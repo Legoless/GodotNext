@@ -97,6 +97,13 @@ layout(set = 0, binding = 11, std430) restrict writeonly buffer CaptureDepth {
 	uint data[];
 }
 capture_depth;
+
+// GodotNext: vsm_caching (#212). Screen pixel count per physical page for deferred static invalidation
+// ordering (written only when view.data.misc.w > 0).
+layout(set = 0, binding = 13, std430) restrict buffer VSMPageCoverage {
+	uint data[];
+}
+page_coverage;
 #endif
 
 #ifdef MODE_BOX
@@ -121,6 +128,17 @@ void vsm_request(uint map, uint mip, uvec2 page, bool coarse) {
 	uint index = vsm_entry_index(map, mip, page);
 	uint flags = VSM_ENTRY_REQUESTED | (coarse ? VSM_ENTRY_COARSE : 0u);
 	uint previous = atomicOr(vsm_page_table.entries[index], flags);
+#ifdef MODE_PIXEL
+	// GodotNext: vsm_caching (#212). Count screen pixels covering already-allocated DIRTY_STATIC pages
+	// when deferred_invalidation_budget > 0 so allocation prioritizes highest screen coverage first.
+	if (view.data.misc.w > 0u && (previous & (VSM_ENTRY_ALLOCATED | VSM_ENTRY_DIRTY_STATIC)) == (VSM_ENTRY_ALLOCATED | VSM_ENTRY_DIRTY_STATIC)) {
+		uvec2 xy = vsm_entry_page(previous);
+		uint p = xy.y * uint(view.data.bias.z) + xy.x;
+		if (p < uint(view.data.bias.w)) {
+			vsm_sink(atomicAdd(page_coverage.data[p], 1u));
+		}
+	}
+#endif
 	if ((previous & VSM_ENTRY_REQUESTED) != 0u) {
 		return;
 	}

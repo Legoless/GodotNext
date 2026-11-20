@@ -140,9 +140,14 @@ struct NextGeoVSMCounters {
 	uint32_t sw_writes = 0u; // 20
 	uint32_t sink = 0u; // 21 (#277 D3D12 GBV atomic sink)
 	uint32_t hiz_pages_built = 0u; // 22
-	uint32_t pad0 = 0u; // 23
+	// GodotNext: vsm_caching (#212). Per-layer cluster counts and ALWAYS-mode layer-0 invariant counter.
+	uint32_t static_clusters = 0u; // 23
+	uint32_t dynamic_clusters = 0u; // 24
+	uint32_t always_layer0_clusters = 0u; // 25
+	uint32_t pad0 = 0u; // 26
+	uint32_t pad1 = 0u; // 27
 };
-static_assert(sizeof(NextGeoVSMCounters) == 96, "NextGeoVSMCounters must match GLSL layout (96 bytes).");
+static_assert(sizeof(NextGeoVSMCounters) == 112, "NextGeoVSMCounters must match GLSL layout (112 bytes).");
 static_assert(offsetof(NextGeoVSMCounters, cluster_count) == 11 * sizeof(uint32_t), "cluster_count word index must stay 11.");
 static_assert(offsetof(NextGeoVSMCounters, sw_clusters) == 12 * sizeof(uint32_t), "sw_clusters word index must stay 12.");
 static_assert(offsetof(NextGeoVSMCounters, sw_writes) == 20 * sizeof(uint32_t), "sw_writes word index must stay 20.");
@@ -183,7 +188,15 @@ inline uint32_t nextgeo_vsm_instance_layer(uint32_t p_record_flags, bool p_moved
 	if ((p_vsm_cull_flags & NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK) == 0u) {
 		return 0u;
 	}
-	const bool is_dynamic = p_moved_this_frame || ((p_record_flags & RendererVirtualMeshStorage::RECORD_RT_SKINNED) != 0u) || p_dynamic_material;
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+	const uint32_t mode = p_record_flags & RendererVirtualMeshStorage::RECORD_VSM_CACHE_MODE_MASK;
+	if (mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_ALWAYS) {
+		return 1u;
+	}
+	if (mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_STATIC || mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_RIGID) {
+		return 0u;
+	}
+	const bool is_dynamic = ((p_record_flags & (RendererVirtualMeshStorage::RECORD_VSM_DYNAMIC | RendererVirtualMeshStorage::RECORD_RT_SKINNED)) != 0u) || p_moved_this_frame || p_dynamic_material;
 	return is_dynamic ? 1u : 0u;
 }
 

@@ -104,7 +104,12 @@ layout(set = 0, binding = 5, std430) buffer restrict VSMCounters {
 	uint sw_writes;
 	uint sink;
 	uint hiz_pages_built;
+	// GodotNext: vsm_caching (#212).
+	uint static_clusters;
+	uint dynamic_clusters;
+	uint always_layer0_clusters;
 	uint pad0;
+	uint pad1;
 }
 vsm_counters;
 
@@ -273,7 +278,15 @@ uint vsm_instance_layer(NextGeoInstanceRecord p_record, uint p_cull_flags, bool 
 	if ((p_cull_flags & NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK) == 0u) {
 		return 0u;
 	}
-	bool is_dynamic = vsm_record_moved(p_record) || ((p_record.flags & NEXTGEO_RECORD_RT_SKINNED) != 0u) || p_dynamic_material;
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+	uint mode = p_record.flags & NEXTGEO_RECORD_VSM_CACHE_MODE_MASK;
+	if (mode == NEXTGEO_RECORD_VSM_CACHE_ALWAYS) {
+		return 1u;
+	}
+	if (mode == NEXTGEO_RECORD_VSM_CACHE_STATIC || mode == NEXTGEO_RECORD_VSM_CACHE_RIGID) {
+		return 0u;
+	}
+	bool is_dynamic = ((p_record.flags & (NEXTGEO_RECORD_VSM_DYNAMIC | NEXTGEO_RECORD_RT_SKINNED)) != 0u) || vsm_record_moved(p_record) || p_dynamic_material;
 	return is_dynamic ? 1u : 0u;
 }
 
@@ -569,7 +582,10 @@ void main() {
 	}
 
 	bool has_prog_surface = prog_enabled && ((record.surface_mask & ~record.pad0) != 0u);
-	if (has_prog_surface && (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK) != 0u) {
+	// GodotNext: vsm_caching (#212). Only AUTO instances with programmable surfaces can mix static
+	// and dynamic surfaces; ALWAYS/RIGID/STATIC route every surface to one deterministic layer.
+	uint cache_mode = record.flags & NEXTGEO_RECORD_VSM_CACHE_MODE_MASK;
+	if (has_prog_surface && cache_mode == NEXTGEO_RECORD_VSM_CACHE_AUTO && (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK) != 0u) {
 		if ((rec.w & (VSM_ENTRY_DIRTY_STATIC | VSM_ENTRY_DIRTY_DYNAMIC)) == 0u) {
 			return;
 		}
@@ -767,7 +783,8 @@ void main() {
 		}
 		uint bin_features = bin < 68u ? vsm_params.bin_features[bin] : 0u;
 		bool has_wpo = (bin_features & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u;
-		uint layer = vsm_instance_layer(record, vsm_params.cull_flags, has_wpo);
+		bool has_dynamic_bin = has_wpo || ((bin_features & NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET) != 0u);
+		uint layer = vsm_instance_layer(record, vsm_params.cull_flags, has_dynamic_bin);
 		uint req_dirty = layer != 0u ? VSM_ENTRY_DIRTY_DYNAMIC : VSM_ENTRY_DIRTY_STATIC;
 		if ((rec.w & req_dirty) == 0u) {
 			continue;
@@ -805,6 +822,15 @@ void main() {
 			break;
 		}
 		vsm_clusters_out.data[cslot] = uvec4(record_idx, global_cluster, dirty_idx, (layer & 1u) | (map_reverse_cull ? 2u : 0u));
+		// GodotNext: vsm_caching (#212). Per-layer cluster telemetry + ALWAYS layer-0 invariant counter.
+		if (layer != 0u) {
+			vsm_ng_sink(atomicAdd(vsm_counters.dynamic_clusters, 1u));
+		} else {
+			vsm_ng_sink(atomicAdd(vsm_counters.static_clusters, 1u));
+			if ((record.flags & NEXTGEO_RECORD_VSM_CACHE_MODE_MASK) == NEXTGEO_RECORD_VSM_CACHE_ALWAYS) {
+				vsm_ng_sink(atomicAdd(vsm_counters.always_layer0_clusters, 1u));
+			}
+		}
 
 		if (bin == NEXTGEO_RASTER_BIN_FIXED) {
 			if (software) {

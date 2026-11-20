@@ -2835,6 +2835,23 @@ bool MaterialStorage::material_is_animated(RID p_material) {
 	return false; //by default nothing is animated
 }
 
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+uint32_t MaterialStorage::material_get_vsm_dynamic_flags(RID p_material) const {
+	uint32_t flags = 0u;
+	RID current = p_material;
+	for (uint32_t depth = 0; depth < 16 && current.is_valid(); depth++) {
+		Material *material = material_owner.get_or_null(current);
+		if (material == nullptr) {
+			break;
+		}
+		if (material->shader && material->shader->data) {
+			flags |= material->shader->data->get_vsm_dynamic_flags();
+		}
+		current = material->next_pass;
+	}
+	return flags;
+}
+
 bool MaterialStorage::material_casts_shadows(RID p_material) {
 	Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL_V(material, true);

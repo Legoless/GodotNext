@@ -35,6 +35,8 @@
 #include "core/math/transform_3d.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_allocate_pages.glsl.gen.h"
+// GodotNext: vsm_caching (#212).
+#include "servers/rendering/renderer_rd/shaders/vsm_invalidate.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_mark_pages.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_page_table.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
@@ -104,8 +106,31 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		ALLOCATE_MODE_MAPS,
 		ALLOCATE_MODE_EMIT,
 		ALLOCATE_MODE_CLEAR,
+		// GodotNext: vsm_caching (#212).
+		ALLOCATE_MODE_DEFER_SCAN,
+		ALLOCATE_MODE_DEFER_APPLY,
 		ALLOCATE_MODE_MAX,
 	};
+	// GodotNext: vsm_caching (#212).
+	enum InvalidateMode {
+		INVALIDATE_MODE_MAPS,
+		INVALIDATE_MODE_BOXES,
+		INVALIDATE_MODE_MAX,
+	};
+	struct InvalidatePushConstant {
+		uint32_t count = 0;
+		uint32_t table_maps = 0;
+		uint32_t pool_pages = 0;
+		uint32_t grid_width = 0;
+	};
+	static_assert(sizeof(InvalidatePushConstant) == 16, "InvalidatePushConstant matches vsm_invalidate.glsl.");
+	struct PendingMapInvalidation {
+		uint32_t map = 0;
+		uint32_t dirty_flags = 0;
+		uint32_t dynamic_if_used = 0;
+		uint32_t pad = 0;
+	};
+	static_assert(sizeof(PendingMapInvalidation) == 16, "PendingMapInvalidation matches uvec4 in vsm_invalidate.glsl.");
 	// VSMViewParams in vsm_state_inc.glsl (std430).
 	struct ViewParams {
 		float inv_projection[4][4] = {};
@@ -130,7 +155,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		uint32_t grid_width = 0;
 		uint32_t request_capacity = 0;
 		uint32_t phase = 0;
-		uint32_t pad = 0;
+		uint32_t deferred_budget = 0; // GodotNext: vsm_caching (#212).
 	};
 	static_assert(sizeof(AllocatePushConstant) % 16 == 0, "Push constants are a multiple of 16 bytes.");
 	// A directional light of the current view (VSMViewParams::directional).
@@ -147,6 +172,10 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	VsmAllocatePagesShaderRD allocate_shader;
 	RID allocate_version;
 	RID allocate_pipelines[ALLOCATE_MODE_MAX];
+	// GodotNext: vsm_caching (#212).
+	VsmInvalidateShaderRD invalidate_shader;
+	RID invalidate_version;
+	RID invalidate_pipelines[INVALIDATE_MODE_MAX];
 	bool marking_ready = false;
 	bool marking_failed = false;
 
@@ -158,18 +187,34 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	LocalVector<MapData> map_data;
 	uint32_t map_data_dirty_begin = 0;
 	uint32_t map_data_dirty_end = 0;
+	// GodotNext: vsm_caching (#212). Per-map shadow caster mask uploaded into MAP_STATE_CULL_MASK.
+	LocalVector<uint32_t> map_cull_masks;
+	bool map_cull_masks_dirty = false;
 	// Sized by the pool.
 	RID pages_buffer;
 	RID free_list_buffer;
 	RID dirty_buffer;
 	RID request_buffer;
+	RID page_coverage_buffer; // GodotNext: vsm_caching (#212). Screen pixels per physical page.
 	uint32_t page_buffers_pages = 0;
 	uint32_t request_buffer_capacity = 0;
-	// Fixed size.
+	// Fixed size / dynamically grown.
 	RID state_buffer;
 	RID view_buffer;
 	RID indirect_buffer;
 	RID box_buffer;
+	RID invalidation_box_buffer; // GodotNext: vsm_caching (#212).
+	uint32_t invalidation_box_capacity = 0;
+	RID invalidation_map_buffer;
+	uint32_t invalidation_map_capacity = 0;
+	LocalVector<PendingMapInvalidation> pending_map_invalidations;
+	uint32_t deferred_invalidation_budget = 0;
+	uint64_t last_invalidation_epoch = 0;
+	uint64_t last_invalidation_boxes = 0;
+	uint64_t last_invalidation_maps = 0;
+	uint64_t total_invalidation_boxes = 0;
+	uint64_t total_invalidation_maps = 0;
+	uint64_t static_mode_invalidations = 0;
 	RID capture_depth_buffer;
 	uint32_t capture_depth_words = 0;
 	uint64_t processed_pool_reallocations = 0;
@@ -200,6 +245,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		uint32_t request_capacity = 0;
 		uint32_t frame = 0;
 		uint32_t cache_frames = 0;
+		uint32_t deferred_budget = 0; // GodotNext: vsm_caching (#212).
 		uint32_t omni_count = 0;
 		uint32_t spot_count = 0;
 		uint32_t area_count = 0;
@@ -221,6 +267,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		RID map_state_after;
 		RID dirty;
 		RID indirect;
+		RID page_coverage; // GodotNext: vsm_caching (#212).
 		// The page clear: the pool is filled with a non-zero value before allocation, copied after the
 		// clear pass, then restored from the copy taken before and cleared again, as without the check.
 		RID pool_saved;
@@ -232,6 +279,8 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	void _resize_map_buffers(uint32_t p_maps);
 	void _ensure_page_buffers();
 	void _set_map_data(uint32_t p_map, const MapData &p_data);
+	// GodotNext: vsm_caching (#212).
+	void _set_map_cull_mask(uint32_t p_map, uint32_t p_mask);
 	void _upload_map_data();
 	void _free_marking_resources();
 	void _free_check_buffers();
@@ -282,6 +331,8 @@ protected:
 	bool _table_resize(uint32_t p_old_maps, uint32_t p_new_maps) override;
 	void _table_clear(uint32_t p_first_map, uint32_t p_map_count) override;
 	void _table_scroll(uint32_t p_map, const ClipmapScroll &p_scroll) override;
+	// GodotNext: vsm_caching (#212).
+	void _table_invalidate_map(uint32_t p_map, uint32_t p_dirty_flags, bool p_dynamic_if_used = false) override;
 	bool _pool_resize(uint32_t p_page_count) override;
 
 public:
@@ -389,6 +440,10 @@ public:
 		float range = 0.0f; // Spot, omni and area.
 		float spot_angle = 0.0f; // Degrees.
 		float fog_energy = 0.0f;
+		// GodotNext: vsm_caching (#212).
+		Vector2 area_size;
+		uint32_t caster_mask = 0xFFFFFFFFu;
+		bool reverse_cull = false;
 	};
 	// LightStorage::update_light_buffers() calls begin_light_update() once, then this for every light it
 	// writes. It allocates or keeps the light's maps (and moves a directional light's clipmap levels to
@@ -425,7 +480,15 @@ public:
 		Vector2 fog_near_size;
 		Vector2 fog_far_size;
 		LocalVector<AABB> boxes; // Transparent instances' world boxes: coarse pages.
+		// GodotNext: vsm_caching (#212). Swept-bounds invalidation boxes from RendererSceneCull.
+		const InvalidationBox *invalidation_boxes = nullptr;
+		uint32_t invalidation_box_count = 0;
+		uint64_t invalidation_epoch = 0;
+		uint64_t static_mode_invalidations = 0;
+		bool has_dynamic_casters = false;
 	};
+	// GodotNext: vsm_caching (#212).
+	uint32_t get_deferred_invalidation_budget() const { return deferred_invalidation_budget; }
 	// Whether VSM marks pages for views (VSM on, the pool and the marking shaders ready).
 	bool is_marking_enabled();
 	void mark_and_allocate(const MarkInput &p_input);

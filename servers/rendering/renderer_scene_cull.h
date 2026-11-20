@@ -393,6 +393,14 @@ public:
 		LocalVector<NextGIRegistryDirtyEvent> nextgi_dirty_published;
 		LocalVector<NextGIRegistryLightEvent> nextgi_light_writing;
 		LocalVector<NextGIRegistryLightEvent> nextgi_light_published;
+		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Per-scenario VSM swept-bounds
+		// invalidation queue and O(D) active dynamic-caster tracking set.
+		uint64_t vsm_invalidation_frame = UINT64_MAX;
+		uint64_t vsm_invalidation_epoch = 0;
+		uint64_t vsm_static_mode_invalidations = 0;
+		HashSet<Instance *> vsm_dynamic_instances;
+		LocalVector<RendererSceneRender::RenderVSMInvalidation> vsm_invalidations_writing;
+		LocalVector<RendererSceneRender::RenderVSMInvalidation> vsm_invalidations_published;
 
 		PagedArray<InstanceBounds> instance_aabbs;
 		PagedArray<InstanceData> instance_data;
@@ -418,6 +426,12 @@ public:
 	void _instance_record_release(Instance *p_instance) const;
 	void _instance_record_update_state(Instance *p_instance) const;
 	void _instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const;
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+	mutable uint64_t vsm_invalidation_epoch_counter = 0;
+	bool _light_uses_vsm(const Instance *p_light_instance) const;
+	void _vsm_emit_invalidation(Scenario *p_scenario, const AABB &p_aabb, uint32_t p_layer_mask, uint32_t p_dirty_flags) const;
+	uint32_t _vsm_classify_instance(const Instance *p_instance, const InstanceGeometryData *p_geom, uint64_t p_frame) const;
+	void _vsm_sync_instance(Instance *p_instance, Scenario *p_scenario, bool p_removing, bool p_force_static_dirty = false, const Transform3D *p_transform = nullptr, const AABB *p_world_aabb = nullptr) const;
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Max displacement magnitude across an instance's active materials.
 	float _instance_displacement_bound(const Instance *p_instance) const;
 	void _process_nextgeo_residency_shadow_dirty();
@@ -478,6 +492,8 @@ public:
 		Vector<RID> materials;
 
 		RSE::ShadowCastingSetting cast_shadows;
+		// GodotNext: vsm_caching (#212).
+		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
 
 		uint32_t layer_mask;
 		// Fit in 32 bits.
@@ -679,6 +695,16 @@ public:
 		HashSet<Instance *> lights;
 		bool can_cast_shadows;
 		bool material_is_animated;
+		// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+		uint32_t vsm_shader_dynamic_flags = 0;
+		uint64_t vsm_last_moved_frame = UINT64_MAX;
+		uint64_t vsm_last_dynamic_emit_frame = UINT64_MAX;
+		Transform3D vsm_last_transform;
+		AABB vsm_last_aabb;
+		uint32_t vsm_last_layer_mask = 0;
+		bool vsm_has_transform = false;
+		bool vsm_in_static_cache = false;
+		bool vsm_in_dynamic_cache = false;
 		uint32_t projector_count = 0;
 		uint32_t softshadow_count = 0;
 
@@ -1148,6 +1174,8 @@ public:
 
 	virtual void instance_geometry_set_flag(RID p_instance, RSE::InstanceFlags p_flags, bool p_enabled);
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, RSE::ShadowCastingSetting p_shadow_casting_setting);
+	// GodotNext: vsm_caching (#212).
+	virtual void instance_geometry_set_shadow_cache_invalidation(RID p_instance, RSE::ShadowCacheInvalidation p_invalidation);
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material);
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material);
 

@@ -896,7 +896,7 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR;
+	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC;
 	uint32_t keep = record.flags & preserved_mask;
 	if ((p_flags & RECORD_VISIBLE) == 0u) {
 		keep &= ~RECORD_VISIBLE;
@@ -997,6 +997,20 @@ void RendererVirtualMeshStorage::instance_record_set_rt_flags(uint32_t p_record,
 	Record &record = records[p_record];
 	constexpr uint32_t rt_mask = RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR;
 	const uint32_t next_flags = (record.flags & ~rt_mask) | (p_rt_flags & rt_mask);
+	if (record.flags == next_flags) {
+		return;
+	}
+	record.flags = next_flags;
+	_mark_dirty(p_record);
+}
+
+// GodotNext: vsm_caching (#212).
+void RendererVirtualMeshStorage::instance_record_set_vsm_dynamic(uint32_t p_record, bool p_dynamic) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	Record &record = records[p_record];
+	const uint32_t next_flags = p_dynamic ? (record.flags | RECORD_VSM_DYNAMIC) : (record.flags & ~RECORD_VSM_DYNAMIC);
 	if (record.flags == next_flags) {
 		return;
 	}

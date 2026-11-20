@@ -95,6 +95,15 @@ indirect;
 layout(r32ui, set = 0, binding = 9) uniform restrict writeonly uimage2DArray pool;
 #endif
 
+#ifdef MODE_ASSIGN
+// GodotNext: vsm_caching (#212). Screen pixel count per physical page written by vsm_mark_pages.glsl
+// MODE_PIXEL when deferred_invalidation_budget > 0.
+layout(set = 0, binding = 10, std430) restrict readonly buffer VSMPageCoverage {
+	uint data[];
+}
+page_coverage;
+#endif
+
 layout(push_constant, std430) uniform Params {
 	uint frame;
 	uint cache_frames;
@@ -103,7 +112,7 @@ layout(push_constant, std430) uniform Params {
 	uint grid_width;
 	uint request_capacity;
 	uint phase;
-	uint pad;
+	uint deferred_budget; // GodotNext: vsm_caching (#212). 0 = unlimited.
 }
 params;
 
@@ -127,6 +136,16 @@ uint vsm_request_count() {
 	return min(state.data[VSM_STATE_REQUESTS], params.request_capacity);
 }
 
+// GodotNext: vsm_caching (#212). CPU model: RendererVirtualShadowMapStorage::coverage_bucket().
+uint vsm_coverage_bucket(uint pixels) {
+	if (pixels < 16u) {
+		return pixels;
+	}
+	uint msb = uint(findMSB(pixels));
+	uint sub = (pixels >> (msb - 1u)) & 1u;
+	return min(16u + (msb - 4u) * 2u + sub, VSM_DEFER_BUCKET_COUNT - 1u);
+}
+
 #ifdef MODE_UPDATE
 
 void main() {
@@ -143,17 +162,25 @@ void main() {
 		uvec2 xy = uvec2(p % params.grid_width, p / params.grid_width);
 		if ((entry & VSM_ENTRY_ALLOCATED) == 0u || any(notEqual(vsm_entry_page(entry), xy))) {
 			owner = 0u;
+			page.w = 0u;
 			vsm_count(VSM_STATE_ORPHANED);
 		} else if ((entry & VSM_ENTRY_REQUESTED) != 0u) {
 			page.y = params.frame;
 		} else {
 			uint age = params.frame - page.y;
-			if (age >= params.cache_frames || (entry & VSM_ENTRY_SCROLLED) != 0u) {
+			// GodotNext: vsm_caching (#212). Evict unrequested pages whose static layer is dirty so their
+			// pool slots return to the free list; keep unrequested pages that only have DIRTY_DYNAMIC so
+			// their static layer 0 remains cached until requested again.
+			if (age >= params.cache_frames || (entry & (VSM_ENTRY_SCROLLED | VSM_ENTRY_DIRTY_STATIC)) != 0u) {
 				vsm_page_table.entries[index] = 0u;
 				owner = 0u;
+				page.w = 0u;
 				vsm_count(VSM_STATE_EVICTED);
 			} else {
 				vsm_count(VSM_STATE_CACHED);
+				if ((page.w & VSM_PAGE_FLAG_HAS_DYNAMIC_CURR) != 0u) {
+					page.w = VSM_PAGE_FLAG_HAS_DYNAMIC_PREV;
+				}
 				if (age != 0u) {
 					bucket = params.cache_frames - age;
 				}
@@ -162,6 +189,7 @@ void main() {
 	}
 	if (owner == 0u) {
 		bucket = 0u;
+		page.w = 0u;
 	}
 	page.x = owner;
 	page.z = bucket;
@@ -216,8 +244,10 @@ void main() {
 	uint index = requests.data[i];
 	uint entry = vsm_page_table.entries[index];
 	bool coarse = (entry & VSM_ENTRY_COARSE) != 0u;
+	uint assign_phase = params.phase & 0x7FFFFFFFu;
+	bool has_dynamic_scene = (params.phase & 0x80000000u) != 0u;
 	uint phase = i < min(state.data[VSM_STATE_RESIDENT], params.request_capacity) ? 0u : (coarse ? 1u : 2u);
-	if (phase != params.phase) {
+	if (phase != assign_phase) {
 		return;
 	}
 	uint map = index / VSM_ENTRIES_PER_MAP;
@@ -226,12 +256,31 @@ void main() {
 	}
 	if ((entry & VSM_ENTRY_ALLOCATED) != 0u) {
 		vsm_count(VSM_STATE_KEPT);
-		if ((entry & (VSM_ENTRY_SCROLLED | VSM_ENTRY_UNCACHED)) != 0u) {
+		bool forced_dirty = (entry & (VSM_ENTRY_SCROLLED | VSM_ENTRY_UNCACHED)) != 0u;
+		if (forced_dirty) {
 			entry |= VSM_ENTRY_DIRTY_MASK;
 			vsm_page_table.entries[index] = entry;
 		}
+		// GodotNext: vsm_caching (#212). Kept non-scrolled DIRTY_STATIC pages participate in the
+		// deferred invalidation budget ordered by screen pixel coverage (highest first).
+		if (params.deferred_budget > 0u && !forced_dirty && (entry & VSM_ENTRY_DIRTY_STATIC) != 0u) {
+			uvec2 xy = vsm_entry_page(entry);
+			uint p = xy.y * params.grid_width + xy.x;
+			if (p < params.pool_pages) {
+				uint b = vsm_coverage_bucket(page_coverage.data[p]);
+				pages.data[p].z = b;
+				vsm_count(VSM_STATE_DEFER_BUCKETS + b);
+				return;
+			}
+		}
 		if ((entry & VSM_ENTRY_DIRTY_MASK) != 0u) {
 			vsm_sink(atomicAdd(map_state.data[vsm_map_state(VSM_MAP_STATE_DIRTY_COUNT, map)], 1u));
+			if ((entry & VSM_ENTRY_DIRTY_STATIC) != 0u) {
+				vsm_count(VSM_STATE_DIRTY_STATIC);
+			}
+			if ((entry & VSM_ENTRY_DIRTY_DYNAMIC) != 0u) {
+				vsm_count(VSM_STATE_DIRTY_DYNAMIC);
+			}
 		}
 		return;
 	}
@@ -252,9 +301,77 @@ void main() {
 	}
 	uvec2 xy = uvec2(p % params.grid_width, p / params.grid_width);
 	vsm_page_table.entries[index] = xy.x | (xy.y << VSM_ENTRY_PAGE_BITS) | VSM_ENTRY_ALLOCATED | VSM_ENTRY_REQUESTED | VSM_ENTRY_DIRTY_MASK | (entry & (VSM_ENTRY_COARSE | VSM_ENTRY_UNCACHED));
-	pages.data[p] = uvec4(index + 1u, params.frame, VSM_BUCKET_NONE, 0u);
+	pages.data[p] = uvec4(index + 1u, params.frame, VSM_BUCKET_NONE, has_dynamic_scene ? VSM_PAGE_FLAG_HAS_DYNAMIC_CURR : 0u);
 	vsm_count(VSM_STATE_NEW);
+	vsm_count(VSM_STATE_DIRTY_STATIC);
+	vsm_count(VSM_STATE_DIRTY_DYNAMIC);
 	vsm_sink(atomicAdd(map_state.data[vsm_map_state(VSM_MAP_STATE_DIRTY_COUNT, map)], 1u));
+}
+
+#endif
+
+#ifdef MODE_DEFER_SCAN
+
+// GodotNext: vsm_caching (#212). Walk coverage buckets from highest to lowest, granting up to
+// params.deferred_budget DIRTY_STATIC pages per view.
+void main() {
+	if (gl_GlobalInvocationID.x != 0u) {
+		return;
+	}
+	uint remaining = params.deferred_budget;
+	uint deferred_total = 0u;
+	for (int b = int(VSM_DEFER_BUCKET_COUNT) - 1; b >= 0; b--) {
+		uint c = state.data[VSM_STATE_DEFER_BUCKETS + uint(b)];
+		uint take = min(c, remaining);
+		state.data[VSM_STATE_DEFER_ALLOW + uint(b)] = take;
+		remaining -= take;
+		deferred_total += c - take;
+	}
+	state.data[VSM_STATE_DEFERRED_STATIC] = deferred_total;
+}
+
+#endif
+
+#ifdef MODE_DEFER_APPLY
+
+// GodotNext: vsm_caching (#212). Accept up to allow[b] DIRTY_STATIC candidates per bucket; defer the
+// rest by marking pages.data[p].z = VSM_DEFER_SKIPPED so MODE_EMIT preserves stale layer-0 depth and
+// keeps VSM_ENTRY_DIRTY_STATIC set for subsequent frames.
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= vsm_request_count()) {
+		return;
+	}
+	uint index = requests.data[i];
+	uint entry = vsm_page_table.entries[index];
+	if ((entry & VSM_ENTRY_ALLOCATED) == 0u || (entry & VSM_ENTRY_DIRTY_STATIC) == 0u) {
+		return;
+	}
+	uvec2 xy = vsm_entry_page(entry);
+	uint p = xy.y * params.grid_width + xy.x;
+	if (p >= params.pool_pages) {
+		return;
+	}
+	uint b = pages.data[p].z;
+	if (b >= VSM_DEFER_BUCKET_COUNT) {
+		return;
+	}
+	uint rank = atomicAdd(state.data[VSM_STATE_DEFER_USED + b], 1u);
+	uint map = index / VSM_ENTRIES_PER_MAP;
+	if (rank < state.data[VSM_STATE_DEFER_ALLOW + b]) {
+		pages.data[p].z = VSM_BUCKET_NONE;
+		vsm_count(VSM_STATE_DIRTY_STATIC);
+		if ((entry & VSM_ENTRY_DIRTY_DYNAMIC) != 0u) {
+			vsm_count(VSM_STATE_DIRTY_DYNAMIC);
+		}
+		vsm_sink(atomicAdd(map_state.data[vsm_map_state(VSM_MAP_STATE_DIRTY_COUNT, map)], 1u));
+	} else {
+		pages.data[p].z = VSM_DEFER_SKIPPED;
+		if ((entry & VSM_ENTRY_DIRTY_DYNAMIC) != 0u) {
+			vsm_count(VSM_STATE_DIRTY_DYNAMIC);
+			vsm_sink(atomicAdd(map_state.data[vsm_map_state(VSM_MAP_STATE_DIRTY_COUNT, map)], 1u));
+		}
+	}
 }
 
 #endif
@@ -377,6 +494,12 @@ void main() {
 		state.data[VSM_STATE_OVERFLOW_VIEWS] += overflow > 0u ? 1u : 0u;
 		state.data[VSM_STATE_TOTAL_DROPPED] += state.data[VSM_STATE_REQUESTS_DROPPED];
 		state.data[VSM_STATE_TOTAL_RESIDENT_OVERFLOW] += state.data[VSM_STATE_RESIDENT_OVERFLOW];
+		// GodotNext: vsm_caching (#212).
+		state.data[VSM_STATE_TOTAL_DIRTY_STATIC] += state.data[VSM_STATE_DIRTY_STATIC];
+		state.data[VSM_STATE_TOTAL_DIRTY_DYNAMIC] += state.data[VSM_STATE_DIRTY_DYNAMIC];
+		state.data[VSM_STATE_TOTAL_DEFERRED_STATIC] += state.data[VSM_STATE_DEFERRED_STATIC];
+		state.data[VSM_STATE_TOTAL_INVALIDATED_STATIC] += state.data[VSM_STATE_INVALIDATED_STATIC];
+		state.data[VSM_STATE_TOTAL_INVALIDATED_DYNAMIC] += state.data[VSM_STATE_INVALIDATED_DYNAMIC];
 		state.data[VSM_STATE_VIEWS] += 1u;
 		state.data[VSM_STATE_BIAS_FRAME] = params.frame + 1u;
 		indirect.data[VSM_INDIRECT_DIRECTIONAL] = totals[0];
@@ -402,7 +525,22 @@ void main() {
 	}
 	uint index = requests.data[i];
 	uint entry = vsm_page_table.entries[index];
-	if ((entry & VSM_ENTRY_ALLOCATED) != 0u && (entry & VSM_ENTRY_DIRTY_MASK) != 0u) {
+	bool allocated = (entry & VSM_ENTRY_ALLOCATED) != 0u;
+	bool deferred_static = false;
+	uint p = 0u;
+	if (allocated) {
+		uvec2 xy = vsm_entry_page(entry);
+		p = xy.y * params.grid_width + xy.x;
+		if (p < params.pool_pages && pages.data[p].z == VSM_DEFER_SKIPPED) {
+			deferred_static = true;
+			pages.data[p].z = VSM_BUCKET_NONE;
+		}
+	}
+	uint emit_flags = entry & VSM_ENTRY_FLAGS_MASK;
+	if (deferred_static) {
+		emit_flags &= ~VSM_ENTRY_DIRTY_STATIC;
+	}
+	if (allocated && (emit_flags & VSM_ENTRY_DIRTY_MASK) != 0u) {
 		uint map = index / VSM_ENTRIES_PER_MAP;
 		uint position = map_state.data[vsm_map_state(VSM_MAP_STATE_DIRTY_OFFSET, map)] + atomicAdd(map_state.data[vsm_map_state(VSM_MAP_STATE_DIRTY_CURSOR, map)], 1u);
 		uint local = index - map * VSM_ENTRIES_PER_MAP;
@@ -415,11 +553,19 @@ void main() {
 		uint page_x = in_mip % pages_per_side;
 		uint page_y = in_mip / pages_per_side;
 		if (position < params.pool_pages) {
-			dirty.data[position] = uvec4(map, mip | (page_x << 8u) | (page_y << 16u), entry & ~VSM_ENTRY_FLAGS_MASK, entry & VSM_ENTRY_FLAGS_MASK);
+			dirty.data[position] = uvec4(map, mip | (page_x << 8u) | (page_y << 16u), entry & ~VSM_ENTRY_FLAGS_MASK, emit_flags);
+		}
+		if ((emit_flags & VSM_ENTRY_DIRTY_DYNAMIC) != 0u && p < params.pool_pages) {
+			// GodotNext: vsm_caching (#212). Layer 1 is cleared and re-rendered now: retain
+			// HAS_DYNAMIC_PREV only when a dynamic invalidation box touched this page in this frame.
+			pages.data[p].w = (pages.data[p].w & VSM_PAGE_FLAG_HAS_DYNAMIC_CURR) != 0u ? VSM_PAGE_FLAG_HAS_DYNAMIC_PREV : 0u;
 		}
 	}
-	uint cleared = VSM_ENTRY_REQUESTED | VSM_ENTRY_COARSE | VSM_ENTRY_DIRTY_STATIC | VSM_ENTRY_DIRTY_DYNAMIC | VSM_ENTRY_SCROLLED;
-	if ((entry & VSM_ENTRY_ALLOCATED) != 0u) {
+	uint cleared = VSM_ENTRY_REQUESTED | VSM_ENTRY_COARSE | VSM_ENTRY_DIRTY_DYNAMIC | VSM_ENTRY_SCROLLED;
+	if (!deferred_static) {
+		cleared |= VSM_ENTRY_DIRTY_STATIC;
+	}
+	if (allocated) {
 		cleared |= VSM_ENTRY_OVERFLOW;
 	}
 	vsm_page_table.entries[index] = entry & ~cleared;

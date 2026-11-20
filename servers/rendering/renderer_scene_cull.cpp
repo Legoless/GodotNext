@@ -239,7 +239,7 @@ void RendererSceneCull::_instance_pair(Instance *p_A, Instance *p_B) {
 		geom->lights.insert(B);
 		light->geometries.insert(A);
 
-		if (geom->can_cast_shadows) {
+		if (geom->can_cast_shadows && !self->_light_uses_vsm(B)) {
 			light->make_shadow_dirty();
 		}
 
@@ -364,7 +364,7 @@ void RendererSceneCull::_instance_unpair(Instance *p_A, Instance *p_B) {
 		geom->lights.erase(B);
 		light->geometries.erase(A);
 
-		if (geom->can_cast_shadows) {
+		if (geom->can_cast_shadows && !self->_light_uses_vsm(B)) {
 			light->make_shadow_dirty();
 		}
 
@@ -702,6 +702,8 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 			case RSE::INSTANCE_MESH:
 			case RSE::INSTANCE_MULTIMESH:
 			case RSE::INSTANCE_PARTICLES: {
+				// GodotNext: vsm_caching (#212). Erase cached shadow and remove from dynamic set before freeing base data.
+				_vsm_sync_instance(instance, scenario, true);
 				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
 				scene_render->geometry_instance_free(geom->geometry_instance);
 			} break;
@@ -844,6 +846,8 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+				// GodotNext: vsm_caching (#212).
+				geom->geometry_instance->set_shadow_cache_invalidation(instance->shadow_cache_invalidation);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -933,6 +937,8 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 
 	if (instance->scenario) {
 		_nextgi_emit_dirty(instance->scenario, instance, RendererRD::NEXTGI_DIRTY_SCENARIO);
+		// GodotNext: vsm_caching (#212). Erase cached shadow and remove from dynamic set on scenario exit.
+		_vsm_sync_instance(instance, instance->scenario, true);
 		instance->scenario->instances.remove(&instance->scenario_item);
 
 		if (instance->indexer_id.is_valid()) {
@@ -1059,8 +1065,10 @@ void RendererSceneCull::instance_set_layer_mask(RID p_instance, uint32_t p_mask)
 
 		if (geom->can_cast_shadows) {
 			for (HashSet<RendererSceneCull::Instance *>::Iterator I = geom->lights.begin(); I != geom->lights.end(); ++I) {
-				InstanceLightData *light = static_cast<InstanceLightData *>((*I)->base_data);
-				light->make_shadow_dirty();
+				if (!_light_uses_vsm(*I)) {
+					InstanceLightData *light = static_cast<InstanceLightData *>((*I)->base_data);
+					light->make_shadow_dirty();
+				}
 			}
 		}
 	}
@@ -1200,6 +1208,10 @@ void RendererSceneCull::instance_set_visible(RID p_instance, bool p_visible) {
 		if (instance->scenario) {
 			RendererSceneOcclusionCull::get_singleton()->scenario_set_instance(instance->scenario->self, p_instance, instance->base, instance->transform, p_visible);
 		}
+	}
+	// GodotNext: vsm_caching (#212). Hiding does not queue _update_instance, so invalidate immediately.
+	if (!p_visible && ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+		_vsm_sync_instance(instance, instance->scenario, false);
 	}
 	_instance_record_update_state(instance);
 }
@@ -1463,14 +1475,35 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 		geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 		if (changed && geom->can_cast_shadows) {
 			for (Instance *E : geom->lights) {
-				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
-				light->make_shadow_dirty();
+				if (!_light_uses_vsm(E)) {
+					InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+					light->make_shadow_dirty();
+				}
 			}
 		}
 	}
 
 	_instance_record_update_state(instance);
 	_instance_queue_update(instance, false, true);
+}
+
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+void RendererSceneCull::instance_geometry_set_shadow_cache_invalidation(RID p_instance, RSE::ShadowCacheInvalidation p_invalidation) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+
+	if (instance->shadow_cache_invalidation == p_invalidation) {
+		return;
+	}
+	instance->shadow_cache_invalidation = p_invalidation;
+
+	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+		ERR_FAIL_NULL(geom->geometry_instance);
+		geom->geometry_instance->set_shadow_cache_invalidation(p_invalidation);
+	}
+	_instance_record_update_state(instance);
+	_vsm_sync_instance(instance, instance->scenario, false);
 }
 
 void RendererSceneCull::instance_geometry_set_material_override(RID p_instance, RID p_material) {
@@ -1900,6 +1933,9 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 	if (p_instance->instance_uniforms.location() >= 0 || p_instance->material_overlay.is_valid()) {
 		flags |= RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS;
 	}
+	// GodotNext: vsm_caching (#212). Encode per-instance cache invalidation mode in GPU record bits 12-13.
+	static_assert(uint32_t(RSE::SHADOW_CACHE_INVALIDATION_AUTO) == 0u && uint32_t(RSE::SHADOW_CACHE_INVALIDATION_ALWAYS) == 1u && uint32_t(RSE::SHADOW_CACHE_INVALIDATION_RIGID) == 2u && uint32_t(RSE::SHADOW_CACHE_INVALIDATION_STATIC) == 3u, "ShadowCacheInvalidation enum values must match RECORD_VSM_CACHE_* bits.");
+	flags |= (uint32_t(p_instance->shadow_cache_invalidation) << RendererVirtualMeshStorage::RECORD_VSM_CACHE_MODE_SHIFT) & RendererVirtualMeshStorage::RECORD_VSM_CACHE_MODE_MASK;
 	RSG::virtual_mesh_storage->instance_record_set_state(p_instance->virtual_record, flags);
 	RSG::virtual_mesh_storage->instance_record_set_layer_mask(p_instance->virtual_record, p_instance->layer_mask);
 
@@ -1953,9 +1989,136 @@ void RendererSceneCull::_process_nextgeo_residency_shadow_dirty() {
 			if ((inst->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(light_inst->base)) == 0) {
 				continue;
 			}
-			InstanceLightData *light = static_cast<InstanceLightData *>(light_inst->base_data);
-			light->make_shadow_dirty();
+			if (!_light_uses_vsm(light_inst)) {
+				InstanceLightData *light = static_cast<InstanceLightData *>(light_inst->base_data);
+				light->make_shadow_dirty();
+			}
 		}
+		// GodotNext: vsm_caching (#212). Invalidate static VSM pages when NextGeo residency changes.
+		_vsm_sync_instance(inst, inst->scenario, false, true);
+	}
+}
+
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+bool RendererSceneCull::_light_uses_vsm(const Instance *p_light_instance) const {
+	if (scene_render == nullptr || !scene_render->is_vsm_active() || p_light_instance == nullptr || p_light_instance->base_type != RSE::INSTANCE_LIGHT) {
+		return false;
+	}
+	return RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(p_light_instance->base));
+}
+
+void RendererSceneCull::_vsm_emit_invalidation(Scenario *p_scenario, const AABB &p_aabb, uint32_t p_layer_mask, uint32_t p_dirty_flags) const {
+	if (p_scenario == nullptr || p_dirty_flags == 0u || !p_aabb.has_surface() || scene_render == nullptr || !scene_render->is_vsm_active()) {
+		return;
+	}
+	RendererSceneRender::RenderVSMInvalidation ev;
+	ev.world_aabb = p_aabb;
+	ev.layer_mask = p_layer_mask;
+	ev.dirty_flags = p_dirty_flags;
+	p_scenario->vsm_invalidations_writing.push_back(ev);
+}
+
+uint32_t RendererSceneCull::_vsm_classify_instance(const Instance *p_instance, const InstanceGeometryData *p_geom, uint64_t p_frame) const {
+	if (p_instance == nullptr || p_geom == nullptr) {
+		return 0u;
+	}
+	RendererVirtualShadowMapStorage::CacheClassificationInput input;
+	input.mode = p_instance->shadow_cache_invalidation;
+	input.frame = p_frame;
+	input.last_moved_frame = p_geom->vsm_last_moved_frame;
+	input.has_skeleton = p_instance->skeleton.is_valid();
+	input.has_mesh_instance = p_instance->mesh_instance.is_valid();
+	input.is_particles = p_instance->base_type == RSE::INSTANCE_PARTICLES;
+	input.is_dynamic_multimesh = p_instance->base_type == RSE::INSTANCE_MULTIMESH && RSG::mesh_storage->multimesh_is_vsm_dynamic(p_instance->base);
+	input.shader_dynamic_flags = p_geom->vsm_shader_dynamic_flags;
+	return RendererVirtualShadowMapStorage::classify_shadow_cache_dynamic(input);
+}
+
+void RendererSceneCull::_vsm_sync_instance(Instance *p_instance, Scenario *p_scenario, bool p_removing, bool p_force_static_dirty, const Transform3D *p_transform, const AABB *p_world_aabb) const {
+	if (p_instance == nullptr || !((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || p_instance->base_data == nullptr) {
+		return;
+	}
+	InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
+	const uint64_t cur_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0u;
+	const Transform3D &cur_xform = p_transform != nullptr ? *p_transform : p_instance->transform;
+	const AABB &cur_aabb = p_world_aabb != nullptr ? *p_world_aabb : p_instance->transformed_aabb;
+	const bool has_valid_bounds = !p_removing && p_scenario != nullptr && p_instance->visible && geom->can_cast_shadows && cur_aabb.has_surface() && cur_xform.basis.determinant() != 0;
+
+	bool moved = false;
+	if (!p_removing && p_scenario != nullptr && p_instance->aabb.has_surface()) {
+		if (!geom->vsm_has_transform) {
+			geom->vsm_last_transform = cur_xform;
+			geom->vsm_has_transform = true;
+		} else if (geom->vsm_last_transform != cur_xform) {
+			geom->vsm_last_transform = cur_xform;
+			geom->vsm_last_moved_frame = cur_frame;
+			moved = true;
+		}
+	}
+
+	const uint32_t dynamic_reasons = _vsm_classify_instance(p_instance, geom, cur_frame);
+	const bool want_dynamic = has_valid_bounds && (dynamic_reasons != 0u);
+	const bool want_static = has_valid_bounds && (dynamic_reasons == 0u);
+	const bool suppress_invalidation = (p_instance->shadow_cache_invalidation == RSE::SHADOW_CACHE_INVALIDATION_STATIC);
+
+	if (RSG::virtual_mesh_storage != nullptr && p_instance->virtual_record != UINT32_MAX) {
+		RSG::virtual_mesh_storage->instance_record_set_vsm_dynamic(p_instance->virtual_record, dynamic_reasons != 0u);
+	}
+
+	const bool was_static = geom->vsm_in_static_cache;
+	const bool was_dynamic = geom->vsm_in_dynamic_cache;
+	const AABB old_aabb = geom->vsm_last_aabb;
+	const uint32_t old_mask = geom->vsm_last_layer_mask;
+	const uint32_t new_mask = p_instance->layer_mask;
+	const uint32_t union_mask = ((was_static || was_dynamic) ? old_mask : 0u) | (has_valid_bounds ? new_mask : 0u);
+	const bool aabb_changed = old_aabb != cur_aabb;
+	const bool mask_changed = old_mask != new_mask;
+
+	auto swept_aabb = [&]() -> AABB {
+		if (old_aabb.has_surface() && cur_aabb.has_surface()) {
+			return old_aabb.merge(cur_aabb);
+		}
+		return cur_aabb.has_surface() ? cur_aabb : old_aabb;
+	};
+
+	if (!suppress_invalidation && p_scenario != nullptr) {
+		if (was_static && !want_static) {
+			_vsm_emit_invalidation(p_scenario, old_aabb, old_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
+		} else if (!was_static && want_static) {
+			_vsm_emit_invalidation(p_scenario, cur_aabb, new_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
+		} else if (was_static && want_static) {
+			if (moved || aabb_changed || mask_changed || p_force_static_dirty) {
+				_vsm_emit_invalidation(p_scenario, swept_aabb(), union_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
+			}
+		}
+
+		if (was_dynamic && !want_dynamic) {
+			_vsm_emit_invalidation(p_scenario, old_aabb, old_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC);
+		} else if (want_dynamic) {
+			const AABB box = was_dynamic ? swept_aabb() : cur_aabb;
+			const uint32_t mask = was_dynamic ? union_mask : new_mask;
+			_vsm_emit_invalidation(p_scenario, box, mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC);
+			geom->vsm_last_dynamic_emit_frame = cur_frame;
+		}
+	}
+
+	if (p_scenario != nullptr) {
+		if (want_dynamic) {
+			p_scenario->vsm_dynamic_instances.insert(p_instance);
+		} else {
+			p_scenario->vsm_dynamic_instances.erase(p_instance);
+		}
+	}
+
+	geom->vsm_in_static_cache = want_static;
+	geom->vsm_in_dynamic_cache = want_dynamic;
+	if (has_valid_bounds) {
+		geom->vsm_last_aabb = cur_aabb;
+		geom->vsm_last_layer_mask = new_mask;
+	} else if (p_removing) {
+		geom->vsm_last_aabb = AABB();
+		geom->vsm_last_layer_mask = 0;
+		geom->vsm_has_transform = false;
 	}
 }
 
@@ -2083,6 +2246,8 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 
 	if (!p_instance->aabb.has_surface()) {
 		_nextgi_emit_dirty(p_instance->scenario, p_instance, RendererRD::NEXTGI_DIRTY_FREED);
+		// GodotNext: vsm_caching (#212).
+		_vsm_sync_instance(p_instance, p_instance->scenario, true);
 		return;
 	}
 
@@ -2112,8 +2277,10 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 
 		if (geom->can_cast_shadows) {
 			for (const Instance *E : geom->lights) {
-				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
-				light->make_shadow_dirty();
+				if (!_light_uses_vsm(E)) {
+					InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+					light->make_shadow_dirty();
+				}
 			}
 		}
 
@@ -2132,6 +2299,8 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		ERR_FAIL_NULL(geom->geometry_instance);
 
 		geom->geometry_instance->set_transform(*instance_xform, p_instance->aabb, p_instance->transformed_aabb);
+		// GodotNext: vsm_caching (#212). Push swept-bounds invalidation and update dynamic state.
+		_vsm_sync_instance(p_instance, p_instance->scenario, false, false, instance_xform, &p_instance->transformed_aabb);
 		if (p_instance->teleported) {
 			geom->geometry_instance->reset_motion_vectors();
 		}
@@ -4079,9 +4248,42 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
-		// GodotNext: vsm_non_nanite (#218). Collect per-light VSM shadow casters independent of atlas tile
-		// capacity or atlas dirty flags, only when VSM is active.
+		// GodotNext: vsm_non_nanite (#218), vsm_caching (#212). Tick O(D) dynamic VSM casters,
+		// publish swept-bounds invalidations once per scenario frame, and collect per-light casters.
 		if (p_reflection_probe.is_null() && scene_render->is_vsm_active()) {
+			const uint64_t vsm_cur_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0u;
+			if (scenario->vsm_invalidation_frame != vsm_cur_frame) {
+				if (!scenario->vsm_dynamic_instances.is_empty()) {
+					LocalVector<Instance *> dyn_snapshot;
+					dyn_snapshot.reserve(scenario->vsm_dynamic_instances.size());
+					for (Instance *dyn_inst : scenario->vsm_dynamic_instances) {
+						dyn_snapshot.push_back(dyn_inst);
+					}
+					for (Instance *dyn_inst : dyn_snapshot) {
+						if (dyn_inst == nullptr || !((1 << dyn_inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || dyn_inst->base_data == nullptr) {
+							scenario->vsm_dynamic_instances.erase(dyn_inst);
+							continue;
+						}
+						InstanceGeometryData *dyn_geom = static_cast<InstanceGeometryData *>(dyn_inst->base_data);
+						const uint32_t reasons = _vsm_classify_instance(dyn_inst, dyn_geom, vsm_cur_frame);
+						if (reasons == 0u || !dyn_inst->visible || !dyn_geom->can_cast_shadows) {
+							// Settled back to static after 8-frame cooldown (or stopped casting): erase layer 1 and bake layer 0.
+							_vsm_sync_instance(dyn_inst, scenario, false);
+						} else if (dyn_geom->vsm_last_dynamic_emit_frame != vsm_cur_frame) {
+							// Active stationary dynamic caster (ALWAYS, VERTEX/DEPTH shader, skeleton, particles, etc.): refresh layer 1.
+							if (dyn_inst->shadow_cache_invalidation != RSE::SHADOW_CACHE_INVALIDATION_STATIC) {
+								_vsm_emit_invalidation(scenario, dyn_geom->vsm_last_aabb, dyn_geom->vsm_last_layer_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC);
+							}
+							dyn_geom->vsm_last_dynamic_emit_frame = vsm_cur_frame;
+						}
+					}
+				}
+				scenario->vsm_invalidation_frame = vsm_cur_frame;
+				scenario->vsm_invalidations_published = scenario->vsm_invalidations_writing;
+				scenario->vsm_invalidations_writing.clear();
+				scenario->vsm_invalidation_epoch = ++vsm_invalidation_epoch_counter;
+			}
+
 			vsm_shadow_data.clear();
 			bool vsm_mesh_instances_checked = false;
 			bool vsm_animated_material = false;
@@ -4176,7 +4378,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 						}
 					}
 					InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(idata.instance->base_data);
-					if (geom->material_is_animated) {
+					if (geom->material_is_animated || (geom->vsm_shader_dynamic_flags & (RendererVirtualShadowMapStorage::CACHE_DYNAMIC_ANIMATED | RendererVirtualShadowMapStorage::CACHE_DYNAMIC_VERTEX_TIME)) != 0u) {
 						vsm_animated_material = true;
 					}
 					if (idata.instance->mesh_instance.is_valid()) {
@@ -4188,6 +4390,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					caster.instance = idata.instance->self;
 					caster.object_id = uint64_t(idata.instance->object_id);
 					caster.extra_margin = idata.instance->extra_margin;
+					// GodotNext: vsm_caching (#212).
+					caster.shadow_cache_invalidation = idata.instance->shadow_cache_invalidation;
+					caster.vsm_last_moved_frame = geom->vsm_last_moved_frame;
+					caster.vsm_shader_dynamic_flags = geom->vsm_shader_dynamic_flags;
+					caster.vsm_dynamic_reasons = _vsm_classify_instance(idata.instance, geom, vsm_cur_frame);
 					entry.casters.push_back(caster);
 				}
 				vsm_shadow_data.push_back(entry);
@@ -4225,7 +4432,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					if (!inst->visible || !((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !geom->can_cast_shadows || !(p_visible_layers & inst->layer_mask & caster_mask) || is_inactive_particle) {
 						continue;
 					}
-					if (geom->material_is_animated) {
+					if (geom->material_is_animated || (geom->vsm_shader_dynamic_flags & (RendererVirtualShadowMapStorage::CACHE_DYNAMIC_ANIMATED | RendererVirtualShadowMapStorage::CACHE_DYNAMIC_VERTEX_TIME)) != 0u) {
 						vsm_animated_material = true;
 					}
 					if (inst->mesh_instance.is_valid()) {
@@ -4237,6 +4444,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					caster.instance = inst->self;
 					caster.object_id = uint64_t(inst->object_id);
 					caster.extra_margin = inst->extra_margin;
+					// GodotNext: vsm_caching (#212).
+					caster.shadow_cache_invalidation = inst->shadow_cache_invalidation;
+					caster.vsm_last_moved_frame = geom->vsm_last_moved_frame;
+					caster.vsm_shader_dynamic_flags = geom->vsm_shader_dynamic_flags;
+					caster.vsm_dynamic_reasons = _vsm_classify_instance(inst, geom, vsm_cur_frame);
 					entry.casters.push_back(caster);
 				}
 				vsm_shadow_data.push_back(entry);
@@ -4257,9 +4469,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		// Q: Should this whole block be skipped if we're rendering our reflection probe?
 
 		sdfgi_update_data.update_static = false;
-		// GodotNext: vsm_non_nanite (#218).
+		// GodotNext: vsm_non_nanite (#218), vsm_caching (#212).
 		sdfgi_update_data.vsm_shadows = nullptr;
 		sdfgi_update_data.vsm_shadow_count = 0;
+		sdfgi_update_data.vsm_invalidations = nullptr;
+		sdfgi_update_data.vsm_invalidation_count = 0;
+		sdfgi_update_data.vsm_invalidation_epoch = 0;
+		sdfgi_update_data.vsm_static_mode_invalidations = 0;
 
 		if (cull.sdfgi.region_count > 0) {
 			//update regions
@@ -4293,9 +4509,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_dynamic_light_count = scenario->nextgi_dynamic_lights.size();
 			sdfgi_update_data.nextgi_static_light_instances = scenario->static_lights.ptr();
 			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
-			// GodotNext: vsm_non_nanite (#218).
+			// GodotNext: vsm_non_nanite (#218), vsm_caching (#212).
 			sdfgi_update_data.vsm_shadows = vsm_shadow_data.is_empty() ? nullptr : vsm_shadow_data.ptr();
 			sdfgi_update_data.vsm_shadow_count = vsm_shadow_data.size();
+			sdfgi_update_data.vsm_invalidations = scenario->vsm_invalidations_published.is_empty() ? nullptr : scenario->vsm_invalidations_published.ptr();
+			sdfgi_update_data.vsm_invalidation_count = scenario->vsm_invalidations_published.size();
+			sdfgi_update_data.vsm_invalidation_epoch = scenario->vsm_invalidation_epoch;
+			sdfgi_update_data.vsm_static_mode_invalidations = scenario->vsm_static_mode_invalidations;
 		}
 
 		// GodotNext: nextgi_rt_registry
@@ -4641,10 +4861,14 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		render_shadow_data[i].instances.clear();
 	}
 	max_shadows_used = 0;
-	// GodotNext: vsm_non_nanite (#218)
+	// GodotNext: vsm_non_nanite (#218), vsm_caching (#212)
 	vsm_shadow_data.clear();
 	sdfgi_update_data.vsm_shadows = nullptr;
 	sdfgi_update_data.vsm_shadow_count = 0;
+	sdfgi_update_data.vsm_invalidations = nullptr;
+	sdfgi_update_data.vsm_invalidation_count = 0;
+	sdfgi_update_data.vsm_invalidation_epoch = 0;
+	sdfgi_update_data.vsm_static_mode_invalidations = 0;
 
 	for (uint32_t i = 0; i < cull.sdfgi.region_count; i++) {
 		render_sdfgi_data[i].instances.clear();
@@ -5125,6 +5349,8 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 
 			bool can_cast_shadows = true;
 			bool is_animated = false;
+			// GodotNext: vsm_caching (#212). Shader usage flags driving AUTO dynamic layer classification.
+			uint32_t vsm_shader_flags = 0u;
 
 			p_instance->instance_uniforms.materials_start();
 
@@ -5137,6 +5363,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 					can_cast_shadows = false;
 				}
 				is_animated = RSG::material_storage->material_is_animated(p_instance->material_override);
+				vsm_shader_flags |= RSG::material_storage->material_get_vsm_dynamic_flags(p_instance->material_override);
 				p_instance->instance_uniforms.materials_append(p_instance->material_override);
 			} else {
 				if (p_instance->base_type == RSE::INSTANCE_MESH) {
@@ -5158,6 +5385,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 								if (RSG::material_storage->material_is_animated(mat)) {
 									is_animated = true;
 								}
+								vsm_shader_flags |= RSG::material_storage->material_get_vsm_dynamic_flags(mat);
 
 								p_instance->instance_uniforms.materials_append(mat);
 
@@ -5189,6 +5417,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 								if (RSG::material_storage->material_is_animated(mat)) {
 									is_animated = true;
 								}
+								vsm_shader_flags |= RSG::material_storage->material_get_vsm_dynamic_flags(mat);
 
 								p_instance->instance_uniforms.materials_append(mat);
 
@@ -5227,6 +5456,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 								if (RSG::material_storage->material_is_animated(mat)) {
 									is_animated = true;
 								}
+								vsm_shader_flags |= RSG::material_storage->material_get_vsm_dynamic_flags(mat);
 
 								p_instance->instance_uniforms.materials_append(mat);
 
@@ -5244,20 +5474,24 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 			if (p_instance->material_overlay.is_valid()) {
 				can_cast_shadows = can_cast_shadows && RSG::material_storage->material_casts_shadows(p_instance->material_overlay);
 				is_animated = is_animated || RSG::material_storage->material_is_animated(p_instance->material_overlay);
+				vsm_shader_flags |= RSG::material_storage->material_get_vsm_dynamic_flags(p_instance->material_overlay);
 				p_instance->instance_uniforms.materials_append(p_instance->material_overlay);
 			}
 
 			if (can_cast_shadows != geom->can_cast_shadows) {
 				//ability to cast shadows change, let lights now
 				for (const Instance *E : geom->lights) {
-					InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
-					light->make_shadow_dirty();
+					if (!_light_uses_vsm(E)) {
+						InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+						light->make_shadow_dirty();
+					}
 				}
 
 				geom->can_cast_shadows = can_cast_shadows;
 			}
 
 			geom->material_is_animated = is_animated;
+			geom->vsm_shader_dynamic_flags = vsm_shader_flags;
 
 			if (p_instance->instance_uniforms.materials_finish(p_instance->self)) {
 				geom->geometry_instance->set_instance_shader_uniforms_offset(p_instance->instance_uniforms.location());

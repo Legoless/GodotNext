@@ -58,6 +58,13 @@ const uint NEXTGEO_RECORD_RT_STATIC = 1u << 8;
 const uint NEXTGEO_RECORD_RT_SKINNED = 1u << 9;
 const uint NEXTGEO_RECORD_RT_ALPHA_AS_OPAQUE = 1u << 10;
 const uint NEXTGEO_RECORD_RT_FAR = 1u << 11;
+// GodotNext: vsm_caching (#212). Per-instance VSM cache behavior and resolved dynamic layer flag.
+const uint NEXTGEO_RECORD_VSM_CACHE_AUTO = 0u << 12;
+const uint NEXTGEO_RECORD_VSM_CACHE_ALWAYS = 1u << 12;
+const uint NEXTGEO_RECORD_VSM_CACHE_RIGID = 2u << 12;
+const uint NEXTGEO_RECORD_VSM_CACHE_STATIC = 3u << 12;
+const uint NEXTGEO_RECORD_VSM_CACHE_MODE_MASK = 3u << 12;
+const uint NEXTGEO_RECORD_VSM_DYNAMIC = 1u << 14;
 
 // NextGeoInstanceRecord::gi_flags.
 const uint NEXTGEO_GI_MODE_MASK = 3u << 0;

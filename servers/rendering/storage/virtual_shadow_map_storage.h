@@ -348,6 +348,12 @@ public:
 		STATE_RESIDENT, // Always-resident requests: the request list's first entries.
 		STATE_RESIDENT_OVERFLOW, // Of those, entries left without a page.
 		STATE_SINK, // Written only by impossible atomic results (#277).
+		// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+		STATE_DIRTY_STATIC, // Dirty pages in this view with ENTRY_DIRTY_STATIC emitted.
+		STATE_DIRTY_DYNAMIC, // Dirty pages in this view with ENTRY_DIRTY_DYNAMIC emitted.
+		STATE_DEFERRED_STATIC, // DIRTY_STATIC pages deferred by deferred_invalidation_budget.
+		STATE_INVALIDATED_STATIC, // Allocated entries newly marked DIRTY_STATIC by vsm_invalidate.
+		STATE_INVALIDATED_DYNAMIC, // Allocated entries newly marked DIRTY_DYNAMIC by vsm_invalidate.
 		STATE_VIEW_END = 32,
 		STATE_TOTAL_OVERFLOW = STATE_VIEW_END, // Requests left without a page since start.
 		STATE_OVERFLOW_VIEWS, // Views with overflow since start.
@@ -355,11 +361,27 @@ public:
 		STATE_VIEWS, // Views marked since start.
 		STATE_BIAS_FRAME, // The frame (plus one) of the last view that updated the overflow bias.
 		STATE_TOTAL_RESIDENT_OVERFLOW, // Always-resident requests left without a page since start.
+		// GodotNext: vsm_caching (#212).
+		STATE_TOTAL_DIRTY_STATIC,
+		STATE_TOTAL_DIRTY_DYNAMIC,
+		STATE_TOTAL_DEFERRED_STATIC,
+		STATE_TOTAL_INVALIDATED_STATIC,
+		STATE_TOTAL_INVALIDATED_DYNAMIC,
 		STATE_BUCKETS = 64,
 		STATE_BUCKET_OFFSETS = STATE_BUCKETS + BUCKET_COUNT,
 		STATE_BUCKET_CURSORS = STATE_BUCKET_OFFSETS + BUCKET_COUNT,
-		STATE_SIZE = STATE_BUCKET_CURSORS + BUCKET_COUNT,
+		// GodotNext: vsm_caching (#212). Deferred static invalidation coverage buckets.
+		DEFER_BUCKET_COUNT = 64,
+		STATE_DEFER_BUCKETS = STATE_BUCKET_CURSORS + BUCKET_COUNT,
+		STATE_DEFER_ALLOW = STATE_DEFER_BUCKETS + DEFER_BUCKET_COUNT,
+		STATE_DEFER_USED = STATE_DEFER_ALLOW + DEFER_BUCKET_COUNT,
+		STATE_SIZE = STATE_DEFER_USED + DEFER_BUCKET_COUNT,
 	};
+	// GodotNext: vsm_caching (#212). Sentinel in PageRecord::bucket marking a deferred static page,
+	// and PageRecord::pad bits tracking whether a page has dynamic layer-1 content.
+	static constexpr uint32_t DEFER_SKIPPED = 0xFFFFFFFEu;
+	static constexpr uint32_t PAGE_FLAG_HAS_DYNAMIC_PREV = 1u << 0;
+	static constexpr uint32_t PAGE_FLAG_HAS_DYNAMIC_CURR = 1u << 1;
 	// The per-map state buffer: MAP_STATE_REGIONS regions of the page table's map count (uints).
 	enum MapStateRegion : uint32_t {
 		MAP_STATE_REQUESTS, // Entries first requested in the view, per map.
@@ -367,6 +389,7 @@ public:
 		MAP_STATE_DIRTY_OFFSET, // The map's first record in the dirty list.
 		MAP_STATE_DIRTY_CURSOR, // Records written so far.
 		MAP_STATE_BIAS, // The overflow bias state (overflow_bias_update()); kept across views.
+		MAP_STATE_CULL_MASK, // GodotNext: vsm_caching (#212). Shadow caster mask per map; kept across views.
 		MAP_STATE_REGIONS,
 	};
 	// The dirty list's indirect arguments (uints): dispatch (count, 1, 1) for the directional pages,
@@ -454,6 +477,10 @@ public:
 		uint32_t dirty = 0; // Requested entries whose page must be rendered.
 		uint32_t coarse = 0; // Requested entries with ENTRY_COARSE.
 		uint32_t resident_overflow = 0; // Always-resident requests left without a page.
+		// GodotNext: vsm_caching (#212).
+		uint32_t dirty_static = 0; // Requested entries whose static layer 0 must be rendered.
+		uint32_t dirty_dynamic = 0; // Requested entries whose dynamic layer 1 must be rendered.
+		uint32_t deferred_static = 0; // Kept DIRTY_STATIC entries deferred by deferred_invalidation_budget.
 	};
 	// Whether an entry's page must be rendered after allocation.
 	static constexpr uint32_t ENTRY_DIRTY_MASK = ENTRY_DIRTY_STATIC | ENTRY_DIRTY_DYNAMIC;
@@ -475,7 +502,65 @@ public:
 	// requests, then the rest), in place on a page table and the page records. Pages go out in
 	// free-list order (bucket, then page index); the GPU hands them out in atomic order, so only the
 	// counts and the outcomes that do not depend on that order compare.
-	static AllocationCounts allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames, uint32_t p_resident_count = 0);
+	static AllocationCounts allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames, uint32_t p_resident_count = 0, uint32_t p_deferred_budget = 0, const uint32_t *p_page_coverage = nullptr);
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+	static const char *const SETTING_DEFERRED_INVALIDATION_BUDGET;
+	static constexpr uint32_t CACHE_MOTION_COOLDOWN_FRAMES = 8;
+	static constexpr uint64_t CACHE_NEVER_MOVED = UINT64_MAX;
+	// Why an instance routes to dynamic layer 1 under AUTO (or ALWAYS). Bits 0-7 match #218's mask.
+	enum CacheDynamicReason : uint32_t {
+		CACHE_DYNAMIC_MOVED = 1u << 0,
+		CACHE_DYNAMIC_MESH_INSTANCE = 1u << 1,
+		CACHE_DYNAMIC_SKELETON = 1u << 2,
+		CACHE_DYNAMIC_PARTICLES = 1u << 3,
+		CACHE_DYNAMIC_MULTIMESH = 1u << 4,
+		CACHE_DYNAMIC_VERTEX = 1u << 5,
+		CACHE_DYNAMIC_ANIMATED = 1u << 6,
+		CACHE_DYNAMIC_MAIN_CAMERA = 1u << 7,
+		CACHE_DYNAMIC_VERTEX_TIME = 1u << 8,
+		CACHE_DYNAMIC_DEPTH = 1u << 9,
+		CACHE_DYNAMIC_MODE_ALWAYS = 1u << 10,
+	};
+	struct CacheClassificationInput {
+		RSE::ShadowCacheInvalidation mode = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
+		uint64_t frame = 0;
+		uint64_t last_moved_frame = CACHE_NEVER_MOVED;
+		bool has_skeleton = false;
+		bool has_mesh_instance = false;
+		bool is_particles = false;
+		bool is_dynamic_multimesh = false;
+		uint32_t shader_dynamic_flags = 0;
+	};
+	static uint32_t classify_shadow_cache_dynamic(const CacheClassificationInput &p_input);
+	// Monotonic mapping from screen pixel count to [0, DEFER_BUCKET_COUNT) (highest coverage first).
+	static uint32_t coverage_bucket(uint32_t p_pixels);
+	// std430 layout of VSMInvalidationBox in vsm_invalidate.glsl (32 bytes).
+	struct InvalidationBox {
+		float min_pos[3] = {};
+		uint32_t layer_mask = 0xFFFFFFFFu;
+		float max_pos[3] = {};
+		uint32_t dirty_flags = 0u;
+	};
+	struct InvalidationCounts {
+		uint32_t static_pages = 0;
+		uint32_t dynamic_pages = 0;
+	};
+	// CPU models of vsm_invalidate.glsl MODE_BOXES and MODE_MAPS.
+	static InvalidationCounts invalidate_box_model(uint32_t *r_table, uint32_t p_table_maps, const MapData *p_maps, const uint32_t *p_map_cull_masks, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const InvalidationBox &p_box);
+	static InvalidationCounts invalidate_map_model(uint32_t *r_table, uint32_t p_table_maps, uint32_t p_map, uint32_t p_dirty_flags, PageRecord *r_pages = nullptr, uint32_t p_pool_pages = 0, uint32_t p_grid_width = 0, bool p_dynamic_if_used = false);
+	// Light properties whose change invalidates all maps of the light.
+	struct LightProperties {
+		Transform3D transform;
+		float range = 0.0f;
+		float spot_angle = 0.0f;
+		Vector2 area_size;
+		uint32_t caster_mask = 0xFFFFFFFFu;
+		bool reverse_cull = false;
+		bool operator==(const LightProperties &p_other) const;
+		bool operator!=(const LightProperties &p_other) const { return !(*this == p_other); }
+	};
+	bool note_light_properties(RID p_light_instance, const LightProperties &p_props, bool p_check_transform);
+	static uint32_t read_deferred_invalidation_budget();
 	// The page-table entry after the emit pass: request flags cleared, dirty flags handed to the list.
 	static constexpr uint32_t entry_after_emit(uint32_t p_entry) {
 		return p_entry & ~(ENTRY_REQUESTED | ENTRY_COARSE | ENTRY_DIRTY_STATIC | ENTRY_DIRTY_DYNAMIC | ENTRY_SCROLLED | ((p_entry & ENTRY_ALLOCATED) ? ENTRY_OVERFLOW : 0u));
@@ -788,6 +873,9 @@ private:
 		Transform3D motion_transform;
 		bool motion_valid = false;
 		uint64_t moved_frame = NEVER_MOVED;
+		// GodotNext: vsm_caching (#212). Property snapshot for light invalidation.
+		LightProperties props;
+		bool props_valid = false;
 	};
 
 	HashMap<RID, LightMaps> light_maps;
@@ -815,6 +903,8 @@ protected:
 	virtual void _table_clear(uint32_t p_first_map, uint32_t p_map_count) {}
 	// Applies clipmap_apply_scroll() to one map on the GPU.
 	virtual void _table_scroll(uint32_t p_map, const ClipmapScroll &p_scroll) {}
+	// GodotNext: vsm_caching (#212). Marks every allocated entry of one map dirty on the GPU.
+	virtual void _table_invalidate_map(uint32_t p_map, uint32_t p_dirty_flags, bool p_dynamic_if_used = false) {}
 	// Replaces the pool with one of p_page_count pages (0 frees it). On failure it returns false and
 	// leaves the previous pool exactly as it was.
 	virtual bool _pool_resize(uint32_t p_page_count) { return true; }
@@ -850,8 +940,9 @@ public:
 
 	// Directional lights: allocates one map per clipmap level that p_max_distance needs and moves each
 	// level's window to the camera. Pages that wrap are marked ENTRY_SCROLLED; a change of the light
-	// plane marks every allocated page. Returns the first map, or MAP_NONE.
-	uint32_t directional_update(RID p_light_instance, const Basis &p_light_basis, const Vector3 &p_camera_position, float p_max_distance);
+	// plane marks every allocated page (ENTRY_DIRTY_STATIC via _table_invalidate_map when
+	// p_invalidate_on_turn is set so deferred_invalidation_budget applies, else ENTRY_SCROLLED).
+	uint32_t directional_update(RID p_light_instance, const Basis &p_light_basis, const Vector3 &p_camera_position, float p_max_distance, bool p_invalidate_on_turn = false);
 	Vector2i get_clipmap_origin(RID p_light_instance, uint32_t p_level) const;
 
 	void free_all();

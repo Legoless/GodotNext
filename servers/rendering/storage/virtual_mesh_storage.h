@@ -65,6 +65,15 @@ public:
 		RECORD_RT_SKINNED = 1u << 9,
 		RECORD_RT_ALPHA_AS_OPAQUE = 1u << 10,
 		RECORD_RT_FAR = 1u << 11,
+		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Per-instance VSM cache behavior
+		// (bits 12-13, matching RSE::ShadowCacheInvalidation) and resolved dynamic layer bit (bit 14).
+		RECORD_VSM_CACHE_AUTO = 0u << 12,
+		RECORD_VSM_CACHE_ALWAYS = 1u << 12,
+		RECORD_VSM_CACHE_RIGID = 2u << 12,
+		RECORD_VSM_CACHE_STATIC = 3u << 12,
+		RECORD_VSM_CACHE_MODE_SHIFT = 12u,
+		RECORD_VSM_CACHE_MODE_MASK = 3u << 12,
+		RECORD_VSM_DYNAMIC = 1u << 14,
 	};
 
 	// gi_flags.
@@ -425,6 +434,8 @@ public:
 	// tlas_instance_index, blas_handle, rt_arena_chunk, rt_arena_offset, src_page_table, card_set.
 	void instance_record_set_rt(uint32_t p_record, const uint32_t p_rt_fields[6]);
 	void instance_record_set_rt_flags(uint32_t p_record, uint32_t p_rt_flags);
+	// GodotNext: vsm_caching (#212). Updates RECORD_VSM_DYNAMIC without touching other record flags.
+	void instance_record_set_vsm_dynamic(uint32_t p_record, bool p_dynamic);
 
 	// Per frame: advance the free list and the temporal history, process page
 	// streaming uploads under the per-frame KiB cap, then upload dirty records.

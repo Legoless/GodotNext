@@ -2847,6 +2847,47 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 		input.boxes.push_back(surface->owner->transformed_aabb);
 	}
 
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Pass per-scenario swept-bounds invalidation
+	// boxes into mark_and_allocate() so vsm_invalidate.glsl runs before marking and allocation.
+	LocalVector<RendererVirtualShadowMapStorage::InvalidationBox> inv_boxes;
+	if (p_render_data->sdfgi_update_data != nullptr) {
+		const RenderSDFGIUpdateData *sd = p_render_data->sdfgi_update_data;
+		input.invalidation_epoch = sd->vsm_invalidation_epoch;
+		input.static_mode_invalidations = sd->vsm_static_mode_invalidations;
+		if (sd->vsm_invalidations != nullptr && sd->vsm_invalidation_count > 0) {
+			inv_boxes.resize(sd->vsm_invalidation_count);
+			for (uint32_t i = 0; i < sd->vsm_invalidation_count; i++) {
+				const RenderVSMInvalidation &src = sd->vsm_invalidations[i];
+				const Vector3 lo = src.world_aabb.position;
+				const Vector3 hi = src.world_aabb.position + src.world_aabb.size;
+				RendererVirtualShadowMapStorage::InvalidationBox &dst = inv_boxes[i];
+				dst.min_pos[0] = float(lo.x);
+				dst.min_pos[1] = float(lo.y);
+				dst.min_pos[2] = float(lo.z);
+				dst.layer_mask = src.layer_mask;
+				dst.max_pos[0] = float(hi.x);
+				dst.max_pos[1] = float(hi.y);
+				dst.max_pos[2] = float(hi.z);
+				dst.dirty_flags = src.dirty_flags;
+				if ((src.dirty_flags & RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC) != 0u) {
+					input.has_dynamic_casters = true;
+				}
+			}
+			input.invalidation_boxes = inv_boxes.ptr();
+			input.invalidation_box_count = inv_boxes.size();
+		}
+		if (!input.has_dynamic_casters && sd->vsm_shadows != nullptr) {
+			for (uint32_t s = 0; s < sd->vsm_shadow_count && !input.has_dynamic_casters; s++) {
+				for (uint32_t i = 0; i < sd->vsm_shadows[s].casters.size(); i++) {
+					if (sd->vsm_shadows[s].casters[i].vsm_dynamic_reasons != 0u) {
+						input.has_dynamic_casters = true;
+						break;
+					}
+				}
+			}
+		}
+	}
+
 	vsm->mark_and_allocate(input);
 }
 
@@ -3373,6 +3414,10 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		uint64_t object_id = 0;
 		float extra_margin = 0.0f;
 		bool moved_this_frame = false;
+		// GodotNext: vsm_caching (#212).
+		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
+		uint64_t vsm_last_moved_frame = RendererVirtualShadowMapStorage::CACHE_NEVER_MOVED;
+		uint32_t vsm_shader_dynamic_flags = 0;
 		uint32_t saved_flags = 0;
 		float saved_depth = 0.0f;
 		LocalVector<CasterLightRef> lights;
@@ -3444,6 +3489,9 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				uc.extra_margin = c.extra_margin;
 				// A set_transform() with the same value is not a move (light changes re-set transforms).
 				uc.moved_this_frame = inst->transform != inst->prev_transform;
+				uc.shadow_cache_invalidation = c.shadow_cache_invalidation;
+				uc.vsm_last_moved_frame = c.vsm_last_moved_frame;
+				uc.vsm_shader_dynamic_flags = c.vsm_shader_dynamic_flags;
 				uc.saved_flags = inst->flags_cache;
 				uc.saved_depth = inst->depth;
 				unique_casters.push_back(uc);
@@ -3706,25 +3754,37 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 
 		const bool uses_particles = (inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) != 0;
 		const bool uses_multimesh = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) != 0;
-		// The dynamic layer (1) takes what changes from frame to frame; the rest renders into the static
-		// layer (0). Only the shadow shader counts: it is the one that draws.
-		uint32_t dynamic_reasons = 0;
-		dynamic_reasons |= uc.moved_this_frame ? VSM_DYNAMIC_MOVED : 0u;
-		dynamic_reasons |= inst->mesh_instance.is_valid() ? VSM_DYNAMIC_MESH_INSTANCE : 0u;
-		dynamic_reasons |= mesh_storage->skeleton_is_valid(inst->data->skeleton) ? VSM_DYNAMIC_SKELETON : 0u;
-		dynamic_reasons |= uses_particles ? VSM_DYNAMIC_PARTICLES : 0u;
-		dynamic_reasons |= (!uses_particles && uses_multimesh && (mesh_storage->_multimesh_uses_motion_vectors_offsets(inst->data->base) || mesh_storage->multimesh_is_rt_dynamic(inst->data->base))) ? VSM_DYNAMIC_MULTIMESH : 0u;
-		dynamic_reasons |= shader->uses_vertex ? VSM_DYNAMIC_VERTEX : 0u;
-		dynamic_reasons |= (shader->is_animated() || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR) != 0) ? VSM_DYNAMIC_ANIMATED : 0u;
-		dynamic_reasons |= shader->uses_main_camera ? VSM_DYNAMIC_MAIN_CAMERA : 0u;
+		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Route static (layer 0) vs dynamic (layer 1)
+		// through the shared CacheClassificationInput rule, inspecting the material's own ShaderData as well
+		// as the shadow shader (uses_shared_shadow_material() swaps out shaders that write DEPTH or read
+		// TIME in vertex() without writing VERTEX).
+		const uint64_t vsm_cur_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0u;
+		uint32_t surf_shader_flags = uc.vsm_shader_dynamic_flags | shader->get_vsm_dynamic_flags();
+		if (surf->shader != nullptr) {
+			surf_shader_flags |= surf->shader->get_vsm_dynamic_flags();
+		}
+		if ((surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR) != 0) {
+			surf_shader_flags |= RendererVirtualShadowMapStorage::CACHE_DYNAMIC_ANIMATED;
+		}
+		RendererVirtualShadowMapStorage::CacheClassificationInput cls_input;
+		cls_input.mode = uc.shadow_cache_invalidation;
+		cls_input.frame = vsm_cur_frame;
+		cls_input.last_moved_frame = uc.moved_this_frame ? vsm_cur_frame : uc.vsm_last_moved_frame;
+		cls_input.has_mesh_instance = inst->mesh_instance.is_valid();
+		cls_input.has_skeleton = mesh_storage->skeleton_is_valid(inst->data->skeleton);
+		cls_input.is_particles = uses_particles;
+		cls_input.is_dynamic_multimesh = !uses_particles && uses_multimesh && (mesh_storage->_multimesh_uses_motion_vectors_offsets(inst->data->base) || mesh_storage->multimesh_is_vsm_dynamic(inst->data->base));
+		cls_input.shader_dynamic_flags = surf_shader_flags;
+		const uint32_t dynamic_reasons = RendererVirtualShadowMapStorage::classify_shadow_cache_dynamic(cls_input);
 		const bool is_dynamic = dynamic_reasons != 0u;
 
 		if (capture) {
 			VSMCasterTelemetry &tel = caster_telemetry[cid];
 			tel.is_dynamic = tel.is_dynamic || is_dynamic;
 			tel.dynamic_reasons |= dynamic_reasons;
+			tel.shadow_cache_invalidation = uint32_t(uc.shadow_cache_invalidation);
 			tel.uses_alpha_scissor = tel.uses_alpha_scissor || shader->uses_discard || shader->uses_alpha_clip;
-			tel.uses_vertex_displacement = tel.uses_vertex_displacement || shader->uses_vertex;
+			tel.uses_vertex_displacement = tel.uses_vertex_displacement || shader->uses_vertex || (surf->shader != nullptr && surf->shader->uses_vertex);
 		}
 
 		// The VSM variant reads its pair from gl_InstanceIndex, which point-size emulation needs for the
@@ -4288,8 +4348,9 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 	inputs.lod_bias = 1.0f;
 	inputs.sw_max_edge_texels = float(_vsm_setting("nanite_sw_raster_max_edge_texels", double(RendererRD::NEXTGEO_VSM_DEFAULT_SW_MAX_EDGE_TEXELS)));
 	inputs.hiz_enabled = bool(_vsm_setting("nanite_hiz", true));
-	inputs.dynamic_layer_hook = bool(_vsm_setting("debug_nanite_dynamic_layer", false));
-	inputs.count_sw_writes = bool(GLOBAL_GET("rendering/nextgeo/debug_stats")) || inputs.dynamic_layer_hook;
+	// GodotNext: vsm_caching (#212). Enable #217's static/dynamic layer routing in production frames.
+	inputs.dynamic_layer_hook = true;
+	inputs.count_sw_writes = bool(GLOBAL_GET("rendering/nextgeo/debug_stats")) || bool(_vsm_setting("debug_nanite_dynamic_layer", false));
 
 	// Build per-map metadata (shadow_caster_mask, reverse_cull, active) so one directional chain and
 	// one local chain cull every active VSM light cleanly without per-light CPU loops.
@@ -4683,17 +4744,25 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	// page and layer.
 	HashSet<VSMPairTuple, VSMPairTupleHasher> gpu_emitted;
 	LocalVector<uint32_t> caster_pairs;
+	// GodotNext: vsm_caching (#212). Per-caster layer-0/layer-1 pair counts + ALWAYS layer-0 invariant.
+	LocalVector<uint32_t> caster_layer0_pairs;
+	LocalVector<uint32_t> caster_layer1_pairs;
+	uint64_t always_layer0_pairs = 0;
 	LocalVector<uint64_t> caster_fragments;
 	LocalVector<uint64_t> caster_outside; // Vertices outside the cull box of their pair.
 	LocalVector<HashSet<uint32_t>> caster_groups; // The draw groups each caster's pairs went to.
 	LocalVector<HashMap<uint32_t, uint64_t>> caster_light_fragments; // Per caster: light index -> fragments.
 	caster_pairs.resize(cap.casters.size());
+	caster_layer0_pairs.resize(cap.casters.size());
+	caster_layer1_pairs.resize(cap.casters.size());
 	caster_fragments.resize(cap.casters.size());
 	caster_outside.resize(cap.casters.size());
 	caster_groups.resize(cap.casters.size());
 	caster_light_fragments.resize(cap.casters.size());
 	for (uint32_t c = 0; c < caster_pairs.size(); c++) {
 		caster_pairs[c] = 0;
+		caster_layer0_pairs[c] = 0;
+		caster_layer1_pairs[c] = 0;
 		caster_fragments[c] = 0;
 		caster_outside[c] = 0;
 	}
@@ -4751,8 +4820,17 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 			total_fragments += fragments;
 			total_outside_vertices += outside;
 			const uint32_t d = pw[2] & 0x7FFFFFFFu;
+			const uint32_t layer = pw[2] >> 31u;
 			if (pw[3] < caster_pairs.size()) {
 				caster_pairs[pw[3]]++;
+				if (layer != 0u) {
+					caster_layer1_pairs[pw[3]]++;
+				} else {
+					caster_layer0_pairs[pw[3]]++;
+					if (cap.casters[pw[3]].shadow_cache_invalidation == uint32_t(RSE::SHADOW_CACHE_INVALIDATION_ALWAYS)) {
+						always_layer0_pairs++;
+					}
+				}
 				caster_fragments[pw[3]] += fragments;
 				caster_outside[pw[3]] += outside;
 				caster_groups[pw[3]].insert(g);
@@ -4763,7 +4841,6 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 					}
 				}
 			}
-			const uint32_t layer = pw[2] >> 31u;
 			const uint32_t layer_flag = layer != 0u ? RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC : RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC;
 			if (d >= dirty_limit || (dirty_recs[d].flags & layer_flag) == 0u) {
 				pair_bad_target++;
@@ -5000,6 +5077,10 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 		cd["uses_alpha_scissor"] = tel.uses_alpha_scissor;
 		cd["uses_vertex_displacement"] = tel.uses_vertex_displacement;
 		cd["dynamic_reasons"] = int64_t(tel.dynamic_reasons);
+		// GodotNext: vsm_caching (#212).
+		cd["shadow_cache_invalidation"] = int64_t(tel.shadow_cache_invalidation);
+		cd["layer0_pairs"] = int64_t(caster_layer0_pairs[c]);
+		cd["layer1_pairs"] = int64_t(caster_layer1_pairs[c]);
 		PackedInt32Array groups_used;
 		for (uint32_t g : caster_groups[c]) {
 			groups_used.push_back(int32_t(g));
@@ -5083,6 +5164,10 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	if (cull_sink != 0u || raster_sink != 0u) {
 		failures.push_back("an atomic returned the reserved 0xFFFFFFFF (#277 sink)");
 	}
+	// GodotNext: vsm_caching (#212).
+	if (always_layer0_pairs > 0) {
+		failures.push_back(vformat("%d ALWAYS-mode caster pairs targeted static layer 0", always_layer0_pairs));
+	}
 
 	result["used_indirect_count"] = cap.used_indirect_count;
 	result["light_count"] = int64_t(cap.light_count);
@@ -5165,6 +5250,8 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	result["nonzero_dynamic_texels"] = int64_t(nonzero_dynamic_texels);
 	result["invalid_max_uint_texels"] = int64_t(invalid_max_uint_texels);
 	result["non_finite_unpacked_texels"] = int64_t(non_finite_unpacked_texels);
+	// GodotNext: vsm_caching (#212).
+	result["always_layer0_pairs"] = int64_t(always_layer0_pairs);
 	result["casters"] = casters_arr;
 	result["dirty_pages"] = dirty_pages_arr;
 	result["failures"] = failures;

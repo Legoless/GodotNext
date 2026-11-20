@@ -97,6 +97,8 @@ public:
 		virtual bool nextgeo_moves_vertices() const { return false; }
 		// GodotNext: path_tracer (#167). The cull mode the path tracer applies to its camera and bounce rays.
 		virtual RSE::CullMode get_cull_mode() const { return RSE::CULL_MODE_BACK; }
+		// GodotNext: vsm_caching (#212). RendererVirtualShadowMapStorage::CacheDynamicReason bits.
+		virtual uint32_t get_vsm_dynamic_flags() const { return 0; }
 
 		virtual bool casts_shadows() const = 0;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const = 0;
@@ -596,6 +598,8 @@ public:
 	virtual float material_get_displacement_center(RID p_material) const override;
 
 	virtual bool material_is_animated(RID p_material) override;
+	// GodotNext: vsm_caching (#212).
+	virtual uint32_t material_get_vsm_dynamic_flags(RID p_material) const override;
 	virtual bool material_casts_shadows(RID p_material) override;
 	virtual RSE::CullMode material_get_cull_mode(RID p_material) const override;
 

@@ -3122,6 +3122,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			stats["overflow"] = int64_t(dc.overflow + lc.overflow);
 			stats["redraw_marks"] = int64_t(dc.redraw_marks + lc.redraw_marks);
 			stats["sink"] = int64_t(dc.sink | lc.sink);
+			// GodotNext: vsm_caching (#212).
+			stats["static_clusters"] = int64_t(dc.static_clusters + lc.static_clusters);
+			stats["dynamic_clusters"] = int64_t(dc.dynamic_clusters + lc.dynamic_clusters);
+			stats["always_layer0_clusters"] = int64_t(dc.always_layer0_clusters + lc.always_layer0_clusters);
 		}
 		*r_stats = stats;
 	}

@@ -2023,6 +2023,14 @@
 				Sets the per-instance shader uniform on the specified 3D geometry instance. Equivalent to [method GeometryInstance3D.set_instance_shader_parameter].
 			</description>
 		</method>
+		<method name="instance_geometry_set_shadow_cache_invalidation">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="mode" type="int" enum="RenderingServer.ShadowCacheInvalidation" />
+			<description>
+				Sets the virtual shadow map cache invalidation behavior for the specified 3D geometry instance. Equivalent to [member GeometryInstance3D.shadow_cache_invalidation].
+			</description>
+		</method>
 		<method name="instance_geometry_set_transparency">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
@@ -6581,6 +6589,18 @@
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_SHADOWS_ONLY" value="3" enum="ShadowCastingSetting">
 			Only render the shadows from the object. The object itself will not be drawn.
+		</constant>
+		<constant name="SHADOW_CACHE_INVALIDATION_AUTO" value="0" enum="ShadowCacheInvalidation">
+			Automatically chooses between the static and dynamic virtual shadow map layers based on recent motion, deformation, particles, dynamic [MultiMesh] updates, or dynamic shader features.
+		</constant>
+		<constant name="SHADOW_CACHE_INVALIDATION_ALWAYS" value="1" enum="ShadowCacheInvalidation">
+			Always renders the instance into the dynamic virtual shadow map layer and never invalidates or writes to the cached static layer.
+		</constant>
+		<constant name="SHADOW_CACHE_INVALIDATION_RIGID" value="2" enum="ShadowCacheInvalidation">
+			Keeps the instance in the cached static virtual shadow map layer and invalidates overlapped static pages when its transform or bounds change.
+		</constant>
+		<constant name="SHADOW_CACHE_INVALIDATION_STATIC" value="3" enum="ShadowCacheInvalidation">
+			Keeps the instance in the cached static virtual shadow map layer and never invalidates cached pages on transform or bounds changes.
 		</constant>
 		<constant name="VISIBILITY_RANGE_FADE_DISABLED" value="0" enum="VisibilityRangeFadeMode" keywords="LOD_FADE_DISABLED">
 			Disable visibility range fading for the given instance.

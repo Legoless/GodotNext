@@ -149,6 +149,8 @@ bool VirtualShadowMapStorage::request_activation() {
 	active_cache_frames = cache_frames(quality);
 	scalability = values;
 	set_lod_bias(values.lod_bias_directional, values.lod_bias_local);
+	// GodotNext: vsm_caching (#212).
+	deferred_invalidation_budget = read_deferred_invalidation_budget();
 	settings_version = ProjectSettings::get_singleton() != nullptr ? ProjectSettings::get_singleton()->get_version() : 0;
 	active = pool_create(pages);
 	if (!active) {
@@ -184,6 +186,8 @@ void VirtualShadowMapStorage::_update_scalability() {
 	}
 	scalability = values;
 	set_lod_bias(values.lod_bias_directional, values.lod_bias_local);
+	// GodotNext: vsm_caching (#212).
+	deferred_invalidation_budget = read_deferred_invalidation_budget();
 	if (quality != active_quality || pages != get_pool_page_count()) {
 		if (pool_create(pages)) {
 			active_quality = quality;
@@ -250,6 +254,14 @@ VirtualShadowMapStorage::~VirtualShadowMapStorage() {
 	if (allocate_version.is_valid()) {
 		allocate_shader.version_free(allocate_version);
 		allocate_version = RID();
+	}
+	// GodotNext: vsm_caching (#212).
+	if (invalidate_version.is_valid()) {
+		invalidate_shader.version_free(invalidate_version);
+		invalidate_version = RID();
+	}
+	for (RID &pipeline : invalidate_pipelines) {
+		pipeline = RID();
 	}
 	if (shader_version.is_valid()) {
 		shader.version_free(shader_version);
@@ -326,11 +338,33 @@ void VirtualShadowMapStorage::_table_clear(uint32_t p_first_map, uint32_t p_map_
 	// gets them starts without their overflow bias.
 	for (uint32_t map = p_first_map; map < p_first_map + p_map_count && map < map_data.size(); map++) {
 		_set_map_data(map, MapData());
+		_set_map_cull_mask(map, 0u);
 	}
 	if (map_state_buffer.is_valid() && p_first_map < map_buffers_maps) {
 		const uint32_t count = MIN(p_map_count, map_buffers_maps - p_first_map);
 		rd->buffer_clear(map_state_buffer, (MAP_STATE_BIAS * map_buffers_maps + p_first_map) * uint32_t(sizeof(uint32_t)), count * uint32_t(sizeof(uint32_t)));
+		// GodotNext: vsm_caching (#212). Clear shadow caster masks of freed maps.
+		rd->buffer_clear(map_state_buffer, (MAP_STATE_CULL_MASK * map_buffers_maps + p_first_map) * uint32_t(sizeof(uint32_t)), count * uint32_t(sizeof(uint32_t)));
 	}
+}
+
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+void VirtualShadowMapStorage::_table_invalidate_map(uint32_t p_map, uint32_t p_dirty_flags, bool p_dynamic_if_used) {
+	if (p_dirty_flags == 0u) {
+		return;
+	}
+	for (PendingMapInvalidation &item : pending_map_invalidations) {
+		if (item.map == p_map) {
+			item.dirty_flags |= p_dirty_flags;
+			item.dynamic_if_used = (item.dynamic_if_used != 0u || p_dynamic_if_used) ? 1u : 0u;
+			return;
+		}
+	}
+	PendingMapInvalidation item;
+	item.map = p_map;
+	item.dirty_flags = p_dirty_flags;
+	item.dynamic_if_used = p_dynamic_if_used ? 1u : 0u;
+	pending_map_invalidations.push_back(item);
 }
 
 void VirtualShadowMapStorage::_table_scroll(uint32_t p_map, const ClipmapScroll &p_scroll) {
@@ -422,7 +456,8 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 	uint32_t first = MAP_NONE;
 	if (p_light.kind == MAP_KIND_DIRECTIONAL) {
 		if (p_light.move_clipmaps) {
-			first = directional_update(p_light_instance, p_light.transform.basis, p_light.camera_position, p_light.max_distance);
+			// GodotNext: vsm_caching (#212). Invalidate on sun turn so deferred_invalidation_budget applies.
+			first = directional_update(p_light_instance, p_light.transform.basis, p_light.camera_position, p_light.max_distance, true);
 		} else {
 			// Reflection probes read the maps of the main view's camera.
 			const MapRange *range = map_touch(p_light_instance);
@@ -436,6 +471,25 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 	const MapRange *range = map_get(p_light_instance);
 	if (first == MAP_NONE || range == nullptr) {
 		return;
+	}
+	// GodotNext: vsm_caching (#212). A local light move or any light property change invalidates all
+	// of its maps. Directional light basis turns are already handled by directional_update().
+	{
+		LightProperties props;
+		props.transform = p_light.transform;
+		props.range = p_light.range;
+		props.spot_angle = p_light.spot_angle;
+		props.area_size = p_light.area_size;
+		props.caster_mask = p_light.caster_mask;
+		props.reverse_cull = p_light.reverse_cull;
+		if (note_light_properties(p_light_instance, props, range->kind != MAP_KIND_DIRECTIONAL)) {
+			for (uint32_t i = 0; i < range->count; i++) {
+				_table_invalidate_map(first + i, ENTRY_DIRTY_STATIC, true);
+			}
+		}
+		for (uint32_t i = 0; i < range->count; i++) {
+			_set_map_cull_mask(first + i, p_light.caster_mask);
+		}
 	}
 	r_map_base = first;
 	r_flags = light_flags(range->kind, range->count);
@@ -578,8 +632,30 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 			pages["overflow_views"] = int64_t(state[STATE_OVERFLOW_VIEWS]);
 			pages["total_dropped"] = int64_t(state[STATE_TOTAL_DROPPED]);
 			pages["views"] = int64_t(state[STATE_VIEWS]);
+			// GodotNext: vsm_caching (#212).
+			pages["dirty_static"] = int64_t(state[STATE_DIRTY_STATIC]);
+			pages["dirty_dynamic"] = int64_t(state[STATE_DIRTY_DYNAMIC]);
+			pages["deferred_static"] = int64_t(state[STATE_DEFERRED_STATIC]);
+			pages["invalidated_static"] = int64_t(state[STATE_INVALIDATED_STATIC]);
+			pages["invalidated_dynamic"] = int64_t(state[STATE_INVALIDATED_DYNAMIC]);
+			pages["total_dirty_static"] = int64_t(state[STATE_TOTAL_DIRTY_STATIC]);
+			pages["total_dirty_dynamic"] = int64_t(state[STATE_TOTAL_DIRTY_DYNAMIC]);
+			pages["total_deferred_static"] = int64_t(state[STATE_TOTAL_DEFERRED_STATIC]);
+			pages["total_invalidated_static"] = int64_t(state[STATE_TOTAL_INVALIDATED_STATIC]);
+			pages["total_invalidated_dynamic"] = int64_t(state[STATE_TOTAL_INVALIDATED_DYNAMIC]);
 			info["pages"] = pages;
 		}
+	}
+	// GodotNext: vsm_caching (#212).
+	{
+		Dictionary caching;
+		caching["deferred_invalidation_budget"] = int64_t(deferred_invalidation_budget);
+		caching["invalidation_boxes"] = int64_t(last_invalidation_boxes);
+		caching["invalidation_maps"] = int64_t(last_invalidation_maps);
+		caching["total_invalidation_boxes"] = int64_t(total_invalidation_boxes);
+		caching["total_invalidation_maps"] = int64_t(total_invalidation_maps);
+		caching["static_mode_invalidations"] = int64_t(static_mode_invalidations);
+		info["caching"] = caching;
 	}
 	return info;
 }
@@ -1221,8 +1297,16 @@ bool VirtualShadowMapStorage::_ensure_marking_shaders() {
 	allocate_modes.push_back("\n#define MODE_MAPS\n");
 	allocate_modes.push_back("\n#define MODE_EMIT\n");
 	allocate_modes.push_back("\n#define MODE_CLEAR\n");
+	// GodotNext: vsm_caching (#212).
+	allocate_modes.push_back("\n#define MODE_DEFER_SCAN\n");
+	allocate_modes.push_back("\n#define MODE_DEFER_APPLY\n");
 	allocate_shader.initialize(allocate_modes, defines);
 	allocate_version = allocate_shader.version_create();
+	Vector<String> invalidate_modes;
+	invalidate_modes.push_back("\n#define MODE_MAPS\n");
+	invalidate_modes.push_back("\n#define MODE_BOXES\n");
+	invalidate_shader.initialize(invalidate_modes, defines);
+	invalidate_version = invalidate_shader.version_create();
 	bool ok = true;
 	for (int mode = 0; mode < MARK_MODE_MAX && ok; mode++) {
 		const RID shader_rid = mark_shader.version_get_shader(mark_version, mode);
@@ -1238,16 +1322,28 @@ bool VirtualShadowMapStorage::_ensure_marking_shaders() {
 			allocate_pipelines[mode] = RD::get_singleton()->compute_pipeline_create(shader_rid);
 		}
 	}
+	for (int mode = 0; mode < INVALIDATE_MODE_MAX && ok; mode++) {
+		const RID shader_rid = invalidate_shader.version_get_shader(invalidate_version, mode);
+		ok = shader_rid.is_valid();
+		if (ok) {
+			invalidate_pipelines[mode] = RD::get_singleton()->compute_pipeline_create(shader_rid);
+		}
+	}
 	if (!ok) {
 		// Freeing the versions frees the pipelines made from them.
 		mark_shader.version_free(mark_version);
 		allocate_shader.version_free(allocate_version);
+		invalidate_shader.version_free(invalidate_version);
 		mark_version = RID();
 		allocate_version = RID();
+		invalidate_version = RID();
 		for (RID &pipeline : mark_pipelines) {
 			pipeline = RID();
 		}
 		for (RID &pipeline : allocate_pipelines) {
+			pipeline = RID();
+		}
+		for (RID &pipeline : invalidate_pipelines) {
 			pipeline = RID();
 		}
 		marking_failed = true;
@@ -1265,8 +1361,10 @@ void VirtualShadowMapStorage::_resize_map_buffers(uint32_t p_maps) {
 	}
 	const uint32_t old_maps = map_buffers_maps;
 	map_data.resize(p_maps);
+	map_cull_masks.resize(p_maps);
 	for (uint32_t map = old_maps; map < p_maps; map++) {
 		map_data[map] = MapData();
+		map_cull_masks[map] = 0u;
 	}
 	const RID new_data = rd->storage_buffer_create(p_maps * uint32_t(sizeof(MapData)));
 	const RID new_state = rd->storage_buffer_create(p_maps * MAP_STATE_REGIONS * uint32_t(sizeof(uint32_t)));
@@ -1287,6 +1385,7 @@ void VirtualShadowMapStorage::_resize_map_buffers(uint32_t p_maps) {
 	map_buffers_maps = p_maps;
 	map_data_dirty_begin = 0;
 	map_data_dirty_end = p_maps;
+	map_cull_masks_dirty = true;
 }
 
 void VirtualShadowMapStorage::_set_map_data(uint32_t p_map, const MapData &p_data) {
@@ -1304,16 +1403,29 @@ void VirtualShadowMapStorage::_set_map_data(uint32_t p_map, const MapData &p_dat
 	}
 }
 
-void VirtualShadowMapStorage::_upload_map_data() {
-	if (map_data_dirty_begin >= map_data_dirty_end || map_data_buffer.is_null()) {
+// GodotNext: vsm_caching (#212).
+void VirtualShadowMapStorage::_set_map_cull_mask(uint32_t p_map, uint32_t p_mask) {
+	ERR_FAIL_UNSIGNED_INDEX(p_map, map_cull_masks.size());
+	if (map_cull_masks[p_map] == p_mask) {
 		return;
 	}
-	const uint32_t end = MIN(map_data_dirty_end, map_data.size());
-	if (map_data_dirty_begin < end) {
-		RD::get_singleton()->buffer_update(map_data_buffer, map_data_dirty_begin * uint32_t(sizeof(MapData)), (end - map_data_dirty_begin) * uint32_t(sizeof(MapData)), map_data.ptr() + map_data_dirty_begin);
+	map_cull_masks[p_map] = p_mask;
+	map_cull_masks_dirty = true;
+}
+
+void VirtualShadowMapStorage::_upload_map_data() {
+	if (map_data_dirty_begin < map_data_dirty_end && map_data_buffer.is_valid()) {
+		const uint32_t end = MIN(map_data_dirty_end, map_data.size());
+		if (map_data_dirty_begin < end) {
+			RD::get_singleton()->buffer_update(map_data_buffer, map_data_dirty_begin * uint32_t(sizeof(MapData)), (end - map_data_dirty_begin) * uint32_t(sizeof(MapData)), map_data.ptr() + map_data_dirty_begin);
+		}
+		map_data_dirty_begin = 0;
+		map_data_dirty_end = 0;
 	}
-	map_data_dirty_begin = 0;
-	map_data_dirty_end = 0;
+	if (map_cull_masks_dirty && map_state_buffer.is_valid() && map_buffers_maps > 0 && map_cull_masks.size() >= map_buffers_maps) {
+		RD::get_singleton()->buffer_update(map_state_buffer, MAP_STATE_CULL_MASK * map_buffers_maps * uint32_t(sizeof(uint32_t)), map_buffers_maps * uint32_t(sizeof(uint32_t)), map_cull_masks.ptr());
+		map_cull_masks_dirty = false;
+	}
 }
 
 void VirtualShadowMapStorage::_ensure_page_buffers() {
@@ -1333,9 +1445,16 @@ void VirtualShadowMapStorage::_ensure_page_buffers() {
 		capture_depth_words = 4;
 		capture_depth_buffer = rd->storage_buffer_create(capture_depth_words * uint32_t(sizeof(uint32_t)));
 		rd->set_resource_name(capture_depth_buffer, "VSM Check Depth");
+		// GodotNext: vsm_caching (#212).
+		invalidation_box_capacity = 64;
+		invalidation_box_buffer = rd->storage_buffer_create(invalidation_box_capacity * uint32_t(sizeof(InvalidationBox)));
+		rd->set_resource_name(invalidation_box_buffer, "VSM Invalidation Boxes");
+		invalidation_map_capacity = 64;
+		invalidation_map_buffer = rd->storage_buffer_create(invalidation_map_capacity * uint32_t(sizeof(PendingMapInvalidation)));
+		rd->set_resource_name(invalidation_map_buffer, "VSM Invalidation Maps");
 	}
 	if (page_buffers_pages != page_count) {
-		for (RID *buffer : { &pages_buffer, &free_list_buffer, &dirty_buffer, &request_buffer }) {
+		for (RID *buffer : { &pages_buffer, &free_list_buffer, &dirty_buffer, &request_buffer, &page_coverage_buffer }) {
 			if (buffer->is_valid()) {
 				rd->free_rid(*buffer);
 			}
@@ -1352,6 +1471,9 @@ void VirtualShadowMapStorage::_ensure_page_buffers() {
 		rd->set_resource_name(dirty_buffer, "VSM Dirty Pages");
 		request_buffer = rd->storage_buffer_create(request_buffer_capacity * uint32_t(sizeof(uint32_t)));
 		rd->set_resource_name(request_buffer, "VSM Requests");
+		page_coverage_buffer = rd->storage_buffer_create(MAX(page_count, 1u) * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(page_coverage_buffer, "VSM Page Coverage");
+		rd->buffer_clear(page_coverage_buffer, 0, MAX(page_count, 1u) * uint32_t(sizeof(uint32_t)));
 		// The pool changed size: no page of the old one is valid (mark_and_allocate() clears the table).
 	}
 }
@@ -1361,7 +1483,7 @@ void VirtualShadowMapStorage::_free_marking_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	for (RID *buffer : { &pages_buffer, &free_list_buffer, &dirty_buffer, &request_buffer, &state_buffer, &view_buffer, &indirect_buffer, &box_buffer, &capture_depth_buffer }) {
+	for (RID *buffer : { &pages_buffer, &free_list_buffer, &dirty_buffer, &request_buffer, &page_coverage_buffer, &state_buffer, &view_buffer, &indirect_buffer, &box_buffer, &invalidation_box_buffer, &invalidation_map_buffer, &capture_depth_buffer }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 		}
@@ -1370,6 +1492,9 @@ void VirtualShadowMapStorage::_free_marking_resources() {
 	page_buffers_pages = 0;
 	request_buffer_capacity = 0;
 	capture_depth_words = 0;
+	invalidation_box_capacity = 0;
+	invalidation_map_capacity = 0;
+	pending_map_invalidations.clear();
 }
 
 void VirtualShadowMapStorage::_free_check_buffers() {
@@ -1377,7 +1502,7 @@ void VirtualShadowMapStorage::_free_check_buffers() {
 	if (rd == nullptr) {
 		return;
 	}
-	for (RID *buffer : { &check.cluster, &check.lights[0], &check.lights[1], &check.lights[2], &check.bias_before, &check.table_marked, &check.pages_before, &check.state_marked, &check.requests, &check.map_state_marked, &check.table_after, &check.pages_after, &check.state_after, &check.map_state_after, &check.dirty, &check.indirect, &check.pool_saved, &check.pool_cleared }) {
+	for (RID *buffer : { &check.cluster, &check.lights[0], &check.lights[1], &check.lights[2], &check.bias_before, &check.table_marked, &check.pages_before, &check.state_marked, &check.requests, &check.map_state_marked, &check.table_after, &check.pages_after, &check.state_after, &check.map_state_after, &check.dirty, &check.indirect, &check.page_coverage, &check.pool_saved, &check.pool_cleared }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 		}
@@ -1513,11 +1638,16 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	view.counts[2] = p_input.spot_count;
 	view.counts[3] = p_input.area_count;
 	const uint32_t box_count = MIN(p_input.boxes.size(), MAX_TRANSPARENT_BOXES);
+	// GodotNext: vsm_caching (#212). Live deferred static invalidation budget (0 = unlimited).
+	const uint32_t defer_budget = deferred_invalidation_budget;
 	view.misc[0] = table_maps;
 	view.misc[1] = box_count;
 	view.misc[2] = view_frame;
+	view.misc[3] = defer_budget;
 	view.bias[0] = lod_bias_directional;
 	view.bias[1] = lod_bias_local;
+	view.bias[2] = grid.x;
+	view.bias[3] = int32_t(page_count);
 	if (p_input.fog) {
 		view.fog_size[0] = uint32_t(MAX(p_input.fog_size.x, 1));
 		view.fog_size[1] = uint32_t(MAX(p_input.fog_size.y, 1));
@@ -1574,6 +1704,7 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 		check.request_capacity = request_buffer_capacity;
 		check.frame = view_frame;
 		check.cache_frames = active_cache_frames;
+		check.deferred_budget = defer_budget;
 		check.omni_count = p_input.omni_count;
 		check.spot_count = p_input.spot_count;
 		check.area_count = p_input.area_count;
@@ -1595,6 +1726,82 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	rd->buffer_clear(state_buffer, STATE_BUCKETS * uint32_t(sizeof(uint32_t)), (STATE_SIZE - STATE_BUCKETS) * uint32_t(sizeof(uint32_t)));
 	rd->buffer_clear(map_state_buffer, 0, 2 * table_maps * uint32_t(sizeof(uint32_t)));
 	rd->buffer_clear(map_state_buffer, MAP_STATE_DIRTY_CURSOR * table_maps * uint32_t(sizeof(uint32_t)), table_maps * uint32_t(sizeof(uint32_t)));
+	if (defer_budget > 0u) {
+		rd->buffer_clear(page_coverage_buffer, 0, MAX(page_count, 1u) * uint32_t(sizeof(uint32_t)));
+	}
+
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Run per-map and swept-bounds invalidation
+	// BEFORE page marking so MODE_PIXEL observes VSM_ENTRY_DIRTY_STATIC when counting screen coverage
+	// and check.table_marked includes the invalidation flags.
+	static_mode_invalidations = p_input.static_mode_invalidations;
+	uint32_t inv_map_count = pending_map_invalidations.size();
+	uint32_t inv_box_count = 0u;
+	if (p_input.invalidation_epoch != 0u && p_input.invalidation_epoch != last_invalidation_epoch) {
+		last_invalidation_epoch = p_input.invalidation_epoch;
+		if (p_input.invalidation_boxes != nullptr && p_input.invalidation_box_count > 0u) {
+			inv_box_count = p_input.invalidation_box_count;
+		}
+		last_invalidation_boxes = inv_box_count;
+	}
+	last_invalidation_maps = inv_map_count;
+	total_invalidation_maps += inv_map_count;
+	total_invalidation_boxes += inv_box_count;
+	if (inv_map_count > 0u || inv_box_count > 0u) {
+		if (inv_map_count > invalidation_map_capacity) {
+			rd->free_rid(invalidation_map_buffer);
+			invalidation_map_capacity = MAX(inv_map_count, invalidation_map_capacity * 2u);
+			invalidation_map_buffer = rd->storage_buffer_create(invalidation_map_capacity * uint32_t(sizeof(PendingMapInvalidation)));
+			rd->set_resource_name(invalidation_map_buffer, "VSM Invalidation Maps");
+		}
+		if (inv_map_count > 0u) {
+			rd->buffer_update(invalidation_map_buffer, 0, inv_map_count * uint32_t(sizeof(PendingMapInvalidation)), pending_map_invalidations.ptr());
+			pending_map_invalidations.clear();
+		}
+		if (inv_box_count > invalidation_box_capacity) {
+			rd->free_rid(invalidation_box_buffer);
+			invalidation_box_capacity = MAX(inv_box_count, invalidation_box_capacity * 2u);
+			invalidation_box_buffer = rd->storage_buffer_create(invalidation_box_capacity * uint32_t(sizeof(InvalidationBox)));
+			rd->set_resource_name(invalidation_box_buffer, "VSM Invalidation Boxes");
+		}
+		if (inv_box_count > 0u) {
+			rd->buffer_update(invalidation_box_buffer, 0, inv_box_count * uint32_t(sizeof(InvalidationBox)), p_input.invalidation_boxes);
+		}
+		LocalVector<RD::Uniform> inv_uniforms;
+		inv_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, table_buffer));
+		inv_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, map_data_buffer));
+		inv_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, map_state_buffer));
+		inv_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, state_buffer));
+		inv_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, pages_buffer));
+		InvalidatePushConstant inv_push;
+		inv_push.table_maps = table_maps;
+		inv_push.pool_pages = page_count;
+		inv_push.grid_width = uint32_t(grid.x);
+		RD::ComputeListID inv_list = rd->compute_list_begin();
+		if (inv_map_count > 0u) {
+			inv_push.count = inv_map_count;
+			LocalVector<RD::Uniform> map_inv_u(inv_uniforms);
+			map_inv_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, invalidation_map_buffer));
+			const RID inv_shader = invalidate_shader.version_get_shader(invalidate_version, INVALIDATE_MODE_MAPS);
+			rd->compute_list_bind_compute_pipeline(inv_list, invalidate_pipelines[INVALIDATE_MODE_MAPS]);
+			rd->compute_list_bind_uniform_set(inv_list, UniformSetCacheRD::get_singleton()->get_cache_vec(inv_shader, 0, map_inv_u), 0);
+			rd->compute_list_set_push_constant(inv_list, &inv_push, sizeof(InvalidatePushConstant));
+			rd->compute_list_dispatch(inv_list, inv_map_count, 1, 1);
+			if (inv_box_count > 0u) {
+				rd->compute_list_add_barrier(inv_list);
+			}
+		}
+		if (inv_box_count > 0u) {
+			inv_push.count = inv_box_count;
+			LocalVector<RD::Uniform> box_inv_u(inv_uniforms);
+			box_inv_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, invalidation_box_buffer));
+			const RID inv_shader = invalidate_shader.version_get_shader(invalidate_version, INVALIDATE_MODE_BOXES);
+			rd->compute_list_bind_compute_pipeline(inv_list, invalidate_pipelines[INVALIDATE_MODE_BOXES]);
+			rd->compute_list_bind_uniform_set(inv_list, UniformSetCacheRD::get_singleton()->get_cache_vec(inv_shader, 0, box_inv_u), 0);
+			rd->compute_list_set_push_constant(inv_list, &inv_push, sizeof(InvalidatePushConstant));
+			rd->compute_list_dispatch(inv_list, inv_box_count, 1, 1);
+		}
+		rd->compute_list_end();
+	}
 
 	// Marking.
 	LocalVector<RD::Uniform> uniforms;
@@ -1616,6 +1823,8 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	}
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, capture_depth_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, box_buffer));
+	// GodotNext: vsm_caching (#212). Screen pixel count per page for deferred static invalidation.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, page_coverage_buffer));
 	{
 		RD::ComputeListID list = rd->compute_list_begin();
 		// The always-resident pages first: they take the request list's first entries, which
@@ -1653,6 +1862,9 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 		check.state_marked = _snapshot(state_buffer, 0, STATE_SIZE * uint32_t(sizeof(uint32_t)), "State Marked");
 		check.requests = _snapshot(request_buffer, 0, request_buffer_capacity * uint32_t(sizeof(uint32_t)), "Requests");
 		check.map_state_marked = _snapshot(map_state_buffer, 0, table_maps * MAP_STATE_REGIONS * uint32_t(sizeof(uint32_t)), "Map State Marked");
+		if (defer_budget > 0u) {
+			check.page_coverage = _snapshot(page_coverage_buffer, 0, page_count * uint32_t(sizeof(uint32_t)), "Page Coverage");
+		}
 	}
 
 	if (capture) {
@@ -1676,6 +1888,7 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	allocate_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, dirty_buffer));
 	allocate_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, indirect_buffer));
 	allocate_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, pool_texture));
+	allocate_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, page_coverage_buffer));
 	AllocatePushConstant push;
 	push.frame = view_frame;
 	push.cache_frames = active_cache_frames;
@@ -1683,6 +1896,7 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	push.pool_pages = page_count;
 	push.grid_width = uint32_t(grid.x);
 	push.request_capacity = request_buffer_capacity;
+	push.deferred_budget = defer_budget;
 	auto bind = [&](RD::ComputeListID p_list, AllocateMode p_mode) {
 		const RID shader_rid = allocate_shader.version_get_shader(allocate_version, p_mode);
 		rd->compute_list_bind_compute_pipeline(p_list, allocate_pipelines[p_mode]);
@@ -1701,13 +1915,23 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 		rd->compute_list_dispatch_threads(list, page_count, 1, 1);
 		rd->compute_list_add_barrier(list);
 		// The always-resident requests, the other coarse requests, then the rest.
+		const uint32_t dyn_scene_bit = p_input.has_dynamic_casters ? 0x80000000u : 0u;
 		for (uint32_t phase = 0; phase < 3; phase++) {
-			push.phase = phase;
+			push.phase = phase | dyn_scene_bit;
 			bind(list, ALLOCATE_MODE_ASSIGN);
 			rd->compute_list_dispatch_threads(list, request_buffer_capacity, 1, 1);
 			rd->compute_list_add_barrier(list);
 		}
 		push.phase = 0;
+		// GodotNext: vsm_caching (#212). Deferred static invalidation budget passes.
+		if (defer_budget > 0u) {
+			bind(list, ALLOCATE_MODE_DEFER_SCAN);
+			rd->compute_list_dispatch(list, 1, 1, 1);
+			rd->compute_list_add_barrier(list);
+			bind(list, ALLOCATE_MODE_DEFER_APPLY);
+			rd->compute_list_dispatch_threads(list, request_buffer_capacity, 1, 1);
+			rd->compute_list_add_barrier(list);
+		}
 		bind(list, ALLOCATE_MODE_MAPS);
 		rd->compute_list_dispatch(list, 1, 1, 1);
 		rd->compute_list_add_barrier(list);
@@ -1826,6 +2050,7 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	const LocalVector<uint32_t> map_state_after = _read_words(check.map_state_after);
 	const LocalVector<uint32_t> dirty = _read_words(check.dirty);
 	const LocalVector<uint32_t> indirect = _read_words(check.indirect);
+	const LocalVector<uint32_t> page_coverage = _read_words(check.page_coverage);
 	Vector<uint8_t> pool_layers[POOL_LAYERS];
 	if (check.pool_cleared.is_valid()) {
 		for (uint32_t layer = 0; layer < POOL_LAYERS; layer++) {
@@ -2207,7 +2432,8 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		model_pages[p].last_used = pages_before[p * 4 + 1];
 		model_pages[p].bucket = pages_before[p * 4 + 2];
 	}
-	const AllocationCounts model = allocate_model(model_table.ptr(), table_entries, model_pages.ptr(), check.pool_pages, check.grid_width, request_list.ptr(), MIN(listed, request_list.size()), check.frame, check.cache_frames, resident_listed);
+	const uint32_t *coverage_ptr = (check.deferred_budget > 0u && page_coverage.size() >= check.pool_pages) ? page_coverage.ptr() : nullptr;
+	const AllocationCounts model = allocate_model(model_table.ptr(), table_entries, model_pages.ptr(), check.pool_pages, check.grid_width, request_list.ptr(), MIN(listed, request_list.size()), check.frame, check.cache_frames, resident_listed, check.deferred_budget, coverage_ptr);
 	Dictionary counts;
 	const struct {
 		const char *name;
@@ -2223,6 +2449,9 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		{ "cached", model.cached, state_after[STATE_CACHED] },
 		{ "available", model.available, state_after[STATE_AVAILABLE] },
 		{ "dirty", model.dirty, state_after[STATE_DIRTY] },
+		{ "dirty_static", model.dirty_static, state_after[STATE_DIRTY_STATIC] },
+		{ "dirty_dynamic", model.dirty_dynamic, state_after[STATE_DIRTY_DYNAMIC] },
+		{ "deferred_static", model.deferred_static, state_after[STATE_DEFERRED_STATIC] },
 		{ "coarse", model.coarse, state_after[STATE_COARSE] },
 		{ "resident_overflow", model.resident_overflow, state_after[STATE_RESIDENT_OVERFLOW] },
 	};
@@ -2311,12 +2540,26 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	LocalVector<uint32_t> page_users;
 	page_users.resize(check.pool_pages);
 	memset(page_users.ptr(), 0, check.pool_pages * sizeof(uint32_t));
+	uint32_t deferred_flagged = 0;
 	for (uint64_t i = 0; i < table_entries; i++) {
 		const uint32_t entry = table_after[i];
-		if (entry & (ENTRY_REQUESTED | ENTRY_COARSE | ENTRY_DIRTY_MASK | ENTRY_SCROLLED)) {
+		const uint32_t before = table_marked[i];
+		// GodotNext: vsm_caching (#212). Deferred requested DIRTY_STATIC pages keep ENTRY_DIRTY_STATIC
+		// when deferred_budget > 0; unrequested cached pages may keep ENTRY_DIRTY_DYNAMIC.
+		uint32_t disallowed = ENTRY_REQUESTED | ENTRY_COARSE | ENTRY_SCROLLED;
+		if (before & ENTRY_REQUESTED) {
+			disallowed |= ENTRY_DIRTY_DYNAMIC;
+			if (check.deferred_budget == 0u) {
+				disallowed |= ENTRY_DIRTY_STATIC;
+			} else if (entry & ENTRY_DIRTY_STATIC) {
+				deferred_flagged++;
+			}
+		} else {
+			disallowed |= ENTRY_DIRTY_STATIC;
+		}
+		if (entry & disallowed) {
 			flags_left++;
 		}
-		const uint32_t before = table_marked[i];
 		if ((before & ENTRY_ALLOCATED) && !(model_table[i] & ENTRY_ALLOCATED) && (entry & ENTRY_ALLOCATED) && !(before & ENTRY_REQUESTED)) {
 			// The model evicted or orphaned it; the GPU may only differ for pages it gave away (stolen).
 			evicted_kept++;
@@ -2377,6 +2620,9 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	if (overflow_flagged != state_after[STATE_OVERFLOW]) {
 		failures.push_back(vformat("allocation: %d requested entries carry the overflow flag, the counter says %d", overflow_flagged, state_after[STATE_OVERFLOW]));
 	}
+	if (deferred_flagged != state_after[STATE_DEFERRED_STATIC]) {
+		failures.push_back(vformat("allocation: %d requested entries kept ENTRY_DIRTY_STATIC, the deferred counter says %d", deferred_flagged, state_after[STATE_DEFERRED_STATIC]));
+	}
 	if (resident_overflowed != state_after[STATE_RESIDENT_OVERFLOW]) {
 		failures.push_back(vformat("allocation: %d resident entries have no page, the counter says %d", resident_overflowed, state_after[STATE_RESIDENT_OVERFLOW]));
 	}
@@ -2424,7 +2670,11 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		if (!(after & ENTRY_ALLOCATED)) {
 			continue;
 		}
-		if (!(before & ENTRY_ALLOCATED) || (before & (ENTRY_SCROLLED | ENTRY_UNCACHED | ENTRY_DIRTY_MASK))) {
+		// GodotNext: vsm_caching (#212). A deferred static page keeps ENTRY_DIRTY_STATIC in table_after
+		// and is omitted from the dirty list unless its dynamic layer is also dirty.
+		const bool deferred_static = (after & ENTRY_DIRTY_STATIC) != 0u;
+		const uint32_t effective_before = deferred_static ? (before & ~uint32_t(ENTRY_DIRTY_STATIC)) : before;
+		if (!(before & ENTRY_ALLOCATED) || (effective_before & (ENTRY_SCROLLED | ENTRY_UNCACHED | ENTRY_DIRTY_MASK))) {
 			expected_dirty.insert(index);
 		}
 	}

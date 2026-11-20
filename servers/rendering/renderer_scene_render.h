@@ -311,18 +311,31 @@ public:
 		PagedArray<RenderGeometryInstance *> instances;
 	};
 
-	// GodotNext: vsm_non_nanite (#218). Per-light shadow casters for VSM rasterization, independent of
-	// shadow-atlas tile limits or dirty flags.
+	// GodotNext: vsm_non_nanite (#218), vsm_caching (#212). Per-light shadow casters for VSM
+	// rasterization, independent of shadow-atlas tile limits or dirty flags.
 	struct RenderVSMCaster {
 		RenderGeometryInstance *geometry_instance = nullptr;
 		RID instance;
 		uint64_t object_id = 0;
 		float extra_margin = 0.0f;
+		// GodotNext: vsm_caching (#212). Per-instance cache behavior and CPU-classified dynamic state.
+		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
+		uint64_t vsm_last_moved_frame = UINT64_MAX;
+		uint32_t vsm_shader_dynamic_flags = 0;
+		uint32_t vsm_dynamic_reasons = 0;
 	};
 
 	struct RenderVSMShadowData {
 		RID light;
 		LocalVector<RenderVSMCaster> casters;
+	};
+
+	// GodotNext: vsm_caching (#212). One swept-bounds invalidation event pushed by RendererSceneCull
+	// and consumed by vsm_invalidate.glsl before page marking/allocation.
+	struct RenderVSMInvalidation {
+		AABB world_aabb;
+		uint32_t layer_mask = 0xFFFFFFFFu;
+		uint32_t dirty_flags = 0u;
 	};
 
 	struct RenderSDFGIData {
@@ -389,6 +402,11 @@ public:
 		// GodotNext: vsm_non_nanite (#218).
 		const RenderVSMShadowData *vsm_shadows = nullptr;
 		uint32_t vsm_shadow_count = 0;
+		// GodotNext: vsm_caching (#212).
+		const RenderVSMInvalidation *vsm_invalidations = nullptr;
+		uint32_t vsm_invalidation_count = 0;
+		uint64_t vsm_invalidation_epoch = 0;
+		uint64_t vsm_static_mode_invalidations = 0;
 	};
 
 	struct CameraData {

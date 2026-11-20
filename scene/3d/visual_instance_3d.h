@@ -100,6 +100,14 @@ public:
 		SHADOW_CASTING_SETTING_SHADOWS_ONLY = RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY,
 	};
 
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+	enum ShadowCacheInvalidation {
+		SHADOW_CACHE_INVALIDATION_AUTO = RSE::SHADOW_CACHE_INVALIDATION_AUTO,
+		SHADOW_CACHE_INVALIDATION_ALWAYS = RSE::SHADOW_CACHE_INVALIDATION_ALWAYS,
+		SHADOW_CACHE_INVALIDATION_RIGID = RSE::SHADOW_CACHE_INVALIDATION_RIGID,
+		SHADOW_CACHE_INVALIDATION_STATIC = RSE::SHADOW_CACHE_INVALIDATION_STATIC,
+	};
+
 	enum GIMode {
 		GI_MODE_DISABLED,
 		GI_MODE_STATIC,
@@ -128,6 +136,8 @@ public:
 
 private:
 	ShadowCastingSetting shadow_casting_setting = SHADOW_CASTING_SETTING_ON;
+	// GodotNext: vsm_caching (#212).
+	ShadowCacheInvalidation shadow_cache_invalidation = SHADOW_CACHE_INVALIDATION_AUTO;
 	Ref<Material> material_override;
 	Ref<Material> material_overlay;
 
@@ -166,6 +176,10 @@ protected:
 public:
 	void set_cast_shadows_setting(ShadowCastingSetting p_shadow_casting_setting);
 	ShadowCastingSetting get_cast_shadows_setting() const;
+
+	// GodotNext: vsm_caching (#212).
+	void set_shadow_cache_invalidation(ShadowCacheInvalidation p_invalidation);
+	ShadowCacheInvalidation get_shadow_cache_invalidation() const;
 
 	void set_transparency(float p_transparency);
 	float get_transparency() const;
@@ -227,6 +241,8 @@ public:
 };
 
 VARIANT_ENUM_CAST(GeometryInstance3D::ShadowCastingSetting);
+// GodotNext: vsm_caching (#212).
+VARIANT_ENUM_CAST(GeometryInstance3D::ShadowCacheInvalidation);
 VARIANT_ENUM_CAST(GeometryInstance3D::GIMode);
 VARIANT_ENUM_CAST(GeometryInstance3D::FarFieldMode);
 VARIANT_ENUM_CAST(GeometryInstance3D::LightmapScale);

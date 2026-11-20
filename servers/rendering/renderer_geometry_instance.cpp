@@ -146,6 +146,11 @@ void RenderGeometryInstanceBase::set_cast_double_sided_shadows(bool p_enable) {
 	_mark_dirty();
 }
 
+// GodotNext: vsm_caching (#212).
+void RenderGeometryInstanceBase::set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) {
+	data->shadow_cache_invalidation = p_invalidation;
+}
+
 void RenderGeometryInstanceBase::reset_motion_vectors() {
 }
 

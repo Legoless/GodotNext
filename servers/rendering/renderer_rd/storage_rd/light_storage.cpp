@@ -887,6 +887,9 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						update.max_distance = max_distance;
 						update.move_clipmaps = !p_render_data->reflection_probe.is_valid();
 						update.fog_energy = light->param[RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY];
+						// GodotNext: vsm_caching (#212).
+						update.caster_mask = light->shadow_caster_mask;
+						update.reverse_cull = light->reverse_cull;
 						vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
 					}
 					light_data.vsm_map_base = vsm_map_base;
@@ -1176,6 +1179,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				update.range = light->param[RSE::LIGHT_PARAM_RANGE];
 				update.spot_angle = light->param[RSE::LIGHT_PARAM_SPOT_ANGLE];
 				update.fog_energy = light->param[RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY];
+				// GodotNext: vsm_caching (#212).
+				update.area_size = light->area_size;
+				update.caster_mask = light->shadow_caster_mask;
+				update.reverse_cull = light->reverse_cull;
 				vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
 			}
 			light_data.vsm_map_base = vsm_map_base;

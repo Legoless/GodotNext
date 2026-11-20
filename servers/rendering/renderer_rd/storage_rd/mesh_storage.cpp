@@ -3402,6 +3402,27 @@ bool MeshStorage::multimesh_is_rt_dynamic(RID p_multimesh) const {
 	return nextgi_rt_multimesh_is_dynamic(state);
 }
 
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+bool MeshStorage::multimesh_is_vsm_dynamic(RID p_multimesh) const {
+	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+	if (multimesh == nullptr) {
+		return false;
+	}
+	if (multimesh->indirect) {
+		return true;
+	}
+	if (RSG::rasterizer != nullptr) {
+		const uint64_t frame = RSG::rasterizer->get_frame_number();
+		if (multimesh->motion_vectors_last_change != UINT64_MAX && frame >= multimesh->motion_vectors_last_change && (frame - multimesh->motion_vectors_last_change) < 8u) {
+			return true;
+		}
+		if (multimesh->rt_change_streak > 0 && frame >= multimesh->rt_last_change_frame && (frame - multimesh->rt_last_change_frame) < 8u) {
+			return true;
+		}
+	}
+	return multimesh_is_rt_dynamic(p_multimesh);
+}
+
 const float *MeshStorage::multimesh_get_rt_transforms(RID p_multimesh, uint32_t &r_count, uint32_t &r_stride) const {
 	r_count = 0;
 	r_stride = 0;

@@ -177,6 +177,8 @@ public:
 	virtual int multimesh_get_visible_instances(RID p_multimesh) const;
 
 	virtual AABB multimesh_get_aabb(RID p_multimesh);
+	// GodotNext: vsm_caching (#212). True when the MultiMesh is indirect or updated recently.
+	virtual bool multimesh_is_vsm_dynamic(RID p_multimesh) const { return false; }
 
 	virtual RID _multimesh_allocate() = 0;
 	virtual void _multimesh_initialize(RID p_rid) = 0;

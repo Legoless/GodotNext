@@ -330,8 +330,8 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_MAX_DIRECTIONAL_LIGHTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "u\n";
 	defines += "#define VSM_CLIPMAP_TEXEL0_EXPONENT (" + itos(CLIPMAP_TEXEL0_EXPONENT) + ")\n";
 	defines += "#define VSM_CLIPMAP_RESIDENT_MIP " + itos(CLIPMAP_RESIDENT_MIP) + "u\n";
-	const char *state_names[] = { "REQUESTS", "REQUESTS_DROPPED", "AVAILABLE", "CURSOR", "OVERFLOW", "NEW", "KEPT", "EVICTED", "ORPHANED", "STOLEN", "DIRTY", "DIRTY_DIRECTIONAL", "COARSE", "CACHED", "MAX_MAP_REQUESTS", "BIASED_MAPS", "RESIDENT", "RESIDENT_OVERFLOW", "SINK" };
-	static_assert(sizeof(state_names) / sizeof(state_names[0]) == STATE_SINK + 1, "One name per per-view counter.");
+	const char *state_names[] = { "REQUESTS", "REQUESTS_DROPPED", "AVAILABLE", "CURSOR", "OVERFLOW", "NEW", "KEPT", "EVICTED", "ORPHANED", "STOLEN", "DIRTY", "DIRTY_DIRECTIONAL", "COARSE", "CACHED", "MAX_MAP_REQUESTS", "BIASED_MAPS", "RESIDENT", "RESIDENT_OVERFLOW", "SINK", "DIRTY_STATIC", "DIRTY_DYNAMIC", "DEFERRED_STATIC", "INVALIDATED_STATIC", "INVALIDATED_DYNAMIC" };
+	static_assert(sizeof(state_names) / sizeof(state_names[0]) == STATE_INVALIDATED_DYNAMIC + 1, "One name per per-view counter.");
 	for (uint32_t i = 0; i < sizeof(state_names) / sizeof(state_names[0]); i++) {
 		defines += "#define VSM_STATE_" + String(state_names[i]) + " " + itos(i) + "u\n";
 	}
@@ -341,10 +341,23 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_STATE_VIEWS " + itos(STATE_VIEWS) + "u\n";
 	defines += "#define VSM_STATE_BIAS_FRAME " + itos(STATE_BIAS_FRAME) + "u\n";
 	defines += "#define VSM_STATE_TOTAL_RESIDENT_OVERFLOW " + itos(STATE_TOTAL_RESIDENT_OVERFLOW) + "u\n";
+	// GodotNext: vsm_caching (#212).
+	defines += "#define VSM_STATE_TOTAL_DIRTY_STATIC " + itos(STATE_TOTAL_DIRTY_STATIC) + "u\n";
+	defines += "#define VSM_STATE_TOTAL_DIRTY_DYNAMIC " + itos(STATE_TOTAL_DIRTY_DYNAMIC) + "u\n";
+	defines += "#define VSM_STATE_TOTAL_DEFERRED_STATIC " + itos(STATE_TOTAL_DEFERRED_STATIC) + "u\n";
+	defines += "#define VSM_STATE_TOTAL_INVALIDATED_STATIC " + itos(STATE_TOTAL_INVALIDATED_STATIC) + "u\n";
+	defines += "#define VSM_STATE_TOTAL_INVALIDATED_DYNAMIC " + itos(STATE_TOTAL_INVALIDATED_DYNAMIC) + "u\n";
 	defines += "#define VSM_STATE_BUCKETS " + itos(STATE_BUCKETS) + "u\n";
 	defines += "#define VSM_STATE_BUCKET_OFFSETS " + itos(STATE_BUCKET_OFFSETS) + "u\n";
 	defines += "#define VSM_STATE_BUCKET_CURSORS " + itos(STATE_BUCKET_CURSORS) + "u\n";
-	const char *map_state_names[] = { "REQUESTS", "DIRTY_COUNT", "DIRTY_OFFSET", "DIRTY_CURSOR", "BIAS" };
+	defines += "#define VSM_DEFER_BUCKET_COUNT " + itos(DEFER_BUCKET_COUNT) + "u\n";
+	defines += "#define VSM_DEFER_SKIPPED " + itos(DEFER_SKIPPED) + "u\n";
+	defines += "#define VSM_PAGE_FLAG_HAS_DYNAMIC_PREV " + itos(PAGE_FLAG_HAS_DYNAMIC_PREV) + "u\n";
+	defines += "#define VSM_PAGE_FLAG_HAS_DYNAMIC_CURR " + itos(PAGE_FLAG_HAS_DYNAMIC_CURR) + "u\n";
+	defines += "#define VSM_STATE_DEFER_BUCKETS " + itos(STATE_DEFER_BUCKETS) + "u\n";
+	defines += "#define VSM_STATE_DEFER_ALLOW " + itos(STATE_DEFER_ALLOW) + "u\n";
+	defines += "#define VSM_STATE_DEFER_USED " + itos(STATE_DEFER_USED) + "u\n";
+	const char *map_state_names[] = { "REQUESTS", "DIRTY_COUNT", "DIRTY_OFFSET", "DIRTY_CURSOR", "BIAS", "CULL_MASK" };
 	static_assert(sizeof(map_state_names) / sizeof(map_state_names[0]) == MAP_STATE_REGIONS, "One name per map state region.");
 	for (uint32_t i = 0; i < MAP_STATE_REGIONS; i++) {
 		defines += "#define VSM_MAP_STATE_" + String(map_state_names[i]) + " " + itos(i) + "u\n";
@@ -561,7 +574,7 @@ uint32_t RendererVirtualShadowMapStorage::get_free_map_count() const {
 	return count;
 }
 
-uint32_t RendererVirtualShadowMapStorage::directional_update(RID p_light_instance, const Basis &p_light_basis, const Vector3 &p_camera_position, float p_max_distance) {
+uint32_t RendererVirtualShadowMapStorage::directional_update(RID p_light_instance, const Basis &p_light_basis, const Vector3 &p_camera_position, float p_max_distance, bool p_invalidate_on_turn) {
 	const uint32_t levels = clipmap_level_count(p_max_distance);
 	const uint32_t first = map_allocate(p_light_instance, MAP_KIND_DIRECTIONAL, levels);
 	if (first == MAP_NONE) {
@@ -579,10 +592,16 @@ uint32_t RendererVirtualShadowMapStorage::directional_update(RID p_light_instanc
 	for (uint32_t level = 0; level < levels; level++) {
 		const Vector2i origin = clipmap_level_origin(center, level);
 		if (maps->origins_valid) {
-			const ClipmapScroll scroll = same_plane ? clipmap_scroll(maps->origins[level], origin) : clipmap_scroll_all();
-			if (scroll.any) {
-				_table_scroll(first + level, scroll);
-				scroll_passes++;
+			if (!same_plane && p_invalidate_on_turn) {
+				// GodotNext: vsm_caching (#212). Sun rotation invalidates static layer 0 (and layer 1 where
+				// dynamic content existed) so deferred_invalidation_budget can budget static re-renders.
+				_table_invalidate_map(first + level, ENTRY_DIRTY_STATIC, true);
+			} else {
+				const ClipmapScroll scroll = same_plane ? clipmap_scroll(maps->origins[level], origin) : clipmap_scroll_all();
+				if (scroll.any) {
+					_table_scroll(first + level, scroll);
+					scroll_passes++;
+				}
 			}
 		}
 		maps->origins[level] = origin;
@@ -618,8 +637,9 @@ static_assert(RendererVirtualShadowMapStorage::CLIPMAP_LEVEL0_EXTENT / float(Ren
 static_assert(RendererVirtualShadowMapStorage::CLIPMAP_TEXEL0_EXPONENT == -10, "A clipmap level 0 texel is 2^CLIPMAP_TEXEL0_EXPONENT meters.");
 static_assert(RendererVirtualShadowMapStorage::cache_frames(RendererVirtualShadowMapStorage::POOL_QUALITY_EPIC) <= RendererVirtualShadowMapStorage::MAX_CACHE_FRAMES, "Every quality's cache frames fit the buckets.");
 static_assert(RendererVirtualShadowMapStorage::MAX_CACHE_FRAMES < RendererVirtualShadowMapStorage::BUCKET_COUNT, "Bucket 0 and one bucket per cached age.");
-static_assert(RendererVirtualShadowMapStorage::STATE_SINK < RendererVirtualShadowMapStorage::STATE_VIEW_END, "Per-view counters fit their region.");
-static_assert(RendererVirtualShadowMapStorage::STATE_TOTAL_RESIDENT_OVERFLOW < RendererVirtualShadowMapStorage::STATE_BUCKETS, "Totals fit their region.");
+static_assert(RendererVirtualShadowMapStorage::STATE_INVALIDATED_DYNAMIC < RendererVirtualShadowMapStorage::STATE_VIEW_END, "Per-view counters fit their region.");
+static_assert(RendererVirtualShadowMapStorage::STATE_TOTAL_INVALIDATED_DYNAMIC < RendererVirtualShadowMapStorage::STATE_BUCKETS, "Totals fit their region.");
+static_assert(sizeof(RendererVirtualShadowMapStorage::InvalidationBox) == 32, "InvalidationBox matches VSMInvalidationBox in vsm_invalidate.glsl.");
 // A level's window lies within pages [16, 48] of the next level's; the next level's window at the
 // resident mip holds pages [0, 64 - (origin mod 2^mip)), so 2^mip - 1 must stay below 16.
 static_assert(RendererVirtualShadowMapStorage::CLIPMAP_RESIDENT_MIP < RendererVirtualShadowMapStorage::MIP_COUNT && (1u << RendererVirtualShadowMapStorage::CLIPMAP_RESIDENT_MIP) <= RendererVirtualShadowMapStorage::PAGES_PER_SIDE / 4, "The next level's resident mips always hold the whole finer level.");
@@ -1283,7 +1303,9 @@ RendererVirtualShadowMapStorage::PageUpdate RendererVirtualShadowMapStorage::pag
 		return PAGE_UPDATE_KEPT;
 	}
 	const uint32_t age = p_frame - p_page.last_used;
-	if (age >= p_cache_frames || (entry & ENTRY_SCROLLED)) {
+	// GodotNext: vsm_caching (#212). Evict unrequested pages whose static layer is dirty so pool slots
+	// return to the free list; keep unrequested pages that only carry ENTRY_DIRTY_DYNAMIC.
+	if (age >= p_cache_frames || (entry & (ENTRY_SCROLLED | ENTRY_DIRTY_STATIC)) != 0u) {
 		return PAGE_UPDATE_EVICTED;
 	}
 	// Cached: the least recently used first; a page requested earlier in this frame is not reused.
@@ -1291,7 +1313,7 @@ RendererVirtualShadowMapStorage::PageUpdate RendererVirtualShadowMapStorage::pag
 	return PAGE_UPDATE_CACHED;
 }
 
-RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorage::allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames, uint32_t p_resident_count) {
+RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorage::allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames, uint32_t p_resident_count, uint32_t p_deferred_budget, const uint32_t *p_page_coverage) {
 	AllocationCounts counts;
 	ERR_FAIL_COND_V(p_grid_width == 0 || p_cache_frames == 0 || p_cache_frames > MAX_CACHE_FRAMES, counts);
 	// Update: orphaned pages, pages dropped after cache_frames frames or scrolled, the rest by bucket.
@@ -1301,20 +1323,26 @@ RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorag
 		uint32_t bucket = BUCKET_NONE;
 		switch (page_update(page, p, p_grid_width, r_table, p_table_entries, p_frame, p_cache_frames, bucket)) {
 			case PAGE_UPDATE_FREE:
+				page.pad = 0;
 				break;
 			case PAGE_UPDATE_KEPT:
 				page.last_used = p_frame;
 				break;
 			case PAGE_UPDATE_CACHED:
 				counts.cached++;
+				if ((page.pad & PAGE_FLAG_HAS_DYNAMIC_CURR) != 0u) {
+					page.pad = PAGE_FLAG_HAS_DYNAMIC_PREV;
+				}
 				break;
 			case PAGE_UPDATE_EVICTED:
 				r_table[page.owner - 1] = 0;
 				page.owner = 0;
+				page.pad = 0;
 				counts.evicted++;
 				break;
 			case PAGE_UPDATE_ORPHANED:
 				page.owner = 0;
+				page.pad = 0;
 				counts.orphaned++;
 				break;
 		}
@@ -1338,6 +1366,13 @@ RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorag
 	}
 	// Assign: the always-resident requests (the list's first p_resident_count) first, then the other
 	// coarse requests, then the rest.
+	struct DeferCandidate {
+		uint32_t index = 0;
+		uint32_t page = 0;
+		uint32_t bucket = 0;
+	};
+	LocalVector<DeferCandidate> defer_candidates;
+	uint32_t defer_bucket_counts[DEFER_BUCKET_COUNT] = {};
 	uint32_t cursor = 0;
 	for (uint32_t phase = 0; phase < 3; phase++) {
 		for (uint32_t i = 0; i < p_request_count; i++) {
@@ -1352,11 +1387,30 @@ RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorag
 			counts.coarse += coarse ? 1 : 0;
 			if (entry & ENTRY_ALLOCATED) {
 				counts.kept++;
-				if (entry & (ENTRY_SCROLLED | ENTRY_UNCACHED)) {
+				const bool forced_dirty = (entry & (ENTRY_SCROLLED | ENTRY_UNCACHED)) != 0u;
+				if (forced_dirty) {
 					entry |= ENTRY_DIRTY_MASK;
 					r_table[index] = entry;
 				}
-				counts.dirty += (entry & ENTRY_DIRTY_MASK) ? 1 : 0;
+				if (p_deferred_budget > 0u && !forced_dirty && (entry & ENTRY_DIRTY_STATIC) != 0u) {
+					const uint32_t p = entry_page_y(entry) * p_grid_width + entry_page_x(entry);
+					if (p < p_pool_pages) {
+						const uint32_t b = coverage_bucket(p_page_coverage != nullptr ? p_page_coverage[p] : 0u);
+						r_pages[p].bucket = b;
+						defer_bucket_counts[b]++;
+						defer_candidates.push_back({ index, p, b });
+						continue;
+					}
+				}
+				if (entry & ENTRY_DIRTY_MASK) {
+					counts.dirty++;
+					if (entry & ENTRY_DIRTY_STATIC) {
+						counts.dirty_static++;
+					}
+					if (entry & ENTRY_DIRTY_DYNAMIC) {
+						counts.dirty_dynamic++;
+					}
+				}
 				continue;
 			}
 			const uint32_t slot = cursor++;
@@ -1375,11 +1429,283 @@ RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorag
 			r_pages[p].owner = index + 1;
 			r_pages[p].last_used = p_frame;
 			r_pages[p].bucket = BUCKET_NONE;
+			r_pages[p].pad = 0;
 			counts.new_pages++;
 			counts.dirty++;
+			counts.dirty_static++;
+			counts.dirty_dynamic++;
+		}
+	}
+	// GodotNext: vsm_caching (#212). Deferred static invalidation budget: accept highest coverage first.
+	if (p_deferred_budget > 0u && !defer_candidates.is_empty()) {
+		uint32_t allow[DEFER_BUCKET_COUNT] = {};
+		uint32_t used[DEFER_BUCKET_COUNT] = {};
+		uint32_t remaining = p_deferred_budget;
+		for (int32_t b = int32_t(DEFER_BUCKET_COUNT) - 1; b >= 0; b--) {
+			const uint32_t c = defer_bucket_counts[b];
+			const uint32_t take = MIN(c, remaining);
+			allow[b] = take;
+			remaining -= take;
+			counts.deferred_static += c - take;
+		}
+		for (const DeferCandidate &cand : defer_candidates) {
+			const uint32_t rank = used[cand.bucket]++;
+			const uint32_t entry = r_table[cand.index];
+			if (rank < allow[cand.bucket]) {
+				r_pages[cand.page].bucket = BUCKET_NONE;
+				counts.dirty++;
+				counts.dirty_static++;
+				if (entry & ENTRY_DIRTY_DYNAMIC) {
+					counts.dirty_dynamic++;
+				}
+			} else {
+				r_pages[cand.page].bucket = DEFER_SKIPPED;
+				if (entry & ENTRY_DIRTY_DYNAMIC) {
+					counts.dirty++;
+					counts.dirty_dynamic++;
+				}
+			}
 		}
 	}
 	return counts;
+}
+
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+const char *const RendererVirtualShadowMapStorage::SETTING_DEFERRED_INVALIDATION_BUDGET = "rendering/lights_and_shadows/virtual_shadows/deferred_invalidation_budget";
+
+uint32_t RendererVirtualShadowMapStorage::classify_shadow_cache_dynamic(const CacheClassificationInput &p_input) {
+	switch (p_input.mode) {
+		case RSE::SHADOW_CACHE_INVALIDATION_STATIC:
+		case RSE::SHADOW_CACHE_INVALIDATION_RIGID:
+			return 0u;
+		case RSE::SHADOW_CACHE_INVALIDATION_ALWAYS:
+			return CACHE_DYNAMIC_MODE_ALWAYS;
+		case RSE::SHADOW_CACHE_INVALIDATION_AUTO:
+		default:
+			break;
+	}
+	uint32_t reasons = 0u;
+	if (p_input.last_moved_frame != CACHE_NEVER_MOVED && p_input.frame >= p_input.last_moved_frame && (p_input.frame - p_input.last_moved_frame) < CACHE_MOTION_COOLDOWN_FRAMES) {
+		reasons |= CACHE_DYNAMIC_MOVED;
+	}
+	if (p_input.has_mesh_instance) {
+		reasons |= CACHE_DYNAMIC_MESH_INSTANCE;
+	}
+	if (p_input.has_skeleton) {
+		reasons |= CACHE_DYNAMIC_SKELETON;
+	}
+	if (p_input.is_particles) {
+		reasons |= CACHE_DYNAMIC_PARTICLES;
+	}
+	if (p_input.is_dynamic_multimesh) {
+		reasons |= CACHE_DYNAMIC_MULTIMESH;
+	}
+	reasons |= p_input.shader_dynamic_flags & (CACHE_DYNAMIC_VERTEX | CACHE_DYNAMIC_ANIMATED | CACHE_DYNAMIC_MAIN_CAMERA | CACHE_DYNAMIC_VERTEX_TIME | CACHE_DYNAMIC_DEPTH);
+	return reasons;
+}
+
+uint32_t RendererVirtualShadowMapStorage::coverage_bucket(uint32_t p_pixels) {
+	if (p_pixels < 16u) {
+		return p_pixels;
+	}
+	uint32_t msb = 0u;
+	uint32_t v = p_pixels;
+	while (v >>= 1u) {
+		msb++;
+	}
+	const uint32_t sub = (p_pixels >> (msb - 1u)) & 1u;
+	return MIN(16u + (msb - 4u) * 2u + sub, DEFER_BUCKET_COUNT - 1u);
+}
+
+static void _invalidate_entry_cpu(uint32_t *r_table, uint32_t p_index, uint32_t p_dirty_flags, RendererVirtualShadowMapStorage::PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, bool p_dynamic_if_used, RendererVirtualShadowMapStorage::InvalidationCounts &r_counts) {
+	using VSM = RendererVirtualShadowMapStorage;
+	const uint32_t entry = r_table[p_index];
+	if ((entry & VSM::ENTRY_ALLOCATED) == 0u) {
+		return;
+	}
+	const uint32_t p = p_grid_width > 0 ? (VSM::entry_page_y(entry) * p_grid_width + VSM::entry_page_x(entry)) : UINT32_MAX;
+	uint32_t flags = p_dirty_flags & VSM::ENTRY_DIRTY_MASK;
+	if (p_dynamic_if_used && r_pages != nullptr && p < p_pool_pages) {
+		if ((r_pages[p].pad & (VSM::PAGE_FLAG_HAS_DYNAMIC_PREV | VSM::PAGE_FLAG_HAS_DYNAMIC_CURR)) != 0u) {
+			flags |= VSM::ENTRY_DIRTY_DYNAMIC;
+		}
+	}
+	if (flags == 0u) {
+		return;
+	}
+	if ((flags & VSM::ENTRY_DIRTY_STATIC) != 0u && (entry & VSM::ENTRY_DIRTY_STATIC) == 0u) {
+		r_counts.static_pages++;
+	}
+	if ((flags & VSM::ENTRY_DIRTY_DYNAMIC) != 0u) {
+		if ((entry & VSM::ENTRY_DIRTY_DYNAMIC) == 0u) {
+			r_counts.dynamic_pages++;
+		}
+		if (!p_dynamic_if_used && r_pages != nullptr && p < p_pool_pages) {
+			r_pages[p].pad |= VSM::PAGE_FLAG_HAS_DYNAMIC_CURR;
+		}
+	}
+	r_table[p_index] = entry | flags;
+}
+
+RendererVirtualShadowMapStorage::InvalidationCounts RendererVirtualShadowMapStorage::invalidate_box_model(uint32_t *r_table, uint32_t p_table_maps, const MapData *p_maps, const uint32_t *p_map_cull_masks, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const InvalidationBox &p_box) {
+	InvalidationCounts counts;
+	ERR_FAIL_NULL_V(r_table, counts);
+	ERR_FAIL_NULL_V(p_maps, counts);
+	const uint32_t dirty_flags = p_box.dirty_flags & ENTRY_DIRTY_MASK;
+	if (dirty_flags == 0u) {
+		return counts;
+	}
+	const Vector3 bmin(p_box.min_pos[0], p_box.min_pos[1], p_box.min_pos[2]);
+	const Vector3 bmax(p_box.max_pos[0], p_box.max_pos[1], p_box.max_pos[2]);
+	if (!(bmax.x >= bmin.x && bmax.y >= bmin.y && bmax.z >= bmin.z)) {
+		return counts;
+	}
+	Vector3 corners[8];
+	for (uint32_t c = 0; c < 8u; c++) {
+		corners[c] = Vector3((c & 1u) ? bmax.x : bmin.x, (c & 2u) ? bmax.y : bmin.y, (c & 4u) ? bmax.z : bmin.z);
+	}
+	for (uint32_t m = 0; m < p_table_maps; m++) {
+		const MapData &md = p_maps[m];
+		if (md.kind == MAP_KIND_MAX) {
+			continue;
+		}
+		if (p_map_cull_masks != nullptr && (p_map_cull_masks[m] & p_box.layer_mask) == 0u) {
+			continue;
+		}
+		if (md.kind == MAP_KIND_DIRECTIONAL) {
+			Vector2i level_min(INT32_MAX, INT32_MAX);
+			Vector2i level_max(INT32_MIN, INT32_MIN);
+			for (uint32_t c = 0; c < 8u; c++) {
+				const float tx = CLAMP(std::floor(row_dot(md.rows[0], corners[c])), -1073741824.0f, 1073741824.0f);
+				const float ty = CLAMP(std::floor(row_dot(md.rows[1], corners[c])), -1073741824.0f, 1073741824.0f);
+				level_min.x = MIN(level_min.x, int32_t(tx));
+				level_min.y = MIN(level_min.y, int32_t(ty));
+				level_max.x = MAX(level_max.x, int32_t(tx));
+				level_max.y = MAX(level_max.y, int32_t(ty));
+			}
+			const Vector2i origin(md.origin[0], md.origin[1]);
+			for (uint32_t mip = 0; mip < MIP_COUNT; mip++) {
+				int64_t lo[2];
+				int64_t hi[2];
+				bool empty = false;
+				for (int axis = 0; axis < 2; axis++) {
+					const int64_t window_start = int64_t(_floor_shift(origin[axis], mip)) * (int64_t(PAGE_SIZE) << mip);
+					lo[axis] = MAX(int64_t(level_min[axis]), int64_t(origin[axis]) * int64_t(PAGE_SIZE));
+					hi[axis] = MIN(int64_t(level_max[axis]), window_start + int64_t(VIRTUAL_SIZE) - 1);
+					empty = empty || lo[axis] > hi[axis];
+				}
+				if (empty) {
+					continue;
+				}
+				const uint32_t shift = mip + PAGE_SIZE_SHIFT;
+				const uint32_t mask = (PAGES_PER_SIDE >> mip) - 1u;
+				for (int32_t y = _floor_shift(int32_t(lo[1]), shift); y <= _floor_shift(int32_t(hi[1]), shift); y++) {
+					for (int32_t x = _floor_shift(int32_t(lo[0]), shift); x <= _floor_shift(int32_t(hi[0]), shift); x++) {
+						const uint32_t idx = entry_index(m, mip, uint32_t(x) & mask, uint32_t(y) & mask);
+						_invalidate_entry_cpu(r_table, idx, dirty_flags, r_pages, p_pool_pages, p_grid_width, false, counts);
+					}
+				}
+			}
+			continue;
+		}
+		uint32_t outside[6] = { 0, 0, 0, 0, 0, 0 };
+		float u_min = 1.0f;
+		float u_max = 0.0f;
+		float v_min = 1.0f;
+		float v_max = 0.0f;
+		bool cut = false;
+		for (uint32_t c = 0; c < 8u; c++) {
+			const float x = row_dot(md.rows[0], corners[c]);
+			const float y = row_dot(md.rows[1], corners[c]);
+			const float w = row_dot(md.rows[3], corners[c]);
+			outside[0] += (w - x < 0.0f) ? 1u : 0u;
+			outside[1] += (w + x < 0.0f) ? 1u : 0u;
+			outside[2] += (w - y < 0.0f) ? 1u : 0u;
+			outside[3] += (w + y < 0.0f) ? 1u : 0u;
+			outside[4] += (w - md.near_w < 0.0f) ? 1u : 0u;
+			outside[5] += (w > md.max_distance) ? 1u : 0u;
+			if (!(w > md.near_w)) {
+				cut = true;
+				continue;
+			}
+			const float u = x / w * 0.5f + 0.5f;
+			const float v = y / w * 0.5f + 0.5f;
+			u_min = MIN(u_min, u);
+			u_max = MAX(u_max, u);
+			v_min = MIN(v_min, v);
+			v_max = MAX(v_max, v);
+		}
+		if (outside[0] == 8u || outside[1] == 8u || outside[2] == 8u || outside[3] == 8u || outside[4] == 8u || outside[5] == 8u) {
+			continue;
+		}
+		uint32_t tx0 = 0;
+		uint32_t ty0 = 0;
+		uint32_t tx1 = VIRTUAL_SIZE - 1u;
+		uint32_t ty1 = VIRTUAL_SIZE - 1u;
+		if (!cut) {
+			tx0 = MIN(uint32_t(CLAMP(u_min, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+			ty0 = MIN(uint32_t(CLAMP(v_min, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+			tx1 = MIN(uint32_t(CLAMP(u_max, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+			ty1 = MIN(uint32_t(CLAMP(v_max, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+		}
+		for (uint32_t mip = 0; mip < MIP_COUNT; mip++) {
+			const uint32_t shift = mip + PAGE_SIZE_SHIFT;
+			for (uint32_t y = ty0 >> shift; y <= (ty1 >> shift); y++) {
+				for (uint32_t x = tx0 >> shift; x <= (tx1 >> shift); x++) {
+					const uint32_t idx = entry_index(m, mip, x, y);
+					_invalidate_entry_cpu(r_table, idx, dirty_flags, r_pages, p_pool_pages, p_grid_width, false, counts);
+				}
+			}
+		}
+	}
+	return counts;
+}
+
+RendererVirtualShadowMapStorage::InvalidationCounts RendererVirtualShadowMapStorage::invalidate_map_model(uint32_t *r_table, uint32_t p_table_maps, uint32_t p_map, uint32_t p_dirty_flags, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, bool p_dynamic_if_used) {
+	InvalidationCounts counts;
+	ERR_FAIL_NULL_V(r_table, counts);
+	if (p_map >= p_table_maps) {
+		return counts;
+	}
+	const uint32_t base = p_map * ENTRIES_PER_MAP;
+	for (uint32_t local = 0; local < ENTRIES_PER_MAP; local++) {
+		_invalidate_entry_cpu(r_table, base + local, p_dirty_flags, r_pages, p_pool_pages, p_grid_width, p_dynamic_if_used, counts);
+	}
+	return counts;
+}
+
+bool RendererVirtualShadowMapStorage::LightProperties::operator==(const LightProperties &p_other) const {
+	return transform == p_other.transform && range == p_other.range && spot_angle == p_other.spot_angle && area_size == p_other.area_size && caster_mask == p_other.caster_mask && reverse_cull == p_other.reverse_cull;
+}
+
+bool RendererVirtualShadowMapStorage::note_light_properties(RID p_light_instance, const LightProperties &p_props, bool p_check_transform) {
+	LightMaps *maps = light_maps.getptr(p_light_instance);
+	if (maps == nullptr) {
+		return false;
+	}
+	if (!maps->props_valid) {
+		maps->props = p_props;
+		maps->props_valid = true;
+		return false;
+	}
+	bool changed = maps->props.range != p_props.range || maps->props.spot_angle != p_props.spot_angle || maps->props.area_size != p_props.area_size || maps->props.caster_mask != p_props.caster_mask || maps->props.reverse_cull != p_props.reverse_cull;
+	if (p_check_transform && maps->props.transform != p_props.transform) {
+		changed = true;
+	}
+	if (changed) {
+		maps->props = p_props;
+	}
+	return changed;
+}
+
+uint32_t RendererVirtualShadowMapStorage::read_deferred_invalidation_budget() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName name = SETTING_DEFERRED_INVALIDATION_BUDGET;
+	if (settings == nullptr || !settings->has_setting(name)) {
+		return 0u;
+	}
+	const int64_t value = settings->get_setting_with_override(name);
+	return value > 0 ? uint32_t(MIN(value, int64_t(POOL_MAX_PAGES))) : 0u;
 }
 
 uint32_t RendererVirtualShadowMapStorage::overflow_bias_update(uint32_t p_state, uint32_t p_requests, uint32_t p_max_requests, uint32_t p_overflow, bool p_new_frame) {

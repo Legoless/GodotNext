@@ -923,6 +923,14 @@ enum ShadowCastingSetting {
 	SHADOW_CASTING_SETTING_SHADOWS_ONLY,
 };
 
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Per-instance VSM cache invalidation behavior.
+enum ShadowCacheInvalidation : uint8_t {
+	SHADOW_CACHE_INVALIDATION_AUTO,
+	SHADOW_CACHE_INVALIDATION_ALWAYS,
+	SHADOW_CACHE_INVALIDATION_RIGID,
+	SHADOW_CACHE_INVALIDATION_STATIC,
+};
+
 enum VisibilityRangeFadeMode {
 	VISIBILITY_RANGE_FADE_DISABLED,
 	VISIBILITY_RANGE_FADE_SELF,

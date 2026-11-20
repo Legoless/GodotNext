@@ -94,6 +94,9 @@ public:
 	virtual float material_get_displacement_center(RID p_material) const { return 0.5f; }
 
 	virtual bool material_is_animated(RID p_material) = 0;
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5). RendererVirtualShadowMapStorage::CacheDynamicReason
+	// bits from the material's shader(s) (VERTEX, vertex TIME, DEPTH, animated, MAIN_CAMERA).
+	virtual uint32_t material_get_vsm_dynamic_flags(RID p_material) const { return 0; }
 	virtual bool material_casts_shadows(RID p_material) = 0;
 	virtual RSE::CullMode material_get_cull_mode(RID p_material) const = 0;
 

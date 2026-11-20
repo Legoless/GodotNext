@@ -77,6 +77,8 @@ public:
 
 	// GodotNext: nextgeo_resolve (#80)
 	virtual void set_nextgeo_record_index(uint32_t p_index) {}
+	// GodotNext: vsm_caching (#212).
+	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -135,6 +137,8 @@ public:
 		bool use_baked_light = false;
 		bool use_dynamic_gi = false;
 		bool cast_double_sided_shadows = false;
+		// GodotNext: vsm_caching (#212).
+		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
 		bool dirty_dependencies = false;
 
 		DependencyTracker dependency_tracker;
@@ -158,6 +162,8 @@ public:
 	virtual void set_use_dynamic_gi(bool p_enable) override;
 	virtual void set_instance_shader_uniforms_offset(int32_t p_offset) override;
 	virtual void set_cast_double_sided_shadows(bool p_enable) override;
+	// GodotNext: vsm_caching (#212).
+	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) override;
 
 	virtual void reset_motion_vectors() override;
 

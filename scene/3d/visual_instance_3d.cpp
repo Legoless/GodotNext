@@ -398,6 +398,16 @@ GeometryInstance3D::ShadowCastingSetting GeometryInstance3D::get_cast_shadows_se
 	return shadow_casting_setting;
 }
 
+// GodotNext: vsm_caching (#212).
+void GeometryInstance3D::set_shadow_cache_invalidation(ShadowCacheInvalidation p_invalidation) {
+	shadow_cache_invalidation = p_invalidation;
+	RS::get_singleton()->instance_geometry_set_shadow_cache_invalidation(get_instance(), (RSE::ShadowCacheInvalidation)p_invalidation);
+}
+
+GeometryInstance3D::ShadowCacheInvalidation GeometryInstance3D::get_shadow_cache_invalidation() const {
+	return shadow_cache_invalidation;
+}
+
 void GeometryInstance3D::set_extra_cull_margin(float p_margin) {
 	ERR_FAIL_COND(p_margin < 0);
 	extra_cull_margin = p_margin;
@@ -582,6 +592,10 @@ void GeometryInstance3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_cast_shadows_setting", "shadow_casting_setting"), &GeometryInstance3D::set_cast_shadows_setting);
 	ClassDB::bind_method(D_METHOD("get_cast_shadows_setting"), &GeometryInstance3D::get_cast_shadows_setting);
 
+	// GodotNext: vsm_caching (#212).
+	ClassDB::bind_method(D_METHOD("set_shadow_cache_invalidation", "invalidation"), &GeometryInstance3D::set_shadow_cache_invalidation);
+	ClassDB::bind_method(D_METHOD("get_shadow_cache_invalidation"), &GeometryInstance3D::get_shadow_cache_invalidation);
+
 	ClassDB::bind_method(D_METHOD("set_lod_bias", "bias"), &GeometryInstance3D::set_lod_bias);
 	ClassDB::bind_method(D_METHOD("get_lod_bias"), &GeometryInstance3D::get_lod_bias);
 
@@ -633,6 +647,8 @@ void GeometryInstance3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "material_overlay", PROPERTY_HINT_RESOURCE_TYPE, "BaseMaterial3D,ShaderMaterial", PROPERTY_USAGE_DEFAULT), "set_material_overlay", "get_material_overlay");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "transparency", PROPERTY_HINT_RANGE, "0.0,1.0,0.01"), "set_transparency", "get_transparency");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "cast_shadow", PROPERTY_HINT_ENUM, "Off,On,Double-Sided,Shadows Only"), "set_cast_shadows_setting", "get_cast_shadows_setting");
+	// GodotNext: vsm_caching (#212).
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_cache_invalidation", PROPERTY_HINT_ENUM, "Auto,Always,Rigid,Static"), "set_shadow_cache_invalidation", "get_shadow_cache_invalidation");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "extra_cull_margin", PROPERTY_HINT_RANGE, "0,16384,0.01,suffix:m"), "set_extra_cull_margin", "get_extra_cull_margin");
 	ADD_PROPERTY(PropertyInfo(Variant::AABB, "custom_aabb", PROPERTY_HINT_NONE, "suffix:m"), "set_custom_aabb", "get_custom_aabb");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lod_bias", PROPERTY_HINT_RANGE, "0.001,128,0.001"), "set_lod_bias", "get_lod_bias");
@@ -657,6 +673,12 @@ void GeometryInstance3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_ON);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+
+	// GodotNext: vsm_caching (#212).
+	BIND_ENUM_CONSTANT(SHADOW_CACHE_INVALIDATION_AUTO);
+	BIND_ENUM_CONSTANT(SHADOW_CACHE_INVALIDATION_ALWAYS);
+	BIND_ENUM_CONSTANT(SHADOW_CACHE_INVALIDATION_RIGID);
+	BIND_ENUM_CONSTANT(SHADOW_CACHE_INVALIDATION_STATIC);
 
 	BIND_ENUM_CONSTANT(GI_MODE_DISABLED);
 	BIND_ENUM_CONSTANT(GI_MODE_STATIC);

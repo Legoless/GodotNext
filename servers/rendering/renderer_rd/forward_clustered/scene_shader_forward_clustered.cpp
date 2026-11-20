@@ -664,6 +664,28 @@ bool SceneShaderForwardClustered::ShaderData::is_animated() const {
 	return (uses_fragment_time && uses_discard) || (uses_vertex_time && uses_vertex);
 }
 
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+uint32_t SceneShaderForwardClustered::ShaderData::get_vsm_dynamic_flags() const {
+	using VSM = RendererVirtualShadowMapStorage;
+	uint32_t flags = 0u;
+	if (uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform) {
+		flags |= VSM::CACHE_DYNAMIC_VERTEX;
+	}
+	if (uses_vertex_time) {
+		flags |= VSM::CACHE_DYNAMIC_VERTEX_TIME;
+	}
+	if (writes_depth || (raster_features & RendererVirtualMeshStorage::RASTER_FEATURE_DEPTH_OFFSET) != 0u) {
+		flags |= VSM::CACHE_DYNAMIC_DEPTH;
+	}
+	if (is_animated() || uses_displacement_time) {
+		flags |= VSM::CACHE_DYNAMIC_ANIMATED;
+	}
+	if (uses_main_camera) {
+		flags |= VSM::CACHE_DYNAMIC_MAIN_CAMERA;
+	}
+	return flags;
+}
+
 RendererRD::MaterialStorage::ShaderData::NextGIRTClass SceneShaderForwardClustered::ShaderData::get_nextgi_rt_class() const {
 	if (uses_alpha_clip || uses_discard) {
 		return nextgi_rt_opaque ? RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE : RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_ALPHA_TESTED;

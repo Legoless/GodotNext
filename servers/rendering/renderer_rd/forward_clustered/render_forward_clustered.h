@@ -1028,18 +1028,24 @@ private:
 		bool is_dynamic = false;
 		bool uses_alpha_scissor = false;
 		bool uses_vertex_displacement = false;
-		uint32_t dynamic_reasons = 0; // VSMDynamicReason bits.
+		uint32_t dynamic_reasons = 0; // VSMDynamicReason / CacheDynamicReason bits.
+		// GodotNext: vsm_caching (#212).
+		uint32_t shadow_cache_invalidation = 0;
 	};
 	// Why a caster renders into the dynamic layer (1) rather than the static one (0).
+	// Bits match RendererVirtualShadowMapStorage::CacheDynamicReason (#212).
 	enum VSMDynamicReason : uint32_t {
-		VSM_DYNAMIC_MOVED = 1u << 0, // Its transform changed in this frame or the one before.
+		VSM_DYNAMIC_MOVED = 1u << 0, // Its transform changed in the last 8 frames.
 		VSM_DYNAMIC_MESH_INSTANCE = 1u << 1, // Blend shapes or skinning (a mesh instance).
 		VSM_DYNAMIC_SKELETON = 1u << 2,
 		VSM_DYNAMIC_PARTICLES = 1u << 3,
 		VSM_DYNAMIC_MULTIMESH = 1u << 4, // A MultiMesh whose buffer changed recently.
-		VSM_DYNAMIC_VERTEX = 1u << 5, // The shadow material writes VERTEX (Godot's world position offset).
-		VSM_DYNAMIC_ANIMATED = 1u << 6, // The shadow material animates with TIME (ShaderData::is_animated()).
-		VSM_DYNAMIC_MAIN_CAMERA = 1u << 7, // The shadow material reads the main camera (camera-facing billboards).
+		VSM_DYNAMIC_VERTEX = 1u << 5, // The material writes VERTEX (Godot's world position offset).
+		VSM_DYNAMIC_ANIMATED = 1u << 6, // The material animates with TIME (ShaderData::is_animated()).
+		VSM_DYNAMIC_MAIN_CAMERA = 1u << 7, // The material reads the main camera (camera-facing billboards).
+		VSM_DYNAMIC_VERTEX_TIME = 1u << 8, // The material reads TIME in vertex() (#212).
+		VSM_DYNAMIC_DEPTH = 1u << 9, // The material writes DEPTH (#212; DEPTH_OFFSET joins in #149).
+		VSM_DYNAMIC_MODE_ALWAYS = 1u << 10, // shadow_cache_invalidation == ALWAYS (#212).
 	};
 
 	struct VSMRasterCheckCapture {

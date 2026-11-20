@@ -3609,6 +3609,8 @@ void RenderingServer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_flag", "instance", "flag", "enabled"), &RenderingServer::instance_geometry_set_flag);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_cast_shadows_setting", "instance", "shadow_casting_setting"), &RenderingServer::instance_geometry_set_cast_shadows_setting);
+	// GodotNext: vsm_caching (#212).
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_cache_invalidation", "instance", "invalidation"), &RenderingServer::instance_geometry_set_shadow_cache_invalidation);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_override", "instance", "material"), &RenderingServer::instance_geometry_set_material_override);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_overlay", "instance", "material"), &RenderingServer::instance_geometry_set_material_overlay);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_visibility_range", "instance", "min", "max", "min_margin", "max_margin", "fade_mode"), &RenderingServer::instance_geometry_set_visibility_range);
@@ -3652,6 +3654,12 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_ON);
 	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+
+	// GodotNext: vsm_caching (#212).
+	BIND_ENUM_CONSTANT(RSE::SHADOW_CACHE_INVALIDATION_AUTO);
+	BIND_ENUM_CONSTANT(RSE::SHADOW_CACHE_INVALIDATION_ALWAYS);
+	BIND_ENUM_CONSTANT(RSE::SHADOW_CACHE_INVALIDATION_RIGID);
+	BIND_ENUM_CONSTANT(RSE::SHADOW_CACHE_INVALIDATION_STATIC);
 
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_SELF);
@@ -4108,6 +4116,9 @@ void RenderingServer::init() {
 		// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). Provisional SW/HW triangle-edge switch in
 		// shadow texels of the target page's mip (0 sends every cluster to HW; measured and tuned in PQ).
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/lights_and_shadows/virtual_shadows/nanite_sw_raster_max_edge_texels", PROPERTY_HINT_RANGE, "0,64,0.25,suffix:tx"), 8.0);
+		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Deferred static invalidation budget in
+		// pages per frame (0 = unlimited).
+		GLOBAL_DEF(PropertyInfo(Variant::INT, VSM::SETTING_DEFERRED_INVALIDATION_BUDGET, PROPERTY_HINT_RANGE, "0,16384,1,or_greater"), 0);
 	}
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);

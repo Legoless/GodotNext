@@ -972,6 +972,8 @@ public:
 	}
 
 	bool multimesh_is_rt_dynamic(RID p_multimesh) const;
+	// GodotNext: vsm_caching (#212).
+	virtual bool multimesh_is_vsm_dynamic(RID p_multimesh) const override;
 	// CPU transforms at the current motion offset. Calls the one-time readback when the cache is empty.
 	const float *multimesh_get_rt_transforms(RID p_multimesh, uint32_t &r_count, uint32_t &r_stride) const;
 
