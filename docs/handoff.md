@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-19, evening. Stack 2 (#145, #158, #221, #222, #295) is reviewed, fixed (`02a07e6b4d`) and GPU-verified on Vulkan, D3D12 and D3D12 GPU-based validation; six unused cloud VMs were deleted, and the two remaining cloud VMs are stopped.
+**Last updated:** 2026-11-20, morning. #298 (headless `--import` shutdown abort) is closed (`96a9a204c5`) on Linux and Windows; Mac-hosted lanes are running on the cloud Linux L4 and Windows L4 VMs for #217, #150, #301, and #297.
 
 ## How to continue
 
@@ -12,7 +12,7 @@ The current state of the build and what to do next. It is written for any agent:
    - `godotnext-update-tracker`, `godotnext-plan-revision` and `godotnext-issues` cover the tracker, the plan and the issues.
 2. Read this file, then `local/handoff-private.md`. The private file has the two remaining cloud VMs (one Linux L4 and one Windows L4 with the private Mesa NIR library), the VM start command, and the pending on-VM agent setup plan.
 3. `git fetch`; master should be at or after this commit. Refresh the tracker with `python3 docs/godotnext/tracker/export.py`.
-4. Lead preference (2026-11-19): run future lane agents on a cloud Linux VM in `tmux` (not on the Mac, which saturates the Mac's internet connection), with Windows runs on the RTX 4080 SUPER machine or the cloud Windows L4 VM. Wait for the lead's approval before starting new VMs or lanes.
+4. Lead preference (2026-11-20): keep the orchestrating agent running locally on the Mac while builds, doctests and GPU validation runs execute on the cloud Linux L4 and Windows L4 VMs (or the RTX 4080 SUPER machine when reachable).
 5. Stop cloud VMs as soon as they have no work left.
 
 ### The lane loop (what Claude's workflows did)
@@ -28,6 +28,8 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 ## State at the handover
 
 - Master: see `git log`. Plan v3.9.16.
+- Landed on 2026-11-20:
+  - **#298 closed (`96a9a204c5`)**: fixed upstream `EditorHelp` shutdown race (`EditorHelp::doc_cleaned`, thread handoff sync, guarded deferred callbacks, clearing `EditorFileSystem::singleton`), added 4 doctests and a 20-run cross-platform `test_headless_import.py` regression check; verified 20/20 imports + 0 warnings + full doctests + Vulkan VVL 1.4 / D3D12+GBV smoke on the cloud Linux L4 VM and cloud Windows L4 test machine (`25.3.1-gn4`).
 - Landed on 2026-11-19, all as progress unless noted:
   - #193 TSR async compute, #218 VSM non-Nanite raster and #167 the path tracer (checked together on the cloud L4 and T4 test machines), with plan v3.9.15.
   - #299 closed (the D3D12 front-layer depth target).
@@ -42,14 +44,11 @@ All Linux Vulkan and Windows Vulkan/D3D12/D3D12-GBV verification and code-review
 
 ## Ready to start (phase order)
 
-- **#217** VSM x Nanite, and **#150** displacement material output.
-- **#301** RD read-only depth attachments (GT-7 waits on it).
-- **#298** headless import abort at shutdown (binary-switch doc-cache reproducer added), and **#297** D3D12 legacy SDFGI drift.
-- Blocked until their blocker lands: #294, #296, #141, #302, #303, #304, #305.
+- **In progress (Mac-hosted lanes on cloud L4 VMs):** **#217** VSM × Nanite, **#150** displacement material output, **#301** RD read-only depth attachments (GT-7), and **#297** D3D12 legacy SDFGI drift.
+- Blocked until their blocker lands: #294, #296, #141, #302, #303, #304, #305 (plus the M6/M7 issues waiting on #217 and #150).
 
 ## Waiting on the lead
 
-- **On-VM agent setup approval:** run future lane agents on the cloud Linux L4 VM in `tmux` (with Windows runs on the RTX 4080 SUPER machine over Tailscale or the cloud Windows L4 VM) so Mac-driven lanes do not saturate the Mac's internet.
 - **#98 DLSS license sign-off.** It holds the DLSS track, plus #236's UE-side Frame Generation, MFG, Reflex and Nsight.
 - **Mac runs.** Every Metal build and run waits for the lead (~47 open issues already have code on master waiting mainly on Metal).
 - **AMD test machine.** A cloud Radeon PRO V710 (#280).
@@ -60,6 +59,5 @@ All Linux Vulkan and Windows Vulkan/D3D12/D3D12-GBV verification and code-review
 - **PresentMon writes no rows on the RTX 4080 SUPER machine** (#202, #236; possibly no active monitor). It must be fixed before PQ.
 - **#236's UE side is render-thread bound in editor game mode**, so it is not GPU-bound. PQ decides how to handle it.
 - **The RTX 4080 SUPER machine is shared** with another project's UE automation. Never stop or touch anything that isn't GodotNext's own there.
-- **A headless `--import` sometimes aborts at shutdown** ("Parameter \"singleton\" is null" in `is_cmdline_mode`) after the reimports finish, also on older trees. Tracked in #298 (reproduces on the first import after switching binaries with different class docs); needs a backtrace from a debug build.
 - **The repository is public.** No local paths, hosts, IPs, VM names or account names go in tracked files, commit messages or issue comments.
 - **Decisions made on 2026-11-16 under the lead's rule** are recorded in the plan's §18.1 and the issue comments. The lead can overrule any of them.

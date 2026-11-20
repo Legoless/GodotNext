@@ -158,5 +158,15 @@
   "blocked": 69,
   "gates_passed": 0,
   "gates_total": 18
+ },
+ {
+  "day": "2026-11-20",
+  "build_total": 237,
+  "build_done": 136,
+  "in_progress": 15,
+  "ready": 20,
+  "blocked": 66,
+  "gates_passed": 0,
+  "gates_total": 18
  }
 ]
