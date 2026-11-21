@@ -716,6 +716,7 @@ func _build_manifest() -> Dictionary:
 			"api_version": RenderingServer.get_video_adapter_api_version(),
 		},
 		"commit": String(version.get("hash", "")),
+		"debug": OS.has_feature("debug"),
 		"command_line": {
 			"engine": _string_array(OS.get_cmdline_args()),
 			"user": _string_array(OS.get_cmdline_user_args()),
@@ -739,6 +740,8 @@ func _build_manifest() -> Dictionary:
 		# An editor binary, not a release export (§23.4 wants the export for the UE comparison).
 		"editor_binary": OS.has_feature("editor"),
 	}
+	if _job.has("source") and typeof(_job["source"]) == TYPE_DICTIONARY:
+		manifest["runner"]["source"] = (_job["source"] as Dictionary).duplicate(true)
 	if _reference_pt != null:
 		manifest["reference"] = "pt"
 		manifest["spp"] = _reference_pt.spp

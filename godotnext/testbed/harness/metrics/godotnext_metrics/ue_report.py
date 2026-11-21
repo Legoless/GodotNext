@@ -131,7 +131,7 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
             manifest = _json(run_dir / "manifest.json")
             platforms.add(_platform(manifest))
             scales.add(_scaling_scale(manifest, name))
-            godotnext_facts.append({"run": name, **_check_nextgi(config, manifest, name)})
+            godotnext_facts.append(_check_godotnext_run(config, manifest, name, judge=judge, notes=notes))
             records.append(_godotnext_record(manifest, index))
             godotnext_runs.append(run_dir)
         elif engine == "ue":
@@ -163,10 +163,21 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
     if len(scales) != 1:
         raise ComparisonError(f"the GodotNext runs differ in scaling_3d_scale: {sorted(scales)}")
     scale = next(iter(scales))
+    source_commits = {str(run.get("source_commit") or "") for run in godotnext_facts}
+    if judge and len(source_commits) != 1:
+        raise ComparisonError(f"the GodotNext runs do not share one source commit: {sorted(source_commits)}")
     _check_internal_size(config, scale, ue_runs_facts, judge=judge, notes=notes)
     lines = []
     for spec in config.lines:
-        godotnext_values, godotnext_missing = _godotnext_statistics(spec, config, godotnext_runs)
+        godotnext_values, godotnext_missing, selected = _godotnext_statistics(spec, config, godotnext_runs)
+        for run in godotnext_facts:
+            run_name = str(run["run"])
+            if run_name in selected:
+                resolved = run.get("resolved_columns")
+                if not isinstance(resolved, dict):
+                    resolved = {}
+                    run["resolved_columns"] = resolved
+                resolved[spec.id] = selected[run_name]
         ue_values, ue_missing = _ue_statistics(spec, config, ue_runs)
         lines.append(
             evaluate_line(
@@ -181,6 +192,12 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
         )
     facts["notes"] = [RUN_MODE_NOTE, *as_list(facts.get("notes", [])), *_unique(notes)]
     facts["godotnext_scaling_3d_scale"] = scale
+    facts["godotnext_source_commit"] = next(iter(source_commits)) if len(source_commits) == 1 else ""
+    facts["godotnext_source_dirty"] = (
+        None
+        if any(type(run.get("source_dirty")) is not bool for run in godotnext_facts)
+        else any(run.get("source_dirty") is True for run in godotnext_facts)
+    )
     facts["ue_runs"] = ue_runs_facts
     facts["godotnext_runs"] = godotnext_facts
     first_profile = ue_runs[0][1] if ue_runs else None
@@ -234,6 +251,7 @@ def render_markdown(report: dict[str, object]) -> str:
         f"- Window: GodotNext warm-up {window['godotnext_warmup']}, UE warm-up {window['ue_warmup']},"
         f" {window['frames']} measured frames",
         f"- GodotNext build {facts['godotnext_commit']} ({godotnext_build});"
+        f" source {facts['godotnext_source_commit'] or 'unrecorded'}, dirty: {facts['godotnext_source_dirty']};"
         f" UE {facts['ue_build_version']}, run mode {facts['ue_run_mode']}",
         *[f"- {note}" for note in as_list(facts.get("notes", []))],
         "",
@@ -298,14 +316,16 @@ def main(argv: list[str] | None = None) -> int:
 
 def _godotnext_statistics(
     spec: LineSpec, config: ComparisonConfig, runs: list[Path]
-) -> tuple[list[float] | None, list[int] | None]:
+) -> tuple[list[float] | None, list[int] | None, dict[str, list[str]]]:
     if spec.godotnext is None:
-        return None, None
+        return None, None, {}
     values: list[float] = []
     missing: list[int] = []
+    selected: dict[str, list[str]] = {}
     for run_dir in runs:
         columns = read_timing_csv(run_dir / "timing.csv")
         names = spec.godotnext.select(list(columns))
+        selected[run_dir.name] = names
         if not names:
             raise ComparisonError(
                 f"{run_dir.name}: line {spec.id}: timing.csv has no column {spec.godotnext.to_json()}"
@@ -330,7 +350,7 @@ def _godotnext_statistics(
             raise ComparisonError(f"{run_dir.name}: line {spec.id}: {exc}") from None
         values.append(statistic)
         missing.append(dropped)
-    return values, missing
+    return values, missing, selected
 
 
 def _ue_statistics(
@@ -349,6 +369,48 @@ def _ue_statistics(
         values.append(statistic)
         missing.append(dropped)
     return values, missing
+
+
+def _check_godotnext_run(
+    config: ComparisonConfig, manifest: dict[str, object], name: str, *, judge: bool, notes: list[str]
+) -> dict[str, object]:
+    """The GodotNext run's device, build and source-tree facts, including the judged-run requirements."""
+    adapter = str(as_dict(manifest.get("adapter") or {}).get("name") or "")
+    if adapter != config.device:
+        raise ComparisonError(f"GodotNext run {name} records adapter {adapter!r}, not {config.device!r}")
+    debug = manifest.get("debug")
+    if judge and debug is not False:
+        raise ComparisonError(
+            f"GodotNext run {name} is a debug export or does not record its debug state; --judge needs a release export"
+        )
+    runner_data = as_dict(manifest.get("runner") or {})
+    source = as_dict(runner_data.get("source") or {})
+    source_commit = str(source.get("commit") or "")
+    source_dirty = source.get("dirty")
+    if judge and (not source_commit or type(source_dirty) is not bool):
+        raise ComparisonError(f"GodotNext run {name} does not record its source commit and dirty flag")
+    if judge and source_dirty:
+        raise ComparisonError(
+            f"GodotNext run {name} has a dirty source tree; --judge needs a clean release-export source"
+        )
+    if not source_commit or type(source_dirty) is not bool:
+        notes.append(
+            f"GodotNext run {name} does not record its source commit and dirty flag; a judged report refuses it."
+        )
+    elif source_dirty:
+        notes.append(f"GodotNext run {name} has a dirty source tree; a judged report refuses it.")
+    if debug is not False:
+        notes.append(
+            f"GodotNext run {name} is a debug export or does not record its debug state; a judged report refuses it."
+        )
+    return {
+        "run": name,
+        "adapter": adapter,
+        "debug": debug if type(debug) is bool else None,
+        "source_commit": source_commit,
+        "source_dirty": source_dirty if type(source_dirty) is bool else None,
+        **_check_nextgi(config, manifest, name),
+    }
 
 
 def _check_nextgi(config: ComparisonConfig, manifest: dict[str, object], name: str) -> dict[str, object]:
@@ -462,6 +524,9 @@ def _check_ue_run(
             raise ComparisonError(f"run {name}: the UE log has no echo of {cvar}; the report cannot check it")
         if not _same_value(seen, value):
             raise ComparisonError(f"run {name}: {cvar} was {seen!r} in the run, not {value!r}")
+    for header in ue.window_quiet_columns:
+        if not profile.columns_named(header):
+            raise ComparisonError(f"run {name}: the capture has no {header!r} column, which must stay quiet")
     activity = window_activity(profile, ue.window_quiet_columns, ue.warmup_frames, config.frames)
     busy = {header: rows for header, rows in activity.items() if rows}
     if busy:
@@ -478,6 +543,8 @@ def _check_ue_run(
         "run": name,
         "run_mode": run_mode,
         "buildversion": metadata.get("buildversion", ""),
+        "config": metadata.get("config", ""),
+        "deviceprofile": metadata.get("deviceprofile", ""),
         "editor_product_version": str(editor.get("product_version", "")),
         "changelist": _changelist(str(editor.get("product_version", "")) or metadata.get("buildversion", "")),
         "rhi": metadata.get("rhiname", ""),

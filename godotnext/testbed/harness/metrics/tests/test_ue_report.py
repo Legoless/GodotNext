@@ -31,6 +31,8 @@ METADATA = {
     "buildversion": BUILD,
     "systemresolution.resx": "1920",
     "systemresolution.resy": "1080",
+    "config": "Development",
+    "deviceprofile": "WindowsEditor",
     "commandline": '"X:/Synthetic/Synthetic.uproject" /Game/Ports/Synthetic/Synthetic.umap -game -dx12 -ExecCmds="a 1,b 2"',
 }
 
@@ -172,6 +174,10 @@ def make_set(
     log_extra: list[str] | None = None,
     dpi_layer: str | None = "HighDpiAware",
     idle_work_rows: int = 0,
+    adapter: str | None = None,
+    debug: bool | None = False,
+    source_commit: str | None = "abc123",
+    source_dirty: bool = False,
 ) -> Path:
     parsed = parse_config(config or synthetic_config(lines=_lines()))
     plan = build_plan(
@@ -203,15 +209,23 @@ def make_set(
             frames = godotnext_frames or parsed.frames
             csv_text = _timing_csv(bases[position], frames, blank_rows)
             (run_dir / "timing.csv").write_text(csv_text, encoding="utf-8")
+            runner_record: dict[str, object] = {
+                "clock": {"locked": False, "detail": "Clocks are not locked for this job."}
+            }
+            if source_commit is not None:
+                runner_record["source"] = {"commit": source_commit, "dirty": source_dirty}
             manifest: dict[str, object] = {
                 "schema": 1,
                 "host": host,
+                "adapter": {"name": parsed.device if adapter is None else adapter, "api_version": "synthetic"},
                 "mode": "timing",
                 "commit": "abc123",
                 "output_size": [1920, 1080],
                 "editor_binary": editor_binary,
-                "runner": {"clock": {"locked": False, "detail": "Clocks are not locked for this job."}},
+                "runner": runner_record,
             }
+            if debug is not None:
+                manifest["debug"] = debug
             scale = (scales or [1.0])[position % len(scales or [1.0])]
             if scale is not None:
                 manifest["scaling_3d_scale"] = scale
@@ -307,6 +321,16 @@ def test_dry_run_has_numbers_and_ratios_but_no_verdict(tmp_path: Path) -> None:
     assert any("editor binary" in note for note in facts["notes"])
     ue_run = facts["ue_runs"][0]
     assert ue_run["changelist"] == "1"
+    assert ue_run["config"] == "Development"
+    assert ue_run["deviceprofile"] == "WindowsEditor"
+    godotnext_run = facts["godotnext_runs"][0]
+    assert godotnext_run["adapter"] == "NVIDIA GeForce RTX 4080 SUPER"
+    assert godotnext_run["debug"] is False
+    assert godotnext_run["source_commit"] == "abc123"
+    assert godotnext_run["source_dirty"] is False
+    assert godotnext_run["resolved_columns"]["total"] == ["feature_a_ms", "feature_b_ms"]
+    assert facts["godotnext_source_commit"] == "abc123"
+    assert facts["godotnext_source_dirty"] is False
     # The report lists every echoed value it checked: the screen percentage, the twelve scalability
     # groups and the three async compute switches.
     assert len(ue_run["cvars"]) == 16
@@ -344,6 +368,40 @@ def test_judging_needs_the_sign_off_five_runs_timing_jobs_and_a_release_export(t
         build_report(make_set(tmp_path / "run", config=config, editor_binary=False), judge=True)
     with pytest.raises(ComparisonError, match="editor binary"):
         build_report(make_set(tmp_path / "editor", config=config, kind="timing"), judge=True)
+
+
+def test_godotnext_adapter_must_match_the_comparison_device(tmp_path: Path) -> None:
+    with pytest.raises(ComparisonError, match="records adapter 'Synthetic GPU'"):
+        build_report(make_set(tmp_path, adapter="Synthetic GPU"), judge=False)
+
+
+def test_judging_refuses_a_debug_or_unclassified_godotnext_export(tmp_path: Path) -> None:
+    options: dict[str, object] = {"config": _judged_config(), "kind": "timing", "editor_binary": False}
+    with pytest.raises(ComparisonError, match="debug export"):
+        build_report(make_set(tmp_path / "debug", debug=True, **options), judge=True)  # type: ignore[arg-type]
+    with pytest.raises(ComparisonError, match="does not record its debug state"):
+        build_report(make_set(tmp_path / "unknown", debug=None, **options), judge=True)  # type: ignore[arg-type]
+
+
+def test_godotnext_source_commit_and_dirty_state_are_recorded_and_judged(tmp_path: Path) -> None:
+    missing = build_report(make_set(tmp_path / "missing", source_commit=None), judge=False)
+    missing_run = missing["set"]["godotnext_runs"][0]  # type: ignore[index]
+    assert missing_run["source_commit"] == "" and missing_run["source_dirty"] is None
+    assert missing["set"]["godotnext_source_dirty"] is None  # type: ignore[index]
+    dirty = build_report(make_set(tmp_path / "dirty", source_dirty=True), judge=False)
+    assert dirty["set"]["godotnext_source_dirty"] is True  # type: ignore[index]
+    options: dict[str, object] = {"config": _judged_config(), "kind": "timing", "editor_binary": False}
+    with pytest.raises(ComparisonError, match="source commit and dirty flag"):
+        build_report(make_set(tmp_path / "judge_missing", source_commit=None, **options), judge=True)  # type: ignore[arg-type]
+    with pytest.raises(ComparisonError, match="dirty source tree"):
+        build_report(make_set(tmp_path / "judge_dirty", source_dirty=True, **options), judge=True)  # type: ignore[arg-type]
+    mixed = make_set(tmp_path / "mixed", **options)  # type: ignore[arg-type]
+    other = mixed / "runs" / "04_g_t2" / "manifest.json"
+    manifest = json.loads(other.read_text(encoding="utf-8"))
+    manifest["runner"]["source"]["commit"] = "def456"
+    other.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ComparisonError, match="do not share one source commit"):
+        build_report(mixed, judge=True)
 
 
 def test_an_unnamed_ue_column_is_reported_in_a_dry_run_and_refused_when_judged(tmp_path: Path) -> None:
@@ -472,6 +530,16 @@ def test_pso_hitches_after_the_warm_up_are_noted_in_a_dry_run_and_refused_when_j
         build_report(make_set(tmp_path / "judged", hitch_in_window=True, **options), judge=True)  # type: ignore[arg-type]
 
 
+def test_a_missing_quiet_column_is_refused_even_in_a_dry_run(tmp_path: Path) -> None:
+    config = synthetic_config(lines=_lines())
+    ue = copy.deepcopy(config["ue"])
+    assert isinstance(ue, dict)
+    ue["window_quiet_columns"] = ["Synthetic/Missing"]
+    config["ue"] = ue
+    with pytest.raises(ComparisonError, match="no 'Synthetic/Missing' column, which must stay quiet"):
+        build_report(make_set(tmp_path, config=config), judge=False)
+
+
 def _active_config(columns: list[str], frames: int = 6) -> dict[str, object]:
     config: dict[str, object] = synthetic_config(lines=_lines(), frames=frames)
     ue = copy.deepcopy(config["ue"])
@@ -573,9 +641,12 @@ def test_skipped_godotnext_frames_are_dropped_not_zero(tmp_path: Path) -> None:
 
 def test_a_prefix_line_sums_the_block_and_needs_its_columns(tmp_path: Path) -> None:
     config = synthetic_config(lines=[*_lines(), _block_line()])
-    block = _line(build_report(make_set(tmp_path, config=config), judge=False), "block")
+    report = build_report(make_set(tmp_path, config=config), judge=False)
+    block = _line(report, "block")
     # nextgi_ms + nextgi_trace_ms; the closing marker's column is excluded.
     assert block["godotnext"]["median"] == pytest.approx(0.5)  # type: ignore[index]
+    run = report["set"]["godotnext_runs"][0]  # type: ignore[index]
+    assert run["resolved_columns"]["block"] == ["nextgi_ms", "nextgi_trace_ms"]
     missing = copy.deepcopy(_block_line())
     missing["godotnext"] = {"prefix": "absent_"}
     with pytest.raises(ComparisonError, match="timing.csv has no column"):

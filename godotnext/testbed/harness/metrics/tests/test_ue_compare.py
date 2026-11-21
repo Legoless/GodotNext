@@ -226,6 +226,19 @@ def test_the_kitbash_config_forces_nextgi_and_the_software_tier() -> None:
     assert gs9.ue is not None and (gs9.ue.group, gs9.ue.columns) == ("Lumen total", (*_SDF_1A, *_LUMEN_TOTAL))
 
 
+def test_the_kitbash_detail_config_enables_mesh_sdf_tracing_on_both_sides() -> None:
+    config = load_config(_TESTBED / "ue_compare" / "swrt_kitbash_detail.json")
+    assert config.godotnext.nextgi is not None
+    assert (config.godotnext.nextgi.tier, config.godotnext.nextgi.quality) == ("SWRT", "HIGH")
+    assert config.ue.checked_cvars()["r.Lumen.TraceMeshSDFs"] == "1"
+    override = (_TESTBED / "ue_compare" / "swrt_kitbash_detail.override.cfg").read_text(encoding="utf-8")
+    assert "global_illumination/nextgi/software_ray_tracing_mode=1" in override
+    line = next(line for line in config.lines if line.id == "gs9_swrt_total_detail")
+    assert line.status == "report_only" and line.gates == ("GS-9",)
+    assert line.godotnext is not None and line.godotnext.prefix == "nextgi_"
+    assert line.ue is not None and line.ue.columns is not None and "GPU/LumenSceneUpdate" in line.ue.columns
+
+
 @pytest.mark.parametrize("path", _CONFIGS, ids=lambda path: path.name)
 def test_every_set_pins_scalability_first_and_echoes_every_pinned_value(path: Path) -> None:
     # parse_config refuses a set that breaks the lead's decisions of 2026-11-16 (the refusals below);

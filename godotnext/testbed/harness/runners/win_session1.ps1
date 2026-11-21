@@ -69,7 +69,8 @@
 # Kind "timing" requires the High performance (or Ultimate Performance) power plan. Kind
 # "validation" sets NV_ALLOW_RAYTRACING_VALIDATION=1 and VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1.
 # Every job gets GODOTNEXT_HARNESS_JOB, the runner record the harness copies into manifest.json
-# (host, clock, power, override), plus "resolution" from a --resolution WxH argument, which the
+# (host, clock, power, override; GodotNext jobs also record the checkout's source commit and dirty
+# state), plus "resolution" from a --resolution WxH argument, which the
 # harness checks the viewport against (#270). A per-scene override.cfg next to --scene is copied
 # to the testbed root for this launch only, as runners/scene_override.sh does on the M5 Max (#240).
 #
@@ -345,6 +346,7 @@ if ($ueJob) {
 	# UE picks its RHI from its own command line; the fleet.md row gives the nvidia-smi index.
 	$driver = 'd3d12'
 	$exe = [string](Get-Field $job 'exe' '')
+	$exe = $exe.Replace('/', '\')
 	if (-not $exe -or -not [System.IO.Path]::IsPathRooted($exe) -or $exe -notmatch '\\Engine\\Binaries\\Win64\\UnrealEditor\.exe$') {
 		Fail 2 'a UE job names the installed editor ...\Engine\Binaries\Win64\UnrealEditor.exe by absolute path (plan v3.9.3)'
 	}
@@ -352,6 +354,7 @@ if ($ueJob) {
 		Fail 2 "UE editor '$exe' not found"
 	}
 	$project = [string](Get-Field $job 'project' '')
+	$project = $project.Replace('/', '\')
 	if (-not $project -or -not [System.IO.Path]::IsPathRooted($project) -or -not $project.EndsWith('.uproject', [System.StringComparison]::OrdinalIgnoreCase)) {
 		Fail 2 'a UE job names its comparison project .uproject by absolute path'
 	}
@@ -544,6 +547,16 @@ if ($ueJob) {
 	$runnerJob['ue_editor'] = [ordered]@{ file_version = [string]$version.FileVersion; product_version = [string]$version.ProductVersion }
 	$runnerJob['run_mode'] = 'editor_game'
 } else {
+	$sourceRecord = [ordered]@{ commit = ''; dirty = $true }
+	$sourceCommit = & git -C $RepoRoot rev-parse HEAD 2>$null
+	if ($LASTEXITCODE -eq 0) {
+		$sourceRecord.commit = [string]$sourceCommit
+		$sourceStatus = & git -C $RepoRoot status --porcelain 2>$null
+		if ($LASTEXITCODE -eq 0) {
+			$sourceRecord.dirty = @($sourceStatus | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
+		}
+	}
+	$runnerJob['source'] = $sourceRecord
 	# The engine consumes --resolution, so the harness learns the requested output size from here (#270).
 	$resolutionArg = Find-Argument $userArgs 'resolution'
 	if ($resolutionArg -match '^(\d+)x(\d+)$') {
@@ -711,10 +724,9 @@ try {
 	$deadline = $started.AddMinutes($timeout)
 	while (-not (Test-Path $donePath)) {
 		if ((Get-Date) -gt $deadline) {
-			& schtasks /End /TN $taskName 2>&1 | Out-Null
 			if ($ueJob) {
-				# Only the editor process this job started, by its id: the install folder also holds
-				# other projects' editors, and the editor's helper processes are shared.
+				# Stop the editor before ending its parent task, so the PID file still names a live child.
+				# Only this job's editor is stopped: other projects use the same install and helpers.
 				if (Test-Path -LiteralPath $pidPath) {
 					$launchId = [int](Get-Content -Raw -LiteralPath $pidPath)
 					$own = Get-CimInstance Win32_Process -Filter "ProcessId=$launchId" -ErrorAction SilentlyContinue
@@ -725,6 +737,19 @@ try {
 				}
 			} else {
 				Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
+			}
+			& schtasks /End /TN $taskName 2>&1 | Out-Null
+			# Ending the task can skip the inner script's finally block, so clean up here too.
+			if ($lockClocks) {
+				& nvidia-smi -i $device.NvsmiIndex -rgc 2>&1 | Out-Null
+				& nvidia-smi -i $device.NvsmiIndex -rmc 2>&1 | Out-Null
+				Write-Output "win_session1.ps1: reset the timed-out job's GPU and memory clock locks"
+			}
+			if ($sceneOverride -and (Test-Path -LiteralPath $rootOverride)) {
+				$rootHash = (Get-FileHash -Algorithm SHA256 $rootOverride).Hash.ToLowerInvariant()
+				if ($rootHash -eq $overrideRecord.sha256) {
+					Remove-Item -Force -ErrorAction SilentlyContinue $rootOverride
+				}
 			}
 			Fail 3 "the job did not finish within $timeout minutes"
 		}

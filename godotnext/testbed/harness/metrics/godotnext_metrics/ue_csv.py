@@ -227,7 +227,7 @@ def window_activity(profile: CsvProfile, headers: Sequence[str], warmup: int, fr
     """Rows of the measured window where a column of each header is non-zero (all same-named columns).
 
     The report uses it for stats that must be quiet once the warm-up is over, such as PSO
-    misses and hitches. A header the capture does not have counts as quiet.
+    misses and hitches. Its caller refuses a quiet header the capture does not have.
     """
     activity: dict[str, int] = {}
     for header in headers:
