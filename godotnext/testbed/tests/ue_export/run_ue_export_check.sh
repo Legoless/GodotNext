@@ -14,6 +14,8 @@
 # 3. check_ue_export.gd, headless, on the two exports (see that script for what it checks), then
 #    check_ue_export_sky.gd on the first export with a real renderer, comparing sky.hdr with
 #    direct linear camera renders of the source scene's actual Sky, including its sun peak.
+#    Skeletal scenes also run check_ue_export_skinning.gd, comparing source and re-imported
+#    renderer skinning on every row of one instance of each asset.
 # 4. RT Shadow Yard without --approximate must refuse (exit 1) and name the diffuse_mode,
 #    shadow_caster_mask and translucent_shadow approximations it needs; an unknown --approximate id
 #    must exit 2; a run the engine ends after 3 frames must exit 1 and write nothing.
@@ -136,6 +138,7 @@ done
 # check <name> [scene]: check_ue_export.gd <scene, default name> on $work/<name>_a and _b.
 check() {
 	local name=$1 scene=${2:-$1}
+	local extra=("${@:3}")
 	status=0
 	"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://tests/ue_export/check_ue_export.gd -- \
 		"$scene" "$work/${name}_a" "$work/${name}_b" >"$work/check_$name.log" 2>&1 || status=$?
@@ -149,6 +152,15 @@ check() {
 				"$work/${name}_a" >"$work/rendered_sky_$name.log" 2>&1 || status=$?
 			report "rendered_sky_$name" "$status" 0 "$work/rendered_sky_$name.log"
 			grep '^GODOTNEXT_RESULT' "$work/rendered_sky_$name.log" || true
+			;;
+	esac
+	case "$scene" in
+		walk | perf | crowd | fixture)
+			status=0
+			"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tests/ue_export/check_ue_export_skinning.gd -- \
+				"--export=$work/${name}_a" ${extra[@]+"${extra[@]}"} >"$work/rendered_skinning_$name.log" 2>&1 || status=$?
+			report "rendered_skinning_$name" "$status" 0 "$work/rendered_skinning_$name.log"
+			grep '^GODOTNEXT_RESULT' "$work/rendered_skinning_$name.log" || true
 			;;
 	esac
 }
@@ -268,7 +280,7 @@ export_pair walk --scene=res://scenes/character_walk/character_walk.tscn --camer
 check walk
 
 export_pair perf --scene=res://scenes/nextgi_perf/nextgi_perf.tscn --camera=CaptureCam --warmup=0 --frames=120 --instances=180 --variant=p3
-check perf
+check perf perf --instances=180 --variant=p3
 
 # The PN scenes are generated, not committed: build them (byte-identical on every run) first.
 status=0
@@ -379,7 +391,7 @@ export_pair fixture "${fixture_args[@]}"
 check fixture
 # A mover alone reaches past the far plane, on one row: the count follows movers row by row.
 export_pair fixture_far "${fixture_args[@]}" --case=mover_far --approximate=camera_far
-check fixture_far fixture
+check fixture_far fixture --case=mover_far
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2
