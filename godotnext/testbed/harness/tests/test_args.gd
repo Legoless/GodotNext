@@ -130,6 +130,8 @@ func _test_parse() -> void:
 		"--hold-frame=60",
 		"--instances=100000",
 		"--lights=1024",
+		"--flight=1",
+		"--storm=1",
 	]))
 	_check(bool(scene_flags["ok"]), "scene flags parse: %s" % scene_flags["error"])
 	if bool(scene_flags["ok"]):
@@ -138,6 +140,11 @@ func _test_parse() -> void:
 		_check(int(args["hold_frame"]) == 60, "hold-frame parsed")
 		_check(int(args["instances"]) == 100000, "instances parsed")
 		_check(int(args["lights"]) == 1024, "lights parsed")
+		_check(String(args["flight"]) == "1", "flight parsed")
+		_check(String(args["storm"]) == "1", "storm parsed")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--storm=yes",
+	]))["ok"]), "non-binary storm fails")
 	_check(not bool(ArgsScript.parse(PackedStringArray([
 		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--hold-frame=-3",
 	]))["ok"]), "negative hold-frame fails")
