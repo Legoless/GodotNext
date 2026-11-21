@@ -14,6 +14,8 @@ The current state of the build and what to do next. It is written for any agent:
 
 **#230 export and skeletal-port progress landed on 2026-11-21 (`3149f30b67`).** The export suite now compares source and re-imported renderer skinning on every row of one instance per skeletal asset; Walk, Perf, Crowd and both fixtures pass. The private importer makes source-triangle, calibrated-bounds and total mismatches fatal, with negative controls proving both mesh checks. All three current-master exports imported with zero errors. Linux passed 2,209 doctests; the RTX 4080 SUPER passed 2,233 and the complete export suite with zero engine/script/validation errors. The first interleaved Character Walk set captured both engines but #229 refused its report because the required `PSO/GraphicsPSOHitch` quiet column was absent; that criterion stays open. A separate invalid Rendering Device ID at GodotNext shutdown needs engine follow-up. Lead sign-off remains open, and no result was judged.
 
+**#232 schema-4 port progress on 2026-11-21:** the private Upscaler Torture importer accepts schema 4's rigid static subset and now makes source-triangle, calibrated-bounds and total mismatches fatal. The real export has 55 instances, 10 movers, 12 materials and four textures; the backed-up import matches all 55 instances and 2,838 triangles, and both negative controls reject their intended corruption. TSR High and Epic each captured both engines after warm-ups at 3840x2160, with UE's profiler confirming 1920x1080 internal resolution. Both reports were refused because `PSO/GraphicsPSOHitch` is absent, which #229 deliberately requires; no dry-run acceptance or verdict is claimed. #98, Mac work and the lead's sign-off stay open. The full suite's #232 checks passed; its unrelated dense-city headless import intermittently logged the existing editor-thread warning, which was not suppressed.
+
 ## How to continue
 
 1. Read `AGENTS.md` (the rules) and the project skills in `.agents/skills/`. The skills are plain Markdown and work for any agent:
@@ -70,7 +72,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 
 **Start now (no engine build needed)**
 
-- **#229's zero-cost harness/metrics pass is landed.** Continue its remaining work only when an owner/hardware gate clears. **#235's zero-cost export and port pass is also landed (`cc84001156`)**; its fairness sign-off is owner-held. **#230's renderer/skinning pass is landed (`3149f30b67`)**, but its strict #229 report and fairness sign-off remain open. The next test-prep implementation task is **#232**'s TSR part, subject to the current lane authorization.
+- **#229's zero-cost harness/metrics pass is landed.** Continue its remaining work only when an owner/hardware gate clears. **#235's zero-cost export and port pass is also landed (`cc84001156`)**; its fairness sign-off is owner-held. **#230's renderer/skinning pass is landed (`3149f30b67`)**, but its strict #229 report and fairness sign-off remain open. **#232's schema-4 port and TSR functional attempts are verified**, with its strict #229 report still open. The next test-prep implementation task is **#231** without GV-3, subject to the current lane authorization.
 
 **Start once the #212 build fix lands**
 
@@ -107,7 +109,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 **Test prep (MQ)**
 
 - One UE-comparison lane, one task at a time, on the RTX 4080 SUPER machine (UE side) and the GPU-less Linux VM (metrics tests). These issues share the comparison configs, harness runners, exporter, `settings-map.md` and plan §23.5.
-- **#235's zero-cost implementation and verification are landed (`cc84001156`)**, including the full export suite, strict UE import, High/Detail dry runs and inspected fairness images. Only its lead sign-off remains. **#230's current-master export/skinning pass is landed (`3149f30b67`)**; its strict functional report and lead sign-off remain open. Next is **#232**'s TSR part, then **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. **#228**: the UE 5.9 notes were still titled Preview when checked on 2026-11-21; plan v3.9.3's editor-game-mode wording is carried into `settings-map.md` by v3.9.18. #229's remaining observations and sign-offs stay in #229.
+- **#235's zero-cost implementation and verification are landed (`cc84001156`)**, including the full export suite, strict UE import, High/Detail dry runs and inspected fairness images. Only its lead sign-off remains. **#230's current-master export/skinning pass is landed (`3149f30b67`)**; its strict functional report and lead sign-off remain open. **#232's schema-4 port and TSR attempts are recorded**, with its strict report still open. Next is **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. **#228**: the UE 5.9 notes were still titled Preview when checked on 2026-11-21; plan v3.9.3's editor-game-mode wording is carried into `settings-map.md` by v3.9.18. #229's remaining observations and sign-offs stay in #229.
 - #233's GodotNext side waits on MegaLights (#142, #143, #146, #135) and on #141; #234's waits on #160, #163 and #151. #199 is a PQ gate behind #225.
 
 ## Waiting on the lead
