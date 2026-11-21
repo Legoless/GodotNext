@@ -8,6 +8,8 @@ The current state of the build and what to do next. It is written for any agent:
 
 **#229 harness progress landed on 2026-11-21 (`52c6a497e8`, plan v3.9.18).** The comparison runner now checks GodotNext's adapter, debug state and source-tree identity, records UE metadata and per-run resolved columns, refuses missing quiet columns, and cleans up owned processes, clocks and overrides on timeout. The GS-9 Detail Tracing config is added. The GPU-less Linux VM passed 402 metrics tests and all 22 config checks; the RTX 4080 SUPER passed real interleaved kitbash High and Detail Tracing dry runs plus controlled timeout probes. The settings record and plan now carry the observed UE 5.9 columns, defaults and game-mode coverage. #229 stays open: GM-3's RT-shadow grouping needs an owner decision, DLSS waits for #98, and other hardware, release-export and sign-off criteria remain.
 
+**#123 MinGW progress landed on 2026-11-21 (`f989575ed3`).** Eight files fix GCC MinGW's `near`/`far` macro collisions and release-only test assumptions: Vulkan-provider fixtures now live inside their `DEBUG_ENABLED` use, and frame-generation metadata/editor-hint assertions use the feature levels that provide them. A complete GCC 16.2 MinGW release-template build passes; its exact Windows binary passed 2,148 cases on the RTX 4080 SUPER. Native Linux passed 2,209 cases, MSVC 2,233, and repository hooks pass. #123 still waits on the lead's Metal close-out and the existing PQ timing line; #273 publication work is unchanged.
+
 ## How to continue
 
 1. Read `AGENTS.md` (the rules) and the project skills in `.agents/skills/`. The skills are plain Markdown and work for any agent:
@@ -79,7 +81,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 **Side jobs (fit them into machine gaps)**
 
 - **#283** (no code): run `tier_check` and the smoke scenes on Vulkan and D3D12 on the RTX 4080 SUPER machine, since its criteria name that card.
-- **#123:** a GCC MinGW build fix (locals named `near`/`far` in NextGI files collide with MinGW macros) or a record that MinGW D3D12 is out of scope.
+- **#123's GCC MinGW fix is landed** (`f989575ed3`): full release-template build plus MinGW runtime, native Linux and MSVC doctests pass. Only the owner-held Metal close-out and PQ timing remain.
 - **#198:** two plan records. D4: keep the landed design and update the issue's step 3. LQ11: follow UE 5.9 (thin geometry on automatically with Nanite foliage) and record a #151 follow-up.
 
 **After #212 is proven**
@@ -95,7 +97,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
   - Build-only closes: #285, #283 (after its RTX 4080 SUPER run) and #274.
   - Runs: #174 async compute; #275 `attachment_clears` (its Metal hunks have never been compiled); #263 the reference capture and the Q1 tool; #265 legacy SDFGI identity (not on unproven #212 code).
   - TSR and frame generation: #198, #203 and #105, together with #195, #193, #301 and #210.
-  - **#123** (`673499de5b`): proven on the RTX 4080 SUPER machine and a cloud Windows L4 (boxes 1, 2 and 5 met). It waits on the macOS/Metal check and on the MinGW fix or decision. The code of its direct build dependents (#118, #122, #175, #177, #195) is on master; #125 is a PQ gate and #273 waits on the lead, so its large "unlocks" count overstates the startable work.
+  - **#123** (`673499de5b`, `f989575ed3`): proven on the RTX 4080 SUPER machine and previously on a cloud Windows L4 (boxes 1, 2 and 5 met). The GCC MinGW release-template build and its full Windows doctests now pass, alongside native Linux and MSVC. It waits on the macOS/Metal check and the PQ timing line. The code of its direct build dependents (#118, #122, #175, #177, #195) is on master; #125 is a PQ gate and #273 waits on the lead, so its large "unlocks" count overstates the startable work.
 - About 47 open issues in all have code on master waiting mainly on Metal.
 
 **Test prep (MQ)**
