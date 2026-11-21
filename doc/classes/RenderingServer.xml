@@ -2026,7 +2026,7 @@
 		<method name="instance_geometry_set_shadow_cache_invalidation">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
-			<param index="1" name="mode" type="int" enum="RenderingServer.ShadowCacheInvalidation" />
+			<param index="1" name="invalidation" type="int" enum="RenderingServer.ShadowCacheInvalidation" />
 			<description>
 				Sets the virtual shadow map cache invalidation behavior for the specified 3D geometry instance. Equivalent to [member GeometryInstance3D.shadow_cache_invalidation].
 			</description>

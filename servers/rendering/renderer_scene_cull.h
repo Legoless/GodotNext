@@ -427,6 +427,7 @@ public:
 	void _instance_record_update_state(Instance *p_instance) const;
 	void _instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const;
 	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
+	struct InstanceGeometryData;
 	mutable uint64_t vsm_invalidation_epoch_counter = 0;
 	bool _light_uses_vsm(const Instance *p_light_instance) const;
 	void _vsm_emit_invalidation(Scenario *p_scenario, const AABB &p_aabb, uint32_t p_layer_mask, uint32_t p_dirty_flags) const;
