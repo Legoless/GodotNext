@@ -11,7 +11,9 @@
 # 2. Two rendered exports of res://scenes/swrt_kitbash/swrt_kitbash.tscn (CaptureCam, warmup 120,
 #    600 frames) into a temporary folder. Each must exit 0 and log no "ERROR:" or "SCRIPT ERROR"
 #    line (a script error inside the exporter would otherwise drop content and still exit 0).
-# 3. check_ue_export.gd, headless, on the two exports (see that script for what it checks).
+# 3. check_ue_export.gd, headless, on the two exports (see that script for what it checks), then
+#    check_ue_export_sky.gd on the first export with a real renderer, comparing sky.hdr with
+#    direct linear camera renders of the source scene's actual Sky, including its sun peak.
 # 4. RT Shadow Yard without --approximate must refuse (exit 1) and name the diffuse_mode,
 #    shadow_caster_mask and translucent_shadow approximations it needs; an unknown --approximate id
 #    must exit 2; a run the engine ends after 3 frames must exit 1 and write nothing.
@@ -139,6 +141,16 @@ check() {
 		"$scene" "$work/${name}_a" "$work/${name}_b" >"$work/check_$name.log" 2>&1 || status=$?
 	report "check_$name" "$status" 0 "$work/check_$name.log"
 	grep '^GODOTNEXT_RESULT' "$work/check_$name.log" || true
+	case "$scene" in
+		torture | fixture) ;;
+		*)
+			status=0
+			"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tests/ue_export/check_ue_export_sky.gd -- \
+				"$work/${name}_a" >"$work/rendered_sky_$name.log" 2>&1 || status=$?
+			report "rendered_sky_$name" "$status" 0 "$work/rendered_sky_$name.log"
+			grep '^GODOTNEXT_RESULT' "$work/rendered_sky_$name.log" || true
+			;;
+	esac
 }
 
 # Two rendered exports of one scene into $work/<name>_a and _b.

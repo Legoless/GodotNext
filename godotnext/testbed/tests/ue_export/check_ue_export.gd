@@ -17,7 +17,9 @@ extends SceneTree
 ## manifest checksums match, that scene.json follows ue_export_schema.md, that library.glb and
 ## axes.glb re-import with the triangle counts, bounds and marker positions scene.json states,
 ## that every camera row is the scene camera's pose, that every texture is the PNG of the scene's
-## own texture, and that sky.hdr holds the procedural sky. Per scene: every kitbash rock placement
+## own texture, and that sky.hdr holds the procedural sky. check_ue_export_sky.gd adds the real
+## renderer comparison (run_ue_export_check.sh calls it for every scene with a sky). Per scene:
+## every kitbash rock placement
 ## equals the seeded layout's plan (so the MultiMesh half kept its transforms); the yard's
 ## caster-mask matrix, blend modes and approximations; the hall's light mix, area lights, light
 ## masks and approximations; Upscaler Torture's camera path and cut, recomputed from the scene's
@@ -1985,6 +1987,7 @@ func _torture_progress(p_frame: int) -> float:
 	return 0.78 + clampf(float(p_frame - 400) / 199.0, 0.0, 1.0) * 0.22
 
 
+## CPU radiance and RGBE checks; check_ue_export_sky.gd separately compares the actual renderer.
 func _check_sky(p_dir: String, p_scene: Dictionary) -> void:
 	var sky_entry: Dictionary = p_scene["environment"]["sky"]
 	_check(String(sky_entry.get("panorama", "")) == "sky.hdr" and String(sky_entry.get("panorama_projection", "")) == "godot_equirect", "the environment names sky.hdr")
