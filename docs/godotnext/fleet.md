@@ -115,7 +115,7 @@ v1 supports the GPU vendors, hardware generations, operating systems and API ver
 
 | Machine | Class it covers | System and APIs | Status |
 |---|---|---|---|
-| Cloud NVIDIA T4 VM (the cloud T4 test machine) | NVIDIA Turing, UE's minimum hardware ray tracing class ("NVIDIA RTX-2000 series or newer") | Windows, D3D12 and Vulkan | Running since 2026-11-16; device mapping below; build row and `vulkaninfo` to add here (#280) |
+| Cloud NVIDIA T4 VM (the cloud T4 test machine) | NVIDIA Turing, UE's minimum hardware ray tracing class ("NVIDIA RTX-2000 series or newer") | Windows, D3D12 and Vulkan | Ran 2026-11-16 to 2026-11-19, deleted 2026-11-20; device mapping below; build row and `vulkaninfo` to add here when it is recreated (#280) |
 | Cloud AMD Radeon PRO V710 VM | AMD RDNA3, UE's "AMD RX-6000 series or newer" class | Windows, D3D12 and Vulkan | Being set up by the lead; build row, device mapping and `vulkaninfo` to add here (#280) |
 | Cloud Linux VM (above) | NVIDIA on Linux (UE's Linux floor: NVIDIA 570 or newer) | Ubuntu 24.04, Vulkan | In use |
 

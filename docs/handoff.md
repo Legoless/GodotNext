@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-21. Tracker refreshed: no issue changed state since the 2026-11-20 night refresh (137 of 237 build tasks done, 16 in progress, 20 ready, 64 blocked), and the page header now names plan v3.9.17. Before that, on 2026-11-20 night, #212 (`a5b4d5d660`, VSM caching and per-page invalidation) landed as unverified progress: repository hooks pass, but its engine builds, new tests, counter checks and GPU validation remain open. The earlier Mac-hosted batch is complete across 6 issues: #298 (`96a9a204c5`) and #297 (plan v3.9.17, `430d5b13fe`) closed; #150 (`7b7d2f5982`), #217 (`230a613b62`, VSM × Nanite — unblocking 12 M6/M7 tasks), #305 (`95f6bc869b`, `MaterialData::texture_cache` refresh), and #301 (`1c738bdcf7`, RD read-only depth attachments for TSR level 2 overlap / GT-7) landed as progress after Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV verification (waiting only on Metal/M5 Max). No lane is running, all worktrees are removed, and all GodotNext cloud VMs, boot disks and template snapshots are deleted.
+**Last updated:** 2026-11-21. Cleanup and readiness pass: no lane is running, master is the only branch locally and on origin, no worktrees or stashes, and nothing GodotNext runs on the RTX 4080 SUPER machine. The cloud resources were recorded as deleted on 2026-11-20 but could not be re-checked today because the cloud sign-in has expired. Ten issues with landed progress that had never been assigned (#105, #123, #198, #203, #263, #265, #274, #275, #283, #285) are now assigned, so the tracker counts them in progress, not ready. "Ready to start" below was rebuilt from a read-only review of 41 candidate issues; the detailed lane queue and a cloud rebuild runbook are in the private companion. Earlier on 2026-11-21 the tracker page moved to plan v3.9.17. On 2026-11-20 night, #212 (`a5b4d5d660`, VSM caching and per-page invalidation) landed as unverified progress: repository hooks pass, but its engine builds, new tests, counter checks and GPU validation remain open. The earlier Mac-hosted batch is complete across 6 issues: #298 (`96a9a204c5`) and #297 (plan v3.9.17, `430d5b13fe`) closed; #150 (`7b7d2f5982`), #217 (`230a613b62`, VSM × Nanite — unblocking 12 M6/M7 tasks), #305 (`95f6bc869b`, `MaterialData::texture_cache` refresh), and #301 (`1c738bdcf7`, RD read-only depth attachments for TSR level 2 overlap / GT-7) landed as progress after Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV verification (waiting only on Metal/M5 Max). No lane is running, all worktrees are removed, and all GodotNext cloud VMs, boot disks and template snapshots are deleted.
 
 ## How to continue
 
@@ -10,9 +10,9 @@ The current state of the build and what to do next. It is written for any agent:
    - `godotnext-implement-issue` builds an issue and lands it;
    - `godotnext-fleet` covers the machines and how to use them;
    - `godotnext-update-tracker`, `godotnext-plan-revision` and `godotnext-issues` cover the tracker, the plan and the issues.
-2. Read this file, then `local/handoff-private.md`. The private file retains historical cloud setup notes, but no GodotNext cloud VMs, disks or template snapshots currently exist.
+2. Read this file, then `local/handoff-private.md`. It points to the private lane queue, the cloud rebuild runbook and the archived history. No GodotNext cloud VMs, disks or template snapshots exist.
 3. `git fetch`; master should be at or after this commit. Refresh the tracker with `python3 docs/godotnext/tracker/export.py`.
-4. Lead preference (2026-11-20): keep the orchestrating agent running locally on the Mac while builds, doctests and GPU validation runs execute on cloud Linux L4 and Windows L4 VMs (or the RTX 4080 SUPER machine when reachable). Reprovision the cloud VMs before cloud work.
+4. Lead preference (2026-11-20): keep the orchestrating agent running locally on the Mac while builds, doctests and GPU validation runs execute on cloud Linux L4 and Windows L4 VMs (or the RTX 4080 SUPER machine when reachable). Recreating cloud VMs is spending: get the lead's go-ahead first, then follow the private rebuild runbook.
 5. Stop cloud VMs as soon as they have no work left; delete them when the build is paused.
 
 ### The lane loop (what Claude's workflows did)
@@ -50,16 +50,65 @@ All Linux Vulkan (VVL 1.4 / 1.4.363.1 syncval) and Windows Vulkan/D3D12/D3D12-GB
 
 ## Ready to start (phase order)
 
-- **M6 VSM & RT follow-ups:** finish and validate **#212** VSM caching from `a5b4d5d660`; **#216** VSM local lights and `#145` RT shadow follow-ups (**#302** skinned alpha RT shadows, **#303** NextGeo alpha RT shadows, **#304** `discard` → `ignoreIntersection` in `#130` any-hit stages) remain code-unblocked on master.
-- **M7 Nanite features (code-unblocked on master by #150 and #217):** **#153** masked/two-sided/custom-UV Nanite materials + VSM, **#154** mesh-shader HW raster + VSM, **#149** pixel depth offset + VSM, **#164** WPO + VSM, **#160** skinned Nanite + VSM, **#151** Nanite foliage instancing + VSM, **#161** spline meshes + VSM, **#163** Nanite tessellation (Experimental, off), **#165** Nanite Voxels (Experimental, off).
-- **Still blocked:** **#294** (needs `#129`), **#141** (needs `#139`), **#296** (needs `#152`, `#160`).
+Every issue below has a macOS/Metal criterion, so it lands as progress until the lead's Mac runs. "Code-unblocked" means its blockers are still open, but their code is on master, proven on Linux and Windows and waiting mainly on Metal. On the tracker, "ready" means every blocker is closed.
+
+**First: make master build (#212)**
+
+- Master has not been built since #212 landed (`a5b4d5d660`, never compiled). Its code is in shared renderer files (scene cull, VSM storage, Forward+, NextGeo cull, rendering server), so every engine lane compiles it.
+- **#212 build fix, before any other engine lane:** build master on the GPU-less Linux VM (dev_mode, 0 warnings) and fix the compile errors; fix the `--doctool` failure (`RenderingServer.xml` names the cache-invalidation parameter `mode`, the binding names it `invalidation`); run the full doctests; land the fix at once as #212 progress. Other lanes start from that fix and never patch #212 code themselves.
+- **#212 proof:** fix the risks found by reading the code (the atlas-skip rule must match #222's `vsm_light_skips_atlas()`; the STATIC counter is never incremented; hiding or freeing a STATIC instance must behave as in UE), add the `[VSM]` doctests and a VSM caching scene with counter checks, run Windows Vulkan, D3D12 and GBV on the RTX 4080 SUPER machine (install the gn4 Mesa library there first) and Linux Vulkan VVL on a cloud Linux L4 VM, then re-run the #217 to #222 checks and the legacy byte-identity check with VSM off.
+- Until master compiles, make every close-out or verification build (Mac close-outs, #283's RTX 4080 SUPER run, comparison binaries) at `8f0cd30b57`, the last proven master.
+- The Windows Vulkan, D3D12 and GBV legs can be proven on the RTX 4080 SUPER machine now. Landings that need the Linux Vulkan VVL leg wait for the lead's go-ahead to recreate a cloud Linux VM.
+
+**Start now (no engine build needed)**
+
+- **#229** UE comparison harness: Python with pytest, configs and UE-side observations on the existing comparison binary. It opens the test-prep lane below.
+
+**Start once the #212 build fix lands**
+
+- **RT shadow follow-ups** (code-unblocked by #145, and by #130 for #304): **#302** skinned alpha RT shadows, then **#303** NextGeo alpha RT shadows, in one lane; **#304** `discard` → `ignoreIntersection` in #130's any-hit stages as its own lane. #302 and #304 touch no #212 files. #303 may edit `mesh_storage.cpp` and `virtual_mesh_storage.*`, which #212 changed, so it rebases over any #212 fix and agrees its UV path with #153. All three add cases to the `shadow_policy` fixture, so land them one after another.
+- **#139** light grid: code-unblocked (its only open blocker, #221, is on master) and independent of #212; check its Forward+ and light-storage files against the #212 lane first. #141 follows it.
+- **#129** hit lighting on Vulkan and D3D12: #121 and #130 are on master, while its Metal part waits on #172, which has no code yet. #294 follows it, after a second reader re-checks the archived UE World Cache page (#286's note).
+- **M7 Nanite** (code-unblocked by #150, #155, #162, #178 and #217). They share files with each other and with #212, so run at most two lanes, land them stacked and rebase over any later #212 fix.
+  - **#153** masked/two-sided/custom-UV materials + VSM first, since it unlocks the most; **#161** spline meshes beside it, the node and legacy half first.
+  - Then **#154** mesh-shader HW raster (D3D12 needs gn4) and **#149** pixel depth offset (steps 1 to 3; its VSM step waits until #212 is proven).
+  - Then **#163** tessellation (Experimental, off). Agree its reserved visible-cluster ID range with #165 first.
+
+**Side jobs (fit them into machine gaps)**
+
+- **#283** (no code): run `tier_check` and the smoke scenes on Vulkan and D3D12 on the RTX 4080 SUPER machine, since its criteria name that card.
+- **#123:** a GCC MinGW build fix (locals named `near`/`far` in NextGI files collide with MinGW macros) or a record that MinGW D3D12 is out of scope.
+- **#198:** two plan records. D4: keep the landed design and update the issue's step 3. LQ11: follow UE 5.9 (thin geometry on automatically with Nanite foliage) and record a #151 follow-up.
+
+**After #212 is proven**
+
+- **#216** VSM local lights: it changes the same files as #212, so it follows in the same lane.
+- **#164** WPO + VSM: #212 is a formal blocker, and it lands after #153.
+- Behind them, and not code-unblocked yet: **#160** (also needs #154), **#151** (needs #153 and #164), **#165** (needs #151), **#296** (needs #152 and #160).
+- #149's VSM step, and the GodotNext half of #231's GV-3.
+
+**Waits on the Mac (close-outs: their code is on master)**
+
+- Don't start these as new work.
+  - Build-only closes: #285, #283 (after its RTX 4080 SUPER run) and #274.
+  - Runs: #174 async compute; #275 `attachment_clears` (its Metal hunks have never been compiled); #263 the reference capture and the Q1 tool; #265 legacy SDFGI identity (not on unproven #212 code).
+  - TSR and frame generation: #198, #203 and #105, together with #195, #193, #301 and #210.
+  - **#123** (`673499de5b`): proven on the RTX 4080 SUPER machine and a cloud Windows L4 (boxes 1, 2 and 5 met). It waits on the macOS/Metal check and on the MinGW fix or decision. The code of its direct build dependents (#118, #122, #175, #177, #195) is on master; #125 is a PQ gate and #273 waits on the lead, so its large "unlocks" count overstates the startable work.
+- About 47 open issues in all have code on master waiting mainly on Metal.
+
+**Test prep (MQ)**
+
+- One UE-comparison lane, one task at a time, on the RTX 4080 SUPER machine (UE side) and the GPU-less Linux VM (metrics tests). These issues share the comparison configs, harness runners, exporter, `settings-map.md` and plan §23.5.
+- Order: **#229** harness, **#235** exporter and port fixes, **#230** re-export and calibrate, **#232**'s TSR part, **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. Fold in **#228**: check whether the UE 5.9 final notes are out, and carry plan v3.9.3 (editor game mode) into `settings-map.md`.
+- #233's GodotNext side waits on MegaLights (#142, #143, #146, #135) and on #141; #234's waits on #160, #163 and #151. #199 is a PQ gate behind #225.
 
 ## Waiting on the lead
 
-- **#98 DLSS license sign-off.** It holds the DLSS track, plus #236's UE-side Frame Generation, MFG, Reflex and Nsight.
+- **Cloud machines.** All GodotNext cloud VMs, disks and template snapshots were deleted on 2026-11-20. Recreating the cloud Linux L4 VM (the Linux Vulkan VVL landing leg), the cloud Windows L4 test machine and the cloud T4 is spending, so it needs the lead's go-ahead and a fresh cloud sign-in.
+- **#98 DLSS license sign-off.** It holds the DLSS track (#99, #100, #106, #168's OIDN option, #200, #208), #232's GU-5 rows, #236's UE-side Frame Generation, MFG, Reflex and Nsight, and #229's DLSS plugin read. Its CI box needs CI re-enabled or waived.
 - **Mac runs.** Every Metal build and run waits for the lead (~47 open issues already have code on master waiting mainly on Metal).
-- **AMD test machine.** A cloud Radeon PRO V710 (#280).
-- **RTX PRO 6000 gcloud quota:** the requests are pending, with 0 granted.
+- **Hardware.** #227 RTX 5090 (the RTX PRO 6000 stand-in quota requests are pending, with 0 granted) and #280 AMD Radeon PRO V710.
+- **Sign-offs.** Each UE port's settings record and screenshots (#230 to #236).
 
 ## Known issues and risks
 
