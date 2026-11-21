@@ -10,6 +10,8 @@ The current state of the build and what to do next. It is written for any agent:
 
 **#123 MinGW progress landed on 2026-11-21 (`f989575ed3`).** Eight files fix GCC MinGW's `near`/`far` macro collisions and release-only test assumptions: Vulkan-provider fixtures now live inside their `DEBUG_ENABLED` use, and frame-generation metadata/editor-hint assertions use the feature levels that provide them. A complete GCC 16.2 MinGW release-template build passes; its exact Windows binary passed 2,148 cases on the RTX 4080 SUPER. Native Linux passed 2,209 cases, MSVC 2,233, and repository hooks pass. #123 still waits on the lead's Metal close-out and the existing PQ timing line; #273 publication work is unchanged.
 
+**#235 export and kitbash-port progress landed on 2026-11-21 (`cc84001156`).** The export suite now compares procedural panoramas with actual linear HDR camera renders, including the sun peak, instead of relying only on the CPU formula. The private UE 5.9 importer makes source-triangle, calibrated-bounds and light-pose mismatches fatal; the spot's original transform was already correct and now has readback assertions. The GPU-less Linux VM passed 2,209 doctests and the real export/sky check. The RTX 4080 SUPER passed 2,233 doctests, the full export suite with zero engine/script/validation errors, the real schema-4 import, two negative controls, and High/Detail functional dry runs with warm-ups. Start/middle/end images from both engines were inspected and the private side-by-side report was checked in Chrome. Only the lead's fairness sign-off and PQ remain; no measurement was judged.
+
 ## How to continue
 
 1. Read `AGENTS.md` (the rules) and the project skills in `.agents/skills/`. The skills are plain Markdown and work for any agent:
@@ -66,7 +68,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 
 **Start now (no engine build needed)**
 
-- **#229's zero-cost harness/metrics pass is landed.** Continue its remaining work only when an owner/hardware gate clears. The next test-prep implementation task is **#235** (exporter and port fixes), subject to the current lane authorization.
+- **#229's zero-cost harness/metrics pass is landed.** Continue its remaining work only when an owner/hardware gate clears. **#235's zero-cost export and port pass is also landed (`cc84001156`)**; its fairness sign-off is owner-held. The next test-prep implementation task is **#230**, subject to the current lane authorization.
 
 **Start once the #212 build fix lands**
 
@@ -103,7 +105,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 **Test prep (MQ)**
 
 - One UE-comparison lane, one task at a time, on the RTX 4080 SUPER machine (UE side) and the GPU-less Linux VM (metrics tests). These issues share the comparison configs, harness runners, exporter, `settings-map.md` and plan §23.5.
-- Order after the #229 progress landing: **#235** exporter and port fixes, **#230** re-export and calibrate, **#232**'s TSR part, **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. **#228**: the UE 5.9 notes were still titled Preview when checked on 2026-11-21; plan v3.9.3's editor-game-mode wording is carried into `settings-map.md` by v3.9.18. #229's remaining observations and sign-offs stay in #229.
+- **#235's zero-cost implementation and verification are landed (`cc84001156`)**, including the full export suite, strict UE import, High/Detail dry runs and inspected fairness images. Only its lead sign-off remains. The next test-prep task is **#230** re-export and calibrate, subject to the current lane authorization, then **#232**'s TSR part, **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. **#228**: the UE 5.9 notes were still titled Preview when checked on 2026-11-21; plan v3.9.3's editor-game-mode wording is carried into `settings-map.md` by v3.9.18. #229's remaining observations and sign-offs stay in #229.
 - #233's GodotNext side waits on MegaLights (#142, #143, #146, #135) and on #141; #234's waits on #160, #163 and #151. #199 is a PQ gate behind #225.
 
 ## Waiting on the lead
@@ -113,7 +115,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 - **#98 DLSS license sign-off.** It holds the DLSS track (#99, #100, #106, #168's OIDN option, #200, #208), #232's GU-5 rows, #236's UE-side Frame Generation, MFG, Reflex and Nsight, and #229's DLSS plugin read. Its CI box needs CI re-enabled or waived.
 - **Mac runs.** Every Metal build and run waits for the lead (~47 open issues already have code on master waiting mainly on Metal).
 - **Hardware.** #227 RTX 5090 (the RTX PRO 6000 stand-in quota requests are pending, with 0 granted) and #280 AMD Radeon PRO V710.
-- **Sign-offs.** Each UE port's settings record and screenshots (#230 to #236).
+- **Sign-offs.** Each UE port's settings record and screenshots, including #235 and #230 to #236.
 
 ## Known issues and risks
 
