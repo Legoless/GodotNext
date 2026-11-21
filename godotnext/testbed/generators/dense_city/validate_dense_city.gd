@@ -59,7 +59,7 @@ func _run() -> void:
 	var entry: Dictionary = variants[_variant]
 	_check_output_hashes(entry)
 	match _variant:
-		"virtual", "lod_baseline", "micro_detail":
+		"virtual", "lod_baseline", "micro_detail", "flight", "gv3":
 			_check_city(entry, _variant == "lod_baseline")
 			if _variant == "lod_baseline":
 				_check_baseline_transforms(variants)
@@ -210,16 +210,22 @@ func _check_city(p_entry: Dictionary, p_baseline: bool) -> void:
 	for light_value in found["spot"]:
 		if (light_value as SpotLight3D).shadow_enabled:
 			spot_shadow += 1
-	_check(omni_shadow == 4, "%s: %d shadowed OmniLight3D, expected 4." % [_variant, omni_shadow])
-	_check(spot_shadow == 4, "%s: %d shadowed SpotLight3D, expected 4." % [_variant, spot_shadow])
+	var expected_omni := int(p_entry.get("shadowed_omni_lights", 4))
+	var expected_spot := int(p_entry.get("shadowed_spot_lights", 4))
+	_check(omni_shadow == expected_omni, "%s: %d shadowed OmniLight3D, expected %d." % [_variant, omni_shadow, expected_omni])
+	_check(spot_shadow == expected_spot, "%s: %d shadowed SpotLight3D, expected %d." % [_variant, spot_shadow, expected_spot])
+	_check(omni_shadow + spot_shadow == int(p_entry.get("shadowed_local_lights", 8)),
+			"%s: %d shadowed local lights, expected %d." % [_variant, omni_shadow + spot_shadow, int(p_entry.get("shadowed_local_lights", 8))])
 	var camera_names: Array[String] = []
 	for camera_value in found["cameras"]:
 		camera_names.append(String((camera_value as Camera3D).name))
 	_check(camera_names.has("cam_main") and camera_names.has("cam_aerial"),
 			"%s: cameras %s, expected cam_main and cam_aerial." % [_variant, str(camera_names)])
+	_check(camera_names.has("FlightCam") == bool(p_entry.get("flight_camera", false)),
+			"%s: cameras %s, FlightCam expected=%s." % [_variant, str(camera_names), str(p_entry.get("flight_camera", false))])
 	var paths: Array = found["paths"]
-	_check(paths.size() == 1 and (paths[0] as Path3D).curve.point_count >= 2,
-			"%s: expected one FlightPath Path3D with a curve." % _variant)
+	_check(paths.size() == 1 and (paths[0] as Path3D).curve.point_count == int(p_entry.get("flight_control_points", 8)),
+			"%s: expected one FlightPath with the canonical eight control points." % _variant)
 
 	# Recount geometry from the imported meshes.
 	var unique := {}

@@ -16,10 +16,10 @@ extends SceneTree
 ## camera and every mesh instance are sampled while the harness publishes frame index N for row N
 ## (Harness.drive_frame), the pose a timing run shows at measured row N. A mesh instance that
 ## moves gets a per-frame transform track. A skinned mesh becomes a skeletal mesh with a clip of the
-## bone poses it showed on every row (#230); GridMap cells are placed as drawn. Content the format
-## does not carry yet (moving lights,
-## MultiMeshes or other nodes, unsupported materials, other visual nodes) stops the export
-## instead of being left out. Content the UE import builds only approximately
+## bone poses it showed on every row (#230); GridMap cells are placed as drawn. A directional light
+## with SKY_MODE_LIGHT_ONLY gets a per-frame transform track (#231). Content the format does not
+## carry yet (moving local lights, moving suns that light the sky, MultiMeshes or other nodes,
+## unsupported materials, other visual nodes) stops the export instead of being left out. Content the UE import builds only approximately
 ## (Lib.APPROXIMATIONS) is refused too, unless --approximate names it: scene.json then lists it.
 ## A scene that resets the temporal history (Viewport.reset_temporal_history) does so in its own
 ## script, which the export cannot see: --camera-cuts names those frames, and scene.json carries
@@ -73,6 +73,11 @@ var _row := -1
 var _done := false
 var _track := PackedStringArray()
 var _baseline := {}
+## Directional-light path -> every sampled world transform. Moving lights with a static sky
+## contribution (SKY_MODE_LIGHT_ONLY) become schema-5 transform tracks.
+var _directional_rows := {}
+var _pending_light_tracks: Array = []
+var _moving_lights := 0
 
 # Per-frame sampling (#232), filled from row 0 on. A slot is one MeshInstance3D's world transform
 # (bind -1) or one rigid part of a skinned one (its skin bind).
@@ -296,7 +301,7 @@ func _motion_state() -> Dictionary:
 		var node: Node = stack.pop_back()
 		if node is GeometryInstance3D or node is Light3D or node is GridMap:
 			var key := str(_scene.get_path_to(node))
-			var placed: Variant = null if node is MeshInstance3D else (node as Node3D).global_transform
+			var placed: Variant = null if node is MeshInstance3D or node is DirectionalLight3D else (node as Node3D).global_transform
 			var entry := [placed, (node as Node3D).is_visible_in_tree()]
 			if node is GridMap:
 				var cells: Array = []
@@ -323,7 +328,7 @@ func _motion_error(p_first: Dictionary, p_last: Dictionary) -> String:
 		return "the scene added or removed geometry or lights while the camera path ran; that is not exported yet"
 	for key: String in p_first:
 		if not p_last.has(key) or p_first[key] != p_last[key]:
-			return "%s moved or changed while the camera path ran; only mesh instance transforms are exported as tracks" % key
+			return "%s moved or changed while the camera path ran; only mesh instance and directional-light transforms are exported as tracks" % key
 	return ""
 
 
@@ -342,6 +347,8 @@ func _start_sampling() -> void:
 			var grid := node as GridMap
 			_watched.append([node_3d, path, node_3d.global_transform, node_3d.is_visible_in_tree(), -1.0, [grid.mesh_library, grid.get_meshes()]])
 			continue
+		if node is DirectionalLight3D:
+			_directional_rows[path] = []
 		if node is MeshInstance3D:
 			var instance := node as MeshInstance3D
 			var skeleton: Skeleton3D = null
@@ -363,16 +370,21 @@ func _start_sampling() -> void:
 			_watched.append([node_3d, path, null, node_3d.is_visible_in_tree(), -1.0, null])
 		else:
 			var energy := (node as Light3D).light_energy if node is Light3D else -1.0
+			var initial_transform: Variant = null if node is DirectionalLight3D else node_3d.global_transform
 			var multimesh_state: Variant = null
 			if node is MultiMeshInstance3D and (node as MultiMeshInstance3D).multimesh != null:
 				var multimesh := (node as MultiMeshInstance3D).multimesh
 				multimesh_state = [multimesh, multimesh.buffer, multimesh.visible_instance_count]
-			_watched.append([node_3d, path, node_3d.global_transform, node_3d.is_visible_in_tree(), energy, multimesh_state])
+			_watched.append([node_3d, path, initial_transform, node_3d.is_visible_in_tree(), energy, multimesh_state])
 
 
 ## One row: every mesh instance's world transform (and its rigid parts when skinned), and the
 ## other nodes against row 0.
 func _sample_row() -> void:
+	for path: String in _directional_rows:
+		var light := _scene.get_node_or_null(NodePath(path)) as DirectionalLight3D
+		if light != null:
+			(_directional_rows[path] as Array).append(light.global_transform)
 	var slot := 0
 	for entry: Array in _sampled_nodes:
 		var instance: MeshInstance3D = entry[0]
@@ -415,7 +427,7 @@ func _sample_row() -> void:
 			if multimesh != state[0] or multimesh.visible_instance_count != int(state[2]) or multimesh.buffer != state[1]:
 				changed = true
 		if changed and _motion_errors.is_empty():
-			_motion_errors.append("%s moved or changed at row %d; only mesh instance transforms are exported as tracks" % [entry[1], _row])
+			_motion_errors.append("%s moved or changed at row %d; only mesh instance and directional-light transforms are exported as tracks" % [entry[1], _row])
 
 
 ## Row _row of one slot. Only slots that move keep every row; a still slot keeps its row 0.
@@ -496,6 +508,12 @@ func _export() -> String:
 		entry.erase("png")
 		texture_entries.append(entry)
 	for pending: Array in _pending_tracks:
+		DirAccess.make_dir_recursive_absolute(_out.path_join("tracks"))
+		error = _write_text(String(pending[0]), _track_csv(pending[1]))
+		if not error.is_empty():
+			return error
+		files.append(String(pending[0]))
+	for pending: Array in _pending_light_tracks:
 		DirAccess.make_dir_recursive_absolute(_out.path_join("tracks"))
 		error = _write_text(String(pending[0]), _track_csv(pending[1]))
 		if not error.is_empty():
@@ -610,6 +628,7 @@ func _export() -> String:
 			"rigid_skin_max_error_m": Lib.json_value(_rigid_skin_error),
 			"rigid_skin_vertices_compared": _rigid_skin_compared,
 			"camera_far_rows": _camera_far_rows,
+			"moving_lights": _moving_lights,
 		},
 	}
 	if _camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
@@ -648,6 +667,7 @@ func _export() -> String:
 		"approximations": approximations.map(func(entry: Dictionary) -> String: return String(entry["id"])),
 		"camera_rows": _track.size(),
 		"movers": _movers,
+		"moving_lights": _moving_lights,
 		"files": files.size() + 1,
 	}, "", true))
 	return ""
@@ -1359,11 +1379,31 @@ func _add_light(p_light: Light3D) -> void:
 	elif p_light is AreaLight3D:
 		type = "area"
 	var transform := p_light.global_transform
+	var track: Variant = null
+	if p_light is DirectionalLight3D:
+		var rows: Array = _directional_rows.get(path, [])
+		if rows.size() != _frames:
+			_unsupported.append("directional light %s has %d sampled rows, not %d" % [path, rows.size(), _frames])
+		elif not rows.is_empty():
+			transform = rows[0]
+			var moves := false
+			for row: Transform3D in rows:
+				if row != transform:
+					moves = true
+					break
+			if moves:
+				if (p_light as DirectionalLight3D).sky_mode != DirectionalLight3D.SKY_MODE_LIGHT_ONLY:
+					_unsupported.append("moving directional light %s must use SKY_MODE_LIGHT_ONLY so the exported sky does not go stale" % path)
+				else:
+					track = "tracks/l%04d.csv" % _pending_light_tracks.size()
+					_pending_light_tracks.append([track, rows])
+					_moving_lights += 1
 	var color := p_light.light_color.srgb_to_linear()
 	var entry := {
 		"node": path,
 		"type": type,
 		"transform": Lib.transform_rows(transform),
+		"track": track,
 		"direction": Lib.json_value(-transform.basis.z.normalized()),
 		"color_linear": [color.r, color.g, color.b],
 		"projector": null,

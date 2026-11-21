@@ -10,9 +10,10 @@ extends RefCounted
 ## and particles (approximations). An import written for schema 2 places movers at frame 0 only.
 ## 4 (#230): skinned meshes as skeletal meshes (skinned/<id>.glb with the skeleton, the skin and
 ## one clip per instance keyed on every row, and a per-row bone pose track), GridMap cells, and
-## rigid parts only on request (--approximate=rigid_skin). An import written for schema 3 does not
-## place skeletal instances or GridMap cells.
-const SCHEMA := 4
+## rigid parts only on request (--approximate=rigid_skin). Schema 5 adds directional-light transform
+## tracks; importers without that support must reject them instead of leaving the light static.
+## An import written for schema 3 does not place skeletal instances or GridMap cells.
+const SCHEMA := 5
 ## Numbers per bone in a pose row (pose_row): position xyz, rotation quaternion xyzw, scale xyz.
 const POSE_STRIDE := 10
 const SKY_WIDTH := 512

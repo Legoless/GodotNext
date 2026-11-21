@@ -46,17 +46,18 @@
 #    (cam_main, 60 frames) and check_ue_export.gd on each pair (the 200,000 seeded MultiMesh
 #    placements and masked materials, the heightfield and its tiled noise texture, the 100 walkers
 #    as skeletal instances with their walk-cycle poses).
-# 9. Dense City Blocks (#231): generators/dense_city/dense_city_generator.gd writes the city and its
-#    10M sweep into the gitignored res://generated/dense_city/ (a failed generation fails the step).
-#    The generator also rewrites the tracked generators/dense_city/expected.json from its fragments,
+# 9. Dense City Blocks (#231): the generator writes the city, 10M sweep, canonical flight and GV-3
+#    into the gitignored res://generated/dense_city/ (a failed generation fails the step). The
+#    generator also rewrites the tracked generators/dense_city/expected.json from its fragments,
 #    so the committed file is copied aside first and put back afterwards (also when the script
-#    stops): the check compares against the committed one. --import then imports the kit with its
+#    stops): the check compares against the committed one. --import imports the kit with its
 #    NextGeo virtual geometry. Dense City (cam_main, 60 frames) without --approximate must refuse
-#    and name diffuse_mode (the kit's glTF-imported materials); then two exports each of the city
-#    and the sweep with it, and check_ue_export.gd on each pair (every placement against the
-#    committed transform fingerprint, the kit meshes' triangle counts and virtual geometry).
+#    and name diffuse_mode. Two exports each of the city and sweep check placements, kit triangles
+#    and virtual geometry; two 3,600-row flight exports check every camera pose; two 600-row GV-3
+#    exports each check the 16 local lights, and the storm pair additionally checks every 0.5-degree
+#    sun row and its static-sky mode. Headless runtime checks cover steady and storm behavior.
 # 10. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
-#    still fixture must export; a light that moves and returns, a mesh hidden for one frame, a
+#    still fixture must export; an omni that moves and returns, a mesh hidden for one frame, a
 #    MultiMesh instance and a GridMap cell that move and return must each refuse (exit 1) and name
 #    the node with row 8, the row it changed at (a first-and-last comparison would miss them); a
 #    Skeleton3D beside its skinned mesh, a camera cull mask that hides a placed layer and a bone
@@ -65,8 +66,9 @@
 #    Skin, a bone skin scale, show_rest_only, a disabled bone, a SkeletonModifier3D, an alpha-blended
 #    GridMap item that casts shadows (translucent_shadow), two GridMap items that share a mesh with
 #    different shadow settings, and a 5 m far plane (camera_far), which exports with
-#    --approximate=camera_far. No refused run may write scene.json. Two exports of the still
-#    fixture without rigid_skin go through check_ue_export.gd (its two GridMaps' cells against
+#    --approximate=camera_far. A light-only directional that turns and returns exports its exact track;
+#    the same motion with a sky-lighting directional refuses. No refused run may write scene.json.
+#    Two still fixture exports go through check_ue_export.gd (its two GridMaps' cells against
 #    transforms written out from their settings), and two of mover_far (only the box, a mover,
 #    reaches past a 20 m far plane, on row 8) with camera_far.
 #
@@ -145,7 +147,7 @@ check() {
 	report "check_$name" "$status" 0 "$work/check_$name.log"
 	grep '^GODOTNEXT_RESULT' "$work/check_$name.log" || true
 	case "$scene" in
-		torture | fixture) ;;
+		torture | fixture | fixture_sun) ;;
 		*)
 			status=0
 			"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tests/ue_export/check_ue_export_sky.gd -- \
@@ -305,7 +307,7 @@ check crowd
 # Dense City (#231) is generated, not committed: build the city and its 10M sweep (seeded), put the
 # committed expected.json back, then import the kit (NextGeo virtual geometry).
 cp "$dense_expected" "$work/dense_city_expected.json"
-for variant in virtual sweep_10m; do
+for variant in virtual sweep_10m flight gv3; do
 	status=0
 	"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://generators/dense_city/dense_city_generator.gd -- \
 		--seed=1 --variant="$variant" >"$work/dense_city_generate_$variant.log" 2>&1 || status=$?
@@ -315,6 +317,17 @@ cp "$work/dense_city_expected.json" "$dense_expected"
 status=0
 "$godot" --headless --audio-driver Dummy --path "$testbed_dir" --import >"$work/dense_city_import.log" 2>&1 || status=$?
 report dense_city_import "$status" 0 "$work/dense_city_import.log"
+for mode in steady storm; do
+	status=0
+	extra=()
+	if [[ "$mode" == storm ]]; then
+		extra=(--storm=1)
+	fi
+	"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://tests/dense_city/runtime_check.gd -- \
+		${extra[@]+"${extra[@]}"} >"$work/dense_city_runtime_$mode.log" 2>&1 || status=$?
+	report "dense_city_runtime_$mode" "$status" 0 "$work/dense_city_runtime_$mode.log"
+	grep '^GODOTNEXT_RESULT' "$work/dense_city_runtime_$mode.log" || true
+done
 dense_args=(--scene=res://generated/dense_city/dense_city.tscn --camera=cam_main --warmup=0 --frames=60)
 status=0
 "$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
@@ -328,6 +341,12 @@ export_pair dense_city "${dense_args[@]}" --approximate=diffuse_mode
 check dense_city
 export_pair dense_city_sweep_10m --scene=res://generated/dense_city/dense_city_sweep_10m.tscn --camera=cam_main --warmup=0 --frames=60 --approximate=diffuse_mode
 check dense_city_sweep_10m
+export_pair dense_city_flight --scene=res://generated/dense_city/dense_city_flight.tscn --camera=FlightCam --warmup=0 --frames=3600 --approximate=diffuse_mode
+check dense_city_flight
+export_pair dense_city_gv3 --scene=res://generated/dense_city/dense_city_gv3.tscn --camera=cam_main --warmup=0 --frames=600 --approximate=diffuse_mode
+check dense_city_gv3
+export_pair dense_city_gv3_storm --scene=res://generated/dense_city/dense_city_gv3.tscn --camera=cam_main --warmup=0 --frames=600 --storm=1 --approximate=diffuse_mode
+check dense_city_gv3_storm
 
 fixture_args=(--scene=res://tests/ue_export/motion_fixture.tscn --camera=Camera --warmup=0 --frames=20)
 # One fixture case: its expected exit code, for a refusal the text the log must hold, and the
@@ -356,6 +375,7 @@ fixture_case() {
 fixture_case none 0 ""
 # Each motion case changes on frame 8 and is back on frame 9.
 fixture_case light_returns 1 "Light moved or changed at row 8;"
+fixture_case directional_sky_returns 1 "moving directional light Sun must use SKY_MODE_LIGHT_ONLY"
 fixture_case mesh_blinks 1 "Box moved or changed at row 8;"
 fixture_case multimesh_returns 1 "Rocks moved or changed at row 8;"
 fixture_case gridmap_returns 1 "Grid moved or changed at row 8;"
@@ -389,6 +409,8 @@ fi
 # a cell scale, an item mesh transform and rotated cells) against transforms written out by hand.
 export_pair fixture "${fixture_args[@]}"
 check fixture
+export_pair fixture_sun "${fixture_args[@]}" --case=directional_returns
+check fixture_sun
 # A mover alone reaches past the far plane, on one row: the count follows movers row by row.
 export_pair fixture_far "${fixture_args[@]}" --case=mover_far --approximate=camera_far
 check fixture_far fixture --case=mover_far

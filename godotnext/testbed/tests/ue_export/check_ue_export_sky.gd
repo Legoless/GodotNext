@@ -69,6 +69,10 @@ func _run() -> void:
 	var shell := packed.instantiate()
 	shell.set_meta("skip_runtime", true)
 	get_root().add_child(shell)
+	for light_data: Dictionary in scene_data.get("lights", []):
+		var light := shell.get_node_or_null(NodePath(String(light_data.get("node", "")))) as DirectionalLight3D
+		if light != null:
+			light.sky_mode = int(light_data.get("properties", {}).get("sky_mode", light.sky_mode)) as DirectionalLight3D.SkyMode
 	_hide_geometry(shell)
 	var environment_node := shell.get_node_or_null(NodePath(String(environment_data.get("node", "")))) as WorldEnvironment
 	if environment_node == null or environment_node.environment == null or environment_node.environment.sky == null:

@@ -191,6 +191,7 @@ _TRANSLUCENCY = ("GPU/TranslucentLighting", "GPU/Translucency")
 # need the scene lighting, the screen probe gather and the TLAS build active.
 _LUMEN_QUIET = (*_LUMEN_UPDATE, "GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections")
 _GM_ACTIVE = ("GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/RayTracingScene")
+_GV_ACTIVE = ("GPU/ShadowDepths", "GPU/ShadowProjection")
 _PSO_QUIET = ("PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch")
 _MEGALIGHTS_TOTAL = (
     "GPU/MegaLights",
@@ -262,7 +263,14 @@ def test_every_set_pins_scalability_first_and_echoes_every_pinned_value(path: Pa
         assert config.ue.window_quiet_columns == (*_PSO_QUIET, *_LUMEN_QUIET)
     else:
         assert config.ue.window_quiet_columns == _PSO_QUIET
-    assert config.ue.window_active_columns == (_GM_ACTIVE if config.raw["port_issue"] == 233 else ())
+    expected_active = (
+        _GM_ACTIVE
+        if config.raw["port_issue"] == 233
+        else _GV_ACTIVE
+        if config.name.startswith("dense_city_gv3")
+        else ()
+    )
+    assert config.ue.window_active_columns == expected_active
 
 
 @pytest.mark.parametrize(
@@ -634,6 +642,45 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
     for line in config.lines:
         assert ("accepted on 2026-11-16" in line.reason) == (line.id in tier_lines)
         assert "departs from the settings record" not in line.reason
+
+
+@pytest.mark.parametrize(
+    ("name", "source", "camera", "frames", "map_name"),
+    [
+        ("dense_city_flight_hwrt_high", "dense_city_flight", "FlightCam", 3600, "DenseCityFlight"),
+        ("dense_city_gv3_vsm", "dense_city_gv3", "cam_main", 600, "DenseCityGV3"),
+        ("dense_city_gv3_storm_vsm", "dense_city_gv3", "cam_main", 600, "DenseCityGV3Storm"),
+    ],
+)
+def test_dense_city_flight_and_gv3_configs(name: str, source: str, camera: str, frames: int, map_name: str) -> None:
+    config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
+    assert config.raw["port_issue"] == 231
+    assert config.godotnext.scene == f"res://generated/dense_city/{source}.tscn"
+    assert config.godotnext.camera == camera
+    assert (config.frames, config.ue.path_frames) == (frames, frames)
+    assert config.ue.map == f"/Game/Ports/{map_name}/{map_name}.umap"
+    assert config.godotnext.nextgi is not None
+    assert (config.godotnext.nextgi.tier, config.godotnext.nextgi.quality) == ("HWRT", "HIGH")
+    assert "--nextgi=on" in godotnext_args(config)
+    assert ("--storm=1" in godotnext_args(config)) == (name == "dense_city_gv3_storm_vsm")
+    for group in _DENSE_CITY_SCALABILITY_GROUPS:
+        assert config.ue.checked_cvars()[group] == "2", group
+    if name == "dense_city_flight_hwrt_high":
+        lines = {line.id: line for line in config.lines}
+        assert set(lines) == {"gn2_dense_city_flight", "gn11_dense_city_flight"}
+        assert lines["gn2_dense_city_flight"].gates == ("GN-2",)
+        assert lines["gn11_dense_city_flight"].gates == ("GN-11",)
+        assert lines["gn2_dense_city_flight"].ue is not None
+        assert lines["gn2_dense_city_flight"].ue.columns == ("GPU/NaniteVisBuffer",)
+        assert lines["gn11_dense_city_flight"].ue is not None
+        assert lines["gn11_dense_city_flight"].ue.columns == ("GPU/NaniteBasePass",)
+    else:
+        (line,) = config.lines
+        assert line.gates == ("GV-3",) and line.status == "ue_bar"
+        assert line.godotnext is None and "V1–V5" in line.reason
+        assert line.ue is not None and line.ue.columns == ("GPU/ShadowDepths", "GPU/ShadowProjection")
+        assert config.ue.window_active_columns == ("GPU/ShadowDepths", "GPU/ShadowProjection")
+        assert config.sign_off is None
 
 
 def _readme_job(name: str) -> dict[str, object]:

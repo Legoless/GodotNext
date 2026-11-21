@@ -10,7 +10,9 @@ extends SceneTree
 ## (instanced-triangle scale sweeps), [code]kit[/code] (the multi-material
 ## kit asset alone; [code]--materials=<n>[/code] sets its surface count) and
 ## [code]stress_10m[/code] (one 10M-triangle single-surface mesh as
-## [code].glb[/code] and [code].obj[/code]).
+## [code].glb[/code] and [code].obj[/code]), [code]flight[/code] (the canonical
+## 3,600-frame camera path) and [code]gv3[/code] (16 shadowed local lights;
+## [code]--storm=1[/code] turns its light-only sun 0.5 degrees per frame).
 ##
 ## Seeded and byte-deterministic on one machine: every random draw comes
 ## from a [RandomNumberGenerator] derived from [code]--seed[/code]; there is
@@ -33,10 +35,11 @@ extends SceneTree
 ## instances, so the [code].tscn[/code] stays small and byte-stable.
 
 const Scaffold := preload("res://generators/scaffold.gd")
+const Flight := preload("res://scenes/slow_io_flight/flight.gd")
 
 const EXPECTED_PATH := "res://generators/dense_city/expected.json"
 const CFG_PATH := "res://generators/dense_city/variants.cfg"
-const VARIANTS: Array[String] = ["virtual", "lod_baseline", "sweep_10m", "sweep_100m", "sweep_1b", "kit", "stress_10m", "micro_detail"]
+const VARIANTS: Array[String] = ["virtual", "lod_baseline", "sweep_10m", "sweep_100m", "sweep_1b", "kit", "stress_10m", "micro_detail", "flight", "gv3"]
 ## PN Micro Detail (#148): four times the base Dense City facade triangle
 ## count, i.e. two subdivisions on each axis. Override with
 ## `--subdivide-facades=N` for a heavier or lighter run.
@@ -135,7 +138,7 @@ func _run() -> void:
 	var entry := {}
 	if _failures.is_empty():
 		match _variant:
-			"virtual":
+			"virtual", "flight", "gv3":
 				entry = _variant_virtual()
 			"lod_baseline":
 				entry = _variant_lod_baseline()
@@ -648,13 +651,17 @@ func _transform_fingerprint(p_placements: Array) -> String:
 ## street lights, cameras, flight path, ground) plus one scene instance per
 ## placement under [code]Buildings[/code]. [param p_mesh_paths] maps recipe
 ## index to the [code].glb[/code] res path for this variant.
-func _write_city_scene(p_path: String, p_scene_name: String, p_placements: Array, p_mesh_paths: Array, p_instanced_triangles: int) -> bool:
+func _write_city_scene(p_path: String, p_scene_name: String, p_placements: Array, p_mesh_paths: Array, p_instanced_triangles: int, p_runtime := false, p_gv3 := false) -> bool:
 	var root := Node3D.new()
 	root.name = p_scene_name
 	root.set_meta("seed", _seed)
 	root.set_meta("variant", _variant)
 	root.set_meta("instance_count", p_placements.size())
 	root.set_meta("instanced_triangles", p_instanced_triangles)
+	if p_runtime:
+		root.set_meta("flight", _variant == "flight")
+		root.set_meta("gv3", p_gv3)
+		root.set_script(load("res://generators/dense_city/dense_city_runtime.gd"))
 
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_SKY
@@ -697,6 +704,25 @@ func _write_city_scene(p_path: String, p_scene_name: String, p_placements: Array
 		spot.light_energy = 2.0
 		Scaffold.add_owned(root, spot, root)
 
+	if p_gv3:
+		for i in range(street_x.size()):
+			var omni := OmniLight3D.new()
+			omni.name = "StreetOmni%d" % (i + 4)
+			omni.position = Vector3(street_x[i], 14.0, 84.0 if i % 2 == 0 else -84.0)
+			omni.shadow_enabled = true
+			omni.omni_range = 70.0
+			omni.light_energy = 1.5
+			Scaffold.add_owned(root, omni, root)
+			var spot := SpotLight3D.new()
+			spot.name = "StreetSpot%d" % (i + 4)
+			var spot_pos := Vector3(street_x[i] - 40.0, 16.0, -84.0 if i % 2 == 0 else 84.0)
+			spot.transform = Transform3D(Basis.looking_at((Vector3(street_x[i] + 60.0, 0.0, 0.0) - spot_pos).normalized(), Vector3.UP), spot_pos)
+			spot.shadow_enabled = true
+			spot.spot_range = 120.0
+			spot.spot_angle = 32.0
+			spot.light_energy = 2.0
+			Scaffold.add_owned(root, spot, root)
+
 	var ground_mesh := PlaneMesh.new()
 	ground_mesh.size = Vector2(4200.0, 4200.0)
 	ground_mesh.material = Scaffold.make_constant_material("DenseCityGround", Color(0.16, 0.16, 0.17), 1.0)
@@ -707,14 +733,17 @@ func _write_city_scene(p_path: String, p_scene_name: String, p_placements: Array
 
 	Scaffold.make_camera(root, root, "cam_main", Vector3(-260.0, 2.0, 0.0), Vector3(200.0, 14.0, 0.0), 3000.0, 70.0, true)
 	Scaffold.make_camera(root, root, "cam_aerial", Vector3(-560.0, 430.0, -560.0), Vector3(0.0, 0.0, 0.0), 5000.0, 60.0, false)
+	if p_runtime:
+		var flight_camera := Scaffold.make_camera(root, root, "FlightCam", Flight.camera_transform(0).origin, Flight.camera_transform(8).origin, 5000.0, 70.0, _variant == "flight")
+		flight_camera.transform = Flight.camera_transform(0)
+		(root.get_node("cam_main") as Camera3D).current = _variant != "flight"
 
 	var flight := Path3D.new()
 	flight.name = "FlightPath"
-	var curve := Curve3D.new()
-	for point in [Vector3(-700.0, 22.0, 0.0), Vector3(-260.0, 3.0, 0.0), Vector3(120.0, 18.0, 8.0),
-			Vector3(520.0, 55.0, -30.0), Vector3(760.0, 140.0, -260.0), Vector3(300.0, 260.0, -620.0),
-			Vector3(-320.0, 240.0, -540.0), Vector3(-720.0, 90.0, -180.0)]:
-		curve.add_point(point)
+	var curve := Flight.make_curve() if p_runtime else Curve3D.new()
+	if not p_runtime:
+		for point in Flight.CONTROL_POINTS:
+			curve.add_point(point)
 	flight.curve = curve
 	Scaffold.add_owned(root, flight, root)
 
@@ -872,11 +901,29 @@ func _variant_virtual() -> Dictionary:
 			"virtual: kit has %d triangles, expected at least %d." % [int(kit_stats["triangles"]), int(_cfg["kit_triangles_min"])])
 	_check(int(seams["surfaces_with_seam"]) == int(seams["surfaces"]),
 			"virtual: kit seams on %d of %d surfaces." % [int(seams["surfaces_with_seam"]), int(seams["surfaces"])])
-	if not _write_city_scene(_out + "/dense_city.tscn", "DenseCity", placements, paths, int(counters["instanced_triangles"])):
+	var scene_name := "DenseCity"
+	var scene_file := "dense_city.tscn"
+	if _variant == "flight":
+		scene_name = "DenseCityFlight"
+		scene_file = "dense_city_flight.tscn"
+	elif _variant == "gv3":
+		scene_name = "DenseCityGV3"
+		scene_file = "dense_city_gv3.tscn"
+	if not _write_city_scene(_out + "/" + scene_file, scene_name, placements, paths, int(counters["instanced_triangles"]), _variant in ["flight", "gv3"], _variant == "gv3"):
 		return {}
-	counters["scene"] = "dense_city.tscn"
+	counters["scene"] = scene_file
 	counters["kit_seams"] = seams
 	counters["transform_fingerprint"] = _transform_fingerprint(placements)
+	if _variant in ["flight", "gv3"]:
+		counters["flight_camera"] = true
+		counters["flight_frames"] = Flight.FLIGHT_FRAMES
+		counters["flight_fps"] = Flight.FLIGHT_FPS
+		counters["flight_control_points"] = Flight.CONTROL_POINTS.size()
+		counters["sun_degrees_per_frame"] = 0.5
+	if _variant == "gv3":
+		counters["shadowed_local_lights"] = 16
+		counters["shadowed_omni_lights"] = 8
+		counters["shadowed_spot_lights"] = 8
 	return counters
 
 

@@ -1,0 +1,130 @@
+{
+	"schema": 1,
+	"name": "dense_city_flight_hwrt_high",
+	"title": "Dense City canonical flight with Nanite, NextGI High: GN-2 and GN-11 Stage A+B",
+	"port_issue": 231,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [
+		1920,
+		1080
+	],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 3600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://generated/dense_city/dense_city_flight.tscn",
+		"camera": "FlightCam",
+		"seed": 1,
+		"override": "res://ue_compare/nextgi_hwrt_high.override.cfg",
+		"nextgi": {
+			"tier": "HWRT",
+			"quality": "HIGH"
+		},
+		"harness_args": [],
+		"timeout_minutes": 60
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/DenseCityFlight/DenseCityFlight.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 3600,
+		"fps": 60,
+		"args": [
+			"-dx12",
+			"-sm6"
+		],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.ViewDistanceQuality 2",
+			"sg.AntiAliasingQuality 2",
+			"sg.ShadowQuality 2",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.PostProcessQuality 2",
+			"sg.TextureQuality 2",
+			"sg.EffectsQuality 2",
+			"sg.FoliageQuality 2",
+			"sg.ShadingQuality 2",
+			"sg.LandscapeQuality 2",
+			"r.Lumen.HardwareRayTracing 1",
+			"r.RDG.AsyncCompute 0",
+			"r.Lumen.AsyncCompute 0",
+			"r.TSR.AsyncCompute 0"
+		],
+		"expect_cvars": {
+			"r.Shadow.Virtual.Enable": "1",
+			"r.RayTracing.Nanite.Mode": "0"
+		},
+		"window_quiet_columns": [
+			"PSO/PSOMisses",
+			"PSO/PSOComputeMisses",
+			"PSO/GraphicsPSOHitch",
+			"PSO/ComputePSOHitch"
+		],
+		"ok_exit_codes": [
+			0
+		],
+		"timeout_minutes": 60
+	},
+	"lines": [
+		{
+			"id": "gn2_dense_city_flight",
+			"name": "GN-2 Dense City canonical flight: NextGeo cull + Hi-Z + visibility against Nanite raster and cull",
+			"gates": [
+				"GN-2"
+			],
+			"status": "ue_bar",
+			"reason": "Provisional groups on both sides (plan \u00a723.5 names neither column). GodotNext: the main view's NextGeo passes from the instance cull through the second raster pass, each column running from its timestamp to the next one (the resolve classification starts after the second raster pass). UE: GPU/NaniteVisBuffer, the Nanite column whose name says it draws the visibility buffer, the raster and cull of the main view in these captures; the HZB the frame builds afterwards is a separate column (GPU/HZB), and Nanite's virtual shadow map raster runs inside GPU/ShadowDepths. Whether UE's group takes the HZB as GodotNext's takes its Hi-Z waits for the lead; the settings record names the final columns. The UE import leaves the ground plane (2 triangles, without NextGeo virtual geometry in the export) off Nanite, as GodotNext draws it outside NextGeo, so neither side's group holds the ground. Plan \u00a723.4 (v3.9.7) says port meshes get Nanite in UE even where the GodotNext content leaves NextGeo off; whether that covers the ground of a scene whose other meshes are NextGeo waits for the lead.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": {
+				"columns": [
+					"nextgeo_instance_cull_ms",
+					"nextgeo_bvh_ms",
+					"nextgeo_cluster_cull_ms",
+					"nextgeo_raster_p1_ms",
+					"nextgeo_hiz_ms",
+					"nextgeo_phase2_cull_ms",
+					"nextgeo_raster_p2_ms"
+				]
+			},
+			"ue": {
+				"group": "Nanite raster and cull (provisional)",
+				"columns": [
+					"GPU/NaniteVisBuffer"
+				]
+			}
+		},
+		{
+			"id": "gn11_dense_city_flight",
+			"name": "GN-11 Dense City canonical flight: Stage A + Stage B against Nanite shading",
+			"gates": [
+				"GN-11"
+			],
+			"status": "ue_bar",
+			"reason": "Provisional groups on both sides (plan \u00a723.5 names neither column). GodotNext: the Stage A and Stage B resolve columns, without the resolve classification (binning, report-only line N3); the compute shading bins (#158) are not built, so the resolve draws 8x8 tile quads per material bucket. UE: GPU/NaniteBasePass, Nanite's material shading in these captures. The settings record names the final columns. The UE import leaves the ground plane (2 triangles, without NextGeo virtual geometry in the export) off Nanite, as GodotNext draws it outside NextGeo, so neither side's group holds the ground. Plan \u00a723.4 (v3.9.7) says port meshes get Nanite in UE even where the GodotNext content leaves NextGeo off; whether that covers the ground of a scene whose other meshes are NextGeo waits for the lead.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": {
+				"columns": [
+					"nextgeo_stage_a_ms",
+					"nextgeo_stage_b_ms"
+				]
+			},
+			"ue": {
+				"group": "Nanite shading (provisional)",
+				"columns": [
+					"GPU/NaniteBasePass"
+				]
+			}
+		}
+	]
+}

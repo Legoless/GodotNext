@@ -7,7 +7,9 @@ extends Node3D
 ## --approximate=rigid_skin (the triangle as a rigid part) or without it (as a skeletal mesh).
 ## --case=<name> breaks one thing:
 ##
-##   light_returns      the light moves away on frame 8 and is back on frame 9
+##   light_returns      the omni moves away on frame 8 and is back on frame 9; refused
+##   directional_returns  a light-only directional turns on frame 8 and is back on frame 9; exported
+##   directional_sky_returns  the same motion with a sky-lighting sun; refused to avoid a stale sky
 ##   mesh_blinks        the box is hidden on frame 8 only
 ##   multimesh_returns  one MultiMesh instance moves on frame 8 and is back on frame 9
 ##   gridmap_returns    one GridMap cell moves on frame 8 and is back on frame 9
@@ -38,6 +40,7 @@ var _local_frame := 0
 var _saw := false
 var _perturbed := false
 var _light: OmniLight3D
+var _directional: DirectionalLight3D
 var _box: MeshInstance3D
 var _rocks: MultiMeshInstance3D
 var _rock_transform := Transform3D()
@@ -202,6 +205,12 @@ func _init() -> void:
 	skinned.skeleton = NodePath("../Skeleton")
 	add_child(skinned)
 
+	if _case in ["directional_returns", "directional_sky_returns"]:
+		_directional = DirectionalLight3D.new()
+		_directional.name = "Sun"
+		_directional.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY if _case == "directional_returns" else DirectionalLight3D.SKY_MODE_LIGHT_AND_SKY
+		add_child(_directional)
+
 
 func _process(_delta: float) -> void:
 	var stepped: Dictionary = SceneArgs.step_frame(self, _local_frame, _saw, -1)
@@ -214,6 +223,8 @@ func _process(_delta: float) -> void:
 	match _case:
 		"light_returns":
 			_light.position = Vector3(3.0, 2.0, 2.0) if perturb else Vector3(2.0, 2.0, 2.0)
+		"directional_returns", "directional_sky_returns":
+			_directional.basis = Basis(Vector3.UP, 0.5) if perturb else Basis.IDENTITY
 		"mesh_blinks":
 			_box.visible = not perturb
 		"mover_far":

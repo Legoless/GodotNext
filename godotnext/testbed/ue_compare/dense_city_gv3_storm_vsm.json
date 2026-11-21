@@ -1,0 +1,104 @@
+{
+	"schema": 1,
+	"name": "dense_city_gv3_storm_vsm",
+	"title": "GV-3 Dense City time-of-day storm: 16 local lights and a 0.5-degree-per-frame sun",
+	"port_issue": 231,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [
+		1920,
+		1080
+	],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://generated/dense_city/dense_city_gv3.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"override": "res://ue_compare/nextgi_hwrt_high.override.cfg",
+		"nextgi": {
+			"tier": "HWRT",
+			"quality": "HIGH"
+		},
+		"harness_args": [
+			"--storm=1"
+		],
+		"timeout_minutes": 60
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/DenseCityGV3Storm/DenseCityGV3Storm.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 600,
+		"fps": 60,
+		"args": [
+			"-dx12",
+			"-sm6"
+		],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.ViewDistanceQuality 2",
+			"sg.AntiAliasingQuality 2",
+			"sg.ShadowQuality 2",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.PostProcessQuality 2",
+			"sg.TextureQuality 2",
+			"sg.EffectsQuality 2",
+			"sg.FoliageQuality 2",
+			"sg.ShadingQuality 2",
+			"sg.LandscapeQuality 2",
+			"r.Lumen.HardwareRayTracing 1",
+			"r.RDG.AsyncCompute 0",
+			"r.Lumen.AsyncCompute 0",
+			"r.TSR.AsyncCompute 0"
+		],
+		"expect_cvars": {
+			"r.Shadow.Virtual.Enable": "1",
+			"r.RayTracing.Nanite.Mode": "0"
+		},
+		"window_quiet_columns": [
+			"PSO/PSOMisses",
+			"PSO/PSOComputeMisses",
+			"PSO/GraphicsPSOHitch",
+			"PSO/ComputePSOHitch"
+		],
+		"ok_exit_codes": [
+			0
+		],
+		"timeout_minutes": 60,
+		"window_active_columns": [
+			"GPU/ShadowDepths",
+			"GPU/ShadowProjection"
+		]
+	},
+	"lines": [
+		{
+			"id": "gv3_vsm_storm_unbudgeted",
+			"name": "GV-3 VSM total, time-of-day storm, unbudgeted",
+			"gates": [
+				"GV-3"
+			],
+			"status": "ue_bar",
+			"reason": "The UE group is the settings record's observed Virtual Shadow Maps total, GPU/ShadowDepths + GPU/ShadowProjection. GodotNext's V1\u2013V5 column group is not defined in the harness yet, so this build-time port run is functional evidence, not a judged GV-3 result. The 16-local-light scene and its Level Sequence are the same on both sides; PQ supplies the GodotNext group and any budget-specific run settings before judging the line. The exported light-only sun track rotates exactly 0.5 degrees per row while the static sky panorama stays fixed.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": {
+				"group": "Virtual Shadow Maps",
+				"columns": [
+					"GPU/ShadowDepths",
+					"GPU/ShadowProjection"
+				]
+			}
+		}
+	]
+}
