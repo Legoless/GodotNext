@@ -4452,10 +4452,10 @@ TEST_CASE("[NextGI][Lite] A set with no room at its level takes a coarser page i
 	}
 	relight.release_instance(lite_test_instance(5));
 	const NextGICard big[4] = { lite_test_card(256), lite_test_card(256), lite_test_card(256), lite_test_card(256) };
-	NextGIInstanceRecord far;
-	far.card_set = 300;
-	far.tlas_index = 300;
-	REQUIRE((relight.assign_card_pages(lite_test_instance(300), far, UINT32_MAX, 1200, big, 4, pi * 0.5f) & 0x80000000u) == 0);
+	NextGIInstanceRecord far_record;
+	far_record.card_set = 300;
+	far_record.tlas_index = 300;
+	REQUIRE((relight.assign_card_pages(lite_test_instance(300), far_record, UINT32_MAX, 1200, big, 4, pi * 0.5f) & 0x80000000u) == 0);
 	LocalVector<uint32_t> current;
 	relight.collect_current_page_sets(current);
 	bool found = false;
@@ -4606,10 +4606,10 @@ TEST_CASE("[NextGI][Lite] SRC placement demotes before it evicts, and a set that
 	CHECK_EQ(relight.get_page_set_count(), 128u);
 	// A nearer set: a demotion frees three quarters of a set, so two demotions make room and
 	// nothing is evicted.
-	NextGIInstanceRecord near;
-	near.card_set = 201;
-	near.tlas_index = 201;
-	CHECK((relight.assign_card_pages(lite_test_instance(201), near, UINT32_MAX, 804, cards, 4, pi) & 0x80000000u) == 0);
+	NextGIInstanceRecord near_record;
+	near_record.card_set = 201;
+	near_record.tlas_index = 201;
+	CHECK((relight.assign_card_pages(lite_test_instance(201), near_record, UINT32_MAX, 804, cards, 4, pi) & 0x80000000u) == 0);
 	Dictionary info;
 	relight.fill_info(info);
 	CHECK_EQ(int64_t(info["src_page_demotions"]), 2);

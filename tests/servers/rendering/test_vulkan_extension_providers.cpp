@@ -608,11 +608,8 @@ TEST_CASE("[Upscalers][VkProviders] A message about a GodotNext handle reaches n
 
 	const VkDebugUtilsObjectNameInfoEXT foreign_objects[2] = { make_object(VK_OBJECT_TYPE_DEVICE, shared_handle), make_object(VK_OBJECT_TYPE_IMAGE, foreign_image) };
 	const VkDebugUtilsObjectNameInfoEXT godot_objects[3] = { make_object(VK_OBJECT_TYPE_DEVICE, shared_handle), make_object(VK_OBJECT_TYPE_IMAGE, foreign_image), make_object(VK_OBJECT_TYPE_IMAGE, godot_image) };
-	const VkDebugUtilsObjectNameInfoEXT shared_objects[5] = { make_object(VK_OBJECT_TYPE_INSTANCE, shared_handle), make_object(VK_OBJECT_TYPE_PHYSICAL_DEVICE, shared_handle), make_object(VK_OBJECT_TYPE_DEVICE, shared_handle), make_object(VK_OBJECT_TYPE_QUEUE, shared_handle), make_object(VK_OBJECT_TYPE_COMMAND_BUFFER, shared_handle) };
 	const VkDebugUtilsMessengerCallbackDataEXT foreign_message = make_message(foreign_objects, 2);
 	const VkDebugUtilsMessengerCallbackDataEXT godot_message = make_message(godot_objects, 3);
-	const VkDebugUtilsMessengerCallbackDataEXT shared_message = make_message(shared_objects, 5);
-	const VkDebugUtilsMessengerCallbackDataEXT no_object_message = make_message(nullptr, 0);
 
 	String provider_name;
 	// With no provider, nothing is allowlisted.
@@ -629,6 +626,9 @@ TEST_CASE("[Upscalers][VkProviders] A message about a GodotNext handle reaches n
 
 #ifdef DEBUG_ENABLED
 	{
+		const VkDebugUtilsObjectNameInfoEXT shared_objects[5] = { make_object(VK_OBJECT_TYPE_INSTANCE, shared_handle), make_object(VK_OBJECT_TYPE_PHYSICAL_DEVICE, shared_handle), make_object(VK_OBJECT_TYPE_DEVICE, shared_handle), make_object(VK_OBJECT_TYPE_QUEUE, shared_handle), make_object(VK_OBJECT_TYPE_COMMAND_BUFFER, shared_handle) };
+		const VkDebugUtilsMessengerCallbackDataEXT shared_message = make_message(shared_objects, 5);
+		const VkDebugUtilsMessengerCallbackDataEXT no_object_message = make_message(nullptr, 0);
 		// The registry of a device driver that created one image and, as the tracked handle of
 		// another type, a value that messages also carry as the device.
 		VulkanCreatedHandles created_handles;

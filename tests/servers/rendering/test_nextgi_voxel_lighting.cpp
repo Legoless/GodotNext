@@ -1348,15 +1348,15 @@ TEST_CASE("[NextGI] Voxel lighting fills a new volume nearest the camera first")
 	const MeshSDFData box = _unit_box_sdf();
 	const Vector3 camera;
 	// Listed far first, which is the instance order the queue used to keep.
-	const NextGIVoxelLighting::TraceInstance far = _instance(&box, 1, Transform3D(Basis(), Vector3(40.0f, 0.0f, 0.0f)));
-	const NextGIVoxelLighting::TraceInstance near = _instance(&box, 2, Transform3D());
+	const NextGIVoxelLighting::TraceInstance far_instance = _instance(&box, 1, Transform3D(Basis(), Vector3(40.0f, 0.0f, 0.0f)));
+	const NextGIVoxelLighting::TraceInstance near_instance = _instance(&box, 2, Transform3D());
 	NextGIVoxelLighting::InstanceBounds bounds[2];
 	bounds[0].mesh = 1;
 	bounds[0].field = &box;
-	bounds[0].world_aabb = far.world_aabb;
+	bounds[0].world_aabb = far_instance.world_aabb;
 	bounds[1].mesh = 2;
 	bounds[1].field = &box;
-	bounds[1].world_aabb = near.world_aabb;
+	bounds[1].world_aabb = near_instance.world_aabb;
 
 	NextGIVoxelLighting lighting;
 	lighting.set_clipmap_origins_from_camera(camera);
@@ -1390,7 +1390,7 @@ TEST_CASE("[NextGI] Voxel lighting fills a new volume nearest the camera first")
 	REQUIRE(last_near >= 0);
 	REQUIRE(first_far > last_near);
 
-	NextGIVoxelLighting::TraceInstance traces[2] = { far, near };
+	NextGIVoxelLighting::TraceInstance traces[2] = { far_instance, near_instance };
 	const uint32_t rays = lighting.retrace(traces, 2);
 	const uint32_t brick_rays = NextGIVoxelLighting::SDF_BRICK_VOXELS * NextGIVoxelLighting::SDF_BRICK_VOXELS * NextGIVoxelLighting::SDF_BRICK_VOXELS * NextGIVoxelLighting::DIRECTIONS;
 	CHECK_EQ(rays, NextGIVoxelLighting::RAYS_PER_FRAME);

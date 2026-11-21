@@ -2203,12 +2203,12 @@ TEST_CASE("[VSM] Clipmap lookups fall back only inside each mip's window") {
 	table[VSM::entry_index(0, 1, 16, 0)] = near_entry;
 	// The near edge, absolute mip 0 page -31: not resident at mip 0, so mip 1's page -16 answers.
 	const Vector2i near_texel(-31 * 64 + 10, 5);
-	VSM::LookupResult near = VSM::lookup_clipmap(table.ptr(), maps, 0, origin, near_texel, 0);
-	CHECK(near.valid);
-	CHECK(near.mip == 1);
-	CHECK(near.entry == near_entry);
-	CHECK(near.texel_x == 9 * 64 + 37); // floor(-1974 / 2) = -987, which is 37 modulo 64.
-	CHECK(near.texel_y == 4 * 64 + 2);
+	VSM::LookupResult near_result = VSM::lookup_clipmap(table.ptr(), maps, 0, origin, near_texel, 0);
+	CHECK(near_result.valid);
+	CHECK(near_result.mip == 1);
+	CHECK(near_result.entry == near_entry);
+	CHECK(near_result.texel_x == 9 * 64 + 37); // floor(-1974 / 2) = -987, which is 37 modulo 64.
+	CHECK(near_result.texel_y == 4 * 64 + 2);
 	// The far edge, absolute mip 0 page 32: inside the level, but its mip 1 page 16 is outside the
 	// mip 1 window and shares slot 16 with page -16, 4 m away. The clipmap lookup misses; the plain
 	// lookup on the wrapped texel would return the near edge's texel.

@@ -62,7 +62,7 @@ uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint3
 		return 0;
 	}
 	LocalVector<uint32_t> dirty;
-	LocalVector<uint32_t> near;
+	LocalVector<uint32_t> near_pages;
 	LocalVector<uint32_t> rest;
 	LocalVector<uint32_t> far_rest;
 	for (uint32_t i = 0; i < p_count; i++) {
@@ -71,7 +71,7 @@ uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint3
 		} else if (p_pages[i].dirty_direct) {
 			dirty.push_back(i);
 		} else if (p_pages[i].near_dirty) {
-			near.push_back(i);
+			near_pages.push_back(i);
 		} else {
 			rest.push_back(i);
 		}
@@ -89,8 +89,8 @@ uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint3
 		bool operator()(uint32_t p_a, uint32_t p_b) const { return pages[p_a].last_relit_frame < pages[p_b].last_relit_frame; }
 	} by_age;
 	by_age.pages = p_pages;
-	if (near.size() > 1) {
-		std::sort(near.ptr(), near.ptr() + near.size(), by_age);
+	if (near_pages.size() > 1) {
+		std::sort(near_pages.ptr(), near_pages.ptr() + near_pages.size(), by_age);
 	}
 	if (rest.size() > 1) {
 		std::sort(rest.ptr(), rest.ptr() + rest.size(), by_age);
@@ -133,7 +133,7 @@ uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint3
 			return scheduled;
 		}
 	}
-	for (uint32_t index : near) {
+	for (uint32_t index : near_pages) {
 		if (near_taken >= near_limit) {
 			break;
 		}

@@ -1687,12 +1687,12 @@ void NextGISWRTTrace::fixture_segments(const LocalVector<AABB> &p_boxes, uint32_
 			continue;
 		}
 		bool crosses = false;
-		bool near = false;
+		bool near_surface = false;
 		for (const AABB &box : p_boxes) {
 			crosses = crosses || box.grow(-FIXTURE_CORE_INSET).intersects_segment(from, to);
-			near = near || box.grow(FIXTURE_CLEARANCE).intersects_segment(from, to);
+			near_surface = near_surface || box.grow(FIXTURE_CLEARANCE).intersects_segment(from, to);
 		}
-		if (!crosses && near) {
+		if (!crosses && near_surface) {
 			continue; // Grazes a box: ambiguous within the surface band.
 		}
 		const uint32_t kind = crosses ? 1 : 0;

@@ -309,6 +309,7 @@ TEST_CASE("[FrameGeneration] Virtuals dispatch through the GDVIRTUAL path and fa
 	plain->on_present(inputs.ptr(), true);
 	plain->reset();
 
+#ifdef DEBUG_ENABLED
 	List<MethodInfo> virtuals;
 	ClassDB::get_virtual_methods("FrameGenerationExtension", &virtuals, true);
 	for (const char *method : { "_get_name", "_is_available", "_set_mode", "_on_frame_inputs", "_on_present", "_reset" }) {
@@ -318,6 +319,7 @@ TEST_CASE("[FrameGeneration] Virtuals dispatch through the GDVIRTUAL path and fa
 		}
 		CHECK_MESSAGE(found, method);
 	}
+#endif
 }
 
 TEST_CASE("[FrameGeneration] Inputs carry the HUD-less colour, the UI layer, depth, velocity and the camera") {
@@ -592,6 +594,7 @@ TEST_CASE("[FrameGeneration] Main window of a game only: the editor, XR, seconda
 		CHECK_EQ(log.lines_naming("NOT_MAIN_WINDOW"), 0);
 	}
 
+#ifdef TOOLS_ENABLED
 	// read_context() takes the editor hint from the engine.
 	const bool was_editor = Engine::get_singleton()->is_editor_hint();
 	Engine::get_singleton()->set_editor_hint(true);
@@ -599,6 +602,7 @@ TEST_CASE("[FrameGeneration] Main window of a game only: the editor, XR, seconda
 	Engine::get_singleton()->set_editor_hint(false);
 	CHECK_FALSE(FrameGenerationRegistry::read_context().editor);
 	Engine::get_singleton()->set_editor_hint(was_editor);
+#endif
 
 	// Which viewports split their frame.
 	CHECK(FrameGenerationRegistry::is_viewport_eligible(DisplayServerEnums::MAIN_WINDOW_ID, false, 1, false));

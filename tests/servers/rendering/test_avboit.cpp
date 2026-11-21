@@ -75,22 +75,22 @@ float _sorted(const Layer *p_layers, int p_count, float p_background) {
 // The AVBOIT passes on one cell with every layer covering it, drawn in p_order: the bounds and
 // occlusion pre-passes, the composite's blend and the resolve, as the shaders and blend states do.
 float _avboit(const Layer *p_layers, int p_count, const int *p_order, float p_background) {
-	float near = AVBOITRD::BOUNDS_CLEAR_NEAR;
-	float far = 0.0f;
+	float nearest = AVBOITRD::BOUNDS_CLEAR_NEAR;
+	float farthest = 0.0f;
 	for (int i = 0; i < p_count; i++) {
-		near = MIN(near, p_layers[p_order[i]].depth);
-		far = MAX(far, p_layers[p_order[i]].depth);
+		nearest = MIN(nearest, p_layers[p_order[i]].depth);
+		farthest = MAX(farthest, p_layers[p_order[i]].depth);
 	}
 	float slices[AVBOITRD::SLICES] = {};
 	for (int i = 0; i < p_count; i++) {
 		const Layer &layer = p_layers[p_order[i]];
-		slices[AVBOITRD::slice(layer.depth, near, far)] += AVBOITRD::optical_depth(layer.alpha);
+		slices[AVBOITRD::slice(layer.depth, nearest, farthest)] += AVBOITRD::optical_depth(layer.alpha);
 	}
 	float sum = 0.0f;
 	float coverage = 0.0f;
 	for (int i = 0; i < p_count; i++) {
 		const Layer &layer = p_layers[p_order[i]];
-		const float t = AVBOITRD::transmittance_front(slices, near, far, layer.depth, AVBOITRD::optical_depth(layer.alpha));
+		const float t = AVBOITRD::transmittance_front(slices, nearest, farthest, layer.depth, AVBOITRD::optical_depth(layer.alpha));
 		sum += layer.color * layer.alpha * t;
 		coverage = layer.alpha + coverage * (1.0f - layer.alpha);
 	}
