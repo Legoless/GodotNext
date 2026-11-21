@@ -6,6 +6,8 @@ The current state of the build and what to do next. It is written for any agent:
 
 **#212 build fix landed on 2026-11-21 (`7739b79509`).** Master now builds with `dev_mode` on the GPU-less Linux VM and the RTX 4080 SUPER machine. Linux ran the full doctests (2,209 cases) and a clean `--doctool` round trip; Windows ran the targeted VSM tests (63 cases). The fix declares `InstanceGeometryData` before its VSM use, updates the NextGeo counter-layout assertion to 112 bytes and aligns the cache-invalidation API documentation. This is build-fix progress only: #212's behavioral, counter, GPU and Metal criteria remain open.
 
+**#229 harness progress landed on 2026-11-21 (`52c6a497e8`, plan v3.9.18).** The comparison runner now checks GodotNext's adapter, debug state and source-tree identity, records UE metadata and per-run resolved columns, refuses missing quiet columns, and cleans up owned processes, clocks and overrides on timeout. The GS-9 Detail Tracing config is added. The GPU-less Linux VM passed 402 metrics tests and all 22 config checks; the RTX 4080 SUPER passed real interleaved kitbash High and Detail Tracing dry runs plus controlled timeout probes. The settings record and plan now carry the observed UE 5.9 columns, defaults and game-mode coverage. #229 stays open: GM-3's RT-shadow grouping needs an owner decision, DLSS waits for #98, and other hardware, release-export and sign-off criteria remain.
+
 ## How to continue
 
 1. Read `AGENTS.md` (the rules) and the project skills in `.agents/skills/`. The skills are plain Markdown and work for any agent:
@@ -29,7 +31,7 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.17.
+- Master: see `git log`. Plan v3.9.18.
 - Landed on 2026-11-20:
   - **#298 closed (`96a9a204c5`)**: fixed upstream `EditorHelp` shutdown race (`EditorHelp::doc_cleaned`, thread handoff sync, guarded deferred callbacks, clearing `EditorFileSystem::singleton`), added 4 doctests and a 20-run cross-platform `test_headless_import.py` regression check; verified 20/20 imports + 0 warnings + full doctests + Vulkan VVL 1.4 / D3D12+GBV smoke on the cloud Linux L4 VM and cloud Windows L4 test machine (`25.3.1-gn4`).
   - **#297 closed (plan v3.9.17)**: counterbalanced 15×15 interleaved AB/BA runs on the cloud Windows L4 test machine (D3D12 + Vulkan, 1920×1080, `--gpu-validation`, NextGI off, VSM off) and a static audit across `b6596def89..953e76ffe0` proved legacy SDFGI's bimodal ±1 binary16 ULP variation is ordinary upstream GPU non-determinism (Fisher `p = 1.0000` D3D12, `p = 0.6999` Vulkan; bit-exact cross-tree EXRs in both clusters; zero engine code changes); recorded baselines and the interleaved AB/BA `max_ulp <= 1` rule in plan §22.2.
@@ -48,7 +50,7 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## Open work from the closed lanes
 
-All Linux Vulkan (VVL 1.4 / 1.4.363.1 syncval) and Windows Vulkan/D3D12/D3D12-GBV verification and code-review items for Stack 2 (`#145`, `#158`, `#221`, `#222`, `#295`) and today's earlier 2026-11-20 batch (`#150`, `#217`, `#305`, `#301`, plus closed `#298` and `#297`) are complete on `master` (`1c738bdcf7`). The open issues from both batches wait only on Metal / M5 Max builds and runs (plus PQ lines). #212's code builds on `master` after `7739b79509`; its next lane must add the required behavioral tests and prove the counter and GPU acceptance criteria before it can close. The #229 harness lane is in progress on the existing machines. No cloud VM, boot disk or template snapshot has been created; all GodotNext cloud resources remain deleted.
+All Linux Vulkan (VVL 1.4 / 1.4.363.1 syncval) and Windows Vulkan/D3D12/D3D12-GBV verification and code-review items for Stack 2 (`#145`, `#158`, `#221`, `#222`, `#295`) and today's earlier 2026-11-20 batch (`#150`, `#217`, `#305`, `#301`, plus closed `#298` and `#297`) are complete on `master` (`1c738bdcf7`). The open issues from both batches wait only on Metal / M5 Max builds and runs (plus PQ lines). #212's code builds on `master` after `7739b79509`; its next lane must add the required behavioral tests and prove the counter and GPU acceptance criteria before it can close. The authorized #229 harness/metrics pass has landed (`52c6a497e8`) and no lane is running. No cloud VM, boot disk or template snapshot has been created; all GodotNext cloud resources remain deleted.
 
 ## Ready to start (phase order)
 
@@ -62,7 +64,7 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 
 **Start now (no engine build needed)**
 
-- **#229** UE comparison harness: Python with pytest, configs and UE-side observations on the existing comparison binary. It opens the test-prep lane below.
+- **#229's zero-cost harness/metrics pass is landed.** Continue its remaining work only when an owner/hardware gate clears. The next test-prep implementation task is **#235** (exporter and port fixes), subject to the current lane authorization.
 
 **Start once the #212 build fix lands**
 
@@ -99,11 +101,12 @@ Every issue below has a macOS/Metal criterion, so it lands as progress until the
 **Test prep (MQ)**
 
 - One UE-comparison lane, one task at a time, on the RTX 4080 SUPER machine (UE side) and the GPU-less Linux VM (metrics tests). These issues share the comparison configs, harness runners, exporter, `settings-map.md` and plan §23.5.
-- Order: **#229** harness, **#235** exporter and port fixes, **#230** re-export and calibrate, **#232**'s TSR part, **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. Fold in **#228**: check whether the UE 5.9 final notes are out, and carry plan v3.9.3 (editor game mode) into `settings-map.md`.
+- Order after the #229 progress landing: **#235** exporter and port fixes, **#230** re-export and calibrate, **#232**'s TSR part, **#231** without GV-3, the UE-side items of **#233** and **#234**, then **#236**'s PresentMon diagnosis. **#228**: the UE 5.9 notes were still titled Preview when checked on 2026-11-21; plan v3.9.3's editor-game-mode wording is carried into `settings-map.md` by v3.9.18. #229's remaining observations and sign-offs stay in #229.
 - #233's GodotNext side waits on MegaLights (#142, #143, #146, #135) and on #141; #234's waits on #160, #163 and #151. #199 is a PQ gate behind #225.
 
 ## Waiting on the lead
 
+- **#229 GM-3 comparison group.** The RT Shadow Yard capture has `GPU/Lights` and `GPU/ShadowsDenoiser`, but no isolated RT-shadow total; `GPU/Lights` also includes direct lighting. The owner must choose the like-for-like group. GM-3 keeps its UE bar and is not silently report-only.
 - **Cloud machines.** All GodotNext cloud VMs, disks and template snapshots were deleted on 2026-11-20. Recreating the cloud Linux L4 VM (the Linux Vulkan VVL landing leg), the cloud Windows L4 test machine and the cloud T4 is spending, so it needs the lead's go-ahead and a fresh cloud sign-in.
 - **#98 DLSS license sign-off.** It holds the DLSS track (#99, #100, #106, #168's OIDN option, #200, #208), #232's GU-5 rows, #236's UE-side Frame Generation, MFG, Reflex and Nsight, and #229's DLSS plugin read. Its CI box needs CI re-enabled or waived.
 - **Mac runs.** Every Metal build and run waits for the lead (~47 open issues already have code on master waiting mainly on Metal).
