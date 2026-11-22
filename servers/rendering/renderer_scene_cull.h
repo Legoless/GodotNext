@@ -401,6 +401,7 @@ public:
 		HashSet<Instance *> vsm_dynamic_instances;
 		LocalVector<RendererSceneRender::RenderVSMInvalidation> vsm_invalidations_writing;
 		LocalVector<RendererSceneRender::RenderVSMInvalidation> vsm_invalidations_published;
+		bool vsm_invalidations_applied = false; // A page-marking view applied vsm_invalidation_epoch.
 
 		PagedArray<InstanceBounds> instance_aabbs;
 		PagedArray<InstanceData> instance_data;
@@ -429,10 +430,14 @@ public:
 	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
 	struct InstanceGeometryData;
 	mutable uint64_t vsm_invalidation_epoch_counter = 0;
-	bool _light_uses_vsm(const Instance *p_light_instance) const;
 	void _vsm_emit_invalidation(Scenario *p_scenario, const AABB &p_aabb, uint32_t p_layer_mask, uint32_t p_dirty_flags) const;
 	uint32_t _vsm_classify_instance(const Instance *p_instance, const InstanceGeometryData *p_geom, uint64_t p_frame) const;
 	void _vsm_sync_instance(Instance *p_instance, Scenario *p_scenario, bool p_removing, bool p_force_static_dirty = false, const Transform3D *p_transform = nullptr, const AABB *p_world_aabb = nullptr) const;
+	void _vsm_emit_cached_bounds(Scenario *p_scenario, const InstanceGeometryData *p_geom) const;
+	void _vsm_sync_changed_multimeshes() const;
+	// MultiMesh instances in the static cache: a buffer change does not always reach _vsm_sync_instance (a custom
+	// AABB suppresses the AABB notification), so update() polls them.
+	mutable HashSet<Instance *> vsm_static_multimeshes;
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Max displacement magnitude across an instance's active materials.
 	float _instance_displacement_bound(const Instance *p_instance) const;
 	void _process_nextgeo_residency_shadow_dirty();
@@ -701,11 +706,14 @@ public:
 		uint64_t vsm_last_moved_frame = UINT64_MAX;
 		uint64_t vsm_last_dynamic_emit_frame = UINT64_MAX;
 		Transform3D vsm_last_transform;
-		AABB vsm_last_aabb;
+		AABB vsm_last_aabb; // The bounds to invalidate when it leaves the cache (a STATIC instance's whole footprint).
+		AABB vsm_last_bounds; // Its bounds at the last sync.
 		uint32_t vsm_last_layer_mask = 0;
 		bool vsm_has_transform = false;
 		bool vsm_in_static_cache = false;
 		bool vsm_in_dynamic_cache = false;
+		uint32_t vsm_dynamic_reasons = 0; // While in the dynamic cache: its reasons at the last sync. Layer routing reads it.
+		bool vsm_range_hidden = false; // Its visibility range (or HLOD parent) hid it from the last directional caster collection.
 		uint32_t projector_count = 0;
 		uint32_t softshadow_count = 0;
 

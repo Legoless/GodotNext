@@ -2028,7 +2028,7 @@
 			<param index="0" name="instance" type="RID" />
 			<param index="1" name="invalidation" type="int" enum="RenderingServer.ShadowCacheInvalidation" />
 			<description>
-				Sets the virtual shadow map cache invalidation behavior for the specified 3D geometry instance. Equivalent to [member GeometryInstance3D.shadow_cache_invalidation].
+				Sets the virtual shadow map cache invalidation behavior for the specified 3D geometry instance. Equivalent to [member GeometryInstance3D.shadow_cache_invalidation]. Changing it invalidates the pages the instance's cached shadow covers, as removing the instance and adding it back would.
 			</description>
 		</method>
 		<method name="instance_geometry_set_transparency">
@@ -6600,7 +6600,7 @@
 			Keeps the instance in the cached static virtual shadow map layer and invalidates overlapped static pages when its transform or bounds change.
 		</constant>
 		<constant name="SHADOW_CACHE_INVALIDATION_STATIC" value="3" enum="ShadowCacheInvalidation">
-			Keeps the instance in the cached static virtual shadow map layer and never invalidates cached pages on transform or bounds changes.
+			Keeps the instance in the cached static virtual shadow map layer and never invalidates cached pages when its transform changes. Adding, removing, showing or hiding the instance, turning its shadow casting on or off and changing its layer mask still invalidate the pages it covers.
 		</constant>
 		<constant name="VISIBILITY_RANGE_FADE_DISABLED" value="0" enum="VisibilityRangeFadeMode" keywords="LOD_FADE_DISABLED">
 			Disable visibility range fading for the given instance.

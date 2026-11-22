@@ -51,6 +51,8 @@ const SceneArgs = preload("res://scenes/scene_args.gd")
 const Character = preload("res://scenes/character_walk/character.gd")
 
 const RESULT_WAIT_FRAMES := 10
+# The controlled scene's first capture: past #212's 8-frame cooldown for the MultiMesh buffers set in _ready().
+const REST_POSE_FRAME := 12
 const BILLBOARD_PARTICLE_COUNT := 4
 const BILLBOARD_QUAD_SIZE := 0.3
 const MAX_OVERFLOW_CAPTURES := 30
@@ -742,10 +744,12 @@ func _step_controlled() -> void:
 		return
 	match _stage:
 		0:
-			# Wait a couple of frames so GPUParticles3D emit and settle, then make every page dirty.
-			if _stage_frame == 2:
+			# Wait until GPUParticles3D emit and settle and the MultiMesh buffers filled in _ready() are past
+			# #212's 8-frame cooldown (a MultiMesh whose buffer changed in the last 8 frames is dynamic),
+			# then make every page dirty.
+			if _stage_frame == REST_POSE_FRAME - 1:
 				_set_shadows(false)
-			elif _stage_frame == 3:
+			elif _stage_frame == REST_POSE_FRAME:
 				_set_shadows(true)
 				_arm("rest_pose")
 		1:

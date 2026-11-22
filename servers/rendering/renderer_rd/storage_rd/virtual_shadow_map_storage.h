@@ -124,13 +124,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		uint32_t grid_width = 0;
 	};
 	static_assert(sizeof(InvalidatePushConstant) == 16, "InvalidatePushConstant matches vsm_invalidate.glsl.");
-	struct PendingMapInvalidation {
-		uint32_t map = 0;
-		uint32_t dirty_flags = 0;
-		uint32_t dynamic_if_used = 0;
-		uint32_t pad = 0;
-	};
-	static_assert(sizeof(PendingMapInvalidation) == 16, "PendingMapInvalidation matches uvec4 in vsm_invalidate.glsl.");
+	// PendingMapInvalidation (vsm_invalidate.glsl MODE_MAPS) is declared in RendererVirtualShadowMapStorage.
 	// VSMViewParams in vsm_state_inc.glsl (std430).
 	struct ViewParams {
 		float inv_projection[4][4] = {};
@@ -268,6 +262,16 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		RID dirty;
 		RID indirect;
 		RID page_coverage; // GodotNext: vsm_caching (#212).
+		// GodotNext: vsm_caching (#212). The invalidation pass (vsm_invalidate.glsl): its inputs, and the page
+		// table and page records before and after it, for the CPU models invalidate_map_model() and
+		// invalidate_box_model().
+		LocalVector<PendingMapInvalidation> invalidation_maps;
+		LocalVector<InvalidationBox> invalidation_boxes;
+		LocalVector<uint32_t> map_cull_masks;
+		RID table_before_invalidation;
+		RID pages_before_invalidation;
+		RID table_after_invalidation;
+		RID pages_after_invalidation;
 		// The page clear: the pool is filled with a non-zero value before allocation, copied after the
 		// clear pass, then restored from the copy taken before and cleared again, as without the check.
 		RID pool_saved;

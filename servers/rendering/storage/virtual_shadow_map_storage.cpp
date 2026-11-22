@@ -594,7 +594,15 @@ uint32_t RendererVirtualShadowMapStorage::directional_update(RID p_light_instanc
 		if (maps->origins_valid) {
 			if (!same_plane && p_invalidate_on_turn) {
 				// GodotNext: vsm_caching (#212). Sun rotation invalidates static layer 0 (and layer 1 where
-				// dynamic content existed) so deferred_invalidation_budget can budget static re-renders.
+				// dynamic content existed) so deferred_invalidation_budget can budget static re-renders. The
+				// pages that leave the level's window still scroll: their slots now hold other pages, so they
+				// are re-rendered at once (ENTRY_SCROLLED is never deferred), and only the pages both windows
+				// share may keep their old depth for a few frames.
+				const ClipmapScroll scroll = clipmap_scroll(maps->origins[level], origin);
+				if (scroll.any) {
+					_table_scroll(first + level, scroll);
+					scroll_passes++;
+				}
 				_table_invalidate_map(first + level, ENTRY_DIRTY_STATIC, true);
 			} else {
 				const ClipmapScroll scroll = same_plane ? clipmap_scroll(maps->origins[level], origin) : clipmap_scroll_all();
@@ -1659,6 +1667,15 @@ RendererVirtualShadowMapStorage::InvalidationCounts RendererVirtualShadowMapStor
 		}
 	}
 	return counts;
+}
+
+void RendererVirtualShadowMapStorage::prune_map_invalidations(LocalVector<PendingMapInvalidation> &r_pending, uint32_t p_first_map, uint32_t p_map_count) {
+	for (uint32_t i = r_pending.size(); i > 0; i--) {
+		const uint32_t map = r_pending[i - 1].map;
+		if (map >= p_first_map && map - p_first_map < p_map_count) {
+			r_pending.remove_at_unordered(i - 1);
+		}
+	}
 }
 
 RendererVirtualShadowMapStorage::InvalidationCounts RendererVirtualShadowMapStorage::invalidate_map_model(uint32_t *r_table, uint32_t p_table_maps, uint32_t p_map, uint32_t p_dirty_flags, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, bool p_dynamic_if_used) {

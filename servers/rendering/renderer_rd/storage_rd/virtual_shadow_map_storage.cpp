@@ -340,6 +340,8 @@ void VirtualShadowMapStorage::_table_clear(uint32_t p_first_map, uint32_t p_map_
 		_set_map_data(map, MapData());
 		_set_map_cull_mask(map, 0u);
 	}
+	// GodotNext: vsm_caching (#212). Freed maps have no entries left to invalidate.
+	prune_map_invalidations(pending_map_invalidations, p_first_map, p_map_count);
 	if (map_state_buffer.is_valid() && p_first_map < map_buffers_maps) {
 		const uint32_t count = MIN(p_map_count, map_buffers_maps - p_first_map);
 		rd->buffer_clear(map_state_buffer, (MAP_STATE_BIAS * map_buffers_maps + p_first_map) * uint32_t(sizeof(uint32_t)), count * uint32_t(sizeof(uint32_t)));
@@ -1502,7 +1504,7 @@ void VirtualShadowMapStorage::_free_check_buffers() {
 	if (rd == nullptr) {
 		return;
 	}
-	for (RID *buffer : { &check.cluster, &check.lights[0], &check.lights[1], &check.lights[2], &check.bias_before, &check.table_marked, &check.pages_before, &check.state_marked, &check.requests, &check.map_state_marked, &check.table_after, &check.pages_after, &check.state_after, &check.map_state_after, &check.dirty, &check.indirect, &check.page_coverage, &check.pool_saved, &check.pool_cleared }) {
+	for (RID *buffer : { &check.cluster, &check.lights[0], &check.lights[1], &check.lights[2], &check.bias_before, &check.table_marked, &check.pages_before, &check.state_marked, &check.requests, &check.map_state_marked, &check.table_after, &check.pages_after, &check.state_after, &check.map_state_after, &check.dirty, &check.indirect, &check.page_coverage, &check.table_before_invalidation, &check.pages_before_invalidation, &check.table_after_invalidation, &check.pages_after_invalidation, &check.pool_saved, &check.pool_cleared }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 		}
@@ -1590,6 +1592,11 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	}
 	const uint32_t table_maps = get_table_capacity();
 	if (table_maps == 0 || table_buffer.is_null() || map_buffers_maps != table_maps) {
+		// GodotNext: vsm_caching (#212). Without maps no page is cached, so the scenario's boxes have nothing to
+		// invalidate: count them as applied, or they would be kept (up to the cap) until a light gets maps.
+		if ((table_maps == 0 || table_buffer.is_null()) && p_input.invalidation_epoch != 0u) {
+			last_applied_invalidation_epoch = p_input.invalidation_epoch;
+		}
 		return; // No light has maps yet.
 	}
 	_ensure_page_buffers();
@@ -1738,6 +1745,7 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	uint32_t inv_box_count = 0u;
 	if (p_input.invalidation_epoch != 0u && p_input.invalidation_epoch != last_invalidation_epoch) {
 		last_invalidation_epoch = p_input.invalidation_epoch;
+		last_applied_invalidation_epoch = p_input.invalidation_epoch;
 		if (p_input.invalidation_boxes != nullptr && p_input.invalidation_box_count > 0u) {
 			inv_box_count = p_input.invalidation_box_count;
 		}
@@ -1746,6 +1754,19 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	last_invalidation_maps = inv_map_count;
 	total_invalidation_maps += inv_map_count;
 	total_invalidation_boxes += inv_box_count;
+	if (capture) {
+		check.invalidation_maps.clear();
+		for (uint32_t i = 0; i < inv_map_count; i++) {
+			check.invalidation_maps.push_back(pending_map_invalidations[i]);
+		}
+		check.invalidation_boxes.clear();
+		for (uint32_t i = 0; i < inv_box_count; i++) {
+			check.invalidation_boxes.push_back(p_input.invalidation_boxes[i]);
+		}
+		check.map_cull_masks = map_cull_masks;
+		check.table_before_invalidation = _snapshot(table_buffer, 0, uint32_t(table_bytes(table_maps)), "Table Before Invalidation");
+		check.pages_before_invalidation = _snapshot(pages_buffer, 0, page_count * 4 * uint32_t(sizeof(uint32_t)), "Pages Before Invalidation");
+	}
 	if (inv_map_count > 0u || inv_box_count > 0u) {
 		if (inv_map_count > invalidation_map_capacity) {
 			rd->free_rid(invalidation_map_buffer);
@@ -1801,6 +1822,10 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 			rd->compute_list_dispatch(inv_list, inv_box_count, 1, 1);
 		}
 		rd->compute_list_end();
+	}
+	if (capture) {
+		check.table_after_invalidation = _snapshot(table_buffer, 0, uint32_t(table_bytes(table_maps)), "Table After Invalidation");
+		check.pages_after_invalidation = _snapshot(pages_buffer, 0, page_count * 4 * uint32_t(sizeof(uint32_t)), "Pages After Invalidation");
 	}
 
 	// Marking.
@@ -2051,6 +2076,11 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	const LocalVector<uint32_t> dirty = _read_words(check.dirty);
 	const LocalVector<uint32_t> indirect = _read_words(check.indirect);
 	const LocalVector<uint32_t> page_coverage = _read_words(check.page_coverage);
+	// GodotNext: vsm_caching (#212).
+	const LocalVector<uint32_t> table_before_invalidation = _read_words(check.table_before_invalidation);
+	const LocalVector<uint32_t> pages_before_invalidation = _read_words(check.pages_before_invalidation);
+	const LocalVector<uint32_t> table_after_invalidation = _read_words(check.table_after_invalidation);
+	const LocalVector<uint32_t> pages_after_invalidation = _read_words(check.pages_after_invalidation);
 	Vector<uint8_t> pool_layers[POOL_LAYERS];
 	if (check.pool_cleared.is_valid()) {
 		for (uint32_t layer = 0; layer < POOL_LAYERS; layer++) {
@@ -2066,6 +2096,79 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	}
 	const MapData *maps = check.map_data.ptr();
 	const uint32_t *bias = bias_before.ptr();
+
+	// GodotNext: vsm_caching (#212, plan §21.3 contract S5). 0. Invalidation: the CPU models of
+	// vsm_invalidate.glsl, MODE_MAPS then MODE_BOXES, on the page table and page records before the pass,
+	// against the GPU's table, page records and counters after it. Both passes only set flags, so the
+	// result does not depend on the GPU's order.
+	{
+		Dictionary invalidation;
+		invalidation["maps"] = int64_t(check.invalidation_maps.size());
+		invalidation["boxes"] = int64_t(check.invalidation_boxes.size());
+		// The boxes themselves, so a test can compare them with the bounds it moved (GV-4's analytic overlap).
+		Array box_list;
+		for (const InvalidationBox &box : check.invalidation_boxes) {
+			Dictionary entry;
+			entry["min"] = Vector3(box.min_pos[0], box.min_pos[1], box.min_pos[2]);
+			entry["max"] = Vector3(box.max_pos[0], box.max_pos[1], box.max_pos[2]);
+			entry["layer_mask"] = int64_t(box.layer_mask);
+			entry["dirty_flags"] = int64_t(box.dirty_flags);
+			box_list.push_back(entry);
+		}
+		invalidation["box_list"] = box_list;
+		if (table_before_invalidation.size() != table_entries || table_after_invalidation.size() != table_entries || pages_before_invalidation.size() != check.pool_pages * 4 || pages_after_invalidation.size() != check.pool_pages * 4) {
+			failures.push_back("invalidation: the capture is incomplete");
+		} else {
+			LocalVector<uint32_t> model_table(table_before_invalidation);
+			LocalVector<PageRecord> model_pages;
+			model_pages.resize(check.pool_pages);
+			for (uint32_t p = 0; p < check.pool_pages; p++) {
+				model_pages[p].owner = pages_before_invalidation[p * 4];
+				model_pages[p].last_used = pages_before_invalidation[p * 4 + 1];
+				model_pages[p].bucket = pages_before_invalidation[p * 4 + 2];
+				model_pages[p].pad = pages_before_invalidation[p * 4 + 3];
+			}
+			InvalidationCounts map_counts;
+			for (const PendingMapInvalidation &item : check.invalidation_maps) {
+				const InvalidationCounts c = invalidate_map_model(model_table.ptr(), table_maps, item.map, item.dirty_flags, model_pages.ptr(), check.pool_pages, check.grid_width, item.dynamic_if_used != 0u);
+				map_counts.static_pages += c.static_pages;
+				map_counts.dynamic_pages += c.dynamic_pages;
+			}
+			InvalidationCounts box_counts;
+			const uint32_t *cull_masks = check.map_cull_masks.size() >= table_maps ? check.map_cull_masks.ptr() : nullptr;
+			for (const InvalidationBox &box : check.invalidation_boxes) {
+				const InvalidationCounts c = invalidate_box_model(model_table.ptr(), table_maps, maps, cull_masks, model_pages.ptr(), check.pool_pages, check.grid_width, box);
+				box_counts.static_pages += c.static_pages;
+				box_counts.dynamic_pages += c.dynamic_pages;
+			}
+			uint32_t entry_mismatches = 0;
+			for (uint64_t i = 0; i < table_entries; i++) {
+				entry_mismatches += model_table[i] != table_after_invalidation[i] ? 1 : 0;
+			}
+			uint32_t pad_mismatches = 0;
+			for (uint32_t p = 0; p < check.pool_pages; p++) {
+				pad_mismatches += model_pages[p].pad != pages_after_invalidation[p * 4 + 3] ? 1 : 0;
+			}
+			const uint32_t static_model = map_counts.static_pages + box_counts.static_pages;
+			const uint32_t dynamic_model = map_counts.dynamic_pages + box_counts.dynamic_pages;
+			invalidation["static_pages"] = int64_t(state_after[STATE_INVALIDATED_STATIC]);
+			invalidation["static_pages_model"] = int64_t(static_model);
+			invalidation["dynamic_pages"] = int64_t(state_after[STATE_INVALIDATED_DYNAMIC]);
+			invalidation["dynamic_pages_model"] = int64_t(dynamic_model);
+			invalidation["map_static_pages_model"] = int64_t(map_counts.static_pages);
+			invalidation["box_static_pages_model"] = int64_t(box_counts.static_pages);
+			invalidation["box_dynamic_pages_model"] = int64_t(box_counts.dynamic_pages);
+			invalidation["entry_mismatches"] = int64_t(entry_mismatches);
+			invalidation["pad_mismatches"] = int64_t(pad_mismatches);
+			if (entry_mismatches > 0 || pad_mismatches > 0) {
+				failures.push_back(vformat("invalidation: %d page-table entries and %d page records differ from the CPU models", entry_mismatches, pad_mismatches));
+			}
+			if (static_model != state_after[STATE_INVALIDATED_STATIC] || dynamic_model != state_after[STATE_INVALIDATED_DYNAMIC]) {
+				failures.push_back(vformat("invalidation: the GPU marked %d static and %d dynamic pages, the CPU models %d and %d", state_after[STATE_INVALIDATED_STATIC], state_after[STATE_INVALIDATED_DYNAMIC], static_model, dynamic_model));
+			}
+		}
+		result["invalidation"] = invalidation;
+	}
 	LocalVector<MarkLight> lights[3];
 	const MapKind light_kinds[3] = { MAP_KIND_OMNI, MAP_KIND_SPOT, MAP_KIND_AREA };
 	const uint32_t light_counts[3] = { check.omni_count, check.spot_count, check.area_count };
@@ -2431,6 +2534,8 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		model_pages[p].owner = pages_before[p * 4];
 		model_pages[p].last_used = pages_before[p * 4 + 1];
 		model_pages[p].bucket = pages_before[p * 4 + 2];
+		// GodotNext: vsm_caching (#212). The page's layer-1 flags (PAGE_FLAG_HAS_DYNAMIC_*).
+		model_pages[p].pad = pages_before[p * 4 + 3];
 	}
 	const uint32_t *coverage_ptr = (check.deferred_budget > 0u && page_coverage.size() >= check.pool_pages) ? page_coverage.ptr() : nullptr;
 	const AllocationCounts model = allocate_model(model_table.ptr(), table_entries, model_pages.ptr(), check.pool_pages, check.grid_width, request_list.ptr(), MIN(listed, request_list.size()), check.frame, check.cache_frames, resident_listed, check.deferred_budget, coverage_ptr);

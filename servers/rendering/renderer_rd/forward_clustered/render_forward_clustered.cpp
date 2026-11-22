@@ -3418,6 +3418,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
 		uint64_t vsm_last_moved_frame = RendererVirtualShadowMapStorage::CACHE_NEVER_MOVED;
 		uint32_t vsm_shader_dynamic_flags = 0;
+		uint32_t vsm_dynamic_reasons = 0; // RendererSceneCull's classification at the instance's last sync.
 		uint32_t saved_flags = 0;
 		float saved_depth = 0.0f;
 		LocalVector<CasterLightRef> lights;
@@ -3492,6 +3493,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				uc.shadow_cache_invalidation = c.shadow_cache_invalidation;
 				uc.vsm_last_moved_frame = c.vsm_last_moved_frame;
 				uc.vsm_shader_dynamic_flags = c.vsm_shader_dynamic_flags;
+				uc.vsm_dynamic_reasons = c.vsm_dynamic_reasons;
 				uc.saved_flags = inst->flags_cache;
 				uc.saved_depth = inst->depth;
 				unique_casters.push_back(uc);
@@ -3755,27 +3757,11 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		const bool uses_particles = (inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) != 0;
 		const bool uses_multimesh = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) != 0;
 		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Route static (layer 0) vs dynamic (layer 1)
-		// through the shared CacheClassificationInput rule, inspecting the material's own ShaderData as well
-		// as the shadow shader (uses_shared_shadow_material() swaps out shaders that write DEPTH or read
-		// TIME in vertex() without writing VERTEX).
-		const uint64_t vsm_cur_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0u;
-		uint32_t surf_shader_flags = uc.vsm_shader_dynamic_flags | shader->get_vsm_dynamic_flags();
-		if (surf->shader != nullptr) {
-			surf_shader_flags |= surf->shader->get_vsm_dynamic_flags();
-		}
-		if ((surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR) != 0) {
-			surf_shader_flags |= RendererVirtualShadowMapStorage::CACHE_DYNAMIC_ANIMATED;
-		}
-		RendererVirtualShadowMapStorage::CacheClassificationInput cls_input;
-		cls_input.mode = uc.shadow_cache_invalidation;
-		cls_input.frame = vsm_cur_frame;
-		cls_input.last_moved_frame = uc.moved_this_frame ? vsm_cur_frame : uc.vsm_last_moved_frame;
-		cls_input.has_mesh_instance = inst->mesh_instance.is_valid();
-		cls_input.has_skeleton = mesh_storage->skeleton_is_valid(inst->data->skeleton);
-		cls_input.is_particles = uses_particles;
-		cls_input.is_dynamic_multimesh = !uses_particles && uses_multimesh && (mesh_storage->_multimesh_uses_motion_vectors_offsets(inst->data->base) || mesh_storage->multimesh_is_vsm_dynamic(inst->data->base));
-		cls_input.shader_dynamic_flags = surf_shader_flags;
-		const uint32_t dynamic_reasons = RendererVirtualShadowMapStorage::classify_shadow_cache_dynamic(cls_input);
+		// by the instance's classification from RendererSceneCull (classify_shadow_cache_dynamic() over every
+		// material of the instance, including those uses_shared_shadow_material() swaps out), as stored at the
+		// instance's last sync: the classification its invalidation boxes were emitted for, so every surface
+		// draws into the layer those boxes clear (a surface in the other layer would only reach new pages).
+		const uint32_t dynamic_reasons = uc.vsm_dynamic_reasons;
 		const bool is_dynamic = dynamic_reasons != 0u;
 
 		if (capture) {

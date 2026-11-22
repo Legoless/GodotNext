@@ -541,6 +541,49 @@ public:
 		float max_pos[3] = {};
 		uint32_t dirty_flags = 0u;
 	};
+	static_assert(sizeof(InvalidationBox) == 32, "InvalidationBox matches VSMInvalidationBox in vsm_invalidate.glsl.");
+	// One map invalidation for vsm_invalidate.glsl MODE_MAPS (a uvec4).
+	struct PendingMapInvalidation {
+		uint32_t map = 0;
+		uint32_t dirty_flags = 0;
+		uint32_t dynamic_if_used = 0;
+		uint32_t pad = 0;
+	};
+	static_assert(sizeof(PendingMapInvalidation) == 16, "PendingMapInvalidation matches uvec4 in vsm_invalidate.glsl.");
+	// Drops the pending invalidations of maps [p_first_map, p_first_map + p_map_count), which were freed.
+	static void prune_map_invalidations(LocalVector<PendingMapInvalidation> &r_pending, uint32_t p_first_map, uint32_t p_map_count);
+	// A scenario's swept-bounds invalidation events (RendererSceneRender::RenderVSMInvalidation: world_aabb,
+	// layer_mask, dirty_flags) are kept until a page-marking view applies them, so the list is capped: past
+	// MAX_PENDING_INVALIDATIONS events a new one merges into the last (a larger box only invalidates more pages).
+	static constexpr uint32_t MAX_PENDING_INVALIDATIONS = 16384;
+	template <typename T>
+	static void append_invalidation(LocalVector<T> &r_list, const T &p_event) {
+		if (r_list.size() >= MAX_PENDING_INVALIDATIONS) {
+			T &last = r_list[r_list.size() - 1];
+			last.world_aabb.merge_with(p_event.world_aabb);
+			last.layer_mask |= p_event.layer_mask;
+			last.dirty_flags |= p_event.dirty_flags;
+			return;
+		}
+		r_list.push_back(p_event);
+	}
+	// Publishes the events written since the last publish. They replace the published list when a view applied
+	// it (p_published_applied), and are appended to it otherwise, so a frame in which no view marks pages drops
+	// none. r_writing is cleared.
+	template <typename T>
+	static void publish_invalidations(LocalVector<T> &r_published, LocalVector<T> &r_writing, bool p_published_applied) {
+		if (p_published_applied || r_published.is_empty()) {
+			r_published = r_writing;
+		} else {
+			for (const T &event : r_writing) {
+				append_invalidation(r_published, event);
+			}
+		}
+		r_writing.clear();
+	}
+	// The invalidation epoch the last page-marking view applied (0 = none). RendererSceneCull reads it after each
+	// render of a scenario: a scenario's published events are kept until a view has applied them.
+	static inline uint64_t last_applied_invalidation_epoch = 0;
 	struct InvalidationCounts {
 		uint32_t static_pages = 0;
 		uint32_t dynamic_pages = 0;
@@ -941,7 +984,8 @@ public:
 	// Directional lights: allocates one map per clipmap level that p_max_distance needs and moves each
 	// level's window to the camera. Pages that wrap are marked ENTRY_SCROLLED; a change of the light
 	// plane marks every allocated page (ENTRY_DIRTY_STATIC via _table_invalidate_map when
-	// p_invalidate_on_turn is set so deferred_invalidation_budget applies, else ENTRY_SCROLLED).
+	// p_invalidate_on_turn is set so deferred_invalidation_budget applies, with the pages that wrap still
+	// ENTRY_SCROLLED; else ENTRY_SCROLLED).
 	uint32_t directional_update(RID p_light_instance, const Basis &p_light_basis, const Vector3 &p_camera_position, float p_max_distance, bool p_invalidate_on_turn = false);
 	Vector2i get_clipmap_origin(RID p_light_instance, uint32_t p_level) const;
 

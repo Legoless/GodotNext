@@ -239,7 +239,7 @@ void RendererSceneCull::_instance_pair(Instance *p_A, Instance *p_B) {
 		geom->lights.insert(B);
 		light->geometries.insert(A);
 
-		if (geom->can_cast_shadows && !self->_light_uses_vsm(B)) {
+		if (geom->can_cast_shadows) {
 			light->make_shadow_dirty();
 		}
 
@@ -364,7 +364,7 @@ void RendererSceneCull::_instance_unpair(Instance *p_A, Instance *p_B) {
 		geom->lights.erase(B);
 		light->geometries.erase(A);
 
-		if (geom->can_cast_shadows && !self->_light_uses_vsm(B)) {
+		if (geom->can_cast_shadows) {
 			light->make_shadow_dirty();
 		}
 
@@ -1065,10 +1065,8 @@ void RendererSceneCull::instance_set_layer_mask(RID p_instance, uint32_t p_mask)
 
 		if (geom->can_cast_shadows) {
 			for (HashSet<RendererSceneCull::Instance *>::Iterator I = geom->lights.begin(); I != geom->lights.end(); ++I) {
-				if (!_light_uses_vsm(*I)) {
-					InstanceLightData *light = static_cast<InstanceLightData *>((*I)->base_data);
-					light->make_shadow_dirty();
-				}
+				InstanceLightData *light = static_cast<InstanceLightData *>((*I)->base_data);
+				light->make_shadow_dirty();
 			}
 		}
 	}
@@ -1475,10 +1473,8 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 		geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 		if (changed && geom->can_cast_shadows) {
 			for (Instance *E : geom->lights) {
-				if (!_light_uses_vsm(E)) {
-					InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
-					light->make_shadow_dirty();
-				}
+				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+				light->make_shadow_dirty();
 			}
 		}
 	}
@@ -1503,7 +1499,9 @@ void RendererSceneCull::instance_geometry_set_shadow_cache_invalidation(RID p_in
 		geom->geometry_instance->set_shadow_cache_invalidation(p_invalidation);
 	}
 	_instance_record_update_state(instance);
-	_vsm_sync_instance(instance, instance->scenario, false);
+	// As in UE, changing the behavior removes and re-adds the instance: its cached footprint and its current bounds
+	// are invalidated (a STATIC instance that moved gets its shadow back where it is).
+	_vsm_sync_instance(instance, instance->scenario, false, true);
 }
 
 void RendererSceneCull::instance_geometry_set_material_override(RID p_instance, RID p_material) {
@@ -1989,33 +1987,59 @@ void RendererSceneCull::_process_nextgeo_residency_shadow_dirty() {
 			if ((inst->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(light_inst->base)) == 0) {
 				continue;
 			}
-			if (!_light_uses_vsm(light_inst)) {
-				InstanceLightData *light = static_cast<InstanceLightData *>(light_inst->base_data);
-				light->make_shadow_dirty();
-			}
+			InstanceLightData *light = static_cast<InstanceLightData *>(light_inst->base_data);
+			light->make_shadow_dirty();
 		}
 		// GodotNext: vsm_caching (#212). Invalidate static VSM pages when NextGeo residency changes.
 		_vsm_sync_instance(inst, inst->scenario, false, true);
 	}
 }
 
-// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
-bool RendererSceneCull::_light_uses_vsm(const Instance *p_light_instance) const {
-	if (scene_render == nullptr || !scene_render->is_vsm_active() || p_light_instance == nullptr || p_light_instance->base_type != RSE::INSTANCE_LIGHT) {
-		return false;
-	}
-	return RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(p_light_instance->base));
-}
-
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Lights keep upstream's make_shadow_dirty() calls: a
+// light a view samples through its virtual shadow maps has no atlas pass (#222), so its dirty flag is not read,
+// and a light that keeps or returns to its atlas pass (volumetric fog, a view that does not sample VSM) redraws it.
 void RendererSceneCull::_vsm_emit_invalidation(Scenario *p_scenario, const AABB &p_aabb, uint32_t p_layer_mask, uint32_t p_dirty_flags) const {
 	if (p_scenario == nullptr || p_dirty_flags == 0u || !p_aabb.has_surface() || scene_render == nullptr || !scene_render->is_vsm_active()) {
 		return;
 	}
+	// A scenario that is not rendered keeps collecting boxes: past the cap, new boxes merge into the last
+	// one (a larger box only invalidates more pages), so the list and the pass that reads it stay bounded.
 	RendererSceneRender::RenderVSMInvalidation ev;
 	ev.world_aabb = p_aabb;
 	ev.layer_mask = p_layer_mask;
 	ev.dirty_flags = p_dirty_flags;
-	p_scenario->vsm_invalidations_writing.push_back(ev);
+	RendererVirtualShadowMapStorage::append_invalidation(p_scenario->vsm_invalidations_writing, ev);
+}
+
+// Invalidates the pages the instance's cached shadow covers, in the layer it is cached in, as hiding or showing it
+// would (a STATIC instance's whole footprint).
+void RendererSceneCull::_vsm_emit_cached_bounds(Scenario *p_scenario, const InstanceGeometryData *p_geom) const {
+	if (p_geom->vsm_in_static_cache) {
+		_vsm_emit_invalidation(p_scenario, p_geom->vsm_last_aabb, p_geom->vsm_last_layer_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
+	} else if (p_geom->vsm_in_dynamic_cache) {
+		_vsm_emit_invalidation(p_scenario, p_geom->vsm_last_aabb, p_geom->vsm_last_layer_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC);
+	}
+}
+
+// A MultiMesh's buffer can change without an AABB notification (a custom AABB suppresses it), so the instance would
+// stay in the static cache with its old shadow. Each frame, before any view collects casters, a MultiMesh instance in
+// the static cache whose buffer changed in the last 8 frames is synced: it leaves the static layer with an
+// invalidation of its cached bounds, and settles back with another once the buffer stops changing.
+void RendererSceneCull::_vsm_sync_changed_multimeshes() const {
+	if (vsm_static_multimeshes.is_empty() || scene_render == nullptr || !scene_render->is_vsm_active()) {
+		return;
+	}
+	LocalVector<Instance *> changed;
+	for (Instance *instance : vsm_static_multimeshes) {
+		if (RSG::mesh_storage->multimesh_is_vsm_dynamic(instance->base)) {
+			changed.push_back(instance);
+		}
+	}
+	for (Instance *instance : changed) {
+		// AUTO: the change makes it dynamic (leaving the static layer). RIGID: a buffer change moves its
+		// sub-instances, which invalidates its bounds as a move would, every frame while the buffer keeps changing.
+		_vsm_sync_instance(instance, instance->scenario, false, true);
+	}
 }
 
 uint32_t RendererSceneCull::_vsm_classify_instance(const Instance *p_instance, const InstanceGeometryData *p_geom, uint64_t p_frame) const {
@@ -2059,7 +2083,10 @@ void RendererSceneCull::_vsm_sync_instance(Instance *p_instance, Scenario *p_sce
 	const uint32_t dynamic_reasons = _vsm_classify_instance(p_instance, geom, cur_frame);
 	const bool want_dynamic = has_valid_bounds && (dynamic_reasons != 0u);
 	const bool want_static = has_valid_bounds && (dynamic_reasons == 0u);
-	const bool suppress_invalidation = (p_instance->shadow_cache_invalidation == RSE::SHADOW_CACHE_INVALIDATION_STATIC);
+	// UE's Static behavior (Epic's Virtual Shadow Maps page): a transform change does not invalidate, but adding or
+	// removing the primitive still does. Hiding, freeing, leaving the scenario, turning shadow casting off and
+	// changing the layer mask take it in or out of the cache, so they invalidate in every mode.
+	const bool static_mode = (p_instance->shadow_cache_invalidation == RSE::SHADOW_CACHE_INVALIDATION_STATIC);
 
 	if (RSG::virtual_mesh_storage != nullptr && p_instance->virtual_record != UINT32_MAX) {
 		RSG::virtual_mesh_storage->instance_record_set_vsm_dynamic(p_instance->virtual_record, dynamic_reasons != 0u);
@@ -2071,7 +2098,7 @@ void RendererSceneCull::_vsm_sync_instance(Instance *p_instance, Scenario *p_sce
 	const uint32_t old_mask = geom->vsm_last_layer_mask;
 	const uint32_t new_mask = p_instance->layer_mask;
 	const uint32_t union_mask = ((was_static || was_dynamic) ? old_mask : 0u) | (has_valid_bounds ? new_mask : 0u);
-	const bool aabb_changed = old_aabb != cur_aabb;
+	const bool aabb_changed = geom->vsm_last_bounds != cur_aabb;
 	const bool mask_changed = old_mask != new_mask;
 
 	auto swept_aabb = [&]() -> AABB {
@@ -2081,14 +2108,23 @@ void RendererSceneCull::_vsm_sync_instance(Instance *p_instance, Scenario *p_sce
 		return cur_aabb.has_surface() ? cur_aabb : old_aabb;
 	};
 
-	if (!suppress_invalidation && p_scenario != nullptr) {
+	// The cached footprint (vsm_last_aabb) is replaced by the current bounds only when an invalidation covered it.
+	// Otherwise it grows: a STATIC instance that moved keeps every bound it was drawn at, through later syncs that
+	// do not invalidate (a material change, say), so that removing it clears them all.
+	bool keep_footprint = false;
+	if (p_scenario != nullptr) {
 		if (was_static && !want_static) {
 			_vsm_emit_invalidation(p_scenario, old_aabb, old_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
 		} else if (!was_static && want_static) {
 			_vsm_emit_invalidation(p_scenario, cur_aabb, new_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
 		} else if (was_static && want_static) {
-			if (moved || aabb_changed || mask_changed || p_force_static_dirty) {
+			if (static_mode && moved && !mask_changed && !p_force_static_dirty) {
+				p_scenario->vsm_static_mode_invalidations++;
+				keep_footprint = true;
+			} else if (moved || aabb_changed || mask_changed || p_force_static_dirty) {
 				_vsm_emit_invalidation(p_scenario, swept_aabb(), union_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
+			} else {
+				keep_footprint = true;
 			}
 		}
 
@@ -2109,14 +2145,26 @@ void RendererSceneCull::_vsm_sync_instance(Instance *p_instance, Scenario *p_sce
 			p_scenario->vsm_dynamic_instances.erase(p_instance);
 		}
 	}
+	if (p_instance->base_type == RSE::INSTANCE_MULTIMESH) {
+		if (want_static && !static_mode) {
+			vsm_static_multimeshes.insert(p_instance);
+		} else {
+			vsm_static_multimeshes.erase(p_instance);
+		}
+	}
 
 	geom->vsm_in_static_cache = want_static;
 	geom->vsm_in_dynamic_cache = want_dynamic;
+	// Layer routing reads the classification stored here, the one these invalidations were emitted for, so a caster
+	// never draws into a layer whose pages its boxes do not clear.
+	geom->vsm_dynamic_reasons = want_dynamic ? dynamic_reasons : 0u;
 	if (has_valid_bounds) {
-		geom->vsm_last_aabb = cur_aabb;
+		geom->vsm_last_aabb = keep_footprint ? swept_aabb() : cur_aabb;
+		geom->vsm_last_bounds = cur_aabb;
 		geom->vsm_last_layer_mask = new_mask;
 	} else if (p_removing) {
 		geom->vsm_last_aabb = AABB();
+		geom->vsm_last_bounds = AABB();
 		geom->vsm_last_layer_mask = 0;
 		geom->vsm_has_transform = false;
 	}
@@ -2277,10 +2325,8 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 
 		if (geom->can_cast_shadows) {
 			for (const Instance *E : geom->lights) {
-				if (!_light_uses_vsm(E)) {
-					InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
-					light->make_shadow_dirty();
-				}
+				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+				light->make_shadow_dirty();
 			}
 		}
 
@@ -4270,6 +4316,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 							// Settled back to static after 8-frame cooldown (or stopped casting): erase layer 1 and bake layer 0.
 							_vsm_sync_instance(dyn_inst, scenario, false);
 						} else if (dyn_geom->vsm_last_dynamic_emit_frame != vsm_cur_frame) {
+							dyn_geom->vsm_dynamic_reasons = reasons;
 							// Active stationary dynamic caster (ALWAYS, VERTEX/DEPTH shader, skeleton, particles, etc.): refresh layer 1.
 							if (dyn_inst->shadow_cache_invalidation != RSE::SHADOW_CACHE_INVALIDATION_STATIC) {
 								_vsm_emit_invalidation(scenario, dyn_geom->vsm_last_aabb, dyn_geom->vsm_last_layer_mask, RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC);
@@ -4279,8 +4326,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					}
 				}
 				scenario->vsm_invalidation_frame = vsm_cur_frame;
-				scenario->vsm_invalidations_published = scenario->vsm_invalidations_writing;
-				scenario->vsm_invalidations_writing.clear();
+				// Events no view applied (a frame whose views of this scenario do not mark pages) stay published.
+				RendererVirtualShadowMapStorage::publish_invalidations(scenario->vsm_invalidations_published, scenario->vsm_invalidations_writing, scenario->vsm_invalidations_applied);
+				scenario->vsm_invalidations_applied = false;
 				scenario->vsm_invalidation_epoch = ++vsm_invalidation_epoch_counter;
 			}
 
@@ -4351,19 +4399,27 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 						continue;
 					}
 					const uint32_t vis_flags = idata.flags & (InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE | InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN | InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN);
-					if (vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE || vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN) {
-						continue;
-					}
-					if (vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK) {
+					bool range_hidden = vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE || vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN;
+					if (!range_hidden && vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK) {
 						if (idata.visibility_index != -1 && _visibility_range_check<false>(scenario->instance_visibility[idata.visibility_index], camera_position, vp_mask) != 0) {
-							continue;
-						}
-						if (idata.parent_array_index != -1) {
+							range_hidden = true;
+						} else if (idata.parent_array_index != -1) {
 							const uint32_t pf = scenario->instance_data[idata.parent_array_index].flags;
 							if (!(((pf & InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK) == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE) || (pf & InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN))) {
-								continue;
+								range_hidden = true;
 							}
 						}
+					}
+					// GodotNext: vsm_caching (#212). A visibility range or HLOD swap adds or removes the caster without a
+					// sync: invalidate its cached bounds, as hiding or showing it would. The events are applied from the
+					// next frame on (this frame's were published before the casters are collected).
+					InstanceGeometryData *range_geom = static_cast<InstanceGeometryData *>(idata.instance->base_data);
+					if (range_hidden != range_geom->vsm_range_hidden) {
+						range_geom->vsm_range_hidden = range_hidden;
+						_vsm_emit_cached_bounds(scenario, range_geom);
+					}
+					if (range_hidden) {
+						continue;
 					}
 					if (base_type == RSE::INSTANCE_PARTICLES && RSG::particles_storage->particles_is_inactive(idata.base_rid)) {
 						continue;
@@ -4394,7 +4450,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					caster.shadow_cache_invalidation = idata.instance->shadow_cache_invalidation;
 					caster.vsm_last_moved_frame = geom->vsm_last_moved_frame;
 					caster.vsm_shader_dynamic_flags = geom->vsm_shader_dynamic_flags;
-					caster.vsm_dynamic_reasons = _vsm_classify_instance(idata.instance, geom, vsm_cur_frame);
+					caster.vsm_dynamic_reasons = geom->vsm_dynamic_reasons;
 					entry.casters.push_back(caster);
 				}
 				vsm_shadow_data.push_back(entry);
@@ -4448,7 +4504,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					caster.shadow_cache_invalidation = inst->shadow_cache_invalidation;
 					caster.vsm_last_moved_frame = geom->vsm_last_moved_frame;
 					caster.vsm_shader_dynamic_flags = geom->vsm_shader_dynamic_flags;
-					caster.vsm_dynamic_reasons = _vsm_classify_instance(inst, geom, vsm_cur_frame);
+					caster.vsm_dynamic_reasons = geom->vsm_dynamic_reasons;
 					entry.casters.push_back(caster);
 				}
 				vsm_shadow_data.push_back(entry);
@@ -4852,6 +4908,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	RENDER_TIMESTAMP("Render 3D Scene");
 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
+	// GodotNext: vsm_caching (#212). Whether a page-marking view applied this scenario's published invalidations;
+	// until one has, the next publish keeps them.
+	if (scenario->vsm_invalidation_epoch != 0 && RendererVirtualShadowMapStorage::last_applied_invalidation_epoch == scenario->vsm_invalidation_epoch) {
+		scenario->vsm_invalidations_applied = true;
+	}
 
 	if (p_viewport.is_valid()) {
 		RSG::viewport->viewport_set_prev_camera_data(p_viewport, p_camera_data);
@@ -5481,10 +5542,8 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 			if (can_cast_shadows != geom->can_cast_shadows) {
 				//ability to cast shadows change, let lights now
 				for (const Instance *E : geom->lights) {
-					if (!_light_uses_vsm(E)) {
-						InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
-						light->make_shadow_dirty();
-					}
+					InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+					light->make_shadow_dirty();
 				}
 
 				geom->can_cast_shadows = can_cast_shadows;
@@ -5552,6 +5611,8 @@ void RendererSceneCull::update() {
 	scene_render->update();
 	update_dirty_instances();
 	_process_nextgeo_residency_shadow_dirty();
+	// GodotNext: vsm_caching (#212). After the MultiMesh buffers' updates, before any view collects casters.
+	_vsm_sync_changed_multimeshes();
 	render_particle_colliders();
 }
 

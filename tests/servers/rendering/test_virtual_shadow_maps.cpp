@@ -69,6 +69,7 @@ public:
 	uint64_t cleared_maps = 0;
 	uint32_t scroll_calls = 0;
 	LocalVector<uint32_t> scrolled_maps;
+	LocalVector<uint32_t> invalidated_maps; // GodotNext: vsm_caching (#212).
 	uint32_t pool_calls = 0;
 	uint32_t last_pool_pages = 0; // The pool the fake holds.
 	bool fail_resize = false;
@@ -112,6 +113,11 @@ protected:
 		clipmap_apply_scroll(map_entries(p_map), p_scroll);
 		scroll_calls++;
 		scrolled_maps.push_back(p_map);
+	}
+	// GodotNext: vsm_caching (#212). As the GPU's invalidation pass would, on the CPU table.
+	void _table_invalidate_map(uint32_t p_map, uint32_t p_dirty_flags, bool p_dynamic_if_used) override {
+		invalidate_map_model(table.ptr(), table.size() / ENTRIES_PER_MAP, p_map, p_dirty_flags, nullptr, 0, 0, p_dynamic_if_used);
+		invalidated_maps.push_back(p_map);
 	}
 	bool _pool_resize(uint32_t p_page_count) override {
 		pool_calls++;
@@ -3840,4 +3846,715 @@ TEST_CASE("[VSM][NextGeo] Static/dynamic layer routing hook defaults to static u
 	CHECK_EQ(nextgeo_vsm_instance_layer(valid, true, hook, false), 1u);
 	CHECK_EQ(nextgeo_vsm_instance_layer(valid | VMS::RECORD_RT_SKINNED, false, hook, false), 1u);
 	CHECK_EQ(nextgeo_vsm_instance_layer(valid, false, hook, true), 1u);
+}
+
+// GodotNext: vsm_caching (#212, plan §21.3 contract S5). CPU models of the VSM cache: the AUTO rule and the
+// cache modes, the deferred budget's coverage buckets, the invalidation pass (boxes and maps), the deferred
+// invalidation budget in the allocation model, sun turns, light properties, the NextGeo record bits and the
+// API. godotnext/testbed/tests/vsm/caching.gd checks the GPU passes against the same models.
+
+namespace TestVSMCaching {
+
+// One map's table with every entry allocated (page (0, 0): no page records are read).
+LocalVector<uint32_t> allocated_table(uint32_t p_maps) {
+	LocalVector<uint32_t> table;
+	table.resize(p_maps * VSM::ENTRIES_PER_MAP);
+	for (uint32_t i = 0; i < table.size(); i++) {
+		table[i] = VSM::entry_pack(0, 0, VSM::ENTRY_ALLOCATED);
+	}
+	return table;
+}
+
+VSM::InvalidationBox make_box(const AABB &p_aabb, uint32_t p_flags, uint32_t p_layer_mask = 0xFFFFFFFFu) {
+	VSM::InvalidationBox box;
+	const Vector3 lo = p_aabb.position;
+	const Vector3 hi = p_aabb.position + p_aabb.size;
+	box.min_pos[0] = float(lo.x);
+	box.min_pos[1] = float(lo.y);
+	box.min_pos[2] = float(lo.z);
+	box.max_pos[0] = float(hi.x);
+	box.max_pos[1] = float(hi.y);
+	box.max_pos[2] = float(hi.z);
+	box.layer_mask = p_layer_mask;
+	box.dirty_flags = p_flags;
+	return box;
+}
+
+uint32_t count_flag(const LocalVector<uint32_t> &p_table, uint32_t p_map, uint32_t p_flag) {
+	uint32_t count = 0;
+	for (uint32_t i = p_map * VSM::ENTRIES_PER_MAP; i < (p_map + 1) * VSM::ENTRIES_PER_MAP; i++) {
+		count += (p_table[i] & p_flag) ? 1 : 0;
+	}
+	return count;
+}
+
+// The emit pass on the CPU: a page the budget deferred keeps ENTRY_DIRTY_STATIC for a later frame.
+void emit_requests(LocalVector<uint32_t> &r_table, const LocalVector<VSM::PageRecord> &p_pages, uint32_t p_width, const LocalVector<uint32_t> &p_requests) {
+	for (uint32_t index : p_requests) {
+		const uint32_t entry = r_table[index];
+		bool deferred = false;
+		if (entry & VSM::ENTRY_ALLOCATED) {
+			const uint32_t p = VSM::entry_page_y(entry) * p_width + VSM::entry_page_x(entry);
+			deferred = p < p_pages.size() && p_pages[p].bucket == VSM::DEFER_SKIPPED;
+		}
+		r_table[index] = VSM::entry_after_emit(entry) | (deferred ? VSM::ENTRY_DIRTY_STATIC : 0u);
+	}
+}
+
+} // namespace TestVSMCaching
+
+TEST_CASE("[VSM] Cache classification: the four modes, the 8-frame motion cooldown and every AUTO reason (#212)") {
+	using namespace TestVSMCaching;
+	VSM::CacheClassificationInput input;
+	input.frame = 100;
+	CHECK(VSM::classify_shadow_cache_dynamic(input) == 0u); // AUTO, never moved, nothing dynamic.
+
+	// Moved at frame 100: dynamic for frames 100 to 107, static again from frame 108.
+	input.last_moved_frame = 100;
+	for (uint64_t frame = 100; frame < 100 + VSM::CACHE_MOTION_COOLDOWN_FRAMES; frame++) {
+		input.frame = frame;
+		CHECK(VSM::classify_shadow_cache_dynamic(input) == uint32_t(VSM::CACHE_DYNAMIC_MOVED));
+	}
+	input.frame = 100 + VSM::CACHE_MOTION_COOLDOWN_FRAMES;
+	CHECK(VSM::classify_shadow_cache_dynamic(input) == 0u);
+	input.frame = 99; // A frame counter behind the move (a reset) is not a move.
+	CHECK(VSM::classify_shadow_cache_dynamic(input) == 0u);
+	input.last_moved_frame = VSM::CACHE_NEVER_MOVED;
+	input.frame = 100;
+
+	// Every other AUTO reason sets its own bit.
+	struct Case {
+		bool skeleton = false;
+		bool mesh_instance = false;
+		bool particles = false;
+		bool multimesh = false;
+		uint32_t shader = 0;
+		uint32_t expected = 0;
+	};
+	Case cases[9];
+	cases[0].skeleton = true;
+	cases[0].expected = VSM::CACHE_DYNAMIC_SKELETON;
+	cases[1].mesh_instance = true; // Blend shapes.
+	cases[1].expected = VSM::CACHE_DYNAMIC_MESH_INSTANCE;
+	cases[2].particles = true;
+	cases[2].expected = VSM::CACHE_DYNAMIC_PARTICLES;
+	cases[3].multimesh = true;
+	cases[3].expected = VSM::CACHE_DYNAMIC_MULTIMESH;
+	cases[4].shader = cases[4].expected = VSM::CACHE_DYNAMIC_VERTEX;
+	cases[5].shader = cases[5].expected = VSM::CACHE_DYNAMIC_VERTEX_TIME;
+	cases[6].shader = cases[6].expected = VSM::CACHE_DYNAMIC_DEPTH;
+	cases[7].shader = cases[7].expected = VSM::CACHE_DYNAMIC_MAIN_CAMERA;
+	cases[8].shader = cases[8].expected = VSM::CACHE_DYNAMIC_ANIMATED;
+	for (const Case &c : cases) {
+		VSM::CacheClassificationInput in;
+		in.frame = 100;
+		in.has_skeleton = c.skeleton;
+		in.has_mesh_instance = c.mesh_instance;
+		in.is_particles = c.particles;
+		in.is_dynamic_multimesh = c.multimesh;
+		in.shader_dynamic_flags = c.shader;
+		CHECK(VSM::classify_shadow_cache_dynamic(in) == c.expected);
+		// RIGID and STATIC stay static whatever the instance does; ALWAYS is always dynamic.
+		in.last_moved_frame = 100;
+		in.mode = RSE::SHADOW_CACHE_INVALIDATION_RIGID;
+		CHECK(VSM::classify_shadow_cache_dynamic(in) == 0u);
+		in.mode = RSE::SHADOW_CACHE_INVALIDATION_STATIC;
+		CHECK(VSM::classify_shadow_cache_dynamic(in) == 0u);
+		in.mode = RSE::SHADOW_CACHE_INVALIDATION_ALWAYS;
+		CHECK(VSM::classify_shadow_cache_dynamic(in) == uint32_t(VSM::CACHE_DYNAMIC_MODE_ALWAYS));
+	}
+	// Shader flags only carry shader reasons: a motion or mode bit in them is ignored.
+	VSM::CacheClassificationInput masked;
+	masked.shader_dynamic_flags = VSM::CACHE_DYNAMIC_MOVED | VSM::CACHE_DYNAMIC_SKELETON | VSM::CACHE_DYNAMIC_MODE_ALWAYS;
+	CHECK(VSM::classify_shadow_cache_dynamic(masked) == 0u);
+	// ALWAYS with nothing dynamic.
+	VSM::CacheClassificationInput always;
+	always.mode = RSE::SHADOW_CACHE_INVALIDATION_ALWAYS;
+	CHECK(VSM::classify_shadow_cache_dynamic(always) == uint32_t(VSM::CACHE_DYNAMIC_MODE_ALWAYS));
+}
+
+TEST_CASE("[VSM] Deferred budget coverage buckets: exact below 16 pixels, two per power of two, monotonic and capped (#212)") {
+	using namespace TestVSMCaching;
+	for (uint32_t pixels = 0; pixels < 16; pixels++) {
+		CHECK(VSM::coverage_bucket(pixels) == pixels);
+	}
+	CHECK(VSM::coverage_bucket(16) == 16u);
+	CHECK(VSM::coverage_bucket(23) == 16u);
+	CHECK(VSM::coverage_bucket(24) == 17u);
+	CHECK(VSM::coverage_bucket(31) == 17u);
+	CHECK(VSM::coverage_bucket(32) == 18u);
+	CHECK(VSM::coverage_bucket(48) == 19u);
+	CHECK(VSM::coverage_bucket(1u << 27) == 62u);
+	CHECK(VSM::coverage_bucket(3u << 26) == VSM::DEFER_BUCKET_COUNT - 1);
+	CHECK(VSM::coverage_bucket(UINT32_MAX) == VSM::DEFER_BUCKET_COUNT - 1);
+	uint32_t previous = 0;
+	for (uint32_t pixels = 1; pixels < (1u << 20); pixels++) {
+		const uint32_t bucket = VSM::coverage_bucket(pixels);
+		CHECK_MESSAGE(bucket >= previous, "pixels ", pixels);
+		CHECK(bucket < VSM::DEFER_BUCKET_COUNT);
+		previous = bucket;
+	}
+	for (uint32_t shift = 20; shift < 32; shift++) {
+		const uint32_t bucket = VSM::coverage_bucket(1u << shift);
+		CHECK(bucket >= previous);
+		CHECK(bucket < VSM::DEFER_BUCKET_COUNT);
+		previous = bucket;
+	}
+}
+
+TEST_CASE("[VSM] Box invalidation: clipmap window and mip edges, negative origins, the layer mask, local frustums and the near plane (#212)") {
+	using namespace TestVSMCaching;
+	// Map 0: clipmap level 2 (256 texels per meter, a mip 0 page is 0.25 m) at origin (-3, 5), so its window
+	// covers X [-0.75, 15.25) and Y [1.25, 17.25). Map 1: a spot face at the origin looking down -Z, range 20.
+	VSM::MapData maps[2];
+	maps[0] = VSM::map_data_clipmap(Basis(), 2, Vector2i(-3, 5), 200.0f);
+	maps[1] = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, Transform3D(), 20.0f, 45.0f);
+	const uint32_t all_layers[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+
+	// A box inside one mip 0 page: one page per mip, except mip 6. A mip's window is aligned to its own pages
+	// (#219): at mip 6 the level's single page holds the window [-64, 0) of mip 0 pages, which misses X > 0
+	// (the next level covers it).
+	{
+		LocalVector<uint32_t> table = allocated_table(2);
+		const VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 2, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == VSM::MIP_COUNT - 1);
+		CHECK(counts.dynamic_pages == 0u);
+		CHECK(count_flag(table, 0, VSM::ENTRY_DIRTY_STATIC) == VSM::MIP_COUNT - 1);
+		CHECK(count_flag(table, 0, VSM::ENTRY_DIRTY_DYNAMIC) == 0u);
+		// Texels x [25, 51] and y [537, 563].
+		for (uint32_t mip = 0; mip < VSM::MIP_COUNT; mip++) {
+			const uint32_t mask = (VSM::PAGES_PER_SIDE >> mip) - 1;
+			const bool in_window = mip + 1 < VSM::MIP_COUNT;
+			CHECK(((table[VSM::entry_index(0, mip, (25u >> (6 + mip)) & mask, (537u >> (6 + mip)) & mask)] & VSM::ENTRY_DIRTY_STATIC) != 0) == in_window);
+		}
+		// The spot face does not see it: Y 2.1 is above its 90 degree frustum at w <= 1.
+		CHECK(count_flag(table, 1, VSM::ENTRY_DIRTY_STATIC) == 0u);
+		// The same box again marks nothing new.
+		const VSM::InvalidationCounts again = VSM::invalidate_box_model(table.ptr(), 2, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(again.static_pages == 0u);
+	}
+	// A box across a mip 0 page edge (X 0.25): two pages at mip 0, one at mips 1 to 5.
+	{
+		LocalVector<uint32_t> table = allocated_table(1);
+		const VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(0.2f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == VSM::MIP_COUNT);
+	}
+	// Left of X 0 the pages are negative and wrap: absolute page -3 is slot 61 at mip 0, -2 is slot 30 at mip 1;
+	// mip 6's window [-64, 0) holds it, so every mip marks one page.
+	{
+		LocalVector<uint32_t> table = allocated_table(1);
+		const VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(-0.7f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == VSM::MIP_COUNT);
+		CHECK((table[VSM::entry_index(0, 0, 61, 8)] & VSM::ENTRY_DIRTY_STATIC) != 0);
+		CHECK((table[VSM::entry_index(0, 1, 30, 4)] & VSM::ENTRY_DIRTY_STATIC) != 0);
+		CHECK((table[VSM::entry_index(0, 0, 0, 8)] & VSM::ENTRY_DIRTY_STATIC) == 0);
+	}
+	// Past the window's far edge at every mip (X 15.3; its alias would be slot 61): nothing.
+	{
+		LocalVector<uint32_t> table = allocated_table(1);
+		const VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(15.3f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == 0u);
+		CHECK(count_flag(table, 0, VSM::ENTRY_DIRTY_STATIC) == 0u);
+	}
+	// The map's shadow caster mask must share a layer with the box.
+	{
+		LocalVector<uint32_t> table = allocated_table(1);
+		const uint32_t layer_two[1] = { 2u };
+		VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, maps, layer_two, nullptr, 0, 0, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC, 1u));
+		CHECK(counts.static_pages == 0u);
+		counts = VSM::invalidate_box_model(table.ptr(), 1, maps, layer_two, nullptr, 0, 0, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC, 3u));
+		CHECK(counts.static_pages == VSM::MIP_COUNT - 1);
+	}
+	// Unallocated entries are not marked; empty flags and inverted boxes mark nothing.
+	{
+		LocalVector<uint32_t> table;
+		table.resize(VSM::ENTRIES_PER_MAP);
+		memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+		VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == 0u);
+		CHECK(count_flag(table, 0, VSM::ENTRY_DIRTY_STATIC) == 0u);
+		LocalVector<uint32_t> full = allocated_table(1);
+		counts = VSM::invalidate_box_model(full.ptr(), 1, maps, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), 0u));
+		CHECK(counts.static_pages == 0u);
+		VSM::InvalidationBox inverted = make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_STATIC);
+		inverted.max_pos[0] = inverted.min_pos[0] - 1.0f;
+		counts = VSM::invalidate_box_model(full.ptr(), 1, maps, all_layers, nullptr, 0, 0, inverted);
+		CHECK(counts.static_pages == 0u);
+	}
+	// The spot face: behind the light, past its range and outside its cone mark nothing; a small box near its
+	// axis marks one page per mip; a box across the near plane marks the whole face.
+	{
+		const VSM::MapData *spot = &maps[1];
+		const AABB rejected[3] = {
+			AABB(Vector3(-0.5f, -0.5f, 1.0f), Vector3(1.0f, 1.0f, 1.0f)),
+			AABB(Vector3(-0.5f, -0.5f, -26.0f), Vector3(1.0f, 1.0f, 1.0f)),
+			AABB(Vector3(30.0f, -0.5f, -10.5f), Vector3(1.0f, 1.0f, 1.0f)),
+		};
+		for (const AABB &aabb : rejected) {
+			LocalVector<uint32_t> table = allocated_table(1);
+			const VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, spot, all_layers, nullptr, 0, 0, make_box(aabb, VSM::ENTRY_DIRTY_STATIC));
+			CHECK(counts.static_pages == 0u);
+		}
+		LocalVector<uint32_t> table = allocated_table(1);
+		VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, spot, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(0.01f, 0.01f, -10.01f), Vector3(0.01f, 0.01f, 0.01f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == VSM::MIP_COUNT);
+		CHECK((table[VSM::entry_index(0, VSM::MIP_COUNT - 1, 0, 0)] & VSM::ENTRY_DIRTY_STATIC) != 0);
+		LocalVector<uint32_t> cut = allocated_table(1);
+		counts = VSM::invalidate_box_model(cut.ptr(), 1, spot, all_layers, nullptr, 0, 0, make_box(AABB(Vector3(-0.2f, -0.2f, -0.5f), Vector3(0.4f, 0.4f, 1.0f)), VSM::ENTRY_DIRTY_STATIC));
+		CHECK(counts.static_pages == VSM::ENTRIES_PER_MAP);
+	}
+	// A dynamic box marks DIRTY_DYNAMIC and records that the pages now hold dynamic depth.
+	{
+		LocalVector<uint32_t> table;
+		table.resize(VSM::ENTRIES_PER_MAP);
+		memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+		const uint32_t index = VSM::entry_index(0, 0, 0, 8);
+		table[index] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+		VSM::PageRecord pages[4];
+		pages[1].owner = index + 1;
+		const VSM::InvalidationCounts counts = VSM::invalidate_box_model(table.ptr(), 1, maps, all_layers, pages, 4, 2, make_box(AABB(Vector3(0.1f, 2.1f, -1.0f), Vector3(0.1f, 0.1f, 2.0f)), VSM::ENTRY_DIRTY_DYNAMIC));
+		CHECK(counts.dynamic_pages == 1u);
+		CHECK(counts.static_pages == 0u);
+		CHECK(table[index] == VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED | VSM::ENTRY_DIRTY_DYNAMIC));
+		CHECK(pages[1].pad == VSM::PAGE_FLAG_HAS_DYNAMIC_CURR);
+		CHECK(pages[0].pad == 0u);
+	}
+}
+
+TEST_CASE("[VSM] Map invalidation marks every allocated page; dynamic_if_used adds layer 1 only where it held depth (#212)") {
+	using namespace TestVSMCaching;
+	LocalVector<uint32_t> table;
+	table.resize(2 * VSM::ENTRIES_PER_MAP);
+	memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+	// Map 0 holds pages 0 to 3 (a 2x2 grid); page 1 had dynamic depth last frame, page 2 this frame.
+	for (uint32_t i = 0; i < 4; i++) {
+		table[i * 7] = VSM::entry_pack(i % 2, i / 2, VSM::ENTRY_ALLOCATED);
+	}
+	table[VSM::ENTRIES_PER_MAP + 3] = VSM::entry_pack(0, 0, VSM::ENTRY_ALLOCATED); // Map 1.
+	VSM::PageRecord pages[4];
+	pages[1].pad = VSM::PAGE_FLAG_HAS_DYNAMIC_PREV;
+	pages[2].pad = VSM::PAGE_FLAG_HAS_DYNAMIC_CURR;
+
+	LocalVector<uint32_t> plain(table);
+	VSM::InvalidationCounts counts = VSM::invalidate_map_model(plain.ptr(), 2, 0, VSM::ENTRY_DIRTY_STATIC, pages, 4, 2, false);
+	CHECK(counts.static_pages == 4u);
+	CHECK(counts.dynamic_pages == 0u);
+	CHECK(count_flag(plain, 1, VSM::ENTRY_DIRTY_STATIC) == 0u); // Other maps keep their pages.
+
+	LocalVector<uint32_t> used(table);
+	counts = VSM::invalidate_map_model(used.ptr(), 2, 0, VSM::ENTRY_DIRTY_STATIC, pages, 4, 2, true);
+	CHECK(counts.static_pages == 4u);
+	CHECK(counts.dynamic_pages == 2u);
+	CHECK((used[0] & VSM::ENTRY_DIRTY_DYNAMIC) == 0);
+	CHECK((used[7] & VSM::ENTRY_DIRTY_DYNAMIC) != 0);
+	CHECK((used[14] & VSM::ENTRY_DIRTY_DYNAMIC) != 0);
+	CHECK((used[21] & VSM::ENTRY_DIRTY_DYNAMIC) == 0);
+	// dynamic_if_used reads the page flags; it does not add to them.
+	CHECK(pages[0].pad == 0u);
+	CHECK(pages[1].pad == VSM::PAGE_FLAG_HAS_DYNAMIC_PREV);
+	CHECK(pages[3].pad == 0u);
+
+	// A dynamic map invalidation records layer-1 use on every page; a map past the table does nothing.
+	LocalVector<uint32_t> dynamic(table);
+	counts = VSM::invalidate_map_model(dynamic.ptr(), 2, 0, VSM::ENTRY_DIRTY_DYNAMIC, pages, 4, 2, false);
+	CHECK(counts.dynamic_pages == 4u);
+	for (uint32_t p = 0; p < 4; p++) {
+		CHECK((pages[p].pad & VSM::PAGE_FLAG_HAS_DYNAMIC_CURR) != 0);
+	}
+	counts = VSM::invalidate_map_model(dynamic.ptr(), 2, 2, VSM::ENTRY_DIRTY_STATIC, pages, 4, 2, false);
+	CHECK(counts.static_pages == 0u);
+}
+
+TEST_CASE("[VSM] Deferred invalidation budget: 0 renders every dirty static page, N renders the N with the most screen coverage (#212)") {
+	using namespace TestVSMCaching;
+	// Ten pool pages; entries 0 to 7 get pages in frame 1. In frame 2 entries 0 to 5 are invalidated
+	// (static), entry 2 also dynamic; entry i's page covers 2^(i + 4) screen pixels.
+	struct Run {
+		LocalVector<uint32_t> table;
+		LocalVector<VSM::PageRecord> pages;
+		LocalVector<uint32_t> coverage;
+		LocalVector<uint32_t> requests;
+		Run() {
+			table.resize(VSM::ENTRIES_PER_MAP);
+			memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+			pages.resize(10);
+			coverage.resize(10);
+			memset(coverage.ptr(), 0, coverage.size() * sizeof(uint32_t));
+			for (uint32_t i = 0; i < 8; i++) {
+				requests.push_back(i);
+			}
+		}
+		uint32_t page_of(uint32_t p_index) const {
+			const uint32_t entry = table[p_index];
+			return VSM::entry_page_y(entry) * 4 + VSM::entry_page_x(entry);
+		}
+		VSM::AllocationCounts frame(uint32_t p_frame, uint32_t p_budget) {
+			for (uint32_t index : requests) {
+				table[index] |= VSM::ENTRY_REQUESTED;
+			}
+			const VSM::AllocationCounts counts = VSM::allocate_model(table.ptr(), table.size(), pages.ptr(), pages.size(), 4, requests.ptr(), requests.size(), p_frame, 30, 0, p_budget, coverage.ptr());
+			emit_requests(table, pages, 4, requests);
+			return counts;
+		}
+		void invalidate() {
+			for (uint32_t i = 0; i < 6; i++) {
+				table[i] |= VSM::ENTRY_DIRTY_STATIC;
+				coverage[page_of(i)] = 1u << (i + 4);
+			}
+			table[2] |= VSM::ENTRY_DIRTY_DYNAMIC;
+		}
+	};
+	// Budget 0 (unlimited) and a budget no smaller than the dirty pages: all six now.
+	for (uint32_t budget : { 0u, 6u, 100u }) {
+		Run run;
+		VSM::AllocationCounts counts = run.frame(1, budget);
+		CHECK(counts.new_pages == 8u);
+		run.invalidate();
+		counts = run.frame(2, budget);
+		CHECK(counts.kept == 8u);
+		CHECK(counts.dirty == 6u);
+		CHECK(counts.dirty_static == 6u);
+		CHECK(counts.dirty_dynamic == 1u);
+		CHECK(counts.deferred_static == 0u);
+		for (uint32_t i = 0; i < 8; i++) {
+			CHECK((run.table[i] & VSM::ENTRY_DIRTY_MASK) == 0);
+		}
+	}
+
+	// Budget 2: entries 5 and 4 (the most coverage) now, then 3 and 2, then 1 and 0. Entry 2's dynamic layer
+	// renders in frame 2 even though its static layer waits; the deferred pages keep ENTRY_DIRTY_STATIC.
+	{
+		Run run;
+		run.frame(1, 2);
+		run.invalidate();
+		VSM::AllocationCounts counts = run.frame(2, 2);
+		CHECK(counts.dirty_static == 2u);
+		CHECK(counts.deferred_static == 4u);
+		CHECK(counts.dirty_dynamic == 1u);
+		CHECK(counts.dirty == 3u);
+		for (uint32_t i = 0; i < 6; i++) {
+			const bool deferred = i < 4;
+			CHECK_MESSAGE(((run.table[i] & VSM::ENTRY_DIRTY_STATIC) != 0) == deferred, "entry ", i);
+			CHECK((run.table[i] & VSM::ENTRY_DIRTY_DYNAMIC) == 0);
+		}
+		counts = run.frame(3, 2);
+		CHECK(counts.dirty_static == 2u);
+		CHECK(counts.deferred_static == 2u);
+		CHECK((run.table[3] & VSM::ENTRY_DIRTY_STATIC) == 0);
+		CHECK((run.table[2] & VSM::ENTRY_DIRTY_STATIC) == 0);
+		CHECK((run.table[1] & VSM::ENTRY_DIRTY_STATIC) != 0);
+		counts = run.frame(4, 2);
+		CHECK(counts.dirty_static == 2u);
+		CHECK(counts.deferred_static == 0u);
+		counts = run.frame(5, 2);
+		CHECK(counts.dirty == 0u);
+		CHECK(counts.deferred_static == 0u);
+	}
+
+	// New pages and scrolled pages are never deferred, even with a budget of 1.
+	{
+		Run run;
+		run.frame(1, 1);
+		run.invalidate();
+		run.table[6] |= VSM::ENTRY_SCROLLED | VSM::ENTRY_DIRTY_STATIC;
+		run.requests.push_back(8); // A new page.
+		VSM::AllocationCounts counts = run.frame(2, 1);
+		CHECK(counts.new_pages == 1u);
+		CHECK(counts.deferred_static == 5u); // Entries 0 to 4; entry 5 has the most coverage.
+		CHECK(counts.dirty_static == 3u); // Entry 5, the scrolled entry 6 and the new entry 8.
+		CHECK((run.table[6] & VSM::ENTRY_DIRTY_MASK) == 0);
+		CHECK((run.table[8] & VSM::ENTRY_ALLOCATED) != 0);
+	}
+}
+
+TEST_CASE("[VSM] Unrequested pages: dirty static ones are evicted, ones with only dirty dynamic stay cached (#212)") {
+	using namespace TestVSMCaching;
+	LocalVector<uint32_t> table;
+	table.resize(VSM::ENTRIES_PER_MAP);
+	memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+	VSM::PageRecord page;
+	page.owner = 6;
+	page.last_used = 10;
+	uint32_t bucket = 0;
+	table[5] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED | VSM::ENTRY_DIRTY_STATIC);
+	CHECK(VSM::page_update(page, 1, 4, table.ptr(), table.size(), 11, 30, bucket) == VSM::PAGE_UPDATE_EVICTED);
+	table[5] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED | VSM::ENTRY_DIRTY_DYNAMIC);
+	CHECK(VSM::page_update(page, 1, 4, table.ptr(), table.size(), 11, 30, bucket) == VSM::PAGE_UPDATE_CACHED);
+	table[5] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED | VSM::ENTRY_DIRTY_STATIC | VSM::ENTRY_REQUESTED);
+	CHECK(VSM::page_update(page, 1, 4, table.ptr(), table.size(), 11, 30, bucket) == VSM::PAGE_UPDATE_KEPT);
+
+	// In the allocation model: a cached page's "dynamic this frame" becomes "dynamic last frame"; an evicted
+	// page loses both.
+	LocalVector<VSM::PageRecord> pages;
+	pages.resize(4);
+	table[5] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED | VSM::ENTRY_DIRTY_DYNAMIC);
+	table[9] = VSM::entry_pack(2, 0, VSM::ENTRY_ALLOCATED | VSM::ENTRY_DIRTY_STATIC);
+	pages[1].owner = 6;
+	pages[1].last_used = 10;
+	pages[1].pad = VSM::PAGE_FLAG_HAS_DYNAMIC_CURR;
+	pages[2].owner = 10;
+	pages[2].last_used = 10;
+	pages[2].pad = VSM::PAGE_FLAG_HAS_DYNAMIC_CURR;
+	const VSM::AllocationCounts counts = VSM::allocate_model(table.ptr(), table.size(), pages.ptr(), pages.size(), 4, nullptr, 0, 11, 30);
+	CHECK(counts.cached == 1u);
+	CHECK(counts.evicted == 1u);
+	CHECK(pages[1].pad == VSM::PAGE_FLAG_HAS_DYNAMIC_PREV);
+	CHECK(pages[2].owner == 0u);
+	CHECK(pages[2].pad == 0u);
+	CHECK(table[9] == 0u);
+}
+
+TEST_CASE("[VSM] Light property changes are noted per light, and the deferred budget setting clamps (#212)") {
+	using namespace TestVSMCaching;
+	TestVSMStorage storage;
+	const RID sun = light_rid(7);
+	REQUIRE(storage.directional_update(sun, Basis(), Vector3(), 100.0f) != VSM::MAP_NONE);
+	VSM::LightProperties props;
+	props.range = 10.0f;
+	CHECK_FALSE(storage.note_light_properties(sun, props, true)); // The first note only records.
+	CHECK_FALSE(storage.note_light_properties(sun, props, true));
+	VSM::LightProperties changed = props;
+	changed.range = 11.0f;
+	CHECK(storage.note_light_properties(sun, changed, true));
+	CHECK_FALSE(storage.note_light_properties(sun, changed, true));
+	changed.transform.origin = Vector3(1, 0, 0);
+	CHECK_FALSE(storage.note_light_properties(sun, changed, false)); // A directional light's position is not a property.
+	CHECK(storage.note_light_properties(sun, changed, true));
+	changed.spot_angle = 30.0f;
+	CHECK(storage.note_light_properties(sun, changed, true));
+	changed.area_size = Vector2(1, 2);
+	CHECK(storage.note_light_properties(sun, changed, true));
+	changed.caster_mask = 1u;
+	CHECK(storage.note_light_properties(sun, changed, true));
+	changed.reverse_cull = true;
+	CHECK(storage.note_light_properties(sun, changed, true));
+	CHECK_FALSE(storage.note_light_properties(light_rid(8), changed, true)); // A light without maps.
+
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	REQUIRE(settings != nullptr);
+	const StringName name = VSM::SETTING_DEFERRED_INVALIDATION_BUDGET;
+	const bool had = settings->has_setting(name);
+	const Variant old_value = had ? settings->get_setting(name) : Variant(0);
+	settings->set_setting(name, -5);
+	CHECK(VSM::read_deferred_invalidation_budget() == 0u);
+	settings->set_setting(name, 512);
+	CHECK(VSM::read_deferred_invalidation_budget() == 512u);
+	settings->set_setting(name, int64_t(1) << 40);
+	CHECK(VSM::read_deferred_invalidation_budget() == VSM::POOL_MAX_PAGES);
+	settings->set_setting(name, old_value);
+}
+
+TEST_CASE("[VSM] A sun turn scrolls the pages that leave each level's window and invalidates the rest (#212)") {
+	using namespace TestVSMCaching;
+	TestVSMStorage storage;
+	const RID sun = light_rid(9);
+	const Vector3 camera(0.07f, 0.0f, -3.0f);
+	const uint32_t first = storage.directional_update(sun, Basis(), camera, 100.0f, true);
+	REQUIRE(first != VSM::MAP_NONE);
+	const uint32_t levels = storage.map_get(sun)->count;
+	fill_light(storage, sun, 3);
+	Vector2i old_origins[VSM::CLIPMAP_MAX_LEVELS];
+	for (uint32_t level = 0; level < levels; level++) {
+		old_origins[level] = storage.get_clipmap_origin(sun, level);
+	}
+	CHECK(storage.invalidated_maps.is_empty());
+	CHECK(storage.scroll_calls == 0);
+
+	// Turned: every level is invalidated (static layer; layer 1 only where it was used), and the levels whose
+	// window moved also scroll the pages that left it, which are never deferred.
+	storage.directional_update(sun, Basis(Vector3(0, 1, 0), 0.1f), camera, 100.0f, true);
+	CHECK(storage.invalidated_maps.size() == levels);
+	uint32_t moved_levels = 0;
+	for (uint32_t level = 0; level < levels; level++) {
+		CHECK(storage.invalidated_maps[level] == first + level);
+		const VSM::ClipmapScroll scroll = VSM::clipmap_scroll(old_origins[level], storage.get_clipmap_origin(sun, level));
+		moved_levels += scroll.any ? 1 : 0;
+		uint32_t expected_scrolled = 0;
+		for (uint32_t mip = 0; mip < VSM::MIP_COUNT; mip++) {
+			const uint32_t pages = VSM::PAGES_PER_SIDE >> mip;
+			for (uint32_t y = 0; y < pages; y++) {
+				for (uint32_t x = 0; x < pages; x++) {
+					expected_scrolled += VSM::clipmap_scroll_hits(scroll, mip, x, y) ? 1 : 0;
+				}
+			}
+		}
+		CHECK(count_flag(storage.table, first + level, VSM::ENTRY_SCROLLED) == expected_scrolled);
+		CHECK(count_flag(storage.table, first + level, VSM::ENTRY_DIRTY_STATIC) == VSM::ENTRIES_PER_MAP);
+	}
+	CHECK(moved_levels > 0);
+	CHECK(storage.scroll_calls == moved_levels);
+
+	// Without p_invalidate_on_turn a turn scrolls every page of every level, as before #212.
+	TestVSMStorage plain;
+	plain.directional_update(sun, Basis(), camera, 100.0f);
+	fill_light(plain, sun, 3);
+	plain.directional_update(sun, Basis(Vector3(0, 1, 0), 0.1f), camera, 100.0f);
+	CHECK(plain.invalidated_maps.is_empty());
+	CHECK(plain.scroll_calls == levels);
+	CHECK(count_flag(plain.table, plain.map_get(sun)->first, VSM::ENTRY_SCROLLED) == VSM::ENTRIES_PER_MAP);
+}
+
+TEST_CASE("[VSM] Freed maps drop their pending map invalidations; the other maps keep theirs (#212)") {
+	LocalVector<VSM::PendingMapInvalidation> pending;
+	const uint32_t maps[6] = { 3, 7, 8, 9, 12, 8 };
+	for (uint32_t map : maps) {
+		VSM::PendingMapInvalidation item;
+		item.map = map;
+		item.dirty_flags = VSM::ENTRY_DIRTY_STATIC;
+		pending.push_back(item);
+	}
+	VSM::prune_map_invalidations(pending, 7, 3); // Maps 7, 8 and 9 were freed.
+	REQUIRE(pending.size() == 2u);
+	const bool kept_3_and_12 = (pending[0].map == 3u && pending[1].map == 12u) || (pending[0].map == 12u && pending[1].map == 3u);
+	CHECK(kept_3_and_12);
+	VSM::prune_map_invalidations(pending, 0, 0); // No map.
+	CHECK(pending.size() == 2u);
+	VSM::prune_map_invalidations(pending, 4, UINT32_MAX); // A range that would wrap past UINT32_MAX holds map 12, not map 3.
+	REQUIRE(pending.size() == 1u);
+	CHECK(pending[0].map == 3u);
+	CHECK(pending[0].dirty_flags == uint32_t(VSM::ENTRY_DIRTY_STATIC));
+}
+
+namespace TestVSMCaching {
+
+// RendererSceneRender::RenderVSMInvalidation's fields, which append_invalidation() and publish_invalidations() use.
+struct TestInvalidation {
+	AABB world_aabb;
+	uint32_t layer_mask = 0;
+	uint32_t dirty_flags = 0;
+};
+
+TestInvalidation make_invalidation(float p_x, uint32_t p_layer_mask, uint32_t p_dirty_flags) {
+	TestInvalidation event;
+	event.world_aabb = AABB(Vector3(p_x, 0, 0), Vector3(1, 1, 1));
+	event.layer_mask = p_layer_mask;
+	event.dirty_flags = p_dirty_flags;
+	return event;
+}
+
+} // namespace TestVSMCaching
+
+TEST_CASE("[VSM] A scenario's invalidation list is capped by merging into its last box, and boxes no view applied stay published (#212)") {
+	using namespace TestVSMCaching;
+	const uint32_t cap = VSM::MAX_PENDING_INVALIDATIONS;
+	LocalVector<TestInvalidation> list;
+	for (uint32_t i = 0; i < cap; i++) {
+		VSM::append_invalidation(list, make_invalidation(float(i), 1u, VSM::ENTRY_DIRTY_STATIC));
+	}
+	REQUIRE(list.size() == cap);
+	const AABB last_before = list[cap - 1].world_aabb;
+	VSM::append_invalidation(list, make_invalidation(-50.0f, 4u, VSM::ENTRY_DIRTY_DYNAMIC));
+	VSM::append_invalidation(list, make_invalidation(40000.0f, 2u, VSM::ENTRY_DIRTY_STATIC));
+	CHECK(list.size() == cap);
+	const TestInvalidation &last = list[cap - 1];
+	CHECK(last.world_aabb.encloses(last_before));
+	CHECK(last.world_aabb.encloses(make_invalidation(-50.0f, 0, 0).world_aabb));
+	CHECK(last.world_aabb.encloses(make_invalidation(40000.0f, 0, 0).world_aabb));
+	CHECK(last.layer_mask == 7u);
+	CHECK(last.dirty_flags == uint32_t(VSM::ENTRY_DIRTY_STATIC | VSM::ENTRY_DIRTY_DYNAMIC));
+	CHECK(list[0].world_aabb == make_invalidation(0.0f, 0, 0).world_aabb); // The other boxes are untouched.
+	CHECK(list[cap - 2].layer_mask == 1u);
+
+	// Publishing: the boxes written since the last publish replace the published ones once a view applied them, and
+	// are added to them while no view has (a frame without a page-marking view of the scenario drops none).
+	LocalVector<TestInvalidation> published;
+	LocalVector<TestInvalidation> writing;
+	writing.push_back(make_invalidation(1.0f, 1u, VSM::ENTRY_DIRTY_STATIC));
+	writing.push_back(make_invalidation(2.0f, 1u, VSM::ENTRY_DIRTY_STATIC));
+	VSM::publish_invalidations(published, writing, false);
+	CHECK(published.size() == 2u);
+	CHECK(writing.is_empty());
+	writing.push_back(make_invalidation(3.0f, 2u, VSM::ENTRY_DIRTY_DYNAMIC));
+	VSM::publish_invalidations(published, writing, false); // Not applied: kept, and the new box added.
+	REQUIRE(published.size() == 3u);
+	CHECK(published[0].world_aabb.position.x == 1.0f);
+	CHECK(published[2].world_aabb.position.x == 3.0f);
+	CHECK(published[2].dirty_flags == uint32_t(VSM::ENTRY_DIRTY_DYNAMIC));
+	writing.push_back(make_invalidation(4.0f, 1u, VSM::ENTRY_DIRTY_STATIC));
+	VSM::publish_invalidations(published, writing, true); // Applied: replaced.
+	REQUIRE(published.size() == 1u);
+	CHECK(published[0].world_aabb.position.x == 4.0f);
+	VSM::publish_invalidations(published, writing, true); // Applied, and nothing new.
+	CHECK(published.is_empty());
+
+	// Boxes kept while no view applies them stay within the cap.
+	published.push_back(make_invalidation(-1.0f, 1u, VSM::ENTRY_DIRTY_STATIC));
+	for (uint32_t i = 0; i < cap + 10; i++) {
+		writing.push_back(make_invalidation(float(i), 1u, VSM::ENTRY_DIRTY_STATIC));
+	}
+	VSM::publish_invalidations(published, writing, false);
+	CHECK(published.size() == cap);
+	CHECK(published[0].world_aabb.position.x == -1.0f);
+	CHECK(published[cap - 1].world_aabb.encloses(make_invalidation(float(cap + 9), 0, 0).world_aabb));
+	CHECK(writing.is_empty());
+}
+
+TEST_CASE("[VSM][NextGeo] Record bits 12-14 hold the cache mode and the resolved dynamic flag; each mode routes to its layer (#212)") {
+	using namespace RendererRD;
+	using VMS = RendererVirtualMeshStorage;
+	static_assert(VMS::RECORD_VSM_CACHE_MODE_SHIFT == 12u);
+	static_assert(VMS::RECORD_VSM_CACHE_MODE_MASK == (3u << 12));
+	static_assert(VMS::RECORD_VSM_DYNAMIC == (1u << 14));
+	static_assert((VMS::RECORD_VSM_DYNAMIC & VMS::RECORD_VSM_CACHE_MODE_MASK) == 0u);
+	static_assert(((VMS::RECORD_RT_FAR | VMS::RECORD_RT_ALPHA_AS_OPAQUE | VMS::RECORD_RT_SKINNED | VMS::RECORD_RT_STATIC | VMS::RECORD_MOVED) & (VMS::RECORD_VSM_CACHE_MODE_MASK | VMS::RECORD_VSM_DYNAMIC)) == 0u);
+	const RSE::ShadowCacheInvalidation modes[4] = { RSE::SHADOW_CACHE_INVALIDATION_AUTO, RSE::SHADOW_CACHE_INVALIDATION_ALWAYS, RSE::SHADOW_CACHE_INVALIDATION_RIGID, RSE::SHADOW_CACHE_INVALIDATION_STATIC };
+	const uint32_t record_modes[4] = { VMS::RECORD_VSM_CACHE_AUTO, VMS::RECORD_VSM_CACHE_ALWAYS, VMS::RECORD_VSM_CACHE_RIGID, VMS::RECORD_VSM_CACHE_STATIC };
+	for (uint32_t i = 0; i < 4; i++) {
+		CHECK(((uint32_t(modes[i]) << VMS::RECORD_VSM_CACHE_MODE_SHIFT) & VMS::RECORD_VSM_CACHE_MODE_MASK) == record_modes[i]);
+	}
+
+	const uint32_t valid = VMS::RECORD_VALID | VMS::RECORD_VISIBLE;
+	const uint32_t hook = NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK;
+	// ALWAYS: layer 1 even when nothing about it is dynamic. RIGID and STATIC: layer 0 even when moved this
+	// frame, skinned, with a vertex-offset bin or flagged dynamic.
+	CHECK(nextgeo_vsm_instance_layer(valid | VMS::RECORD_VSM_CACHE_ALWAYS, false, hook, false) == 1u);
+	const uint32_t everything = VMS::RECORD_RT_SKINNED | VMS::RECORD_VSM_DYNAMIC;
+	CHECK(nextgeo_vsm_instance_layer(valid | VMS::RECORD_VSM_CACHE_RIGID | everything, true, hook, true) == 0u);
+	CHECK(nextgeo_vsm_instance_layer(valid | VMS::RECORD_VSM_CACHE_STATIC | everything, true, hook, true) == 0u);
+	// AUTO: RendererSceneCull's resolved dynamic flag (bit 14), a move this frame, skinning or a dynamic bin.
+	CHECK(nextgeo_vsm_instance_layer(valid, false, hook, false) == 0u);
+	CHECK(nextgeo_vsm_instance_layer(valid | VMS::RECORD_VSM_DYNAMIC, false, hook, false) == 1u);
+	CHECK(nextgeo_vsm_instance_layer(valid, true, hook, false) == 1u);
+	CHECK(nextgeo_vsm_instance_layer(valid | VMS::RECORD_RT_SKINNED, false, hook, false) == 1u);
+	CHECK(nextgeo_vsm_instance_layer(valid, false, hook, true) == 1u);
+	// Without the hook (#217's debug path) everything stays on layer 0, ALWAYS included.
+	CHECK(nextgeo_vsm_instance_layer(valid | VMS::RECORD_VSM_CACHE_ALWAYS | VMS::RECORD_VSM_DYNAMIC, true, 0u, true) == 0u);
+}
+
+TEST_CASE("[VSM][SceneTree] shadow_cache_invalidation is bound and round-trips through GeometryInstance3D and RenderingServer (#212)") {
+	const char *names[4] = { "AUTO", "ALWAYS", "RIGID", "STATIC" };
+	List<StringName> constants;
+	ClassDB::get_enum_constants("RenderingServer", "ShadowCacheInvalidation", &constants);
+	CHECK(constants.size() == 4);
+	List<StringName> node_constants;
+	ClassDB::get_enum_constants("GeometryInstance3D", "ShadowCacheInvalidation", &node_constants);
+	CHECK(node_constants.size() == 4);
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	// A MeshInstance3D made through ClassDB: its header would declare a global Shader that another test's
+	// alias shadows.
+	GeometryInstance3D *node = Object::cast_to<GeometryInstance3D>(ClassDB::instantiate("MeshInstance3D"));
+	REQUIRE(node != nullptr);
+	CHECK(node->get_shadow_cache_invalidation() == GeometryInstance3D::SHADOW_CACHE_INVALIDATION_AUTO);
+	CHECK(int(node->get("shadow_cache_invalidation")) == 0);
+	for (uint32_t mode = 0; mode < 4; mode++) {
+		const String name = String("SHADOW_CACHE_INVALIDATION_") + names[mode];
+		bool valid = false;
+		CHECK(ClassDB::get_integer_constant("RenderingServer", name, &valid) == int64_t(mode));
+		CHECK(valid);
+		CHECK(ClassDB::get_integer_constant_enum("RenderingServer", name) == StringName("ShadowCacheInvalidation"));
+		valid = false;
+		CHECK(ClassDB::get_integer_constant("GeometryInstance3D", name, &valid) == int64_t(mode));
+		CHECK(valid);
+		Callable::CallError error;
+		const Variant instance = node->get_instance();
+		const Variant value = int64_t(mode);
+		const Variant *args[2] = { &instance, &value };
+		rs->callp("instance_geometry_set_shadow_cache_invalidation", args, 2, error);
+		CHECK(error.error == Callable::CallError::CALL_OK);
+		node->set("shadow_cache_invalidation", int64_t(mode));
+		CHECK(int(node->get_shadow_cache_invalidation()) == int(mode));
+		CHECK(int(node->get("shadow_cache_invalidation")) == int(mode));
+	}
+	memdelete(node);
 }
