@@ -658,6 +658,7 @@ def test_dense_city_flight_and_gv3_configs(name: str, source: str, camera: str, 
     assert config.godotnext.scene == f"res://generated/dense_city/{source}.tscn"
     assert config.godotnext.camera == camera
     assert (config.frames, config.ue.path_frames) == (frames, frames)
+    assert config.ue.warmup_frames == (1800 if name == "dense_city_flight_hwrt_high" else 300)
     assert config.ue.map == f"/Game/Ports/{map_name}/{map_name}.umap"
     assert config.godotnext.nextgi is not None
     assert (config.godotnext.nextgi.tier, config.godotnext.nextgi.quality) == ("HWRT", "HIGH")

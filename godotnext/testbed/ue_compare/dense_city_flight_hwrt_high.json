@@ -33,7 +33,7 @@
 		"map": "/Game/Ports/DenseCityFlight/DenseCityFlight.umap",
 		"rhi": "D3D12",
 		"feature_level": "SM6",
-		"warmup_frames": 300,
+		"warmup_frames": 1800,
 		"path_frames": 3600,
 		"fps": 60,
 		"args": [
