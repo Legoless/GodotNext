@@ -613,7 +613,9 @@ NextGIHitIneligible nextgi_hit_classify(const NextGIHitShaderSource &p_source) {
 			return NEXTGI_HIT_INELIGIBLE_DERIVATIVE;
 		}
 	}
-	if (p_source.uses_discard || _nextgi_hit_uses_token(code, "discard")) {
+	// GodotNext: nextgi_hit_discard (#304). The hit mode writes discard in fragment() as NEXTGI_HIT_DISCARD; one left
+	// in the code sits in a helper function, which the hit stages cannot leave fragment() from.
+	if (_nextgi_hit_uses_token(code, "discard")) {
 		return NEXTGI_HIT_INELIGIBLE_DISCARD;
 	}
 	if (p_source.writes_depth || _nextgi_hit_uses_token(code, "gl_FragDepth")) {
@@ -731,6 +733,13 @@ const char *nextgi_hit_check_counter_name(NextGIHitCheckCounter p_counter) {
 			return "probe_gpu_instances";
 		case NEXTGI_HIT_CHECK_PROBE_GPU_FALLBACK:
 			return "probe_gpu_fallback";
+		// GodotNext: nextgi_hit_discard (#304)
+		case NEXTGI_HIT_CHECK_DISCARD_CUT:
+			return "discard_cut";
+		case NEXTGI_HIT_CHECK_DISCARD_IGNORED:
+			return "discard_ignored";
+		case NEXTGI_HIT_CHECK_DISCARD_COVERED:
+			return "discard_covered";
 		case NEXTGI_HIT_CHECK_COUNTER_MAX:
 			break;
 	}
@@ -898,7 +907,7 @@ void NextGIHitMaterials::_compile_task(void *p_userdata) {
 		shader->reason = nextgi_hit_classify(source);
 	}
 	if (shader->reason == NEXTGI_HIT_ELIGIBLE) {
-		shader->any_hit = source.alpha_scissor || source.alpha_hash;
+		shader->any_hit = nextgi_hit_source_has_any_hit(source); // GodotNext: nextgi_hit_discard (#304)
 		HashMap<String, String> code;
 		code["vertex"] = source.vertex_code;
 		code["fragment"] = source.fragment_code;
@@ -2075,17 +2084,26 @@ bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_r
 	return true;
 }
 
-// GodotNext: nextgi_shadow_policy (#145)
-NextGIShadowRetraceVerdict NextGIHitMaterials::get_shadow_retrace_verdict(uint64_t p_serial) const {
+// GodotNext: nextgi_hit_discard (#304)
+NextGIShadowRetraceVerdict nextgi_hit_shadow_retrace_verdict(bool p_material_groups, bool p_seen, bool p_compiling, bool p_eligible, bool p_any_hit) {
 	// Simplified Material (#286): no material compiles a hit group, so nothing can evaluate the shader's alpha.
-	if (!internal->material_groups) {
+	if (!p_material_groups) {
 		return NEXTGI_SHADOW_VERDICT_OPAQUE;
 	}
-	HitShader *const *shader = internal->shaders.getptr(p_serial);
-	if (shader == nullptr || (*shader)->state == HitShader::STATE_COMPILING) {
+	if (!p_seen || p_compiling) {
 		return NEXTGI_SHADOW_VERDICT_UNKNOWN;
 	}
-	return (*shader)->state != HitShader::STATE_INELIGIBLE && (*shader)->any_hit ? NEXTGI_SHADOW_VERDICT_RETRACE : NEXTGI_SHADOW_VERDICT_OPAQUE;
+	return p_eligible && p_any_hit ? NEXTGI_SHADOW_VERDICT_RETRACE : NEXTGI_SHADOW_VERDICT_OPAQUE;
+}
+
+// GodotNext: nextgi_shadow_policy (#145)
+NextGIShadowRetraceVerdict NextGIHitMaterials::get_shadow_retrace_verdict(uint64_t p_serial) const {
+	HitShader *const *shader = internal->shaders.getptr(p_serial);
+	const bool seen = shader != nullptr;
+	const bool compiling = seen && (*shader)->state == HitShader::STATE_COMPILING;
+	// The compile task writes the reason and any_hit: read them only once the shader has left STATE_COMPILING.
+	const bool done = seen && !compiling;
+	return nextgi_hit_shadow_retrace_verdict(internal->material_groups, seen, compiling, done && (*shader)->state != HitShader::STATE_INELIGIBLE, done && (*shader)->any_hit);
 }
 
 // GodotNext: nextgi_shadow_policy (#145). Notify the shared texture table latch when the RT scene releases slots.

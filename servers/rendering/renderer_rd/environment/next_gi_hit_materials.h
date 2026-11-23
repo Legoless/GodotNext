@@ -53,11 +53,11 @@ class NextGIRTScene;
 class NextGISRC;
 
 // GodotNext: nextgi_hit_groups (#130, plan §21.2 L7). Material hit groups: each Godot spatial material
-// shader compiles to a closest-hit stage (and an any-hit stage when it alpha-tests), linked through #179's
-// pipeline libraries into one RT pipeline whose hit shader binding table maps every geometry of the NextGI
-// TLAS to its material shader's group. Textures are read through #176's bindless tables, and the hit
-// shaders read the vertex attributes from an attribute stream in the RT arena. Everything above
-// NextGIHitMaterials is device-free so doctests run it without a GPU.
+// shader compiles to a closest-hit stage (and an any-hit stage when it alpha-tests or discards, #304),
+// linked through #179's pipeline libraries into one RT pipeline whose hit shader binding table maps every
+// geometry of the NextGI TLAS to its material shader's group. Textures are read through #176's bindless
+// tables, and the hit shaders read the vertex attributes from an attribute stream in the RT arena.
+// Everything above NextGIHitMaterials is device-free so doctests run it without a GPU.
 //
 // Nothing here runs unless a consumer asks for it and the hit groups can run (nextgi_hit_availability()):
 // otherwise there is no stream in the arena, no table, no pipeline, and every TLAS instance keeps
@@ -71,8 +71,8 @@ class NextGISRC;
 //   ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT for shadow rays (every other instance is
 //   FORCE_OPAQUE_BIT), and the shadow-only instances lack bit 7. A trace with gl_RayFlagsNoOpaqueEXT overrides
 //   the instance flag, and the any-hit stage of an alpha-tested material's group then runs its alpha scissor or
-//   hash test and ignores what it cuts; so does a trace without opacity flags on a FORCE_NO_OPAQUE instance (the
-//   retrace, trace_shadow_retrace()).
+//   hash test and ignores what it cuts (GodotNext: nextgi_hit_discard (#304): and where fragment() discards); so
+//   does a trace without opacity flags on a FORCE_NO_OPAQUE instance (the retrace, trace_shadow_retrace()).
 // - HitParams.record_count must be get_record_count(): instances past it are written by the GPU (particles,
 //   dynamic MultiMesh), have no record and come back from the fallback group without one.
 // - Trace only on frames where has_current_records() is true: the records and shader binding table ranges
@@ -321,7 +321,9 @@ enum NextGIHitIneligible {
 	NEXTGI_HIT_ELIGIBLE,
 	NEXTGI_HIT_INELIGIBLE_SCREEN_READ, // Screen, depth or normal-roughness textures, SCREEN_UV, FRAGCOORD.
 	NEXTGI_HIT_INELIGIBLE_DERIVATIVE, // dFdx, dFdy, fwidth or textureQueryLod: no derivatives at a hit.
-	NEXTGI_HIT_INELIGIBLE_DISCARD, // A closest-hit stage cannot discard.
+	// GodotNext: nextgi_hit_discard (#304). discard in a helper function: the hit stages leave only fragment() itself
+	// early (discard in fragment() is NEXTGI_HIT_DISCARD, ignoreIntersectionEXT in the any-hit stage).
+	NEXTGI_HIT_INELIGIBLE_DISCARD,
 	NEXTGI_HIT_INELIGIBLE_DEPTH_WRITE,
 	NEXTGI_HIT_INELIGIBLE_POSITION_WRITE, // POSITION, MODELVIEW_MATRIX or PROJECTION_MATRIX writes.
 	NEXTGI_HIT_INELIGIBLE_TEXTURE_TYPE, // Not a 2D texture, a texture array or a global texture.
@@ -360,6 +362,17 @@ struct NextGIHitShaderSource {
 // The reason a hit source is ineligible, or NEXTGI_HIT_ELIGIBLE. Scans the generated code for built-ins the
 // hit template does not provide.
 NextGIHitIneligible nextgi_hit_classify(const NextGIHitShaderSource &p_source);
+
+// GodotNext: nextgi_hit_discard (#304). Whether an eligible hit source's group gets an any-hit stage: an alpha
+// scissor or hash test, or discard in fragment() (the any-hit stage ignores the intersection where it discards).
+_FORCE_INLINE_ bool nextgi_hit_source_has_any_hit(const NextGIHitShaderSource &p_source) {
+	return p_source.alpha_scissor || p_source.alpha_hash || p_source.uses_discard;
+}
+
+// GodotNext: nextgi_hit_discard (#304). NextGIHitMaterials::get_shadow_retrace_verdict() for one shader:
+// OPAQUE without material groups (Simplified Material, #286), UNKNOWN before a material with the shader was seen or
+// while it compiles, RETRACE for an eligible shader whose group has an any-hit stage, OPAQUE for any other.
+NextGIShadowRetraceVerdict nextgi_hit_shadow_retrace_verdict(bool p_material_groups, bool p_seen, bool p_compiling, bool p_eligible, bool p_any_hit);
 
 // The per-element MultiMesh inputs a hit source reads: the hit records do not carry an element's color or
 // custom data, so a MultiMesh element whose material reads one its MultiMesh stores uses the fallback group.
@@ -441,6 +454,11 @@ enum NextGIHitCheckCounter {
 	NEXTGI_HIT_CHECK_PROBE_HITS,
 	NEXTGI_HIT_CHECK_PROBE_GPU_INSTANCES, // ... on GPU-written TLAS instances (custom index past the records).
 	NEXTGI_HIT_CHECK_PROBE_GPU_FALLBACK, // ... of them, shaded by the fallback group (all must be).
+	// GodotNext: nextgi_hit_discard (#304). Texels the capture did not cover, traced too: those whose forced-opaque hit
+	// on the card's own instance reports that fragment() discarded there (the closest-hit stage's discard branch ran).
+	NEXTGI_HIT_CHECK_DISCARD_CUT,
+	NEXTGI_HIT_CHECK_DISCARD_IGNORED, // ... of them, missed without forced opacity (the any-hit stage ignored them).
+	NEXTGI_HIT_CHECK_DISCARD_COVERED, // Covered texels whose hit reports a discard (the capture kept them).
 	NEXTGI_HIT_CHECK_COUNTER_MAX,
 };
 static_assert(int(NEXTGI_HIT_CHECK_COUNTER_MAX) <= int(NEXTGI_HIT_CHECK_COUNTERS), "The check counters fit their block.");
@@ -556,7 +574,8 @@ public:
 	// Whether the retrace can evaluate the alpha of the shader code with this serial (ShaderData::nextgi_hit_serial):
 	// RETRACE once its hit group with an any-hit stage exists, OPAQUE when the shader is refused or has no any-hit
 	// stage (or no material group compiles, Simplified Material), UNKNOWN while it compiles or before a material
-	// with it was seen.
+	// with it was seen (nextgi_hit_shadow_retrace_verdict()). GodotNext: nextgi_hit_discard (#304): a shader that
+	// discards in fragment() has an any-hit stage, so its casters are retraced.
 	NextGIShadowRetraceVerdict get_shadow_retrace_verdict(uint64_t p_serial) const;
 	// Wake the shared bindless texture-table latch when NextGIRTScene releases slots from the shared table.
 	void notify_shared_texture_slot_released();

@@ -1634,7 +1634,14 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					used_flag_pointers.insert("DISCARD");
 				}
 
-				code = "discard;";
+				// GodotNext: nextgi_hit_discard (#304). A hit stage has no discard: in fragment() itself it becomes the hit
+				// template's NEXTGI_HIT_DISCARD, which leaves fragment() and marks the hit (the any-hit stage then ignores
+				// the intersection). A discard in a helper function stays, and nextgi_hit_classify() refuses the shader.
+				if (p_actions.nextgi_hit && current_func_name == SNAME("fragment")) {
+					code = "NEXTGI_HIT_DISCARD;";
+				} else {
+					code = "discard;";
+				}
 			} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
 				code = "continue;";
 			} else if (cfnode->flow_op == SL::FLOW_OP_BREAK) {

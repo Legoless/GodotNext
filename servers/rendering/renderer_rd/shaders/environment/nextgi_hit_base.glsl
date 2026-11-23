@@ -11,6 +11,8 @@
 // compares the payloads with the material atlas the raster capture wrote (MODE_RENDER_MATERIAL). A third
 // trace leaves the texel the other way, into what stands in front of the card, and counts the hits on
 // GPU-written TLAS instances, which have no record and must come back from the fallback group.
+// GodotNext: nextgi_hit_discard (#304). The texels the capture did not cover are traced too
+// (nextgi_hit_check_uncovered()): where a material's fragment() discards, the capture dropped the texel.
 
 #include "nextgi_hit_layout_inc.glsl"
 
@@ -32,6 +34,27 @@ void count(uint p_counter) {
 
 bool byte_close(uint p_a, uint p_b) {
 	return abs(int(p_a) - int(p_b)) <= 1;
+}
+
+// GodotNext: nextgi_hit_discard (#304). A texel the capture did not cover: off the card's geometry, or where its
+// material's fragment() discards (the raster capture drops the fragment). A forced-opaque trace that hits the card's
+// own instance there and reports the hit discarded ran the closest-hit stage's discard branch; the same ray without
+// forced opacity must then miss, because the any-hit stage ignores the intersection where fragment() discards.
+void nextgi_hit_check_uncovered(uint p_record, vec3 p_origin, vec3 p_direction, float p_t_max, float p_cone_width) {
+	payload.shading = uvec4(0u);
+	payload.hit = uvec4(floatBitsToUint(p_cone_width), floatBitsToUint(0.0), 0u, 0u);
+	traceRayEXT(hit_tlas, gl_RayFlagsOpaqueEXT, 0x80, 0, 1, 0, p_origin, 0.0, p_direction, p_t_max, 0);
+	uint flags = payload.shading.z >> 24u;
+	if ((flags & NEXTGI_HIT_PAYLOAD_HIT) == 0u || (flags & NEXTGI_HIT_PAYLOAD_DISCARDED) == 0u || payload.hit.w != p_record) {
+		return;
+	}
+	count(NEXTGI_HIT_CHECK_DISCARD_CUT_COUNTER);
+	payload.shading = uvec4(0u);
+	payload.hit = uvec4(floatBitsToUint(p_cone_width), floatBitsToUint(0.0), 0u, 0u);
+	traceRayEXT(hit_tlas, gl_RayFlagsNoOpaqueEXT, 0x80, 0, 1, 0, p_origin, 0.0, p_direction, p_t_max, 0);
+	if (((payload.shading.z >> 24u) & NEXTGI_HIT_PAYLOAD_HIT) == 0u) {
+		count(NEXTGI_HIT_CHECK_DISCARD_IGNORED_COUNTER);
+	}
 }
 
 // GodotNext: nextgi_shadow_policy (#145). One shadow retrace record: the ray again, now through the material
@@ -86,9 +109,6 @@ void main() {
 	NextGICard card = hit_check_cards.data[job.y];
 	ivec2 atlas_texel = ivec2(card.atlas_rect.xy + texel);
 	float depth = texelFetch(hit_check_depth, atlas_texel, 0).r;
-	if (depth <= 0.0) {
-		return; // Not covered by the capture.
-	}
 
 	// nextgi_src.h's card frame: the texel's center on the card plane, traced along -axis_n.
 	NextGIInstanceRecord rec = hit_records.data[job.x];
@@ -106,6 +126,11 @@ void main() {
 	float t_max = (card.axis_n.w + 2.0 * card.axis_u.w / float(width)) * scale;
 	// An orthographic capture: the cone keeps the width of one card texel.
 	float cone_width = 2.0 * card.axis_u.w / float(width) * scale;
+	if (depth <= 0.0) {
+		// Not covered by the capture. GodotNext: nextgi_hit_discard (#304): it may be a texel fragment() discards.
+		nextgi_hit_check_uncovered(job.x, origin, direction, t_max, cone_width);
+		return;
+	}
 
 	vec4 atlas_albedo = texelFetch(hit_check_albedo, atlas_texel, 0);
 	vec4 atlas_normal = texelFetch(hit_check_normal, atlas_texel, 0);
@@ -128,6 +153,10 @@ void main() {
 		}
 		bool fallback = (flags & NEXTGI_HIT_PAYLOAD_FALLBACK) != 0u;
 		any_hit_group = (flags & NEXTGI_HIT_PAYLOAD_ANY_HIT_GROUP) != 0u;
+		// GodotNext: nextgi_hit_discard (#304). The capture kept this texel, so fragment() did not discard it there.
+		if ((flags & NEXTGI_HIT_PAYLOAD_DISCARDED) != 0u) {
+			count(NEXTGI_HIT_CHECK_DISCARD_COVERED_COUNTER);
+		}
 		if (fallback) {
 			// The fallback group writes constants: only material groups are compared.
 			count(NEXTGI_HIT_CHECK_FALLBACK_COUNTER);

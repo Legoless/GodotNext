@@ -206,6 +206,10 @@ struct NextGIHitPayload {
 #define NEXTGI_HIT_PAYLOAD_FRONT_FACE 4u
 // Bit 3: the group has an any-hit stage.
 #define NEXTGI_HIT_PAYLOAD_ANY_HIT_GROUP 8u
+// GodotNext: nextgi_hit_discard (#304). Bit 4: the material's fragment() discarded at the hit, which a forced-opaque
+// trace (no any-hit stage) still reaches. It comes with the fallback flag: fragment() stopped at the discard, so the
+// material outputs are incomplete, and the caller shades the hit as it shades a fallback-group hit.
+#define NEXTGI_HIT_PAYLOAD_DISCARDED 16u
 
 // NextGIHitCheckCounter (next_gi_hit_materials.h); the per-material sample counts follow the counters.
 #define NEXTGI_HIT_CHECK_SAMPLES_COUNTER 0u
@@ -225,6 +229,10 @@ struct NextGIHitPayload {
 #define NEXTGI_HIT_CHECK_PROBE_HITS_COUNTER 14u
 #define NEXTGI_HIT_CHECK_PROBE_GPU_INSTANCES_COUNTER 15u
 #define NEXTGI_HIT_CHECK_PROBE_GPU_FALLBACK_COUNTER 16u
+// GodotNext: nextgi_hit_discard (#304)
+#define NEXTGI_HIT_CHECK_DISCARD_CUT_COUNTER 17u
+#define NEXTGI_HIT_CHECK_DISCARD_IGNORED_COUNTER 18u
+#define NEXTGI_HIT_CHECK_DISCARD_COVERED_COUNTER 19u
 #define NEXTGI_HIT_CHECK_MATERIALS_BASE 32u
 
 // The arena chunks bound below (NEXTGI_HIT_ARENA_CHUNKS).

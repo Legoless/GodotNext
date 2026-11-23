@@ -146,6 +146,20 @@ vec3 light_vertex;
 float streaming_lod;
 vec3 energy_compensation;
 
+#ifdef DISCARD_USED
+// GodotNext: nextgi_hit_discard (#304). discard in fragment(), which ShaderCompiler's hit mode writes as
+// NEXTGI_HIT_DISCARD: fragment() ends there and the hit is marked discarded. The any-hit stage then ignores the
+// intersection, as the rasterizer drops the fragment. The closest-hit stage (a forced-opaque trace) reports the hit
+// discarded and with the fallback flag (NEXTGI_HIT_PAYLOAD_DISCARDED): fragment() wrote only what came before the
+// discard. A discard in a helper function stays discard, and nextgi_hit_classify() refuses the shader.
+bool nextgi_hit_discarded;
+#define NEXTGI_HIT_DISCARD \
+	do { \
+		nextgi_hit_discarded = true; \
+		return; \
+	} while (false)
+#endif
+
 #GLOBALS
 
 void nextgi_hit_vertex_code() {
@@ -421,6 +435,9 @@ void main() {
 	light_vertex = vertex;
 	streaming_lod = 0.0;
 	energy_compensation = vec3(1.0);
+#ifdef DISCARD_USED
+	nextgi_hit_discarded = false;
+#endif
 
 	nextgi_hit_fragment_code();
 
@@ -435,10 +452,29 @@ void main() {
 #endif
 
 #ifdef NEXTGI_HIT_ANY
+#ifdef DISCARD_USED
+	// GodotNext: nextgi_hit_discard (#304)
+	if (nextgi_hit_discarded) {
+		ignoreIntersectionEXT;
+	}
+#endif
+	// GodotNext: nextgi_hit_discard (#304). Only an alpha test cuts by alpha: a group that has the any-hit stage
+	// for discard alone keeps the hits its alpha would blend.
+#if defined(ALPHA_SCISSOR_USED) || defined(ALPHA_HASH_USED)
 	if (alpha < 0.5) {
 		ignoreIntersectionEXT;
 	}
+#endif
 #else
+#ifdef DISCARD_USED
+	// GodotNext: nextgi_hit_discard (#304). A forced-opaque trace (GI) runs no any-hit stage, so it meets the texels
+	// fragment() discards. fragment() stopped at the discard, so the material outputs below it were never written:
+	// the hit is cut (opacity 0) and carries the fallback flag, so the caller shades it as a fallback-group hit (a
+	// refused shader's hit, as before #304) instead of with the template's defaults.
+	if (nextgi_hit_discarded) {
+		alpha = 0.0;
+	}
+#endif
 	vec3 normal = normal_highp;
 #if defined(NORMAL_MAP_USED)
 	normal_map.xy = normal_map.xy * 2.0 - 1.0;
@@ -449,6 +485,11 @@ void main() {
 #endif
 
 	uint flags = NEXTGI_HIT_PAYLOAD_HIT | (front_facing ? NEXTGI_HIT_PAYLOAD_FRONT_FACE : 0u) | ((hit_record.flags & 1u) != 0u ? NEXTGI_HIT_PAYLOAD_ANY_HIT_GROUP : 0u);
+#ifdef DISCARD_USED
+	if (nextgi_hit_discarded) {
+		flags |= NEXTGI_HIT_PAYLOAD_FALLBACK | NEXTGI_HIT_PAYLOAD_DISCARDED; // GodotNext: nextgi_hit_discard (#304)
+	}
+#endif
 	payload.shading.x = packUnorm4x8(vec4(clamp(albedo_highp, vec3(0.0), vec3(1.0)), clamp(alpha, 0.0, 1.0)));
 	payload.shading.y = packSnorm2x16(nextgi_hit_oct_encode(normal));
 	payload.shading.z = uint(round(clamp(roughness_highp, 0.0, 1.0) * 255.0)) | (uint(round(clamp(metallic_highp, 0.0, 1.0) * 255.0)) << 8u) | (uint(round(clamp(ao, 0.0, 1.0) * 255.0)) << 16u) | (flags << 24u);

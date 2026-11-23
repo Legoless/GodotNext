@@ -122,7 +122,8 @@ enum : uint32_t {
 };
 
 // Whether the material retrace can decide a caster whose alpha comes from shader code: its shader has a material
-// hit group with an any-hit stage (#130). Hit groups refuse some shaders (discard, derivatives, screen reads, ...,
+// hit group with an any-hit stage (#130; GodotNext: nextgi_hit_discard (#304): alpha tests and discard in
+// fragment()). Hit groups refuse some shaders (discard in a helper function, derivatives, screen reads, ...,
 // nextgi_hit_classify()); their hits take the fallback group, which has no any-hit stage, so a retrace through them
 // always reports the ray occluded. The RT scene keeps the verdict per shader code (ShaderData::nextgi_hit_serial)
 // while the material stays in the scene, also after the hit groups are freed, so a refused shader does not ask

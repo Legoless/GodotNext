@@ -125,8 +125,9 @@ bool path_tracer_trace(vec3 p_origin, vec3 p_dir, float p_tmax, out PathTracerHi
 // The material at the hit, evaluated by its hit group: the same ray again, from the tmin that found the hit (past
 // the culled ones), closest-hit only, up to just past the hit. Its cone is one pixel's (#130's texture level of
 // detail; PathTracerGPURays). A fallback-group hit (no hit group of its own, no attribute stream, no record) keeps
-// the D16 table entry. The hit group's normal (normal maps included) replaces the geometric one, on the side the
-// ray came from.
+// the D16 table entry, and so does a hit where the material's fragment() discards (GodotNext: nextgi_hit_discard
+// (#304): its group reports it with the fallback flag). The hit group's normal (normal maps included) replaces the
+// geometric one, on the side the ray came from.
 void path_tracer_prepare_hit(PathTracerHit p_hit, vec3 p_dir, inout vec3 r_normal) {
 	path_tracer_material = PATH_TRACER_TABLE(p_hit.surface);
 	payload.shading = uvec4(0u);

@@ -49,6 +49,13 @@ extends Node3D
 ## allocated, and the other features report HWRT_MODE_SIMPLIFIED_MATERIAL. The default, Full, is the check
 ## above, and the tier info must report FULL.
 ##
+## GodotNext: nextgi_hit_discard (#304). Four more panels carry shaders that discard stripes in fragment(), two of
+## them with an alpha scissor across the stripes as well. The raster capture drops the discarded texels, so the check
+## also traces the texels the capture did not cover: a forced-opaque ray that hits a discard panel there must come back
+## reported discarded (the closest-hit stage's discard branch, shaded as a fallback hit), the same ray without forced
+## opacity must miss (the any-hit stage ignores the intersection), and almost no covered texel may report a discard.
+## -- --materials=N makes a smaller run (N below 256: a multiple of 20, at least 120): the same kinds, fewer of each.
+##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
 const SETTING := "rendering/global_illumination/nextgi/debug/hit_material_check"
@@ -66,6 +73,8 @@ const MAX_WAIT_FRAMES := 2400
 const SETTLE_FRAMES := 40
 # Three-surface panels, and the code changes of one shared shader (past the relink threshold of 16).
 const MULTI_SURFACE_PANELS := 6
+# GodotNext: nextgi_hit_discard (#304). The discard panels, after the refused ones.
+const DISCARD_PANELS := 4
 const SHADER_EDITS := 20
 const EDIT_WAIT_FRAMES := 600
 # The MultiMeshes in front of the panels.
@@ -81,6 +90,10 @@ var _expect_mode := "FULL"
 # Diagnostics: --kinds=0,4,12 builds every material from these kinds only, --uv-scale=1 fixes the UV scale.
 var _kinds := PackedInt32Array()
 var _uv_scale := 0.0
+# GodotNext: nextgi_hit_discard (#304). --materials=N builds N materials instead of 256 (N of 256 or more keeps 256),
+# rounded down to a multiple of KINDS and at least six of each kind (the multi-surface panels use materials of the
+# fourth round, and the five refused panels must stay under a twentieth of the samples), for a smaller run.
+var _material_count := MATERIALS
 var _textures := {}
 var _shaders := {}
 var _environment: Environment
@@ -105,6 +118,10 @@ func _ready() -> void:
 				_kinds.append(int(kind))
 		elif arg.begins_with("--uv-scale="):
 			_uv_scale = float(arg.trim_prefix("--uv-scale="))
+		elif arg.begins_with("--materials="):
+			var wanted := int(arg.trim_prefix("--materials="))
+			_material_count = MATERIALS if wanted >= MATERIALS else maxi(wanted / KINDS, 6) * KINDS
+	_result["materials"] = _material_count
 	ProjectSettings.set_setting(SETTING, false)
 	_build_scene()
 	_run()
@@ -228,7 +245,7 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 	var hits := int(counters.get("hit_check_hits", 0))
 	var fallback := int(counters.get("hit_check_fallback", 0))
 	var shaded := hits - fallback
-	_check(samples >= MATERIALS * 1000, "the check traced the panels' texels (%d samples)" % samples)
+	_check(samples >= _material_count * 1000, "the check traced the panels' texels (%d samples)" % samples)
 	_check(hits >= samples * MIN_MATCH, "the rays hit (%d of %d)" % [hits, samples])
 	# The refused materials' panels are shaded by the fallback group; nothing else is.
 	_check(fallback > 0, "the refused materials' hits use the fallback group (%d)" % fallback)
@@ -243,10 +260,21 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 	out["share_any_hit"] = float(any_agree) / float(max(any_samples, 1))
 	_check(any_samples == samples, "every sample is traced again without forced opacity")
 	_check(any_agree >= any_samples * MIN_MATCH, "the any-hit decisions match the captured alpha (%d of %d)" % [any_agree, any_samples])
+	# GodotNext: nextgi_hit_discard (#304). The discard panels' stripes: the capture dropped them, the closest-hit stage
+	# reports them discarded and the any-hit stage ignores them.
+	var discard_cut := int(counters.get("hit_check_discard_cut", 0))
+	var discard_ignored := int(counters.get("hit_check_discard_ignored", 0))
+	var discard_covered := int(counters.get("hit_check_discard_covered", 0))
+	out["discard_cut"] = discard_cut
+	out["discard_ignored"] = discard_ignored
+	out["discard_covered"] = discard_covered
+	_check(discard_cut >= DISCARD_PANELS * 100, "the closest-hit stage reports the texels fragment() discards (%d)" % discard_cut)
+	_check(discard_ignored >= discard_cut * MIN_MATCH, "the any-hit stage ignores the texels fragment() discards (%d of %d)" % [discard_ignored, discard_cut])
+	_check(discard_covered <= samples * (1.0 - MIN_MATCH), "almost no texel the capture kept reports a discard (%d of %d)" % [discard_covered, samples])
 	_check(int(counters.get("hit_check_alpha_tested", 0)) > 0, "samples land on alpha-tested groups")
 	_check(int(counters.get("hit_check_alpha_cut", 0)) > 0, "the scissor cut some of those texels, so the any-hit had to ignore them")
 	# Every material, and the default material of the panel without one, has its own group.
-	_check(int(counters.get("hit_check_materials", 0)) >= MATERIALS + 1, "every material and the default material were sampled (%d)" % counters.get("hit_check_materials", 0))
+	_check(int(counters.get("hit_check_materials", 0)) >= _material_count + 1, "every material and the default material were sampled (%d)" % counters.get("hit_check_materials", 0))
 	_check(int(counters.get("hit_groups_linked", 0)) >= _shaders.size(), "a group per eligible shader is linked (%d, %d shaders)" % [counters.get("hit_groups_linked", 0), _shaders.size()])
 	_check(int(counters.get("hit_groups_pending", 0)) == 0, "no group is pending")
 	_check(int(counters.get("hit_ineligible", 0)) >= 5, "the refused shaders are counted (%d)" % counters.get("hit_ineligible", 0))
@@ -256,7 +284,7 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 	_check(int(counters.get("hit_ineligible_instance_uniform", 0)) >= 1, "the instance-uniform shader is refused as INSTANCE_UNIFORM")
 	_check(int(counters.get("hit_ineligible_texture_type", 0)) >= 1, "the cube-texture shader is refused as TEXTURE_TYPE")
 	_check(int(counters.get("hit_light_skipped", 0)) >= 1, "the custom light() shader is counted as skipped at hits")
-	_check(int(counters.get("hit_materials", 0)) >= MATERIALS, "every material has a hit record")
+	_check(int(counters.get("hit_materials", 0)) >= _material_count, "every material has a hit record")
 	# The MultiMesh elements whose color or custom data the material reads use the fallback group, counted.
 	var element_geometries := int(counters.get("hit_element_data_geometries", 0))
 	out["element_data_geometries"] = element_geometries
@@ -296,7 +324,7 @@ func _measure_simplified(p_out: Dictionary, p_counters: Dictionary, p_by_consume
 	_check(geometries > 0 and int(p_counters.get("hit_fallback_geometries", 0)) == geometries, "every geometry uses the simplified hit shader (%d of %d)" % [p_counters.get("hit_fallback_geometries", 0), geometries])
 	var samples := int(p_counters.get("hit_check_samples", 0))
 	var hits := int(p_counters.get("hit_check_hits", 0))
-	_check(samples >= MATERIALS * 1000, "the check traced the panels' texels (%d samples)" % samples)
+	_check(samples >= _material_count * 1000, "the check traced the panels' texels (%d samples)" % samples)
 	_check(hits >= samples * MIN_MATCH, "the rays hit (%d of %d)" % [hits, samples])
 	_check(int(p_counters.get("hit_check_fallback", 0)) == hits, "every hit comes from the simplified hit shader (%d of %d)" % [p_counters.get("hit_check_fallback", 0), hits])
 	var probe_gpu := int(p_counters.get("hit_check_probe_gpu_instances", 0))
@@ -583,7 +611,7 @@ func _texture(p_kind: String, p_seed: int, p_mipmaps: bool) -> Texture2D:
 func _materials() -> Array[Material]:
 	var list: Array[Material] = []
 	var uv_scales := [1.0, 2.0, 4.0, 8.0]
-	for i in MATERIALS:
+	for i in _material_count:
 		var kind := i % KINDS if _kinds.is_empty() else _kinds[i % _kinds.size()]
 		var m: Material
 		if kind < STANDARD_KINDS:
@@ -599,6 +627,18 @@ func _materials() -> Array[Material]:
 		if code.contains("instance uniform"):
 			refused.set_meta("instance_tint", Color(0.5, 0.2, 0.9))
 		list.append(refused)
+	# GodotNext: nextgi_hit_discard (#304). The discard panels: each discard shader on DISCARD_PANELS / 2 materials.
+	var discard_codes := _discard_shaders()
+	for i in DISCARD_PANELS:
+		var key := "discard_%d" % (i % discard_codes.size())
+		if not _shaders.has(key):
+			var shader := Shader.new()
+			shader.code = discard_codes[i % discard_codes.size()]
+			_shaders[key] = shader
+		var m := ShaderMaterial.new()
+		m.shader = _shaders[key]
+		m.set_shader_parameter("tint", Color.from_hsv(0.15 + 0.2 * i, 0.6, 0.9))
+		list.append(m)
 	return list
 
 
@@ -776,6 +816,18 @@ void fragment() {
 	METALLIC = metal;
 }
 """
+
+
+# GodotNext: nextgi_hit_discard (#304). Stripes a quarter of the panel's UV width apart are discarded before the
+# albedo is written (the hit must not shade them with what fragment() never wrote); the second shader also cuts bands
+# across them with an alpha scissor, so its any-hit stage ignores the intersection at two places. Both are traced as
+# opaque (nextgi_rt_opaque), as the alpha-tested StandardMaterial3D kinds are: the groups still get their any-hit stage,
+# but no shadow caster asks for the material retrace, which would make the hit groups with the check's setting off.
+func _discard_shaders() -> PackedStringArray:
+	return PackedStringArray([
+		"shader_type spatial;\nrender_mode nextgi_rt_opaque;\nuniform vec4 tint : source_color = vec4(1.0);\nvoid fragment() {\n\tif (fract(UV.x * 4.0) < 0.5) {\n\t\tdiscard;\n\t}\n\tALBEDO = tint.rgb;\n\tROUGHNESS = 0.6;\n}\n",
+		"shader_type spatial;\nrender_mode nextgi_rt_opaque;\nuniform vec4 tint : source_color = vec4(1.0);\nvoid fragment() {\n\tALBEDO = tint.rgb;\n\tROUGHNESS = 0.4;\n\tALPHA = fract(UV.y * 8.0) < 0.5 ? 0.0 : 1.0;\n\tALPHA_SCISSOR_THRESHOLD = 0.5;\n\tif (fract(UV.x * 4.0) < 0.5) {\n\t\tdiscard;\n\t}\n}\n",
+	])
 
 
 func _refused_shaders() -> PackedStringArray:

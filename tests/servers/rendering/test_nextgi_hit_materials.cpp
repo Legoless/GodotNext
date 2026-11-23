@@ -30,7 +30,8 @@
 
 // GodotNext: nextgi_hit_groups (#130). The device-free parts of the material hit groups: the gate, the
 // RT-arena attribute stream, the eligibility rules, the hit shader binding table keys, the check's jobs and
-// the ShaderCompiler's hit mode.
+// the ShaderCompiler's hit mode. GodotNext: nextgi_hit_discard (#304): discard in fragment() lowered to the
+// any-hit stage's ignoreIntersectionEXT, through the hit template, glslang and the shader containers.
 
 #include "tests/test_macros.h"
 
@@ -42,9 +43,27 @@ TEST_FORCE_LINK(test_nextgi_hit_materials)
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_hit_material.glsl.gen.h"
 #include "servers/rendering/rendering_server_enums.h"
+#include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_compiler.h"
 #include "servers/rendering/shader_types.h"
+
+#include "modules/modules_enabled.gen.h"
+
+#ifdef MODULE_GLSLANG_ENABLED
+#include "modules/glslang/shader_compile.h"
+#endif
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/rendering_shader_container_vulkan.h"
+#endif
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/rendering_shader_container_d3d12.h"
+
+#include <windows.h>
+#endif
+
+#include <thirdparty/spirv-headers/include/spirv/unified1/spirv.h>
 
 using namespace RendererRD;
 
@@ -717,6 +736,15 @@ TEST_CASE("[NextGIHit] Ineligible materials are classified, and only by whole id
 	CHECK_EQ(nextgi_hit_classify(_source("albedo_highp = vec3(dFdx(uv_interp.x));")), NEXTGI_HIT_INELIGIBLE_DERIVATIVE);
 	CHECK_EQ(nextgi_hit_classify(_source("albedo_highp = vec3(fwidth(uv_interp.x));")), NEXTGI_HIT_INELIGIBLE_DERIVATIVE);
 	CHECK_EQ(nextgi_hit_classify(_source("if (uv_interp.x > 0.5) { discard; }")), NEXTGI_HIT_INELIGIBLE_DISCARD);
+	// #304: the hit mode writes discard in fragment() as NEXTGI_HIT_DISCARD, which the hit template lowers. Only a
+	// discard left in the code (in a helper function) refuses the shader, whatever uses_discard says.
+	NextGIHitShaderSource lowered = _source("if (uv_interp.x > 0.5) { NEXTGI_HIT_DISCARD; }");
+	lowered.uses_discard = true;
+	CHECK_EQ(nextgi_hit_classify(lowered), NEXTGI_HIT_ELIGIBLE);
+	NextGIHitShaderSource helper = _source("m_cut(uv_interp);");
+	helper.globals = "void m_cut(vec2 m_uv) { if (m_uv.x > 0.5) { discard; } }";
+	helper.uses_discard = true;
+	CHECK_EQ(nextgi_hit_classify(helper), NEXTGI_HIT_INELIGIBLE_DISCARD);
 	CHECK_EQ(nextgi_hit_classify(_source("albedo_highp = vec3(gl_FrontFacing ? 1.0 : 0.0);")), NEXTGI_HIT_INELIGIBLE_BUILTIN);
 	CHECK_EQ(nextgi_hit_classify(_source("albedo_highp = vec3(float(INSTANCE_INDEX));")), NEXTGI_HIT_INELIGIBLE_BUILTIN);
 	// Identifiers that only contain a token are fine.
@@ -905,6 +933,11 @@ TEST_CASE("[NextGIHit] The check's jobs cover each card's texels in order, withi
 		CHECK_NE(String(nextgi_hit_check_counter_name(NextGIHitCheckCounter(i))), "unknown");
 	}
 	CHECK_EQ(nextgi_hit_check_counter_name(NEXTGI_HIT_CHECK_PROBE_GPU_FALLBACK), String("probe_gpu_fallback"));
+	// GodotNext: nextgi_hit_discard (#304). nextgi_hit_layout_inc.glsl numbers these 17, 18 and 19.
+	CHECK_EQ(int(NEXTGI_HIT_CHECK_DISCARD_CUT), 17);
+	CHECK_EQ(nextgi_hit_check_counter_name(NEXTGI_HIT_CHECK_DISCARD_CUT), String("discard_cut"));
+	CHECK_EQ(nextgi_hit_check_counter_name(NEXTGI_HIT_CHECK_DISCARD_IGNORED), String("discard_ignored"));
+	CHECK_EQ(nextgi_hit_check_counter_name(NEXTGI_HIT_CHECK_DISCARD_COVERED), String("discard_covered"));
 }
 
 static void _init_spatial_compiler(ShaderCompiler &r_compiler) {
@@ -917,8 +950,14 @@ static void _init_spatial_compiler(ShaderCompiler &r_compiler) {
 	actions.renames["ROUGHNESS"] = "roughness_highp";
 	actions.renames["TIME"] = "global_time";
 	actions.renames["FRAGCOORD"] = "gl_FragCoord";
+	actions.renames["ALPHA"] = "alpha_highp";
+	actions.renames["ALPHA_SCISSOR_THRESHOLD"] = "alpha_scissor_threshold";
+	actions.renames["ALPHA_HASH_SCALE"] = "alpha_hash_scale";
 	actions.usage_defines["UV"] = "#define UV_USED\n";
 	actions.usage_defines["FRAGCOORD"] = "#define FRAGCOORD_USED\n";
+	actions.usage_defines["ALPHA_SCISSOR_THRESHOLD"] = "#define ALPHA_SCISSOR_USED\n";
+	actions.usage_defines["ALPHA_HASH_SCALE"] = "#define ALPHA_HASH_USED\n";
+	actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
 	actions.base_texture_binding_index = 1;
 	actions.texture_layout_set = 2;
 	actions.base_uniform_string = "material.";
@@ -1060,6 +1099,340 @@ void light() {
 	CHECK(raster.code["fragment"].contains("textureProj(sampler2D(m_proj_map, SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), vec3(uv_interp, 1.0))"));
 	CHECK_FALSE(raster.code["light"].is_empty());
 	CHECK(raster.stage_globals[ShaderCompiler::STAGE_FRAGMENT].contains("m_light_only_helper"));
+}
+
+TEST_CASE("[NextGIHit] An alpha test or discard in fragment() gives the group an any-hit stage, which the shadow retrace uses at Full only") {
+	NextGIHitShaderSource source;
+	CHECK_FALSE(nextgi_hit_source_has_any_hit(source));
+	source.alpha_scissor = true;
+	CHECK(nextgi_hit_source_has_any_hit(source));
+	source.alpha_scissor = false;
+	source.alpha_hash = true;
+	CHECK(nextgi_hit_source_has_any_hit(source));
+	source.alpha_hash = false;
+	source.uses_discard = true;
+	CHECK(nextgi_hit_source_has_any_hit(source));
+
+	// A discard-only shader the hit groups compiled: its casters are retraced at Full.
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(true, true, false, true, true), NEXTGI_SHADOW_VERDICT_RETRACE);
+	// Simplified Material compiles no material group: opaque, whatever the shader.
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(false, true, false, true, true), NEXTGI_SHADOW_VERDICT_OPAQUE);
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(false, false, false, false, false), NEXTGI_SHADOW_VERDICT_OPAQUE);
+	// Not seen yet, or still compiling: the retrace is tried.
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(true, false, false, false, false), NEXTGI_SHADOW_VERDICT_UNKNOWN);
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(true, true, true, false, false), NEXTGI_SHADOW_VERDICT_UNKNOWN);
+	// Refused (a discard in a helper function, a derivative, ...) or no any-hit stage: opaque.
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(true, true, false, false, true), NEXTGI_SHADOW_VERDICT_OPAQUE);
+	CHECK_EQ(nextgi_hit_shadow_retrace_verdict(true, true, false, true, false), NEXTGI_SHADOW_VERDICT_OPAQUE);
+	// The table the RT scene reads before it asks for a verdict (next_gi_rt_scene.cpp): at Simplified Material and Inline
+	// a shader-alpha caster is opaque before any verdict, so discard changes nothing there. These checks pin the table
+	// only; that the RT scene reads it first is shown on the GPU by shadow_alpha_check's Simplified Material and Inline
+	// runs (the discard hole shadows as opaque, with no retrace entry).
+	CHECK_EQ(nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_MODE_FULL), NEXTGI_HIT_AVAILABLE);
+	CHECK_EQ(nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
+	CHECK_EQ(nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_MODE_INLINE), NEXTGI_HIT_HWRT_MODE_INLINE);
+}
+
+// Whether p_code uses p_word as a whole identifier.
+static bool _has_word(const String &p_code, const String &p_word) {
+	for (int from = p_code.find(p_word); from >= 0; from = p_code.find(p_word, from + 1)) {
+		const int end = from + p_word.length();
+		if ((from == 0 || !is_ascii_identifier_char(p_code[from - 1])) && (end >= p_code.length() || !is_ascii_identifier_char(p_code[end]))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// SceneShaderForwardClustered::ShaderData::build_nextgi_hit_source() with the test compiler: the hit variant and
+// the flags the hit groups read.
+static Error _compile_hit_source(const String &p_code, NextGIHitShaderSource &r_source) {
+	if (ShaderTypes::get_singleton() == nullptr) {
+		memnew(ShaderTypes);
+	}
+	ShaderCompiler compiler;
+	_init_spatial_compiler(compiler);
+	ShaderCompiler::IdentifierActions actions;
+	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
+	actions.entry_point_stages["fragment"] = ShaderCompiler::STAGE_FRAGMENT;
+	actions.entry_point_stages["light"] = ShaderCompiler::STAGE_FRAGMENT;
+	bool alpha_scissor = false;
+	bool alpha_hash = false;
+	bool discard = false;
+	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &alpha_scissor;
+	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &alpha_hash;
+	actions.usage_flag_pointers["DISCARD"] = &discard;
+	HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniforms;
+	actions.uniforms = &uniforms;
+	actions.nextgi_hit = true;
+	ShaderCompiler::GeneratedCode gen;
+	const Error err = compiler.compile(RSE::SHADER_SPATIAL, p_code, &actions, "test_hit_discard.gdshader", gen);
+	if (err != OK) {
+		return err;
+	}
+	r_source.defines = gen.defines;
+	r_source.uniforms = gen.uniforms;
+	r_source.globals = gen.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
+	r_source.vertex_code = gen.code.has("vertex") ? gen.code["vertex"] : String();
+	r_source.fragment_code = gen.code.has("fragment") ? gen.code["fragment"] : String();
+	r_source.textures = gen.texture_uniforms;
+	r_source.ubo_size = gen.uniform_total_size;
+	r_source.alpha_scissor = alpha_scissor;
+	r_source.alpha_hash = alpha_hash;
+	r_source.uses_discard = discard;
+	return OK;
+}
+
+// The hit template's stage sources for p_source, filled as NextGIHitMaterials::_compile_task() fills them. The
+// group stays disabled, so nothing compiles on a device: only the sources are built.
+static Vector<String> _hit_stage_sources(const NextGIHitShaderSource &p_source) {
+	NextgiHitMaterialShaderRD shader_rd;
+	Vector<ShaderRD::VariantDefine> variants;
+	variants.push_back(ShaderRD::VariantDefine(0, "", false));
+	shader_rd.initialize(variants);
+	const RID version = shader_rd.version_create(false);
+	if (version.is_null()) {
+		return Vector<String>();
+	}
+	HashMap<String, String> code;
+	code["vertex"] = p_source.vertex_code;
+	code["fragment"] = p_source.fragment_code;
+	const String globals = nextgi_hit_texture_defines(p_source) + p_source.globals;
+	shader_rd.version_set_raytracing_code(version, code, p_source.uniforms, String(), globals, globals, String(), String(), p_source.defines);
+	const Vector<String> sources = shader_rd.version_build_variant_stage_sources(version, 0);
+	shader_rd.version_free(version);
+	return sources;
+}
+
+#ifdef MODULE_GLSLANG_ENABLED
+// The instructions with opcode p_opcode in a SPIR-V module.
+static uint32_t _spirv_count(const Vector<uint8_t> &p_spirv, uint32_t p_opcode) {
+	const uint32_t *words = reinterpret_cast<const uint32_t *>(p_spirv.ptr());
+	const int64_t word_count = p_spirv.size() / int64_t(sizeof(uint32_t));
+	uint32_t found = 0;
+	for (int64_t i = 5; i < word_count;) {
+		const uint32_t length = words[i] >> SpvWordCountShift;
+		if (length == 0) {
+			break;
+		}
+		if ((words[i] & SpvOpCodeMask) == p_opcode) {
+			found++;
+		}
+		i += length;
+	}
+	return found;
+}
+
+// The stages of p_sources that have code, through glslang for p_format, as ShaderRD::compile_stages() does.
+static Vector<RenderingDeviceCommons::ShaderStageSPIRVData> _hit_spirv(const RenderingShaderContainerFormat &p_format, const Vector<String> &p_sources) {
+	Vector<RenderingDeviceCommons::ShaderStageSPIRVData> stages;
+	for (int i = 0; i < p_sources.size(); i++) {
+		if (p_sources[i].is_empty()) {
+			continue;
+		}
+		const RenderingDeviceCommons::ShaderStage stage = RenderingDeviceCommons::ShaderStage(i);
+		String error;
+		RenderingDeviceCommons::ShaderStageSPIRVData data;
+		data.shader_stage = stage;
+		data.spirv = compile_glslang_shader(stage, p_sources[i], p_format.get_shader_language_version(), p_format.get_shader_spirv_version(stage), &error);
+		CHECK_MESSAGE(!data.spirv.is_empty(), (String(RenderingDeviceCommons::SHADER_STAGE_NAMES[i]) + " stage: " + error).utf8().get_data());
+		stages.push_back(data);
+	}
+	return stages;
+}
+#endif // MODULE_GLSLANG_ENABLED
+
+TEST_CASE("[NextGIHit][ShaderCompiler] discard in fragment() becomes ignoreIntersectionEXT in the any-hit stage; in a helper function it refuses the shader") {
+	const String discard_code = R"(
+shader_type spatial;
+
+void fragment() {
+	ALBEDO = vec3(0.5);
+	if (UV.x > 0.5) {
+		discard;
+	}
+	ALBEDO = vec3(0.25);
+}
+)";
+	NextGIHitShaderSource source;
+	REQUIRE_EQ(_compile_hit_source(discard_code, source), OK);
+	CHECK_MESSAGE(source.fragment_code.contains("NEXTGI_HIT_DISCARD;"), source.fragment_code);
+	CHECK_FALSE(_has_word(source.fragment_code, "discard"));
+	CHECK(source.defines.has("#define DISCARD_USED\n"));
+	CHECK(source.uses_discard);
+	CHECK_FALSE(source.alpha_scissor);
+	CHECK_EQ(nextgi_hit_classify(source), NEXTGI_HIT_ELIGIBLE);
+	CHECK(nextgi_hit_source_has_any_hit(source));
+
+	// The raster output keeps discard.
+	ShaderCompiler::GeneratedCode raster;
+	REQUIRE_EQ(_compile_spatial(discard_code, false, raster), OK);
+	CHECK(_has_word(raster.code["fragment"], "discard"));
+	CHECK_FALSE(raster.code["fragment"].contains("NEXTGI_HIT_DISCARD"));
+
+	// Both stages get the material's lowered discard and its DISCARD_USED: no stage of a hit group may hold a fragment
+	// discard. (The template text is the same for every material; the SPIR-V counts below show what it becomes.)
+	const Vector<String> stages = _hit_stage_sources(source);
+	REQUIRE_EQ(stages.size(), int(RD::SHADER_STAGE_MAX));
+	const String &any_hit = stages[RD::SHADER_STAGE_ANY_HIT];
+	const String &closest_hit = stages[RD::SHADER_STAGE_CLOSEST_HIT];
+	CHECK(any_hit.contains("#define NEXTGI_HIT_ANY"));
+	CHECK(closest_hit.contains("#define NEXTGI_HIT_CLOSEST"));
+	for (const String &stage : { any_hit, closest_hit }) {
+		CHECK(stage.contains("#define DISCARD_USED"));
+		CHECK(stage.contains("NEXTGI_HIT_DISCARD;"));
+		CHECK_FALSE(_has_word(stage, "discard"));
+	}
+
+	// A helper function's discard stays discard, and the hit groups refuse the shader.
+	const String helper_code = R"(
+shader_type spatial;
+
+void cut(vec2 uv) {
+	if (uv.x > 0.5) {
+		discard;
+	}
+}
+
+void fragment() {
+	cut(UV);
+	ALBEDO = vec3(0.5);
+}
+)";
+	NextGIHitShaderSource helper;
+	REQUIRE_EQ(_compile_hit_source(helper_code, helper), OK);
+	CHECK(helper.uses_discard);
+	CHECK_FALSE(helper.fragment_code.contains("NEXTGI_HIT_DISCARD"));
+	CHECK_FALSE(helper.globals.contains("NEXTGI_HIT_DISCARD"));
+	CHECK_MESSAGE(_has_word(helper.globals, "discard"), helper.globals);
+	CHECK_EQ(nextgi_hit_classify(helper), NEXTGI_HIT_INELIGIBLE_DISCARD);
+
+	// A discard in fragment() is lowered, but one more in a helper function still refuses the shader.
+	const String both_code = R"(
+shader_type spatial;
+
+void cut(vec2 uv) {
+	if (uv.y > 0.5) {
+		discard;
+	}
+}
+
+void fragment() {
+	if (UV.x > 0.5) {
+		discard;
+	}
+	cut(UV);
+	ALBEDO = vec3(0.5);
+}
+)";
+	NextGIHitShaderSource both;
+	REQUIRE_EQ(_compile_hit_source(both_code, both), OK);
+	CHECK(both.fragment_code.contains("NEXTGI_HIT_DISCARD;"));
+	CHECK_MESSAGE(_has_word(both.globals, "discard"), both.globals);
+	CHECK_EQ(nextgi_hit_classify(both), NEXTGI_HIT_INELIGIBLE_DISCARD);
+
+#ifdef MODULE_GLSLANG_ENABLED
+	// Through glslang: the any-hit stage ignores the intersection once for each cut it has. discard alone gives one
+	// (its alpha, which no test binarizes, does not cut); discard with an alpha scissor or hash two; an alpha hash
+	// alone one; neither none. The closest-hit stage never ignores, and no stage keeps a fragment kill. Every case's
+	// stages then go into the shader containers, as RenderingDevice::shader_compile_binary_from_spirv() makes them:
+	// Vulkan, and Direct3D 12 through Mesa NIR to DXIL (IgnoreHit()).
+	struct Case {
+		const char *name;
+		String code;
+		uint32_t any_hit_ignores;
+	};
+	const Case cases[] = {
+		{ "discard", discard_code, 1u },
+		{ "discard_scissor", R"(
+shader_type spatial;
+
+void fragment() {
+	ALBEDO = vec3(0.5);
+	ALPHA = UV.y;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+	if (UV.x > 0.5) {
+		discard;
+	}
+}
+)",
+				2u },
+		{ "hash", R"(
+shader_type spatial;
+
+void fragment() {
+	ALBEDO = vec3(0.5);
+	ALPHA = UV.y;
+	ALPHA_HASH_SCALE = 1.0;
+}
+)",
+				1u },
+		{ "discard_hash", R"(
+shader_type spatial;
+
+void fragment() {
+	ALBEDO = vec3(0.5);
+	ALPHA = UV.y;
+	ALPHA_HASH_SCALE = 1.0;
+	if (UV.x > 0.5) {
+		discard;
+	}
+}
+)",
+				2u },
+		{ "plain", R"(
+shader_type spatial;
+
+void fragment() {
+	ALBEDO = vec3(0.5);
+	ALPHA = UV.y;
+}
+)",
+				0u },
+	};
+#ifdef D3D12_ENABLED
+	HMODULE lib_d3d12 = LoadLibraryW(L"D3D12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+#endif
+	for (const Case &c : cases) {
+		NextGIHitShaderSource case_source;
+		REQUIRE_EQ(_compile_hit_source(c.code, case_source), OK);
+		CHECK_EQ(nextgi_hit_classify(case_source), NEXTGI_HIT_ELIGIBLE);
+		const Vector<String> case_stages = _hit_stage_sources(case_source);
+		REQUIRE_EQ(case_stages.size(), int(RD::SHADER_STAGE_MAX));
+		for (const RenderingDeviceCommons::ShaderStage stage : { RenderingDeviceCommons::SHADER_STAGE_ANY_HIT, RenderingDeviceCommons::SHADER_STAGE_CLOSEST_HIT }) {
+			String error;
+			const Vector<uint8_t> spirv = compile_glslang_shader(stage, case_stages[stage], RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_4, &error);
+			REQUIRE_MESSAGE(!spirv.is_empty(), (String(c.name) + ": " + error).utf8().get_data());
+			const uint32_t expected = stage == RenderingDeviceCommons::SHADER_STAGE_ANY_HIT ? c.any_hit_ignores : 0u;
+			CHECK_MESSAGE(_spirv_count(spirv, SpvOpIgnoreIntersectionKHR) == expected, c.name);
+			CHECK_MESSAGE(_spirv_count(spirv, SpvOpKill) == 0u, c.name);
+			CHECK_MESSAGE(_spirv_count(spirv, SpvOpTerminateInvocation) == 0u, c.name);
+		}
+#ifdef VULKAN_ENABLED
+		{
+			RenderingShaderContainerFormatVulkan vk_format;
+			const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> spirv = _hit_spirv(vk_format, case_stages);
+			REQUIRE_EQ(spirv.size(), 2);
+			Ref<RenderingShaderContainer> container = vk_format.create_container();
+			CHECK_MESSAGE(container->set_code_from_spirv("NextgiHitMaterialDiscardVulkan", spirv), c.name);
+		}
+#endif
+#ifdef D3D12_ENABLED
+		{
+			RenderingShaderContainerFormatD3D12 d3d12_format;
+			d3d12_format.set_lib_d3d12(lib_d3d12);
+			const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> spirv = _hit_spirv(d3d12_format, case_stages);
+			REQUIRE_EQ(spirv.size(), 2);
+			Ref<RenderingShaderContainer> container = d3d12_format.create_container();
+			CHECK_MESSAGE(container->set_code_from_spirv("NextgiHitMaterialDiscardD3D12", spirv), c.name);
+		}
+#endif
+	}
+#ifdef D3D12_ENABLED
+	FreeLibrary(lib_d3d12);
+#endif
+#endif // MODULE_GLSLANG_ENABLED
 }
 
 } // namespace TestNextGIHitMaterials

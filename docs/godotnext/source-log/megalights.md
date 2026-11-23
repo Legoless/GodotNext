@@ -41,8 +41,9 @@ review with GM-4):
   alpha-tested at their threshold, and alpha blending as opaque (LQ6, following UE 5.9 above).
 - The bindless alpha path samples the albedo texture's top mip with its declared filter and repeat (emulated with
   one linear repeating sampler); the raster pass also uses the mips.
-- Shaders that cut with `discard`, and any other shader the material hit groups refuse (#130,
-  `nextgi_hit_classify()`), cannot be retraced: their casters shadow as opaque.
+- Shaders the material hit groups refuse (#130, `nextgi_hit_classify()`) cannot be retraced: their casters
+  shadow as opaque. Since #304 a `discard` in `fragment()` is retraced (the any-hit stage ignores the
+  intersection there); a `discard` in a helper function is still refused, as #155's raster target refuses it.
 - The far field (merged per-cell proxies) traces every proxy as an opaque caster of every light: caster masks
   and cast shadow off apply to near-field instances only.
 

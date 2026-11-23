@@ -140,3 +140,25 @@ their inline path, as UE's "Other features fall back to inline ray tracing"; eac
 info reports the reason for it. UE's Disabled is
 `rendering/global_illumination/nextgi/hardware_ray_tracing = Off`. The Windows and Linux entries use Godot's
 feature-tag overrides, as `rendering/rendering_device/driver.windows` does.
+
+## discard in the any-hit stage (#304), 2026-11-22
+
+No new outside input. The `GL_EXT_ray_tracing` entry above covers `ignoreIntersectionEXT`: it is allowed only in
+the any-hit stage, ends that invocation and drops the candidate, as `discard` ends a fragment invocation and drops
+the fragment. Mesa NIR turns it into DXIL's `IgnoreHit()` on Direct3D 12, as it already did for the alpha scissor and
+hash test. No Unreal Engine source, shader or plugin was opened.
+
+What is this project's own: ShaderCompiler's hit mode writes a `discard` in `fragment()` itself as the template's
+`NEXTGI_HIT_DISCARD`, which marks the hit and returns from `fragment()`; the any-hit stage then ignores the
+intersection. A forced-opaque trace (GI, the path tracer) runs no any-hit stage and so reaches the closest-hit stage at
+a discarded texel. There `fragment()` has written only what came before the discard, so the closest-hit stage reports
+the hit with opacity 0 and the fallback flag plus `NEXTGI_HIT_PAYLOAD_DISCARDED`: the caller shades it as a
+fallback-group hit (the path tracer keeps its D16 table entry), as it did before #304 when the shader was refused,
+instead of with the template's default material. A `discard` in a helper function cannot leave `fragment()` that
+way, so it stays `discard` and `nextgi_hit_classify()` refuses the shader (DISCARD), as #155's raster target refuses
+it. A group that has the any-hit stage only for `discard` cuts nothing by alpha: alpha without a scissor or hash test
+is blending, which ray-traced shadows treat as opaque (LQ6). A shader that discards in `fragment()` has an any-hit
+stage, so #145's retrace verdict for it is RETRACE at Full; Simplified Material and Inline compile no material group,
+so its casters stay opaque there. The hit check also traces the texels its raster capture did not cover, where a
+discard panel's `fragment()` discarded: the closest-hit stage must report them discarded and the any-hit stage must
+ignore them.
