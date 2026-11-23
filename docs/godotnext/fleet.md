@@ -30,7 +30,7 @@ A pass is zero lines containing `Invalid Metal usage`, zero lines containing `Er
 
 ## Fleet editor builds and Vulkan capability archive (#11)
 
-Recorded on 2026-11-08 at base commit `17dd0086` (`4.8.beta.custom_build.17dd00861`). The RTX 5090 machine gets its rows through #227 before PQ (§23).
+Recorded on 2026-11-08 at base commit `17dd0086` (`4.8.beta.custom_build.17dd00861`). The RTX 5090 machine's Linux rows are in its own section below (2026-11-23); its Windows rows follow through #227.
 
 ### Editor builds, doctests, and dev tools
 
@@ -80,6 +80,27 @@ Devices:
 D3D12 12_0 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 4080 SUPER
 ```
 
+### The RTX 5090 machine (#227, plan v3.9.20)
+
+The second test machine of the v1 fleet (plan §23.2) is the lead's Threadripper workstation, in use from 2026-11-23 (lead decision, plan v3.9.20). For now it runs Linux Vulkan only. Its Windows 11 lines (D3D12, DLSS, frame generation, MFG, Reflex, PresentMon and the UE 5.9 comparison) come later in a Windows 11 VM on the same machine with the RTX 5090 passed through (#227). It is the lead's workstation and hosts other work: GodotNext runs stay in their own folders, one GPU job at a time, and its name, address and helper scripts are in the git-ignored `local/` folder.
+
+| Host | OS | GPU | Compiler | Build command | Editor binary | Wall time | `--headless --test` | Vulkan validation and tools |
+|---|---|---|---|---|---|---|---|---|
+| the RTX 5090 machine | Ubuntu 26.04.1 LTS, kernel 7.0.0-44 (AMD Ryzen Threadripper PRO 9985WX, 64 cores, 128 GB) | NVIDIA GeForce RTX 5090, 32 GB, driver 595.99.02 (Vulkan 1.4.329), plus llvmpipe | GCC 15.2.0 | `scons platform=linuxbsd target=editor dev_mode=yes -j56` (SCons 4.11.1, Python 3.14) | `bin/godot.linuxbsd.editor.x86_64` | 1m 35s cold (empty SCons cache) | 2223 passed, 0 failed (3 pre-existing skips), master `d1f126ee` | Khronos validation layer 1.4.363.1 and `vulkaninfo` 1.4.363.1 from the LunarG SDK, loaded through `VK_LAYER_PATH` (no system SDK) |
+
+Recorded on 2026-11-23 at `d1f126ee`.
+
+- **Device:** `vendorID` 0x10DE, `deviceID` 0x2B85, `rayQuery` true, `maxInstanceCount` 16,777,215, mesh and task shaders. Archive: `fleet/vulkaninfo/g0/the RTX 5090 machine-rtx5090.json` (`vulkaninfo --json=0`).
+- **PCIe:** Gen 5 x16 maximum (`nvidia-smi --query-gpu=pcie.link.gen.max,pcie.link.width.max`); the link drops to Gen 1 at idle.
+- **Clocks and power:** maximum graphics 3105 MHz, memory 14001 MHz, power limit 600 W, VBIOS 98.02.2E.80.39. Clock locks for timing runs are set in PQ.
+- **Display:** rendered runs use a private Xvfb display (1920x1080x24, no TCP) that each run starts and stops; NVIDIA's Vulkan driver presents to it. Pass `--audio-driver Dummy`.
+- **Smoke (2026-11-23, master `d1f126ee`, Vulkan with `--gpu-validation`):** `scenes/nextgi_perf/nextgi_perf.tscn` (NextGI on, `tier=HWRT reason=NONE quality=HIGH`) and `scenes/vsm_flythrough/vsm_flythrough.tscn`, 300 frames each, 0 errors and 0 validation messages. The first headless `--import` of a fresh checkout logs the known editor-thread `is_visible_in_tree()` error.
+
+| Device name | v1 role | Godot Vulkan `--gpu-index` | `nvidia-smi -i` | `vulkaninfo --json=<n>` |
+|---|---|---|---|---|
+| `NVIDIA GeForce RTX 5090` | Second fleet device: Linux Vulkan now, Windows 11 VM later; every NVIDIA line in PQ | `0` | `0` | `0` |
+| `llvmpipe (LLVM 21.1.8, 256 bits)` | Software rasterizer, not a test device | `1` | n/a | `1` |
+
 ### Cloud L4 VMs (v3.8, build-time only)
 
 Compute Engine `g2-standard-16` VMs (16 vCPU, 64 GB) with one NVIDIA L4 each run PR basics during the build (plan §23.2, v3.8). There are two images, Linux and Windows; since plan v3.9 the build runs as many VMs of each as it has parallel work for. They run no gate, timing or UE-comparison line and no DLSS-enabled build. Their project, names, addresses and SSH key are in the git-ignored `local/fleet.env`; the fleet skill says how to start, stop and reach them.
@@ -103,7 +124,7 @@ On the Windows VM the user signs in automatically, so rendered runs go through `
 
 ### Cloud test machine (plan v3.9.7, build-time only)
 
-Until the RTX 5090 machine exists (#227), a Compute Engine Windows VM with one NVIDIA RTX PRO 6000 (Blackwell, the RTX 5090's chip) is the second test machine (lead decision 2026-11-16, plan §23.2). It runs once its GPU quota is granted; until then, the Windows L4 VMs above stand in for it. When it is created it gets a build row and a device-mapping table like the L4 VM's, and its project, name, zone and address go in the git-ignored `local/fleet.env`, as for the L4 VMs.
+Until the RTX 5090 machine runs Windows 11 with its card (#227, plan v3.9.20), a Compute Engine Windows VM with one NVIDIA RTX PRO 6000 (Blackwell, the RTX 5090's chip) is the second test machine (lead decision 2026-11-16, plan §23.2). It runs once its GPU quota is granted; until then, the Windows L4 VMs above stand in for it. When it is created it gets a build row and a device-mapping table like the L4 VM's, and its project, name, zone and address go in the git-ignored `local/fleet.env`, as for the L4 VMs.
 
 - A landing check that says it renders on the RTX 4080 SUPER may run on the RTX 4080 SUPER machine or on the cloud test machine. The issue comment that reports it names the machine.
 - Like the L4 VMs, it runs no gate line, gives no judged timing or UE-comparison verdict and never runs a DLSS-enabled build, and it is stopped when idle.

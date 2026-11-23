@@ -1,6 +1,6 @@
 ---
 name: godotnext-fleet
-description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, a cloud NVIDIA RTX PRO 6000 test machine standing in for the RTX 5090 during the build, cloud NVIDIA L4 VMs for Linux and Windows, a cloud NVIDIA T4 and a cloud AMD Radeon PRO V710 for functional coverage, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
+description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, a cloud NVIDIA RTX PRO 6000 test machine for Windows until the RTX 5090 machine runs Windows, cloud NVIDIA L4 VMs for Linux and Windows, a cloud NVIDIA T4 and a cloud AMD Radeon PRO V710 for functional coverage, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
 ---
 
 # Use the GodotNext hardware
@@ -9,8 +9,8 @@ description: Describes the GodotNext build and test hardware (Apple M5 Max, NVID
 |---|---|---|---|
 | Apple M5 Max (Apple10) | macOS, Metal | Daily build loop; Metal-first P0 and P1 work; PR basics until the RTX 4080 SUPER is in use (§24); Metal lines in PQ | In use |
 | NVIDIA RTX 4080 SUPER | Windows 11, Vulkan and D3D12 | Vulkan and D3D12 work (P2, PD), DLSS builds with the lead's own SDK, the RTX 4080 SUPER PR run, NVIDIA lines in PQ | Remote |
-| NVIDIA RTX 5090 | Windows 11 | Every NVIDIA line in PQ; multi frame generation | To be set up before PQ (#227) |
-| Cloud test machine: Windows VM, NVIDIA RTX PRO 6000 (Blackwell) | Windows, Vulkan and D3D12 | The second test machine until the RTX 5090 machine exists (plan v3.9.7): PR basics and "renders on the RTX 4080 SUPER" landing checks; never DLSS-enabled builds; not a PQ machine | Not running until its GPU quota is granted; Windows L4 VMs stand in until then; stop when idle |
+| NVIDIA RTX 5090 (the RTX 5090 machine, the lead's Threadripper workstation) | Ubuntu 26.04, Vulkan, now; Windows 11 in a VM with the card passed through, later (plan v3.9.20) | Linux builds, doctests and Vulkan validation runs now, including Linux landing checks (no spend; helpers in `local/rtx5090/`); every NVIDIA line in PQ; multi frame generation | Linux in use from 2026-11-23; the Windows VM with the card is still to set up (#227). The lead's workstation: stay in GodotNext folders, one GPU job at a time, no sudo or system changes without the lead's OK |
+| Cloud test machine: Windows VM, NVIDIA RTX PRO 6000 (Blackwell) | Windows, Vulkan and D3D12 | The second test machine for Windows until the RTX 5090 machine's Windows VM has the card (plan v3.9.7, v3.9.20): PR basics and "renders on the RTX 4080 SUPER" landing checks; never DLSS-enabled builds; not a PQ machine | Not running until its GPU quota is granted; Windows L4 VMs stand in until then; stop when idle |
 | Linux x86_64 VM, no GPU | Linux, llvmpipe | CPU, doctest and software-Vulkan smoke runs; never DLSS-enabled builds | Available |
 | Cloud Linux VM, NVIDIA L4 (16 vCPU, 64 GB) | Ubuntu 24.04, Vulkan (NVIDIA 580 driver), headless X on the L4 | Linux builds and doctests, Linux Vulkan validation runs on a second NVIDIA (Ada) card; never DLSS-enabled builds | Deleted 2026-11-20; recreate only with the lead's go-ahead (it bills), using the private rebuild runbook in `local/`; stop when idle |
 | Cloud Windows VM, NVIDIA L4 (16 vCPU, 64 GB) | Windows Server 2025, Vulkan and D3D12 (NVIDIA GRID driver, WDDM) | Windows builds, Vulkan and D3D12 validation runs beside the RTX 4080 SUPER; never DLSS-enabled builds | Deleted 2026-11-20; recreate only with the lead's go-ahead, using the private rebuild runbook in `local/`; stop when idle |
@@ -52,7 +52,7 @@ The cloud NVIDIA T4 and AMD Radeon PRO V710 VMs (plan §26.5, #280) are reached 
 
 ## The cloud test machine
 
-Until the RTX 5090 machine exists (#227), a Compute Engine Windows VM with one NVIDIA RTX PRO 6000 is the second test machine (plan §23.2, v3.9.7). Until its GPU quota is granted and it runs, a Windows L4 VM stands in for it. It is reached and handled like the Windows L4 VMs: its settings go in `local/fleet.env` when it is created, it bills while it runs, and it never runs a DLSS-enabled build.
+Until the RTX 5090 machine runs Windows 11 with its card (#227, plan v3.9.20), a Compute Engine Windows VM with one NVIDIA RTX PRO 6000 is the second test machine for Windows (plan §23.2, v3.9.7). Until its GPU quota is granted and it runs, a Windows L4 VM stands in for it. It is reached and handled like the Windows L4 VMs: its settings go in `local/fleet.env` when it is created, it bills while it runs, and it never runs a DLSS-enabled build.
 
 - **Landing checks:** a check that says it renders on the RTX 4080 SUPER may run on the RTX 4080 SUPER machine or on the cloud test machine. The issue comment that reports it names the machine.
 - **Not PQ:** it runs no gate line and gives no judged timing or UE-comparison verdict. PQ still runs on the RTX 4080 SUPER, the RTX 5090 and the M5 Max.
