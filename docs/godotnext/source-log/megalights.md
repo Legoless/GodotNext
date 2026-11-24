@@ -149,6 +149,47 @@ Contract decisions for M9:
   light uses `SHADOW_METHOD_RAY_TRACED`, `NextGIRTShadows` is never instantiated, zero atlas VRAM is allocated, zero
   RT shadow passes run, and specialization bit 15 (`use_rt_shadows`) remains `false`.
 
+### MegaLights sampling core (#142, contract M3, GM-1, GM-2, budget M-3), 2026-11-24
+
+- Standard published Monte Carlo & computer-graphics textbook algorithms implemented from first principles:
+  - Weighted Reservoir Sampling (Chao / Efraimidis-Spirakis / streaming `w_i / w_sum` single-pass WRS) for
+    unbiased K-reservoir per-pixel light selection over the #139 packed froxel cell list.
+  - Per-slice stratified 3D periodic void-and-cluster (Ulichney 1993 void-and-cluster generalized to a
+    3D periodic `(64, 64, 32)` Gaussian kernel with spatial `sigma_xy = 1.9`, temporal `sigma_t = 1.2`)
+    written from scratch in `godotnext/tools/blue_noise/generate.py` to generate the committed 64×64×32
+    RG8 spatio-temporal blue-noise table (`servers/rendering/renderer_rd/effects/megalights_stbn.h`).
+  - Welford online mean and M2 variance recurrence for reference-mode convergence measurement.
+  - Octahedral unit-vector encoding packed into `snorm16x2` (Cigolle et al. 2014 *Survey of Efficient
+    Representations for Independent Unit Vectors*).
+- Everything else — `ml_light_eval_inc.glsl`, `ml_generate_samples.glsl`, `ml_guiding.glsl`,
+  `ml_reference.glsl`, `MegaLights` / `MegaLightsViewData`, and the Forward+ pre-opaque wiring — was
+  written from plan §21.3 contract M3, issue #142, and GodotNext's own #136 direct-light inputs, #138
+  Light Function Atlas, #139 packed froxel light grid, #140 IES/barn-door/textured rect light helpers,
+  #145 `nextgi_shadow_ray_inc.glsl` (`trace_shadow()`), and Godot's Forward+ PBR / LTC area-light code.
+  No Unreal Engine source, shaders, NVIDIA/NvRTX samples, or third-party STBN tables were consulted.
+
+Contract decisions for M3:
+- **Sample buffer packing (16 bytes/sample, budget M-3 & 64 MiB VRAM cap):** Each sample is a packed
+  `uvec4` (`light_packed`, `floatBitsToUint(inv_pdf)`, `packSnorm2x16(oct(ray_dir_ws))`,
+  `floatBitsToUint(max_distance)`), storing 4 spp at 1080p half-res in ~31.6 MiB (full-res 4 spp
+  in 126.6 MiB, well under the 64 MiB default-half-res MegaLights budget) while keeping #146 visibility
+  and #135 denoiser inputs compact and aligned.
+- **Continuous sub-quantized STBN:** The committed 64×64×32 RG8 table provides exact uniform 256-bin
+  blue-noise strata per slice; `ml_light_eval_inc.glsl` dithers within each 1/256 bin using a 24-bit
+  PCG sub-offset so the estimator stays strictly unbiased even for very dim candidate lights
+  (`w_i / w_sum < 1/256`). Soft-shadow emitter sampling uses the full 64×64×32 spatio-temporal cycle
+  (with epoch shifts every 32 frames); adaptive WRS light selection (`ml_stbn_select_u`) re-hashes the
+  shared toroidal shift and slice each frame to preserve spatial blue noise within a frame while
+  remaining conditionally independent of last frame's tile guiding table.
+- **Unbiased visible-light guiding floor:** `ml_guiding.glsl` aggregates up to 32 visible light IDs
+  and hit counts per 8×8 screen tile into a 36-uint (144-byte) ping-pong record. `ml_generate_samples.glsl`
+  applies `mix(0.25, 1.0, count / max_count)` to lights present in the previous frame's tile and keeps
+  a strictly positive weight floor `0.25` for unlisted/occluded lights so every light retains non-zero
+  selection probability and the weighted estimator remains mathematically unbiased.
+- **Provisional defaults (tuned in PQ):** `samples_per_pixel = 4` (quality presets Low/Medium=2,
+  High=4, Epic=8), `downsample = 1` (`Half`, 2×2 Bayer cycle `(0,0),(1,1),(1,0),(0,1)`),
+  `directional_lights = false`, `falloff_cull_threshold = 0.001`, `reference_mode = false`.
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

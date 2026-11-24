@@ -46,6 +46,8 @@
 // GodotNext: vsm_settings_debug (#221).
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+// GodotNext: megalights_sampling (#142).
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
 // GodotNext: light_grid (#139).
 #include "servers/rendering/renderer_rd/light_grid_math.h"
@@ -2422,6 +2424,24 @@ Dictionary RenderingServer::light_grid_get_check_result() {
 #endif
 }
 
+void RenderingServer::megalights_request_check(const Dictionary &p_options) {
+	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	RendererRD::MegaLights::request_check(p_options);
+#else
+	(void)p_options;
+#endif
+}
+
+Dictionary RenderingServer::megalights_get_check_result() {
+	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	return RendererRD::MegaLights::get_check_result();
+#else
+	return Dictionary();
+#endif
+}
+
 Dictionary RenderingServer::virtual_shadow_maps_get_tier_info() {
 	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). Valid on every renderer: without the Forward+
 	// storage the reason is UNSUPPORTED_RENDERER.
@@ -3204,6 +3224,9 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: light_grid (#139, plan §21.3 contract M2).
 	ClassDB::bind_method(D_METHOD("light_grid_request_check"), &RenderingServer::light_grid_request_check);
 	ClassDB::bind_method(D_METHOD("light_grid_get_check_result"), &RenderingServer::light_grid_get_check_result);
+	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2).
+	ClassDB::bind_method(D_METHOD("megalights_request_check", "options"), &RenderingServer::megalights_request_check, DEFVAL(Dictionary()));
+	ClassDB::bind_method(D_METHOD("megalights_get_check_result"), &RenderingServer::megalights_get_check_result);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);
@@ -4212,6 +4235,15 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/light_function_atlas/size", PROPERTY_HINT_RANGE, "256,8192,256"), 2048);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/light_function_atlas/format", PROPERTY_HINT_ENUM, "R8,RGBA8"), 0);
 	GLOBAL_DEF("rendering/lights_and_shadows/light_function_atlas/translucent", false);
+
+	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2, budget M-3).
+	// Per-pixel weighted light sampling over the packed grid, half-res 2x2 rotating downsample,
+	// directional light opt-in, falloff early cull threshold, and exhaustive ray-traced reference mode.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/samples_per_pixel", PROPERTY_HINT_RANGE, "1,16,1"), 4);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/downsample", PROPERTY_HINT_ENUM, "Full,Half"), 1);
+	GLOBAL_DEF("rendering/megalights/directional_lights", false);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/megalights/falloff_cull_threshold", PROPERTY_HINT_RANGE, "0.0,0.1,0.0001,or_greater"), 0.001);
+	GLOBAL_DEF("rendering/megalights/reference_mode", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);

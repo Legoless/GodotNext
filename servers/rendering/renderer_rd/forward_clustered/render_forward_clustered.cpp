@@ -2801,6 +2801,36 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		}
 	}
 
+	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2).
+	// Run per-pixel weighted light sampling (or reference accumulation / GPU verification check)
+	// after the prepass and packed froxel light grid are built, leaving Forward+ Set 1 untouched
+	// for #141/#143.
+	if (megalights_inputs_active && !p_render_data->reflection_probe.is_valid() && rb.is_valid() && rb->get_view_count() == 1 && rb_data.is_valid() && rb->has_megalights_inputs()) {
+		const RID ml_depth = rb->get_depth_texture(0);
+		const RID ml_normal_roughness = (p_normal_roughness_slices != nullptr && p_normal_roughness_slices[0].is_valid()) ? p_normal_roughness_slices[0] : rb_data->get_normal_roughness(0);
+		const RID ml_albedo = rb->get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO, 0, 0);
+		const RID ml_material = rb->get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL, 0, 0);
+		if (ml_depth.is_valid() && ml_normal_roughness.is_valid() && ml_albedo.is_valid() && ml_material.is_valid()) {
+			if (mega_lights == nullptr) {
+				mega_lights = memnew(RendererRD::MegaLights);
+			}
+			RendererRD::MegaLights::FrameInputs ml_inputs;
+			ml_inputs.render_data = p_render_data;
+			ml_inputs.depth_texture = ml_depth;
+			ml_inputs.normal_roughness_texture = ml_normal_roughness;
+			ml_inputs.ml_albedo_texture = ml_albedo;
+			ml_inputs.ml_material_texture = ml_material;
+			ml_inputs.dfg_lut_texture = dfg_lut.texture;
+			ml_inputs.ltc_lut1_texture = texture_storage->texture_get_rd_texture(ltc.lut1_texture);
+			ml_inputs.ltc_lut2_texture = texture_storage->texture_get_rd_texture(ltc.lut2_texture);
+			ml_inputs.light_function_atlas = &light_function_atlas;
+			ml_inputs.next_gi = &next_gi;
+			ml_inputs.flip_y = p_render_data->scene_data->flip_y;
+			ml_inputs.use_soft_shadows = true;
+			mega_lights->render_sampling(ml_inputs, rb);
+		}
+	}
+
 	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218) / vsm_nanite (#217). After the light buffers (vsm_map_base) and the cluster.
 	if (vsm_mark_view && rb_data.is_valid() && current_cluster_builder) {
 		// GodotNext: vsm_nanite (#217). Optional test/debug hook (off by default until #212 lands):
@@ -6756,6 +6786,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// the only place the MegaLights shader groups are enabled; the doctest checks its gate.
 	if (!is_reflection_probe && rb.is_valid()) {
 		megalights_inputs_active = RendererRD::MegaLightsInputs::enable_view_shader_groups(scene_shader, rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, p_render_data->scene_data->view_count > 1, using_nextgeo);
+		if (!megalights_inputs_active && RendererRD::MegaLights::has_pending_check() && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && p_render_data->scene_data->view_count == 1) {
+			scene_shader.enable_megalights_shader_group(false);
+			if (using_nextgeo) {
+				scene_shader.enable_nextgeo_megalights_shader_group();
+			}
+			megalights_inputs_active = true;
+		}
 		if (megalights_inputs_active) {
 			rb->ensure_megalights_inputs();
 		} else {
@@ -11966,6 +12003,11 @@ RenderForwardClustered::~RenderForwardClustered() {
 	if (rr_guides) {
 		memdelete(rr_guides);
 		rr_guides = nullptr;
+	}
+
+	if (mega_lights) {
+		memdelete(mega_lights);
+		mega_lights = nullptr;
 	}
 
 	RD::get_singleton()->free_rid(shadow_sampler);

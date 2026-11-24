@@ -141,6 +141,13 @@ class RenderingServerDefault : public RenderingServer {
 	Dictionary _light_grid_get_check_result() {
 		return RenderingServer::light_grid_get_check_result();
 	}
+	// GodotNext: megalights_sampling (#142).
+	void _megalights_request_check(const Dictionary &p_options) {
+		RenderingServer::megalights_request_check(p_options);
+	}
+	Dictionary _megalights_get_check_result() {
+		return RenderingServer::megalights_get_check_result();
+	}
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -1491,6 +1498,27 @@ public:
 		} else {
 			Dictionary ret;
 			command_queue.push_and_ret(this, &RenderingServerDefault::_light_grid_get_check_result, &ret);
+			return ret;
+		}
+	}
+
+	// GodotNext: megalights_sampling (#142).
+	virtual void megalights_request_check(const Dictionary &p_options = Dictionary()) override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			_megalights_request_check(p_options);
+		} else {
+			command_queue.push(this, &RenderingServerDefault::_megalights_request_check, p_options);
+		}
+	}
+
+	virtual Dictionary megalights_get_check_result() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _megalights_get_check_result();
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_megalights_get_check_result, &ret);
 			return ret;
 		}
 	}

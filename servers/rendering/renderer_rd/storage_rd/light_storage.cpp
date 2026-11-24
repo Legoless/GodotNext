@@ -1213,6 +1213,11 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				light_data.shadow_opacity = (p_using_shadows && light->shadow)
 						? light->param[RSE::LIGHT_PARAM_SHADOW_OPACITY]
 						: 0.0;
+				// GodotNext: megalights_sampling (#142). Record directional caster mask in buffer order.
+				if (directional_light_caster_masks.size() <= r_directional_light_count) {
+					directional_light_caster_masks.resize(r_directional_light_count + 1);
+				}
+				directional_light_caster_masks[r_directional_light_count] = (p_using_shadows && light->shadow) ? light->shadow_caster_mask : 0u;
 				// GodotNext: light_function_atlas (#138).
 				light_data.light_function_index = (lfa != nullptr && light->light_function.is_valid())
 						? lfa->append_view_entry(light_instance->light, LightFunctionAtlasPacker::MODE_DIRECTIONAL, light_transform, light->light_function_scale, 45.0f)
@@ -2029,6 +2034,28 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 	if (lfa != nullptr) {
 		lfa->finish_view_entries();
+	}
+}
+
+void LightStorage::get_view_light_shadow_caster_masks(uint32_t p_directional_count, LocalVector<uint32_t> &r_masks) const {
+	// GodotNext: megalights_sampling (#142). Shadow caster masks in exact GPU view buffer order.
+	const uint32_t dir_count = MIN(p_directional_count, uint32_t(directional_light_caster_masks.size()));
+	r_masks.resize(omni_light_count + spot_light_count + area_light_count + dir_count);
+	uint32_t out = 0;
+	for (uint32_t i = 0; i < omni_light_count; i++) {
+		const Light *light = omni_light_sort != nullptr ? omni_light_sort[i].light : nullptr;
+		r_masks[out++] = (light != nullptr && light->shadow) ? light->shadow_caster_mask : 0u;
+	}
+	for (uint32_t i = 0; i < spot_light_count; i++) {
+		const Light *light = spot_light_sort != nullptr ? spot_light_sort[i].light : nullptr;
+		r_masks[out++] = (light != nullptr && light->shadow) ? light->shadow_caster_mask : 0u;
+	}
+	for (uint32_t i = 0; i < area_light_count; i++) {
+		const Light *light = area_light_sort != nullptr ? area_light_sort[i].light : nullptr;
+		r_masks[out++] = (light != nullptr && light->shadow) ? light->shadow_caster_mask : 0u;
+	}
+	for (uint32_t i = 0; i < dir_count; i++) {
+		r_masks[out++] = directional_light_caster_masks[i];
 	}
 }
 

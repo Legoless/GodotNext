@@ -2664,6 +2664,19 @@
 				Sets the maximum vertex offset bound in meters for the given spatial material on NextGeo virtualized meshes. A negative value inherits [member ProjectSettings.rendering/nextgeo/vertex_offset_max_default]. Equivalent to [member Material.vertex_offset_max].
 			</description>
 		</method>
+		<method name="megalights_get_check_result">
+			<return type="Dictionary" />
+			<description>
+				Returns the most recent MegaLights sampling core verification result recorded after calling [method megalights_request_check]. Returns an empty [Dictionary] if no check has been requested yet, or a dictionary with [code]"done": false[/code] while multi-frame accumulation is still in progress.
+			</description>
+		</method>
+		<method name="megalights_request_check">
+			<return type="void" />
+			<param index="0" name="options" type="Dictionary" default="{}" />
+			<description>
+				Schedules a GPU verification check for the MegaLights sampling core on the next rendered 3D views (for example unbiasedness against exhaustive shading, reference-mode convergence, visible-light guiding, falloff early culling, or light-type evaluation). Retrieve status and metrics with [method megalights_get_check_result].
+			</description>
+		</method>
 		<method name="mesh_add_surface">
 			<return type="void" />
 			<param index="0" name="mesh" type="RID" />

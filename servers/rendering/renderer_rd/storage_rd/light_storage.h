@@ -293,6 +293,9 @@ private:
 
 	uint32_t max_directional_lights;
 	DirectionalLightData *directional_lights = nullptr;
+	// GodotNext: megalights_sampling (#142). Shadow caster masks of the directional lights written
+	// by update_light_buffers() (0 when shadow is disabled), for ml_reference.glsl trace_shadow().
+	LocalVector<uint32_t> directional_light_caster_masks;
 	RID directional_light_buffer;
 
 	/* REFLECTION PROBE */
@@ -932,6 +935,9 @@ public:
 	uint32_t get_omni_light_count() const { return omni_light_count; }
 	uint32_t get_spot_light_count() const { return spot_light_count; }
 	uint32_t get_area_light_count() const { return area_light_count; }
+	// GodotNext: megalights_sampling (#142). Shadow caster masks (0 if shadows disabled) in view buffer order:
+	// omni [0..omni), spot [omni..omni+spot), area [omni+spot..omni+spot+area), directional [..+p_directional_count).
+	void get_view_light_shadow_caster_masks(uint32_t p_directional_count, LocalVector<uint32_t> &r_masks) const;
 	RID get_omni_light_buffer() { return omni_light_buffer; }
 	RID get_spot_light_buffer() { return spot_light_buffer; }
 	RID get_area_light_buffer() { return area_light_buffer; }

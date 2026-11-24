@@ -36,6 +36,8 @@
 // GodotNext: avboit (#295)
 #include "servers/rendering/renderer_rd/effects/avboit.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
+// GodotNext: megalights_sampling (#142)
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/rr_guides.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
@@ -953,6 +955,8 @@ private:
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
 	// GodotNext: rr_guides (#205). Created by the first view that writes the guides.
 	RendererRD::RRGuides *rr_guides = nullptr;
+	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3). Created lazily on first MegaLights view.
+	RendererRD::MegaLights *mega_lights = nullptr;
 
 	/* Cluster builder */
 
