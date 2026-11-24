@@ -1687,8 +1687,11 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	tex_info->owner_info.resource = main_texture;
 	tex_info->owner_info.allocation = allocation;
 	tex_info->owner_info.states.subresource_states.resize(p_format.mipmaps * p_format.array_layers);
+	tex_info->owner_info.states.subresource_layouts.resize(p_format.mipmaps * p_format.array_layers);
+	const D3D12_BARRIER_LAYOUT tracked_initial_layout = barrier_capabilities.enhanced_barriers_supported ? D3D12_BARRIER_LAYOUT_UNDEFINED : D3D12_BARRIER_LAYOUT_COMMON;
 	for (uint32_t i = 0; i < tex_info->owner_info.states.subresource_states.size(); i++) {
 		tex_info->owner_info.states.subresource_states[i] = initial_state;
+		tex_info->owner_info.states.subresource_layouts[i] = tracked_initial_layout;
 	}
 	tex_info->states_ptr = &tex_info->owner_info.states;
 	tex_info->format = p_format.format;
@@ -1782,8 +1785,11 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create_from_extension(uint64_
 	tex_info->owner_info.resource = nullptr; // Not allocated by us.
 	tex_info->owner_info.allocation = nullptr; // Not allocated by us.
 	tex_info->owner_info.states.subresource_states.resize(resource_desc.MipLevels * p_array_layers);
+	tex_info->owner_info.states.subresource_layouts.resize(resource_desc.MipLevels * p_array_layers);
+	const D3D12_BARRIER_LAYOUT ext_initial_layout = !p_depth_stencil ? D3D12_BARRIER_LAYOUT_RENDER_TARGET : D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE;
 	for (uint32_t i = 0; i < tex_info->owner_info.states.subresource_states.size(); i++) {
 		tex_info->owner_info.states.subresource_states[i] = !p_depth_stencil ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		tex_info->owner_info.states.subresource_layouts[i] = ext_initial_layout;
 	}
 	tex_info->states_ptr = &tex_info->owner_info.states;
 	tex_info->format = p_format;
@@ -2620,7 +2626,7 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	D3D12_TEXTURE_BARRIER texture_barrier_d3d12 = {};
 	for (uint32_t i = 0; i < p_texture_barriers.size(); i++) {
 		const TextureBarrier &texture_barrier_rd = p_texture_barriers[i];
-		const TextureInfo *texture_info = (const TextureInfo *)(texture_barrier_rd.texture.id);
+		TextureInfo *texture_info = (TextureInfo *)(texture_barrier_rd.texture.id);
 		if (texture_info->main_texture) {
 			texture_info = texture_info->main_texture;
 		}
@@ -2633,7 +2639,8 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		texture_barrier_d3d12.LayoutBefore = _rd_texture_layout_to_d3d12_barrier_layout(texture_barrier_rd.prev_layout, cmd_buf_info->list_type);
 		texture_barrier_d3d12.LayoutAfter = _rd_texture_layout_to_d3d12_barrier_layout(texture_barrier_rd.next_layout, cmd_buf_info->list_type);
 		texture_barrier_d3d12.pResource = texture_info->resource;
-		if (texture_barrier_rd.subresources.mipmap_count == texture_info->mipmaps && texture_barrier_rd.subresources.layer_count == texture_info->layers) {
+		const bool covers_all = texture_barrier_rd.subresources.mipmap_count == texture_info->mipmaps && texture_barrier_rd.subresources.layer_count == texture_info->layers;
+		if (covers_all) {
 			// So, all resources. Then, let's be explicit about it so D3D12 doesn't think
 			// we are dealing with a subset of subresources.
 			texture_barrier_d3d12.Subresources.IndexOrFirstMipLevel = 0xffffffff;
@@ -2649,6 +2656,30 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		}
 		texture_barrier_d3d12.Flags = (texture_barrier_rd.prev_layout == RDD::TEXTURE_LAYOUT_UNDEFINED) ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
 		texture_barriers.push_back(texture_barrier_d3d12);
+
+		// GodotNext: pu_dlss_d3d12 (#119). Keep per-subresource enhanced layouts current for driver callbacks.
+		ResourceInfo::States *res_states = texture_info->states_ptr;
+		if (res_states != nullptr && !res_states->subresource_layouts.is_empty()) {
+			if (covers_all) {
+				for (uint32_t s = 0; s < res_states->subresource_layouts.size(); s++) {
+					res_states->subresource_layouts[s] = texture_barrier_d3d12.LayoutAfter;
+				}
+			} else {
+				for (uint32_t layer = 0; layer < texture_barrier_rd.subresources.layer_count; layer++) {
+					for (uint32_t mip = 0; mip < texture_barrier_rd.subresources.mipmap_count; mip++) {
+						const uint32_t subresource = D3D12CalcSubresource(
+								texture_barrier_rd.subresources.base_mipmap + mip,
+								texture_barrier_rd.subresources.base_layer + layer,
+								0,
+								texture_info->desc.MipLevels,
+								texture_info->desc.ArraySize());
+						if (subresource < res_states->subresource_layouts.size()) {
+							res_states->subresource_layouts[subresource] = texture_barrier_d3d12.LayoutAfter;
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Define the barrier groups and execute.
@@ -2680,6 +2711,390 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	if (barrier_groups_count) {
 		cmd_buf_info->cmd_list_7->Barrier(barrier_groups_count, barrier_groups);
 	}
+}
+
+// GodotNext: pu_dlss_d3d12 (#119). Compatible barrier access bits for each tracked enhanced layout.
+static D3D12_BARRIER_ACCESS _d3d12_barrier_layout_access(D3D12_BARRIER_LAYOUT p_layout, D3D12_COMMAND_LIST_TYPE p_list_type) {
+	switch (p_layout) {
+		case D3D12_BARRIER_LAYOUT_UNDEFINED:
+			return D3D12_BARRIER_ACCESS_NO_ACCESS;
+		case D3D12_BARRIER_LAYOUT_COMMON:
+		case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON:
+		case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
+			return D3D12_BARRIER_ACCESS_COMMON;
+		case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+		case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS:
+		case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
+			return D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+		case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+		case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
+		case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
+			return D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+		case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
+			return (p_list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) ? D3D12_BARRIER_ACCESS_COMMON : D3D12_BARRIER_ACCESS_RENDER_TARGET;
+		case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
+			return (p_list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) ? D3D12_BARRIER_ACCESS_COMMON : (D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE);
+		case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+			return (p_list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) ? D3D12_BARRIER_ACCESS_COMMON : D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+		case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ_COMPUTE_QUEUE_ACCESSIBLE:
+			return (p_list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) ? D3D12_BARRIER_ACCESS_SHADER_RESOURCE : (D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+		case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+		case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE:
+		case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
+			return D3D12_BARRIER_ACCESS_COPY_SOURCE;
+		case D3D12_BARRIER_LAYOUT_COPY_DEST:
+		case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
+		case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
+			return D3D12_BARRIER_ACCESS_COPY_DEST;
+		case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+			return D3D12_BARRIER_ACCESS_RESOLVE_SOURCE;
+		case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+			return D3D12_BARRIER_ACCESS_RESOLVE_DEST;
+		case D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE:
+			return (p_list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) ? D3D12_BARRIER_ACCESS_COMMON : D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE;
+		default:
+			return D3D12_BARRIER_ACCESS_COMMON;
+	}
+}
+
+void RenderingDeviceDriverD3D12::driver_callback_transition_textures(CommandBufferID p_cmd_buffer, VectorView<TextureID> p_textures, VectorView<bool> p_read_write) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	ERR_FAIL_NULL(cmd_buf_info);
+	ERR_FAIL_COND(p_textures.size() != p_read_write.size());
+
+	if (p_textures.size() == 0) {
+		return;
+	}
+
+	// Deduplicate entries covering the same (owner_texture, subresource range); write access wins.
+	struct UniqueTextureEntry {
+		TextureInfo *tex_info = nullptr;
+		TextureInfo *owner_tex = nullptr;
+		bool read_write = false;
+	};
+	LocalVector<UniqueTextureEntry> entries;
+	entries.reserve(p_textures.size());
+	for (uint32_t i = 0; i < p_textures.size(); i++) {
+		if (p_textures[i].id == 0) {
+			continue;
+		}
+		TextureInfo *tex_info = (TextureInfo *)p_textures[i].id;
+		TextureInfo *owner_tex = tex_info->main_texture ? tex_info->main_texture : tex_info;
+		if (owner_tex->resource == nullptr) {
+			continue;
+		}
+		bool merged = false;
+		for (uint32_t j = 0; j < entries.size(); j++) {
+			if (entries[j].owner_tex == owner_tex &&
+					entries[j].tex_info->base_mip == tex_info->base_mip &&
+					entries[j].tex_info->mipmaps == tex_info->mipmaps &&
+					entries[j].tex_info->base_layer == tex_info->base_layer &&
+					entries[j].tex_info->layers == tex_info->layers) {
+				entries[j].read_write = entries[j].read_write || p_read_write[i];
+				merged = true;
+				break;
+			}
+		}
+		if (!merged) {
+			UniqueTextureEntry entry;
+			entry.tex_info = tex_info;
+			entry.owner_tex = owner_tex;
+			entry.read_write = p_read_write[i];
+			entries.push_back(entry);
+		}
+	}
+
+	if (entries.is_empty()) {
+		return;
+	}
+
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		// Legacy barrier path: drive all subresource transitions through _resource_transition_batch
+		// and _resource_transitions_flush so subsequent lazy transitions stay in sync.
+		for (uint32_t idx = 0; idx < entries.size(); idx++) {
+			TextureInfo *tex_info = entries[idx].tex_info;
+			TextureInfo *owner_tex = entries[idx].owner_tex;
+			if (owner_tex->states_ptr == nullptr) {
+				continue;
+			}
+			const D3D12_RESOURCE_STATES wanted_state = entries[idx].read_write
+					? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+					: D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+			uint32_t planes = 1;
+			if ((owner_tex->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+				planes = format_get_plane_count(owner_tex->format);
+			}
+			const uint32_t state_count = owner_tex->states_ptr->subresource_states.size();
+			for (uint32_t layer = 0; layer < tex_info->layers; layer++) {
+				for (uint32_t mip = 0; mip < tex_info->mipmaps; mip++) {
+					const uint32_t subresource = D3D12CalcSubresource(
+							tex_info->base_mip + mip,
+							tex_info->base_layer + layer,
+							0,
+							owner_tex->desc.MipLevels,
+							owner_tex->desc.ArraySize());
+					if (subresource < state_count) {
+						_resource_transition_batch(cmd_buf_info, owner_tex, subresource, planes, wanted_state);
+					}
+				}
+			}
+		}
+		_resource_transitions_flush(cmd_buf_info);
+		return;
+	}
+
+	// Enhanced barrier path: transition each texture to UNORDERED_ACCESS or DIRECT_QUEUE_SHADER_RESOURCE
+	// (or SHADER_RESOURCE on compute lists) and remember its pre-callback layout for restore.
+	ERR_FAIL_NULL(cmd_buf_info->cmd_list_7);
+	cmd_buf_info->callback_saved_layouts.clear();
+
+	thread_local LocalVector<D3D12_TEXTURE_BARRIER> texture_barriers;
+	texture_barriers.clear();
+
+	const D3D12_BARRIER_LAYOUT srv_layout = (cmd_buf_info->list_type == D3D12_COMMAND_LIST_TYPE_DIRECT)
+			? D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
+			: D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+
+	for (uint32_t idx = 0; idx < entries.size(); idx++) {
+		TextureInfo *tex_info = entries[idx].tex_info;
+		TextureInfo *owner_tex = entries[idx].owner_tex;
+		if ((owner_tex->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)) {
+			continue;
+		}
+		ResourceInfo::States *res_states = owner_tex->states_ptr;
+		if (res_states == nullptr) {
+			continue;
+		}
+
+		const bool rw = entries[idx].read_write;
+		const D3D12_BARRIER_LAYOUT target_layout = rw ? D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS : srv_layout;
+		const D3D12_BARRIER_ACCESS target_access = rw ? D3D12_BARRIER_ACCESS_UNORDERED_ACCESS : D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+		const uint32_t planes = (owner_tex->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ? format_get_plane_count(owner_tex->format) : 1u;
+
+		const bool covers_all = (tex_info->base_mip == 0 && tex_info->base_layer == 0 &&
+				tex_info->mipmaps == static_cast<uint32_t>(owner_tex->desc.MipLevels) &&
+				tex_info->layers == static_cast<uint32_t>(owner_tex->desc.ArraySize()));
+
+		bool uniform_layout = true;
+		D3D12_BARRIER_LAYOUT common_layout = D3D12_BARRIER_LAYOUT_COMMON;
+		bool has_first_layout = false;
+		if (!res_states->subresource_layouts.is_empty()) {
+			for (uint32_t layer = 0; layer < tex_info->layers && uniform_layout; layer++) {
+				for (uint32_t mip = 0; mip < tex_info->mipmaps; mip++) {
+					const uint32_t subresource = D3D12CalcSubresource(
+							tex_info->base_mip + mip,
+							tex_info->base_layer + layer,
+							0,
+							owner_tex->desc.MipLevels,
+							owner_tex->desc.ArraySize());
+					const D3D12_BARRIER_LAYOUT sub_layout = (subresource < res_states->subresource_layouts.size())
+							? res_states->subresource_layouts[subresource]
+							: D3D12_BARRIER_LAYOUT_COMMON;
+					if (!has_first_layout) {
+						common_layout = sub_layout;
+						has_first_layout = true;
+					} else if (sub_layout != common_layout) {
+						uniform_layout = false;
+						break;
+					}
+				}
+			}
+		}
+
+		if (covers_all && uniform_layout) {
+			if (common_layout != target_layout || rw) {
+				D3D12_TEXTURE_BARRIER barrier = {};
+				barrier.SyncBefore = (common_layout == D3D12_BARRIER_LAYOUT_UNDEFINED) ? D3D12_BARRIER_SYNC_NONE : D3D12_BARRIER_SYNC_ALL;
+				barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+				barrier.AccessBefore = _d3d12_barrier_layout_access(common_layout, cmd_buf_info->list_type);
+				barrier.AccessAfter = target_access;
+				barrier.LayoutBefore = common_layout;
+				barrier.LayoutAfter = target_layout;
+				barrier.pResource = owner_tex->resource;
+				barrier.Subresources.IndexOrFirstMipLevel = 0xffffffff;
+				barrier.Subresources.NumMipLevels = 0;
+				barrier.Flags = (common_layout == D3D12_BARRIER_LAYOUT_UNDEFINED) ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
+				texture_barriers.push_back(barrier);
+
+				CommandBufferInfo::CallbackSavedTextureLayout saved;
+				saved.owner_texture = owner_tex;
+				saved.base_mip = 0;
+				saved.mipmaps = owner_tex->desc.MipLevels;
+				saved.base_layer = 0;
+				saved.layers = owner_tex->desc.ArraySize();
+				saved.planes = planes;
+				saved.all_subresources = true;
+				saved.saved_layout = common_layout;
+				saved.active_layout = target_layout;
+				saved.read_write = rw;
+				cmd_buf_info->callback_saved_layouts.push_back(saved);
+
+				for (uint32_t s = 0; s < res_states->subresource_layouts.size(); s++) {
+					res_states->subresource_layouts[s] = target_layout;
+				}
+			}
+		} else {
+			for (uint32_t layer = 0; layer < tex_info->layers; layer++) {
+				for (uint32_t mip = 0; mip < tex_info->mipmaps; mip++) {
+					const uint32_t abs_mip = tex_info->base_mip + mip;
+					const uint32_t abs_layer = tex_info->base_layer + layer;
+					const uint32_t subresource = D3D12CalcSubresource(
+							abs_mip,
+							abs_layer,
+							0,
+							owner_tex->desc.MipLevels,
+							owner_tex->desc.ArraySize());
+					const D3D12_BARRIER_LAYOUT cur_layout = (subresource < res_states->subresource_layouts.size())
+							? res_states->subresource_layouts[subresource]
+							: D3D12_BARRIER_LAYOUT_COMMON;
+					if (cur_layout == target_layout && !rw) {
+						continue;
+					}
+
+					D3D12_TEXTURE_BARRIER barrier = {};
+					barrier.SyncBefore = (cur_layout == D3D12_BARRIER_LAYOUT_UNDEFINED) ? D3D12_BARRIER_SYNC_NONE : D3D12_BARRIER_SYNC_ALL;
+					barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+					barrier.AccessBefore = _d3d12_barrier_layout_access(cur_layout, cmd_buf_info->list_type);
+					barrier.AccessAfter = target_access;
+					barrier.LayoutBefore = cur_layout;
+					barrier.LayoutAfter = target_layout;
+					barrier.pResource = owner_tex->resource;
+					barrier.Subresources.IndexOrFirstMipLevel = abs_mip;
+					barrier.Subresources.NumMipLevels = 1;
+					barrier.Subresources.FirstArraySlice = abs_layer;
+					barrier.Subresources.NumArraySlices = 1;
+					barrier.Subresources.FirstPlane = 0;
+					barrier.Subresources.NumPlanes = planes;
+					barrier.Flags = (cur_layout == D3D12_BARRIER_LAYOUT_UNDEFINED) ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
+					texture_barriers.push_back(barrier);
+
+					CommandBufferInfo::CallbackSavedTextureLayout saved;
+					saved.owner_texture = owner_tex;
+					saved.base_mip = abs_mip;
+					saved.mipmaps = 1;
+					saved.base_layer = abs_layer;
+					saved.layers = 1;
+					saved.planes = planes;
+					saved.all_subresources = false;
+					saved.saved_layout = cur_layout;
+					saved.active_layout = target_layout;
+					saved.read_write = rw;
+					cmd_buf_info->callback_saved_layouts.push_back(saved);
+
+					if (subresource < res_states->subresource_layouts.size()) {
+						res_states->subresource_layouts[subresource] = target_layout;
+					}
+				}
+			}
+		}
+	}
+
+	if (!texture_barriers.is_empty()) {
+		D3D12_BARRIER_GROUP group = {};
+		group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+		group.NumBarriers = texture_barriers.size();
+		group.pTextureBarriers = texture_barriers.ptr();
+		cmd_buf_info->cmd_list_7->Barrier(1, &group);
+	}
+}
+
+void RenderingDeviceDriverD3D12::driver_callback_restore_textures(CommandBufferID p_cmd_buffer, VectorView<TextureID> p_textures, VectorView<bool> p_read_write) {
+	(void)p_textures;
+	(void)p_read_write;
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		return;
+	}
+
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	ERR_FAIL_NULL(cmd_buf_info);
+	ERR_FAIL_NULL(cmd_buf_info->cmd_list_7);
+
+	if (cmd_buf_info->callback_saved_layouts.is_empty()) {
+		return;
+	}
+
+	thread_local LocalVector<D3D12_TEXTURE_BARRIER> texture_barriers;
+	texture_barriers.clear();
+
+	for (uint32_t i = cmd_buf_info->callback_saved_layouts.size(); i > 0; i--) {
+		const CommandBufferInfo::CallbackSavedTextureLayout &saved = cmd_buf_info->callback_saved_layouts[i - 1];
+		if (saved.owner_texture == nullptr || saved.owner_texture->resource == nullptr) {
+			continue;
+		}
+
+		D3D12_BARRIER_LAYOUT restore_layout = saved.saved_layout;
+		D3D12_BARRIER_ACCESS restore_access = D3D12_BARRIER_ACCESS_COMMON;
+		if (restore_layout == D3D12_BARRIER_LAYOUT_UNDEFINED) {
+			// Enhanced barriers never allow UNDEFINED as LayoutAfter; emit a UAV sync barrier for
+			// write textures and keep them in active_layout.
+			if (!saved.read_write) {
+				continue;
+			}
+			restore_layout = saved.active_layout;
+			restore_access = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+		} else {
+			restore_access = _d3d12_barrier_layout_access(restore_layout, cmd_buf_info->list_type);
+		}
+
+		if (restore_layout == saved.active_layout && !saved.read_write) {
+			continue;
+		}
+
+		D3D12_TEXTURE_BARRIER barrier = {};
+		barrier.SyncBefore = D3D12_BARRIER_SYNC_ALL;
+		barrier.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+		barrier.AccessBefore = saved.read_write ? D3D12_BARRIER_ACCESS_UNORDERED_ACCESS : D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+		barrier.AccessAfter = restore_access;
+		barrier.LayoutBefore = saved.active_layout;
+		barrier.LayoutAfter = restore_layout;
+		barrier.pResource = saved.owner_texture->resource;
+		if (saved.all_subresources) {
+			barrier.Subresources.IndexOrFirstMipLevel = 0xffffffff;
+			barrier.Subresources.NumMipLevels = 0;
+		} else {
+			barrier.Subresources.IndexOrFirstMipLevel = saved.base_mip;
+			barrier.Subresources.NumMipLevels = saved.mipmaps;
+			barrier.Subresources.FirstArraySlice = saved.base_layer;
+			barrier.Subresources.NumArraySlices = saved.layers;
+			barrier.Subresources.FirstPlane = 0;
+			barrier.Subresources.NumPlanes = saved.planes;
+		}
+		barrier.Flags = D3D12_TEXTURE_BARRIER_FLAG_NONE;
+		texture_barriers.push_back(barrier);
+
+		ResourceInfo::States *res_states = saved.owner_texture->states_ptr;
+		if (res_states != nullptr && !res_states->subresource_layouts.is_empty()) {
+			if (saved.all_subresources) {
+				for (uint32_t s = 0; s < res_states->subresource_layouts.size(); s++) {
+					res_states->subresource_layouts[s] = restore_layout;
+				}
+			} else {
+				for (uint32_t layer = 0; layer < saved.layers; layer++) {
+					for (uint32_t mip = 0; mip < saved.mipmaps; mip++) {
+						const uint32_t subresource = D3D12CalcSubresource(
+								saved.base_mip + mip,
+								saved.base_layer + layer,
+								0,
+								saved.owner_texture->desc.MipLevels,
+								saved.owner_texture->desc.ArraySize());
+						if (subresource < res_states->subresource_layouts.size()) {
+							res_states->subresource_layouts[subresource] = restore_layout;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (!texture_barriers.is_empty()) {
+		D3D12_BARRIER_GROUP group = {};
+		group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+		group.NumBarriers = texture_barriers.size();
+		group.pTextureBarriers = texture_barriers.ptr();
+		cmd_buf_info->cmd_list_7->Barrier(1, &group);
+	}
+
+	cmd_buf_info->callback_saved_layouts.clear();
 }
 
 /****************/
@@ -3000,6 +3415,7 @@ void RenderingDeviceDriverD3D12::command_buffer_end(CommandBufferID p_cmd_buffer
 	cmd_buf_info->compute_root_signature_crc = 0;
 	cmd_buf_info->pending_dyn_params = true;
 	cmd_buf_info->descriptor_heaps_set = false;
+	cmd_buf_info->callback_saved_layouts.clear();
 	// GodotNext: d3d12_rt_pipelines (#121). The next recording starts after this one ran, so it reuses the indirect
 	// trace arguments from the first slot, and nothing has accessed them yet in it.
 	cmd_buf_info->dispatch_rays_arguments_used = 0;
@@ -3267,6 +3683,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 		swap_chain->render_targets_info.push_back(TextureInfo());
 		TextureInfo &texture_info = swap_chain->render_targets_info[i];
 		texture_info.owner_info.states.subresource_states.push_back(D3D12_RESOURCE_STATE_PRESENT);
+		texture_info.owner_info.states.subresource_layouts.push_back(D3D12_BARRIER_LAYOUT_PRESENT);
 		texture_info.states_ptr = &texture_info.owner_info.states;
 		texture_info.format = swap_chain->data_format;
 #if defined(_MSC_VER) || !defined(_WIN32)
@@ -7440,6 +7857,50 @@ uint64_t RenderingDeviceDriverD3D12::get_resource_native_handle(DriverResource p
 	}
 }
 
+// GodotNext: pu_dlss_d3d12 (#119).
+uint64_t RenderingDeviceDriverD3D12::command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) {
+	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	ERR_FAIL_NULL_V(cmd_buf_info, 0);
+	return (uint64_t)cmd_buf_info->cmd_list.Get();
+}
+
+void RenderingDeviceDriverD3D12::command_buffer_invalidate_cached_state(CommandBufferID p_cmd_buffer) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	ERR_FAIL_NULL(cmd_buf_info);
+	cmd_buf_info->graphics_pso = nullptr;
+	cmd_buf_info->graphics_root_signature_crc = 0;
+	cmd_buf_info->compute_pso = nullptr;
+	cmd_buf_info->compute_root_signature_crc = 0;
+	cmd_buf_info->pending_dyn_params = true;
+	cmd_buf_info->descriptor_heaps_set = false;
+}
+
+Error RenderingDeviceDriverD3D12::texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info) {
+	const TextureInfo *tex_info = (const TextureInfo *)p_texture.id;
+	ERR_FAIL_NULL_V(tex_info, ERR_INVALID_PARAMETER);
+	const TextureInfo *owner_tex = tex_info->main_texture ? tex_info->main_texture : tex_info;
+
+	r_info = {};
+	r_info.image = (uint64_t)owner_tex->resource;
+	r_info.view = (uint64_t)tex_info->resource;
+	r_info.format = (uint64_t)tex_info->desc.Format;
+	if ((owner_tex->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+		r_info.aspect.set_flag(TEXTURE_ASPECT_DEPTH_BIT);
+		if (format_get_plane_count(owner_tex->format) > 1) {
+			r_info.aspect.set_flag(TEXTURE_ASPECT_STENCIL_BIT);
+		}
+	} else {
+		r_info.aspect.set_flag(TEXTURE_ASPECT_COLOR_BIT);
+	}
+	r_info.base_mipmap = tex_info->base_mip;
+	r_info.mipmap_count = tex_info->mipmaps;
+	r_info.base_layer = tex_info->base_layer;
+	r_info.layer_count = tex_info->layers;
+	r_info.width = MAX(1u, static_cast<uint32_t>(owner_tex->desc.Width >> r_info.base_mipmap));
+	r_info.height = MAX(1u, static_cast<uint32_t>(owner_tex->desc.Height >> r_info.base_mipmap));
+	return OK;
+}
+
 uint64_t RenderingDeviceDriverD3D12::get_total_memory_used() {
 	D3D12MA::Budget local_budget;
 	D3D12MA::Budget non_local_budget;
@@ -8011,11 +8472,16 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		barrier_capabilities.enhanced_barriers_supported = options12.EnhancedBarriersSupported;
 	}
 #ifdef DEBUG_ENABLED
-	// GodotNext: d3d12_dxr (#118). Debug builds can force the legacy resource-state path, so both
-	// barrier paths can be validated on a device with enhanced barriers.
-	if (barrier_capabilities.enhanced_barriers_supported && OS::get_singleton()->get_environment("GODOT_D3D12_LEGACY_BARRIERS") == "1") {
-		barrier_capabilities.enhanced_barriers_supported = false;
-		print_line("D3D12: enhanced barriers are off (GODOT_D3D12_LEGACY_BARRIERS=1).");
+	// GodotNext: d3d12_dxr (#118), pu_dlss_d3d12 (#119). Debug builds can force the legacy
+	// resource-state path, so both barrier paths can be validated on a device with enhanced barriers.
+	const D3D12BarrierMode barrier_mode = d3d12_resolve_barrier_mode(
+			barrier_capabilities.enhanced_barriers_supported,
+			true,
+			OS::get_singleton()->get_environment("GODOT_D3D12_FORCE_LEGACY_BARRIERS"),
+			OS::get_singleton()->get_environment("GODOT_D3D12_LEGACY_BARRIERS"));
+	barrier_capabilities.enhanced_barriers_supported = barrier_mode.enhanced_barriers;
+	if (barrier_mode.forced_legacy && barrier_mode.log_line[0] != '\0') {
+		print_line(barrier_mode.log_line);
 	}
 #endif
 

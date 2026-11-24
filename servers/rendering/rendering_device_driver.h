@@ -1097,6 +1097,10 @@ public:
 		uint32_t height = 0;
 	};
 	virtual uint64_t command_buffer_get_native_handle(CommandBufferID p_cmd_buffer);
+	// GodotNext: pu_dlss_d3d12 (#119). Invalidates cached pipeline, root-signature, dynamic-state and
+	// descriptor-heap bindings on an open command buffer after an external driver callback mutates
+	// native command-list state. Base default is a no-op.
+	virtual void command_buffer_invalidate_cached_state(CommandBufferID p_cmd_buffer);
 	virtual Error texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info);
 	virtual uint64_t get_total_memory_used() = 0;
 	virtual uint64_t get_lazily_memory_used() = 0;
@@ -1192,6 +1196,17 @@ public:
 	// (B8G8R8A8_SNORM, or A2R10G10B10_UNORM_PACK32 through an SRV swizzle a build never applies) are not
 	// included: a build would read their components in the wrong order.
 	static bool d3d12_acceleration_structure_vertex_format_supported(DataFormat p_format);
+
+	// GodotNext: pu_dlss_d3d12 (#119). Pure D3D12 barrier-path selection rule, always compiled so
+	// doctests can exercise both enhanced and legacy paths without a GPU. In DEBUG_ENABLED builds,
+	// GODOT_D3D12_FORCE_LEGACY_BARRIERS=1 (or GODOT_D3D12_LEGACY_BARRIERS=1 from #118) forces the
+	// legacy resource-state path even when OPTIONS12 reports enhanced barriers.
+	struct D3D12BarrierMode {
+		bool enhanced_barriers = false;
+		bool forced_legacy = false;
+		const char *log_line = "";
+	};
+	static D3D12BarrierMode d3d12_resolve_barrier_mode(bool p_device_enhanced_barriers, bool p_debug_enabled, const String &p_force_legacy_env, const String &p_legacy_env = String());
 
 	// GodotNext: rd_mesh_shaders (#178)
 	// Pure mesh-shader capability rules (SUPPORTS_MESH_SHADER and SUPPORTS_MESH_SHADER_INDIRECT), always compiled so

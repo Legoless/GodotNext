@@ -40,6 +40,9 @@ uint64_t RenderingDeviceDriver::command_buffer_get_native_handle(CommandBufferID
 	return 0;
 }
 
+void RenderingDeviceDriver::command_buffer_invalidate_cached_state(CommandBufferID p_cmd_buffer) {
+}
+
 Error RenderingDeviceDriver::texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info) {
 	return ERR_UNAVAILABLE;
 }
@@ -172,6 +175,33 @@ RenderingDeviceDriver::D3D12RaytracingPipelineCaps RenderingDeviceDriver::d3d12_
 	caps.trace_rays_indirect = caps.pipeline;
 	caps.library = caps.pipeline && p_device_7;
 	return caps;
+}
+
+// GodotNext: pu_dlss_d3d12 (#119)
+RenderingDeviceDriver::D3D12BarrierMode RenderingDeviceDriver::d3d12_resolve_barrier_mode(bool p_device_enhanced_barriers, bool p_debug_enabled, const String &p_force_legacy_env, const String &p_legacy_env) {
+	D3D12BarrierMode mode;
+	if (!p_device_enhanced_barriers) {
+		mode.enhanced_barriers = false;
+		mode.forced_legacy = false;
+		mode.log_line = "";
+		return mode;
+	}
+	if (p_debug_enabled && p_force_legacy_env == "1") {
+		mode.enhanced_barriers = false;
+		mode.forced_legacy = true;
+		mode.log_line = "D3D12: Forcing legacy barriers (GODOT_D3D12_FORCE_LEGACY_BARRIERS=1).";
+		return mode;
+	}
+	if (p_debug_enabled && p_legacy_env == "1") {
+		mode.enhanced_barriers = false;
+		mode.forced_legacy = true;
+		mode.log_line = "D3D12: enhanced barriers are off (GODOT_D3D12_LEGACY_BARRIERS=1).";
+		return mode;
+	}
+	mode.enhanced_barriers = true;
+	mode.forced_legacy = false;
+	mode.log_line = "";
+	return mode;
 }
 
 // GodotNext: metal_ray_shaders (#172)

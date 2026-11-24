@@ -309,6 +309,9 @@ private:
 		struct States {
 			// As many subresources as mipmaps * layers; planes (for depth-stencil) are tracked together.
 			TightLocalVector<D3D12_RESOURCE_STATES> subresource_states; // Used only if not a view.
+			// GodotNext: pu_dlss_d3d12 (#119). Tracks the current enhanced-barrier layout per subresource
+			// so driver callbacks can transition textures to callback-compatible layouts and back cleanly.
+			TightLocalVector<D3D12_BARRIER_LAYOUT> subresource_layouts;
 			uint32_t last_batch_with_uav_barrier = 0;
 		};
 
@@ -480,6 +483,14 @@ public:
 			VectorView<RDD::TextureBarrier> p_texture_barriers,
 			VectorView<AccelerationStructureBarrier> p_acceleration_structure_barriers) override final;
 
+	// GodotNext: pu_dlss_d3d12 (#119). External driver callback texture transitions on both legacy
+	// and enhanced barrier paths. On legacy barriers, transitions go through _resource_transition_batch
+	// and _resource_transitions_flush so lazy state tracking stays accurate; on enhanced barriers,
+	// layouts are transitioned to callback-compatible SRV/UAV layouts and restored afterward.
+	void driver_callback_transition_textures(CommandBufferID p_cmd_buffer, VectorView<TextureID> p_textures, VectorView<bool> p_read_write);
+	void driver_callback_restore_textures(CommandBufferID p_cmd_buffer, VectorView<TextureID> p_textures = VectorView<TextureID>(), VectorView<bool> p_read_write = VectorView<bool>());
+	bool is_using_enhanced_barriers() const { return barrier_capabilities.enhanced_barriers_supported; }
+
 private:
 	/****************/
 	/**** FENCES ****/
@@ -623,6 +634,22 @@ private:
 		};
 		LocalVector<DispatchRaysArguments> dispatch_rays_arguments;
 		uint32_t dispatch_rays_arguments_used = 0;
+
+		// GodotNext: pu_dlss_d3d12 (#119). Pre-callback layouts saved on the enhanced barrier
+		// path so driver_callback_restore_textures() returns every texture to its prior layout.
+		struct CallbackSavedTextureLayout {
+			TextureInfo *owner_texture = nullptr;
+			uint32_t base_mip = 0;
+			uint32_t mipmaps = 0;
+			uint32_t base_layer = 0;
+			uint32_t layers = 0;
+			uint32_t planes = 1;
+			bool all_subresources = false;
+			D3D12_BARRIER_LAYOUT saved_layout = D3D12_BARRIER_LAYOUT_UNDEFINED;
+			D3D12_BARRIER_LAYOUT active_layout = D3D12_BARRIER_LAYOUT_UNDEFINED;
+			bool read_write = false;
+		};
+		LocalVector<CallbackSavedTextureLayout> callback_saved_layouts;
 
 		HashMap<ResourceInfo::States *, BarrierRequest> res_barriers_requests;
 		LocalVector<D3D12_RESOURCE_BARRIER> res_barriers;
@@ -1183,6 +1210,10 @@ public:
 
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override final;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override final;
+	// GodotNext: pu_dlss_d3d12 (#119).
+	virtual uint64_t command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) override final;
+	virtual void command_buffer_invalidate_cached_state(CommandBufferID p_cmd_buffer) override final;
+	virtual Error texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info) override final;
 	virtual uint64_t get_total_memory_used() override final;
 	virtual uint64_t get_lazily_memory_used() override final;
 	virtual uint64_t limit_get(Limit p_limit) override final;
