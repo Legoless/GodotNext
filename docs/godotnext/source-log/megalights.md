@@ -106,6 +106,21 @@ and the shader's retrace verdict is not `OPAQUE` (`nextgi_shadow_alpha_route()` 
 and `fragment()`'s `discard`) and falls back to the bindless texture-alpha cut — instead of shadowing as opaque —
 in Simplified Material, Inline, on GPU-written instances, on fallback lights, or when the hit groups refuse the
 shader (such as a `discard` in a helper function per #304).
+### Light-source parity (#140, contract M8, GM-11), 2026-11-24
+
+- ANSI/IESNA LM-63-1995 and LM-63-2002 (*IESNA Standard File Format for Electronic Transfer of Photometric
+  Data*, public lighting-industry standard). Used only for the documented ASCII file format grammar, header
+  keywords, `TILT=NONE` / `TILT=INCLUDE` handling, photometric type C/B/A coordinate conventions, horizontal
+  symmetry rules (0°, 90°, 180°, 90°–270°, 360°), and candela multiplier fields. No manufacturer `.ies`
+  files or third-party parser implementations were read or included; all test profiles are synthetically
+  generated.
+
+- Barn-door rectangle clipping (`barn_door_clip_rect`, `barn_door_clip_texture_rect`), lazy 256-layer R16F
+  IES atlas allocation (`IESAtlasAllocator`), textured rect-light evaluation in NextGI SRC relight (reusing
+  Godot's `area_lights_inc.glsl` LTC helpers and `area_light_atlas`), and per-light contact shadow controls
+  (reusing Godot's `screen_space_contact_shadows.glsl` wavefront ray march and #139's `barn_door_angle` /
+  `barn_door_length` culling) were written from first principles, plan §21.3 contract M8, issue #140, and
+  Godot's own Forward+ and NextGI shaders. No Unreal Engine source, shaders, or third-party code were consulted.
 
 ## Contract decisions
 

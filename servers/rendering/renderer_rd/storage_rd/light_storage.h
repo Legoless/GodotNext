@@ -34,6 +34,8 @@
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
+// GodotNext: light_source_parity (#140).
+#include "servers/rendering/renderer_rd/light_source_parity.h"
 #include "servers/rendering/renderer_rd/storage_rd/forward_id_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -88,11 +90,28 @@ private:
 		bool allow_contact_shadows = true;
 		// GodotNext: vsm_settings_debug (#221).
 		RSE::LightShadowMethod shadow_method = RSE::LIGHT_SHADOW_METHOD_PROJECT;
+		// GodotNext: light_source_parity (#140).
+		RID ies_profile;
+		bool ies_use_intensity = false;
+		float ies_intensity_scale = 1.0f;
+		bool contact_shadow_length_world_space = false;
 
 		Dependency dependency;
 	};
 
 	mutable RID_Owner<Light, true> light_owner;
+
+	// GodotNext: light_source_parity (#140). Lazy 256-layer R16F IES profile atlas.
+	struct IESProfileEntry {
+		PackedFloat32Array table;
+		float peak_candela = 1.0f;
+	};
+	mutable RID_Owner<IESProfileEntry, true> ies_profile_owner;
+	LightSourceParity::IESAtlasAllocator ies_atlas_allocator;
+	RID ies_atlas_texture;
+
+	void _ensure_ies_atlas_texture();
+	void _upload_ies_profile_to_layer(const IESProfileEntry *p_entry, uint32_t p_layer);
 
 	/* LIGHT INSTANCE */
 
@@ -177,10 +196,19 @@ private:
 		uint32_t vsm_flags;
 		uint32_t light_function_index;
 		uint32_t vsm_pad;
+		// GodotNext: light_source_parity (#140). IES profile, barn-door shading, and per-light contact shadows.
+		uint32_t ies_layer;
+		float ies_scale;
+		float barn_door_angle_rad;
+		float barn_door_length;
+		float contact_shadow_length;
+		uint32_t contact_shadow_sscs_index;
+		float contact_shadow_casting_intensity;
+		float contact_shadow_non_casting_intensity;
 	};
-	// GodotNext: vsm_page_pool (#220). An std430 array element: keep the GLSL copy in
+	// GodotNext: vsm_page_pool (#220), light_source_parity (#140). An std430 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
-	static_assert(sizeof(LightData) == 240, "LightData must match light_data_inc.glsl.");
+	static_assert(sizeof(LightData) == 272, "LightData must match light_data_inc.glsl.");
 	static_assert(sizeof(LightData) % 16 == 0, "LightData must stay a multiple of 16 bytes.");
 
 	struct LightInstanceDepthSort {
@@ -244,10 +272,15 @@ private:
 		uint32_t vsm_flags;
 		float df_shadow_start;
 		float df_shadow_distance;
+		// GodotNext: light_source_parity (#140). Per-light contact shadow controls.
+		float contact_shadow_length;
+		uint32_t contact_shadow_flags;
+		float contact_shadow_casting_intensity;
+		float contact_shadow_non_casting_intensity;
 	};
-	// GodotNext: vsm_page_pool (#220). An std140 array element: keep the GLSL copy in
+	// GodotNext: vsm_page_pool (#220), light_source_parity (#140). An std140 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
-	static_assert(sizeof(DirectionalLightData) == 480, "DirectionalLightData must match light_data_inc.glsl.");
+	static_assert(sizeof(DirectionalLightData) == 496, "DirectionalLightData must match light_data_inc.glsl.");
 	static_assert(sizeof(DirectionalLightData) % 16 == 0, "DirectionalLightData must stay a multiple of 16 bytes.");
 
 	uint32_t max_directional_lights;
@@ -551,6 +584,24 @@ public:
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) override;
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) override;
 	virtual bool light_get_allow_contact_shadows(RID p_light) const override;
+
+	// GodotNext: light_source_parity (#140).
+	bool owns_ies_profile(RID p_rid) const { return ies_profile_owner.owns(p_rid); }
+	virtual RID ies_profile_allocate() override;
+	virtual void ies_profile_initialize(RID p_rid) override;
+	virtual void ies_profile_free(RID p_rid) override;
+	virtual void ies_profile_set_data(RID p_ies_profile, const Ref<Image> &p_image, float p_peak_candela) override;
+	virtual void light_set_ies_profile(RID p_light, RID p_ies_profile) override;
+	virtual RID light_get_ies_profile(RID p_light) const override;
+	virtual void light_set_ies_use_intensity(RID p_light, bool p_use_intensity) override;
+	virtual bool light_get_ies_use_intensity(RID p_light) const override;
+	virtual void light_set_ies_intensity_scale(RID p_light, float p_scale) override;
+	virtual float light_get_ies_intensity_scale(RID p_light) const override;
+	virtual void light_set_contact_shadow_length_world_space(RID p_light, bool p_world_space) override;
+	virtual bool light_get_contact_shadow_length_world_space(RID p_light) const override;
+	RID get_ies_atlas_texture() const;
+	uint32_t ies_profile_get_atlas_layer(RID p_ies_profile) const;
+	float ies_profile_get_peak_candela(RID p_ies_profile) const;
 
 	virtual void light_omni_set_shadow_mode(RID p_light, RSE::LightOmniShadowMode p_mode) override;
 

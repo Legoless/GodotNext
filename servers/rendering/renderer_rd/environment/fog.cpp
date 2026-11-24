@@ -829,7 +829,8 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 			fog->bound_shadow_atlas_depth != p_settings.shadow_atlas_depth ||
 			fog->bound_directional_shadow_depth != p_settings.directional_shadow_depth ||
 			fog->bound_light_function_atlas != lf_atlas ||
-			fog->bound_light_function_buffer != lf_buffer;
+			fog->bound_light_function_buffer != lf_buffer ||
+			fog->bound_ies_profile_atlas != p_settings.ies_profile_atlas;
 	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity(shadow_bindings_changed);
 	if (!fog->copy_uniform_set.is_null() && !RD::get_singleton()->uniform_set_is_valid(fog->copy_uniform_set)) {
 		fog->copy_uniform_set = RID();
@@ -1114,6 +1115,18 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 				u.append_id(lf_buffer);
 				uniforms.push_back(u);
 			}
+			// GodotNext: light_source_parity (#140). IES profile atlas at Set 0 binding 29 (MODE_DENSITY only).
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 29;
+				if (p_settings.ies_profile_atlas.is_valid()) {
+					u.append_id(p_settings.ies_profile_atlas);
+				} else {
+					u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE));
+				}
+				uniforms.push_back(u);
+			}
 			fog->bound_vsm_pool_tex = p_settings.vsm_pool_tex;
 			fog->bound_vsm_page_table = p_settings.vsm_page_table;
 			fog->bound_vsm_map_data = p_settings.vsm_map_data;
@@ -1122,6 +1135,7 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 			fog->bound_directional_shadow_depth = p_settings.directional_shadow_depth;
 			fog->bound_light_function_atlas = lf_atlas;
 			fog->bound_light_function_buffer = lf_buffer;
+			fog->bound_ies_profile_atlas = p_settings.ies_profile_atlas;
 			fog->gi_dependent_sets.process_uniform_set_density = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY)), 0);
 			if (fog->nextgi_density_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(fog->nextgi_density_uniform_set)) {
 				RD::get_singleton()->free_rid(fog->nextgi_density_uniform_set);

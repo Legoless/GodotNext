@@ -63,6 +63,8 @@
 #include "editor/import/resource_importer_bmfont.h"
 #include "editor/import/resource_importer_csv_translation.h"
 #include "editor/import/resource_importer_dynamic_font.h"
+// GodotNext: light_source_parity (#140).
+#include "editor/import/resource_importer_ies.h"
 #include "editor/import/resource_importer_image.h"
 #include "editor/import/resource_importer_imagefont.h"
 #include "editor/import/resource_importer_layered_texture.h"
@@ -214,6 +216,8 @@ void register_editor_types() {
 	GDREGISTER_CLASS(ResourceImporterBMFont);
 	GDREGISTER_CLASS(ResourceImporterCSVTranslation);
 	GDREGISTER_CLASS(ResourceImporterDynamicFont);
+	// GodotNext: light_source_parity (#140).
+	GDREGISTER_CLASS(ResourceImporterIES);
 	GDREGISTER_CLASS(ResourceImporterImage);
 	GDREGISTER_CLASS(ResourceImporterImageFont);
 	GDREGISTER_CLASS(ResourceImporterSVG);

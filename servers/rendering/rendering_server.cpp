@@ -2810,6 +2810,13 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_shadow_method", "light", "method"), &RenderingServer::light_set_shadow_method);
 	ClassDB::bind_method(D_METHOD("light_set_max_sdfgi_cascade", "light", "cascade"), &RenderingServer::light_set_max_sdfgi_cascade);
 	ClassDB::bind_method(D_METHOD("light_set_allow_contact_shadows", "light", "enable"), &RenderingServer::light_set_allow_contact_shadows);
+	// GodotNext: light_source_parity (#140, plan §21.3 contract M8).
+	ClassDB::bind_method(D_METHOD("ies_profile_create"), &RenderingServer::ies_profile_create);
+	ClassDB::bind_method(D_METHOD("ies_profile_set_data", "profile", "image", "peak_candela"), &RenderingServer::ies_profile_set_data);
+	ClassDB::bind_method(D_METHOD("light_set_ies_profile", "light", "ies_profile"), &RenderingServer::light_set_ies_profile);
+	ClassDB::bind_method(D_METHOD("light_set_ies_use_intensity", "light", "enable"), &RenderingServer::light_set_ies_use_intensity);
+	ClassDB::bind_method(D_METHOD("light_set_ies_intensity_scale", "light", "scale"), &RenderingServer::light_set_ies_intensity_scale);
+	ClassDB::bind_method(D_METHOD("light_set_contact_shadow_length_world_space", "light", "enable"), &RenderingServer::light_set_contact_shadow_length_world_space);
 
 	ClassDB::bind_method(D_METHOD("light_omni_set_shadow_mode", "light", "mode"), &RenderingServer::light_omni_set_shadow_mode);
 
@@ -2865,6 +2872,10 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_BARN_DOOR_LENGTH);
 	// GodotNext: vsm_local_lights (#216).
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS);
+	// GodotNext: light_source_parity (#140).
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DISABLED);

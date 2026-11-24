@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
+#include "servers/rendering/renderer_rd/light_source_parity.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
@@ -1183,7 +1184,8 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 			// the forward specular (probes, sky, SSR) stays instead of the ambient fallback.
 			ss_flags |= (nextgi_view && RendererRD::NextGI::is_lumen_lite()) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
-			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
+			// GodotNext: light_source_parity (#140). Only enable SSCS when at least one visible light has active contact shadows.
+			ss_flags |= !p_render_data->contact_shadow_lights.is_empty() ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
 
 			if (rd.is_valid()) {
 				Ref<RenderBufferDataForwardClustered> rb_data;
@@ -1195,7 +1197,12 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		}
 		scene_state.ubo.ss_effects_flags = ss_flags;
 	} else {
-		scene_state.ubo.ss_effects_flags = 0;
+		// GodotNext: light_source_parity (#140). Per-light contact shadows also work without a WorldEnvironment.
+		uint32_t ss_flags = 0;
+		if (p_render_data->reflection_probe.is_null() && p_opaque_render_buffers && !p_render_data->contact_shadow_lights.is_empty()) {
+			ss_flags |= SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS;
+		}
+		scene_state.ubo.ss_effects_flags = ss_flags;
 	}
 
 	if (uniform_buffer_index >= scene_state.implementation_uniform_buffers.size()) {
@@ -2039,6 +2046,8 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.vsm_map_data = vsm_ready ? vsm->get_map_data_buffer() : vsm_projection_default_buffer;
 		settings.vsm_coarse_miss = vsm_ready ? vsm->get_coarse_miss_buffer() : vsm_projection_default_miss_buffer;
 		settings.vsm_table_maps = vsm_ready ? vsm->get_table_capacity() : 0u;
+		// GodotNext: light_source_parity (#140). IES profile atlas for volumetric fog light evaluation.
+		settings.ies_profile_atlas = RendererRD::LightStorage::get_singleton()->get_ies_atlas_texture();
 
 		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 		settings.light_function_atlas = light_function_atlas.get_atlas_texture_or_default();
@@ -2174,7 +2183,7 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 	ss_effects->screen_space_reflection(p_render_buffers, rb_data->ss_effects_data.ssr, p_normal_slices, environment_get_ssr_max_steps(p_environment), environment_get_ssr_fade_in(p_environment), environment_get_ssr_fade_out(p_environment), environment_get_ssr_depth_tolerance(p_environment), p_projections, reprojections, p_eye_offsets, *copy_effects);
 }
 
-void RenderForwardClustered::_process_sscs(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection *p_projections, const Transform3D &p_transform, const LocalVector<int> &p_contact_shadows, const RenderShadowData *p_render_shadows, const float p_taa_frame_count) {
+void RenderForwardClustered::_process_sscs(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection *p_projections, const Transform3D &p_transform, const LocalVector<RenderDataRD::ContactShadowLight> &p_contact_shadow_lights, const float p_taa_frame_count) {
 	ERR_FAIL_NULL(ss_effects);
 	ERR_FAIL_COND(p_render_buffers.is_null());
 
@@ -2185,27 +2194,29 @@ void RenderForwardClustered::_process_sscs(Ref<RenderSceneBuffersRD> p_render_bu
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
-	RendererRD::SSEffects::SSCSSettings settings;
-	settings.quality = RSE::ScreenSpaceContactShadowsLength(GLOBAL_GET_CACHED(int, "rendering/lights_and_shadows/contact_shadow/shadow_length"));
-	settings.surface_thickness = GLOBAL_GET_CACHED(float, "rendering/lights_and_shadows/contact_shadow/surface_thickness");
+	const int project_length_enum = GLOBAL_GET_CACHED(int, "rendering/lights_and_shadows/contact_shadow/shadow_length");
+	const float surface_thickness = GLOBAL_GET_CACHED(float, "rendering/lights_and_shadows/contact_shadow/surface_thickness");
+	const int screen_height = p_render_buffers->get_internal_size().height;
 
 	Transform3D inverse_transform = p_transform.affine_inverse();
 
-	ss_effects->sscs_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.sscs, p_contact_shadows.size());
+	ss_effects->sscs_allocate_buffers(p_render_buffers, rb_data->ss_effects_data.sscs, p_contact_shadow_lights.size());
 
-	for (uint32_t i = 0; i < p_contact_shadows.size(); i++) {
-		RID light_instance = p_render_shadows[p_contact_shadows[i]].light;
-		RID base = light_storage->light_instance_get_base_light(light_instance);
-		if (!light_storage->light_get_allow_contact_shadows(base)) {
-			continue;
-		}
+	for (uint32_t i = 0; i < p_contact_shadow_lights.size(); i++) {
+		const RenderDataRD::ContactShadowLight &entry = p_contact_shadow_lights[i];
+		Transform3D light_transform = light_storage->light_instance_get_base_transform(entry.light_instance);
+		const bool is_directional = entry.type == RSE::LIGHT_DIRECTIONAL;
+		Vector3 light_coord = is_directional
+				? inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 0, 1))).normalized()
+				: inverse_transform.xform(light_transform.origin);
 
-		Transform3D light_transform = light_storage->light_instance_get_base_transform(light_instance);
-		Vector3 light_direction = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 0, 1))).normalized();
+		RendererRD::SSEffects::SSCSSettings settings;
+		settings.surface_thickness = surface_thickness;
+		settings.contact_shadow_length = entry.length;
+		settings.world_space = entry.world_space;
+		settings.quality = RendererRD::LightSourceParity::select_contact_shadow_quality(entry.length, entry.world_space, screen_height, project_length_enum);
 
-		float blur = light_storage->light_get_param(base, RSE::LIGHT_PARAM_CONTACT_SHADOW_BLUR);
-
-		ss_effects->screen_space_contact_shadows(p_render_buffers, rb_data->ss_effects_data.sscs, settings, p_projections, light_direction, i, blur, p_taa_frame_count);
+		ss_effects->screen_space_contact_shadows(p_render_buffers, rb_data->ss_effects_data.sscs, settings, p_projections, light_coord, is_directional, i, entry.blur, p_taa_frame_count);
 	}
 }
 
@@ -2621,8 +2632,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			}
 		}
 
-		if (p_use_sscs) {
-			_process_sscs(rb, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform, p_render_data->contact_shadows, p_render_data->render_shadows, p_render_data->scene_data->taa_frame_count);
+		if (p_use_sscs && !p_render_data->contact_shadow_lights.is_empty()) {
+			_process_sscs(rb, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform, p_render_data->contact_shadow_lights, p_render_data->scene_data->taa_frame_count);
 		}
 
 		if (p_use_ssr) {
@@ -6377,8 +6388,57 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			p_render_data->scene_data->calculate_motion_vectors = true;
 		}
 
-		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) {
-			using_sscs = true;
+		// GodotNext: light_source_parity (#140). Collect visible lights with active per-light contact shadows
+		// (directional first, then local lights up to MAX_SSCS_LIGHTS_PER_VIEW). When none are active
+		// (e.g. contact_shadow_length == 0), using_sscs remains false so rendering is byte-identical to off.
+		p_render_data->contact_shadow_lights.clear();
+		p_render_data->contact_shadow_light_indices.clear();
+		if (rb_data.is_valid() && ss_effects && p_render_data->lights != nullptr) {
+			const bool project_cs_enabled = GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled");
+			const int project_cs_length_enum = GLOBAL_GET_CACHED(int, "rendering/lights_and_shadows/contact_shadow/shadow_length");
+			auto try_add_cs_light = [&](RID p_li, bool p_want_directional) {
+				if (p_render_data->contact_shadow_lights.size() >= RendererRD::LightSourceParity::MAX_SSCS_LIGHTS_PER_VIEW) {
+					return;
+				}
+				if (!light_storage->owns_light_instance(p_li)) {
+					return;
+				}
+				const RID base = light_storage->light_instance_get_base_light(p_li);
+				const RSE::LightType ltype = light_storage->light_get_type(base);
+				if ((ltype == RSE::LIGHT_DIRECTIONAL) != p_want_directional) {
+					return;
+				}
+				if (ltype == RSE::LIGHT_DIRECTIONAL && light_storage->light_directional_get_sky_mode(base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+					return;
+				}
+				const RendererRD::LightSourceParity::ResolvedContactShadow resolved = RendererRD::LightSourceParity::resolve_contact_shadow(
+						light_storage->light_get_param(base, RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH),
+						light_storage->light_get_contact_shadow_length_world_space(base),
+						light_storage->light_get_allow_contact_shadows(base),
+						light_storage->light_get_param(base, RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY),
+						light_storage->light_get_param(base, RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY),
+						project_cs_enabled,
+						project_cs_length_enum);
+				if (!resolved.active) {
+					return;
+				}
+				const uint32_t slot = p_render_data->contact_shadow_lights.size();
+				RenderDataRD::ContactShadowLight entry;
+				entry.light_instance = p_li;
+				entry.type = ltype;
+				entry.length = resolved.length;
+				entry.world_space = resolved.world_space;
+				entry.blur = light_storage->light_get_param(base, RSE::LIGHT_PARAM_CONTACT_SHADOW_BLUR);
+				p_render_data->contact_shadow_lights.push_back(entry);
+				p_render_data->contact_shadow_light_indices.insert(p_li, slot);
+			};
+			for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+				try_add_cs_light((*p_render_data->lights)[i], true);
+			}
+			for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+				try_add_cs_light((*p_render_data->lights)[i], false);
+			}
+			using_sscs = !p_render_data->contact_shadow_lights.is_empty();
 		}
 
 		if (p_render_data->scene_data->view_count > 1) {
@@ -9476,6 +9536,9 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 stays free for #140 IES).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 62, light_function_atlas.get_atlas_texture_or_default()));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 63, light_function_atlas.get_view_entry_buffer_or_default()));
+		// GodotNext: light_source_parity (#140, plan §21.3 contract M8). IES profile Texture2DArray atlas
+		// bound at Set 1 binding 64 (bindings 62..63 are reserved for #138 Light Function Atlas).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 64, light_storage->get_ies_atlas_texture()));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)
@@ -10569,6 +10632,10 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 	//Fill push constant
 
 	ginstance->base_flags = 0;
+	// GodotNext: light_source_parity (#140). Record shadow casting flag for contact-shadow intensity split.
+	if (ginstance->data->casts_shadows) {
+		ginstance->base_flags |= INSTANCE_DATA_FLAG_CASTS_SHADOWS;
+	}
 
 	bool store_transform = true;
 	if (ginstance->data->base_type == RSE::INSTANCE_MULTIMESH) {

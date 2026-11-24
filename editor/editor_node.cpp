@@ -103,6 +103,8 @@
 #include "editor/import/resource_importer_bmfont.h"
 #include "editor/import/resource_importer_csv_translation.h"
 #include "editor/import/resource_importer_dynamic_font.h"
+// GodotNext: light_source_parity (#140).
+#include "editor/import/resource_importer_ies.h"
 #include "editor/import/resource_importer_image.h"
 #include "editor/import/resource_importer_imagefont.h"
 #include "editor/import/resource_importer_layered_texture.h"
@@ -8801,6 +8803,11 @@ EditorNode::EditorNode() {
 		Ref<ResourceImporterBitMap> import_bitmap;
 		import_bitmap.instantiate();
 		ResourceFormatImporter::get_singleton()->add_importer(import_bitmap);
+
+		// GodotNext: light_source_parity (#140).
+		Ref<ResourceImporterIES> import_ies;
+		import_ies.instantiate();
+		ResourceFormatImporter::get_singleton()->add_importer(import_ies);
 	}
 
 	{

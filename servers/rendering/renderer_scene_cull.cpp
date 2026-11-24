@@ -888,6 +888,8 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+				// GodotNext: light_source_parity (#140).
+				geom->geometry_instance->set_casts_shadows(instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF);
 				// GodotNext: vsm_caching (#212).
 				geom->geometry_instance->set_shadow_cache_invalidation(instance->shadow_cache_invalidation);
 				if (instance->lightmap_sh.size() == 9) {
@@ -1513,6 +1515,8 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 		ERR_FAIL_NULL(geom->geometry_instance);
 
 		geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+		// GodotNext: light_source_parity (#140).
+		geom->geometry_instance->set_casts_shadows(instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF);
 		if (changed && geom->can_cast_shadows) {
 			for (Instance *E : geom->lights) {
 				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
@@ -5735,6 +5739,8 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 				}
 
 				geom->can_cast_shadows = can_cast_shadows;
+				// GodotNext: light_source_parity (#140).
+				geom->geometry_instance->set_casts_shadows(can_cast_shadows);
 			}
 
 			geom->material_is_animated = is_animated;

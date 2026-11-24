@@ -389,7 +389,7 @@ public:
 
 	// GodotNext: vsm_page_marking (#219). LightStorage::LightData's layout (light_data_inc.glsl), for the
 	// GPU check's read-back of the light buffers; LightStorage::update_light_buffers() asserts it.
-	static constexpr uint32_t LIGHT_DATA_BYTES = 240;
+	static constexpr uint32_t LIGHT_DATA_BYTES = 272;
 	static constexpr uint32_t LIGHT_DATA_POSITION = 0;
 	static constexpr uint32_t LIGHT_DATA_INV_RADIUS = 12;
 	static constexpr uint32_t LIGHT_DATA_DIRECTION = 16;

@@ -8,6 +8,8 @@
 #define NEXTGI_SRC_RELIGHT_INC_GLSL
 
 #include "../light_function_inc.glsl"
+#include "../area_lights_inc.glsl"
+#include "../ies_inc.glsl"
 
 #ifdef NEXTGI_RADIANCE_RGBA16F
 layout(rgba16f, set = 0, binding = 1) uniform image2D radiance_image;
@@ -113,6 +115,26 @@ layout(set = 0, binding = 30, std430) restrict readonly buffer NextGILightFuncti
 	LightFunctionEntry data[];
 }
 light_function_data;
+// GodotNext: light_source_parity (#140, plan §21.3 contract M8). Companion per-light parity record,
+// area light texture atlas, and IES profile atlas (bound on both HWRT and SWRT).
+struct NextGILightParity {
+	vec4 axis_x_width;
+	vec4 axis_y_height;
+	vec4 area_tex_rect;
+	uint ies_layer;
+	float ies_scale;
+	float barn_door_angle_rad;
+	float barn_door_length;
+};
+
+layout(set = 0, binding = 31, std430) restrict readonly buffer NextGILightParities {
+	NextGILightParity data[];
+}
+light_parities;
+
+layout(set = 0, binding = 32) uniform texture2D area_light_atlas;
+layout(set = 0, binding = 33) uniform texture2DArray ies_profile_atlas;
+layout(set = 0, binding = 34) uniform sampler parity_linear_sampler;
 
 const uint REUSE_NONE = 0xFFFFFFFFu;
 const float PI = 3.14159265;
@@ -315,7 +337,69 @@ void main() {
 	for (uint i = 0u; i < page.light_count; i++) {
 		uint light_idx = page_lights.data[page.light_offset + i];
 		NextGILight light = lights.data[light_idx];
+		NextGILightParity parity = light_parities.data[light_idx];
 		uint light_type = uint(light.direction_type.w + 0.5);
+		float shadow = 1.0;
+		if (i < page.shadowed_count) {
+			shadow = (mask & (1u << i)) != 0u ? 1.0 : 0.0;
+		}
+		if (light_type == 3u) {
+			// GodotNext: light_source_parity (#140). AreaLight3D: LTC + barn doors + area_texture + IES.
+			vec3 rel = world - light.position_inv_range.xyz;
+			if (dot(light.direction_type.xyz, rel) <= 0.0) {
+				continue;
+			}
+			vec2 half_size = vec2(parity.axis_x_width.w, parity.axis_y_height.w) * 0.5;
+			if (half_size.x <= 1e-5 || half_size.y <= 1e-5) {
+				continue;
+			}
+			vec3 ax = parity.axis_x_width.xyz;
+			vec3 ay = parity.axis_y_height.xyz;
+			vec3 pos_local = vec3(dot(rel, ax), dot(rel, ay), dot(rel, -light.direction_type.xyz));
+			vec2 clip_min;
+			vec2 clip_max;
+			if (!barn_door_clip_rect(pos_local, half_size, parity.barn_door_angle_rad, parity.barn_door_length, clip_min, clip_max)) {
+				continue;
+			}
+			float ies = 1.0;
+			if (parity.ies_layer != IES_LAYER_NONE) {
+				ies = ies_sample_atlas(parity.ies_layer, parity.ies_scale, normalize(pos_local), ies_profile_atlas, parity_linear_sampler);
+				if (ies <= 0.0) {
+					continue;
+				}
+			}
+			vec3 closest_local = vec3(clamp(pos_local.x, clip_min.x, clip_max.x), clamp(pos_local.y, clip_min.y, clip_max.y), 0.0);
+			float dist = length(closest_local - pos_local);
+			float atten_raw = nextgi_omni_attenuation(dist, light.position_inv_range.w, light.attenuation);
+			float atten_ltc = atten_raw * dist * dist;
+			vec3 rel_center = light.position_inv_range.xyz - world;
+			vec3 p_min_x = ax * clip_min.x;
+			vec3 p_max_x = ax * clip_max.x;
+			vec3 p_min_y = ay * clip_min.y;
+			vec3 p_max_y = ay * clip_max.y;
+			vec3 points[4];
+			points[0] = rel_center + p_min_x + p_min_y;
+			points[1] = rel_center + p_max_x + p_min_y;
+			points[2] = rel_center + p_max_x + p_max_y;
+			points[3] = rel_center + p_min_x + p_max_y;
+			vec4 clip_tex_rect = barn_door_clip_texture_rect(parity.area_tex_rect, half_size, clip_min, clip_max);
+			float max_mipmap = 0.0;
+			if (clip_tex_rect != vec4(0.0)) {
+				vec2 atlas_size = vec2(textureSize(sampler2D(area_light_atlas, parity_linear_sampler), 0));
+				vec2 tex_px = max(ceil(parity.area_tex_rect.zw * atlas_size), vec2(1.0));
+				float atlas_mips = float(textureQueryLevels(sampler2D(area_light_atlas, parity_linear_sampler)));
+				max_mipmap = max(min(floor(log2(min(tex_px.x, tex_px.y))), atlas_mips) - 1.0, 0.0);
+			}
+			float ltc_integral = 0.0;
+			vec3 area_tex_color = vec3(1.0);
+			ltc_evaluate_diff(normal, points, clip_tex_rect, max_mipmap, area_light_atlas, parity_linear_sampler, ltc_integral, area_tex_color);
+			vec3 area_contrib = light.color_energy.rgb * light.color_energy.a * area_tex_color * (ltc_integral * 0.5) * atten_ltc * ies * shadow;
+			if (params.light_function_count > 0u && light_idx < params.light_function_count) {
+				area_contrib *= light_function_mask_combined(light_function_data.data[light_idx], light_function_atlas, world);
+			}
+			direct += area_contrib;
+			continue;
+		}
 		vec3 to_light;
 		float atten = 1.0;
 		if (light_type == 0u) {
@@ -333,12 +417,13 @@ void main() {
 				float power = light.inv_spot_atten > 0.0 ? 1.0 / light.inv_spot_atten : 1.0;
 				atten *= 1.0 - pow(spot_rim, power);
 			}
+			// GodotNext: light_source_parity (#140). IES profile attenuation in light local space.
+			if (parity.ies_layer != IES_LAYER_NONE && atten > 0.0) {
+				vec3 dir_ls = vec3(dot(-to_light, parity.axis_x_width.xyz), dot(-to_light, parity.axis_y_height.xyz), dot(-to_light, -light.direction_type.xyz));
+				atten *= ies_sample_atlas(parity.ies_layer, parity.ies_scale, dir_ls, ies_profile_atlas, parity_linear_sampler);
+			}
 		}
 		float ndotl = max(dot(normal, to_light), 0.0);
-		float shadow = 1.0;
-		if (i < page.shadowed_count) {
-			shadow = (mask & (1u << i)) != 0u ? 1.0 : 0.0;
-		}
 		vec3 light_contrib = light.color_energy.rgb * light.color_energy.a * atten * ndotl * shadow;
 		if (params.light_function_count > 0u && light_idx < params.light_function_count) {
 			light_contrib *= light_function_mask_combined(light_function_data.data[light_idx], light_function_atlas, world);

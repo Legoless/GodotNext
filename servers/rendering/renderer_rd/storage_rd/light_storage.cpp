@@ -91,6 +91,12 @@ LightStorage::~LightStorage() {
 		RD::get_singleton()->free_rid(E.value.cubemap);
 	}
 
+	// GodotNext: light_source_parity (#140).
+	if (ies_atlas_texture.is_valid()) {
+		RD::get_singleton()->free_rid(ies_atlas_texture);
+		ies_atlas_texture = RID();
+	}
+
 	singleton = nullptr;
 }
 
@@ -118,6 +124,9 @@ bool LightStorage::free(RID p_rid) {
 		return true;
 	} else if (owns_shadow_atlas(p_rid)) {
 		shadow_atlas_free(p_rid);
+		return true;
+	} else if (owns_ies_profile(p_rid)) {
+		ies_profile_free(p_rid);
 		return true;
 	}
 
@@ -178,6 +187,10 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	light.param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH] = RendererRD::LightGrid::DEFAULT_BARN_DOOR_LENGTH;
 	// GodotNext: vsm_local_lights (#216).
 	light.param[RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS] = 0.0;
+	// GodotNext: light_source_parity (#140). Default contact shadow length 0 (off) is byte-identical to disabled.
+	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH] = LightSourceParity::DEFAULT_CONTACT_SHADOW_LENGTH;
+	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY] = LightSourceParity::DEFAULT_CONTACT_SHADOW_CASTING_INTENSITY;
+	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY] = LightSourceParity::DEFAULT_CONTACT_SHADOW_NON_CASTING_INTENSITY;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -218,6 +231,7 @@ void LightStorage::light_free(RID p_rid) {
 	light_set_projector(p_rid, RID()); //clear projector
 	light_area_set_texture(p_rid, RID()); //clear area texture
 	light_set_light_function(p_rid, RID()); //clear light function
+	light_set_ies_profile(p_rid, RID()); // GodotNext: light_source_parity (#140)
 
 	// delete the texture
 	Light *light = light_owner.get_or_null(p_rid);
@@ -469,6 +483,193 @@ bool LightStorage::light_get_allow_contact_shadows(RID p_light) const {
 	ERR_FAIL_NULL_V(light, true);
 
 	return light->allow_contact_shadows;
+}
+
+// GodotNext: light_source_parity (#140). Lazy 256-layer R16F IES profile atlas & per-light contact shadow mode.
+void LightStorage::_ensure_ies_atlas_texture() {
+	if (ies_atlas_texture.is_valid()) {
+		return;
+	}
+	RD::TextureFormat tf;
+	tf.format = RD::DATA_FORMAT_R16_SFLOAT;
+	tf.width = LightSourceParity::IES_TABLE_WIDTH;
+	tf.height = LightSourceParity::IES_TABLE_HEIGHT;
+	tf.array_layers = LightSourceParity::IES_MAX_ATLAS_LAYERS;
+	tf.mipmaps = 1;
+	tf.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	ies_atlas_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+	RD::get_singleton()->set_resource_name(ies_atlas_texture, "IES Profile Atlas");
+	RD::get_singleton()->texture_clear(ies_atlas_texture, Color(1.0, 1.0, 1.0, 1.0), 0, 1, 0, LightSourceParity::IES_MAX_ATLAS_LAYERS);
+}
+
+void LightStorage::_upload_ies_profile_to_layer(const IESProfileEntry *p_entry, uint32_t p_layer) {
+	ERR_FAIL_NULL(p_entry);
+	ERR_FAIL_COND(!ies_atlas_texture.is_valid());
+	ERR_FAIL_COND(p_layer >= LightSourceParity::IES_MAX_ATLAS_LAYERS);
+
+	constexpr uint32_t texel_count = LightSourceParity::IES_TABLE_WIDTH * LightSourceParity::IES_TABLE_HEIGHT;
+	Vector<uint8_t> bytes;
+	bytes.resize(texel_count * sizeof(uint16_t));
+	uint16_t *dst = reinterpret_cast<uint16_t *>(bytes.ptrw());
+	if (uint32_t(p_entry->table.size()) == texel_count) {
+		const float *src = p_entry->table.ptr();
+		for (uint32_t i = 0; i < texel_count; i++) {
+			dst[i] = Math::make_half_float(MAX(src[i], 0.0f));
+		}
+	} else {
+		const uint16_t one_hf = Math::make_half_float(1.0f);
+		for (uint32_t i = 0; i < texel_count; i++) {
+			dst[i] = one_hf;
+		}
+	}
+	RD::get_singleton()->texture_update(ies_atlas_texture, p_layer, bytes);
+}
+
+RID LightStorage::ies_profile_allocate() {
+	return ies_profile_owner.allocate_rid();
+}
+
+void LightStorage::ies_profile_initialize(RID p_rid) {
+	ies_profile_owner.initialize_rid(p_rid, IESProfileEntry());
+}
+
+void LightStorage::ies_profile_free(RID p_rid) {
+	IESProfileEntry *entry = ies_profile_owner.get_or_null(p_rid);
+	ERR_FAIL_NULL(entry);
+	ies_atlas_allocator.evict(p_rid.get_id());
+	ies_profile_owner.free(p_rid);
+}
+
+void LightStorage::ies_profile_set_data(RID p_ies_profile, const Ref<Image> &p_image, float p_peak_candela) {
+	IESProfileEntry *entry = ies_profile_owner.get_or_null(p_ies_profile);
+	ERR_FAIL_NULL(entry);
+	entry->table.clear();
+	if (p_image.is_valid()) {
+		constexpr uint32_t expected_w = LightSourceParity::IES_TABLE_WIDTH;
+		constexpr uint32_t expected_h = LightSourceParity::IES_TABLE_HEIGHT;
+		ERR_FAIL_COND_MSG(uint32_t(p_image->get_width()) != expected_w || uint32_t(p_image->get_height()) != expected_h,
+				vformat("LightStorage::ies_profile_set_data: expected %dx%d image, got %dx%d.", expected_w, expected_h, p_image->get_width(), p_image->get_height()));
+		const uint32_t texel_count = expected_w * expected_h;
+		entry->table.resize(texel_count);
+		float *dst = entry->table.ptrw();
+		if (p_image->get_format() == Image::FORMAT_RH) {
+			const Vector<uint8_t> data = p_image->get_data();
+			if (uint32_t(data.size()) >= texel_count * sizeof(uint16_t)) {
+				const uint16_t *src = reinterpret_cast<const uint16_t *>(data.ptr());
+				for (uint32_t i = 0; i < texel_count; i++) {
+					dst[i] = Math::half_to_float(src[i]);
+				}
+			} else {
+				for (uint32_t i = 0; i < texel_count; i++) {
+					dst[i] = 1.0f;
+				}
+			}
+		} else {
+			for (uint32_t y = 0; y < expected_h; y++) {
+				for (uint32_t x = 0; x < expected_w; x++) {
+					dst[y * expected_w + x] = p_image->get_pixel(x, y).r;
+				}
+			}
+		}
+	}
+	entry->peak_candela = MAX(p_peak_candela, 0.0f);
+	const uint32_t layer = ies_atlas_allocator.get_layer(p_ies_profile.get_id());
+	if (layer != LightSourceParity::IES_LAYER_NONE) {
+		_ensure_ies_atlas_texture();
+		_upload_ies_profile_to_layer(entry, layer);
+	}
+}
+
+void LightStorage::light_set_ies_profile(RID p_light, RID p_ies_profile) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+
+	if (light->ies_profile == p_ies_profile) {
+		return;
+	}
+	ERR_FAIL_COND(p_ies_profile.is_valid() && !ies_profile_owner.owns(p_ies_profile));
+
+	if (light->type != RSE::LIGHT_DIRECTIONAL && light->ies_profile.is_valid()) {
+		ies_atlas_allocator.release(light->ies_profile.get_id());
+	}
+
+	light->ies_profile = p_ies_profile;
+
+	if (light->type != RSE::LIGHT_DIRECTIONAL && light->ies_profile.is_valid()) {
+		bool newly_allocated = false;
+		const uint32_t layer = ies_atlas_allocator.acquire(light->ies_profile.get_id(), &newly_allocated);
+		if (layer == LightSourceParity::IES_LAYER_NONE) {
+			WARN_PRINT_ONCE("IES profile atlas is full (maximum 256 active IES profiles); additional profiles will be ignored.");
+		} else if (newly_allocated) {
+			const IESProfileEntry *entry = ies_profile_owner.get_or_null(light->ies_profile);
+			if (entry != nullptr) {
+				_ensure_ies_atlas_texture();
+				_upload_ies_profile_to_layer(entry, layer);
+			}
+		}
+	}
+}
+
+RID LightStorage::light_get_ies_profile(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RID());
+	return light->ies_profile;
+}
+
+void LightStorage::light_set_ies_use_intensity(RID p_light, bool p_use_intensity) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->ies_use_intensity = p_use_intensity;
+}
+
+bool LightStorage::light_get_ies_use_intensity(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, false);
+	return light->ies_use_intensity;
+}
+
+void LightStorage::light_set_ies_intensity_scale(RID p_light, float p_scale) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->ies_intensity_scale = MAX(p_scale, 0.0f);
+}
+
+float LightStorage::light_get_ies_intensity_scale(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, 1.0f);
+	return light->ies_intensity_scale;
+}
+
+void LightStorage::light_set_contact_shadow_length_world_space(RID p_light, bool p_world_space) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->contact_shadow_length_world_space = p_world_space;
+}
+
+bool LightStorage::light_get_contact_shadow_length_world_space(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, false);
+	return light->contact_shadow_length_world_space;
+}
+
+RID LightStorage::get_ies_atlas_texture() const {
+	if (ies_atlas_texture.is_valid()) {
+		return ies_atlas_texture;
+	}
+	return TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+}
+
+uint32_t LightStorage::ies_profile_get_atlas_layer(RID p_ies_profile) const {
+	if (!p_ies_profile.is_valid() || !ies_profile_owner.owns(p_ies_profile)) {
+		return LightSourceParity::IES_LAYER_NONE;
+	}
+	return ies_atlas_allocator.get_layer(p_ies_profile.get_id());
+}
+
+float LightStorage::ies_profile_get_peak_candela(RID p_ies_profile) const {
+	const IESProfileEntry *entry = ies_profile_owner.get_or_null(p_ies_profile);
+	return entry != nullptr ? entry->peak_candela : 1.0f;
 }
 
 void LightStorage::light_omni_set_shadow_mode(RID p_light, RSE::LightOmniShadowMode p_mode) {
@@ -920,7 +1121,6 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 	omni_light_count = 0;
 	spot_light_count = 0;
 	area_light_count = 0;
-	uint32_t directional_contact_shadows_count = 0;
 
 	r_directional_light_soft_shadows = false;
 
@@ -1007,13 +1207,19 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				light_data.shadow_opacity = (p_using_shadows && light->shadow)
 						? light->param[RSE::LIGHT_PARAM_SHADOW_OPACITY]
 						: 0.0;
-				light_data.sscs_index = (light->shadow && light->allow_contact_shadows)
-						? directional_contact_shadows_count++
-						: 0xffffffff;
 				// GodotNext: light_function_atlas (#138).
 				light_data.light_function_index = (lfa != nullptr && light->light_function.is_valid())
 						? lfa->append_view_entry(light_instance->light, LightFunctionAtlasPacker::MODE_DIRECTIONAL, light_transform, light->light_function_scale, 45.0f)
 						: LightFunctionAtlasPacker::ENTRY_NONE;
+				// GodotNext: light_source_parity (#140). Per-light contact shadow slot and intensities.
+				{
+					const uint32_t *sscs_ptr = p_render_data->contact_shadow_light_indices.getptr(light_instance->self);
+					light_data.sscs_index = sscs_ptr != nullptr ? *sscs_ptr : 0xFFFFFFFFu;
+					light_data.contact_shadow_length = light->param[RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH];
+					light_data.contact_shadow_flags = light->contact_shadow_length_world_space ? LightSourceParity::CONTACT_SHADOW_FLAG_WORLD_SPACE : 0u;
+					light_data.contact_shadow_casting_intensity = CLAMP(light->param[RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY], 0.0f, 1.0f);
+					light_data.contact_shadow_non_casting_intensity = CLAMP(light->param[RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY], 0.0f, 1.0f);
+				}
 
 				float angular_diameter = light->param[RSE::LIGHT_PARAM_SIZE];
 				if (angular_diameter > 0.0) {
@@ -1350,9 +1556,27 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			}
 		}
 
+		// GodotNext: light_source_parity (#140). Resolve IES profile atlas layer and peak candela.
+		uint32_t ies_layer = LightSourceParity::IES_LAYER_NONE;
+		float ies_peak_candela = 1.0f;
+		if (light->ies_profile.is_valid()) {
+			const IESProfileEntry *ies_entry = ies_profile_owner.get_or_null(light->ies_profile);
+			if (ies_entry != nullptr) {
+				ies_layer = ies_atlas_allocator.get_layer(light->ies_profile.get_id());
+				ies_peak_candela = ies_entry->peak_candela;
+			}
+		}
+		const bool ies_active = ies_layer != LightSourceParity::IES_LAYER_NONE;
+
 		float energy = sign * light->param[RSE::LIGHT_PARAM_ENERGY] * fade;
 
-		if (RendererSceneRenderRD::get_singleton()->is_using_physical_light_units()) {
+		if (ies_active && light->ies_use_intensity) {
+			if (RendererSceneRenderRD::get_singleton()->is_using_physical_light_units()) {
+				energy *= ies_peak_candela;
+			} else {
+				energy *= Math::PI * ies_peak_candela;
+			}
+		} else if (RendererSceneRenderRD::get_singleton()->is_using_physical_light_units()) {
 			energy *= light->param[RSE::LIGHT_PARAM_INTENSITY];
 
 			// Convert from Luminous Power to Luminous Intensity
@@ -1459,7 +1683,32 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				light_data.color[1] /= surface_area;
 				light_data.color[2] /= surface_area;
 			}
+		} else {
+			// GodotNext: light_source_parity (#140). Store unit view-space light +X and +Y axes
+			// in area_width / area_height (unused by omni/spot) so IES evaluation has the full
+			// orthonormal light-local basis even without shadows or when omni dual-paraboloid
+			// overwrites direction.xy.
+			Vector3 light_right = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(1, 0, 0))).normalized();
+			Vector3 light_up = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 1, 0))).normalized();
+			light_data.area_width[0] = light_right.x;
+			light_data.area_width[1] = light_right.y;
+			light_data.area_width[2] = light_right.z;
+			light_data.area_height[0] = light_up.x;
+			light_data.area_height[1] = light_up.y;
+			light_data.area_height[2] = light_up.z;
 		}
+		// GodotNext: light_source_parity (#140). Populate IES, barn-door, and per-light contact shadow fields.
+		light_data.ies_layer = ies_layer;
+		light_data.ies_scale = ies_active ? light->ies_intensity_scale : 1.0f;
+		light_data.barn_door_angle_rad = float(Math::deg_to_rad(CLAMP(double(light->param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE]), 0.0, 90.0)));
+		light_data.barn_door_length = MAX(light->param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH], 0.0f);
+		light_data.contact_shadow_length = light->param[RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH];
+		{
+			const uint32_t *sscs_ptr = p_render_data->contact_shadow_light_indices.getptr(light_instance->self);
+			light_data.contact_shadow_sscs_index = sscs_ptr != nullptr ? *sscs_ptr : 0xFFFFFFFFu;
+		}
+		light_data.contact_shadow_casting_intensity = CLAMP(light->param[RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY], 0.0f, 1.0f);
+		light_data.contact_shadow_non_casting_intensity = CLAMP(light->param[RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY], 0.0f, 1.0f);
 		light_data.mask = light->cull_mask;
 
 		light_data.atlas_rect[0] = 0;
@@ -1656,7 +1905,11 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_instance->cull_mask = light->cull_mask;
 
 		// hook for subclass to do further processing.
-		const float intensity_proxy = RendererRD::LightGrid::compute_light_intensity_proxy(light_data.color[0], light_data.color[1], light_data.color[2]);
+		const float ies_proxy_scale = ies_active ? light_data.ies_scale : 1.0f;
+		const float intensity_proxy = RendererRD::LightGrid::compute_light_intensity_proxy(
+				light_data.color[0] * ies_proxy_scale,
+				light_data.color[1] * ies_proxy_scale,
+				light_data.color[2] * ies_proxy_scale);
 		RendererSceneRenderRD::get_singleton()->setup_added_light(
 				type,
 				light_transform,

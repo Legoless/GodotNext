@@ -1927,6 +1927,21 @@
 				Returns [code]true[/code] if the OS supports a certain [param feature]. Features might be [code]s3tc[/code], [code]rgtc[/code], [code]bptc[/code], [code]etc[/code], [code]etc2[/code], [code]astc[/code], and [code]astc_hdr[/code].
 			</description>
 		</method>
+		<method name="ies_profile_create">
+			<return type="RID" />
+			<description>
+				Creates a photometric IES profile resource on the rendering server and returns its [RID]. Populate it with [method ies_profile_set_data] and attach it to a light using [method light_set_ies_profile]. Free it with [method free_rid] when no longer needed.
+			</description>
+		</method>
+		<method name="ies_profile_set_data">
+			<return type="void" />
+			<param index="0" name="profile" type="RID" />
+			<param index="1" name="image" type="Image" />
+			<param index="2" name="peak_candela" type="float" />
+			<description>
+				Uploads a normalized 256×64 [constant Image.FORMAT_RH] candela lookup [param image] and its [param peak_candela] intensity to the IES [param profile]. Passing a null [param image] releases the profile's GPU atlas layer.
+			</description>
+		</method>
 		<method name="instance_attach_object_instance_id">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
@@ -2310,7 +2325,7 @@
 			<param index="0" name="light" type="RID" />
 			<param index="1" name="enable" type="bool" />
 			<description>
-				If [code]true[/code], allows screen-space contact shadows for this light. Only used when [member ProjectSettings.rendering/lights_and_shadows/contact_shadow/enabled] is enabled. Equivalent to [member Light3D.shadow_contact_shadows_allow].
+				If [code]true[/code], allows screen-space contact shadows for this light when [constant LIGHT_PARAM_CONTACT_SHADOW_LENGTH] is non-zero (or [code]-1.0[/code] while [member ProjectSettings.rendering/lights_and_shadows/contact_shadow/enabled] is enabled). Equivalent to [member Light3D.shadow_contact_shadows_allow].
 			</description>
 		</method>
 		<method name="light_set_bake_mode">
@@ -2327,6 +2342,14 @@
 			<param index="1" name="color" type="Color" />
 			<description>
 				Sets the color of the light. Equivalent to [member Light3D.light_color].
+			</description>
+		</method>
+		<method name="light_set_contact_shadow_length_world_space">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<description>
+				Sets whether [constant LIGHT_PARAM_CONTACT_SHADOW_LENGTH] is interpreted in world-space meters ([code]true[/code]) or as a fraction of viewport height ([code]false[/code]). Equivalent to [member Light3D.contact_shadow_length_world_space].
 			</description>
 		</method>
 		<method name="light_set_cull_mask">
@@ -2346,6 +2369,30 @@
 			<param index="4" name="length" type="float" />
 			<description>
 				Sets the distance fade for this 3D light. This acts as a form of level of detail (LOD) and can be used to improve performance. Equivalent to [member Light3D.distance_fade_enabled], [member Light3D.distance_fade_begin], [member Light3D.distance_fade_shadow], and [member Light3D.distance_fade_length].
+			</description>
+		</method>
+		<method name="light_set_ies_intensity_scale">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="scale" type="float" />
+			<description>
+				Sets the scale factor applied to the light's IES profile attenuation. Equivalent to [member Light3D.ies_intensity_scale].
+			</description>
+		</method>
+		<method name="light_set_ies_profile">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="ies_profile" type="RID" />
+			<description>
+				Assigns an IES profile resource (created with [method ies_profile_create]) to a positional light, or clears it when [param ies_profile] is an invalid [RID]. Equivalent to [member Light3D.ies_profile].
+			</description>
+		</method>
+		<method name="light_set_ies_use_intensity">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<description>
+				Sets whether the assigned IES profile's peak candela overrides the light's base intensity. Equivalent to [member Light3D.ies_use_intensity].
 			</description>
 		</method>
 		<method name="light_set_light_function">
@@ -5590,7 +5637,16 @@
 		<constant name="LIGHT_PARAM_SHADOW_RESOLUTION_BIAS" value="26" enum="LightParam">
 			Per-light virtual shadow map resolution bias in mips, clamped to [code][-2.0, 4.0][/code]. Positive values select coarser mips and negative values select finer mips (see [member Light3D.shadow_resolution_bias]).
 		</constant>
-		<constant name="LIGHT_PARAM_MAX" value="27" enum="LightParam">
+		<constant name="LIGHT_PARAM_CONTACT_SHADOW_LENGTH" value="27" enum="LightParam">
+			Per-light contact shadow ray length ([code]0.0[/code] disables, [code]-1.0[/code] inherits the project setting, positive values specify screen-height fraction or world-space meters). Equivalent to [member Light3D.contact_shadow_length].
+		</constant>
+		<constant name="LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY" value="28" enum="LightParam">
+			Contact shadow intensity on shadow-casting geometry pixels. Equivalent to [member Light3D.contact_shadow_casting_intensity].
+		</constant>
+		<constant name="LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY" value="29" enum="LightParam">
+			Contact shadow intensity on non-shadow-casting geometry pixels. Equivalent to [member Light3D.contact_shadow_non_casting_intensity].
+		</constant>
+		<constant name="LIGHT_PARAM_MAX" value="30" enum="LightParam">
 			Represents the size of the [enum LightParam] enum.
 		</constant>
 		<constant name="LIGHT_BAKE_DISABLED" value="0" enum="LightBakeMode">

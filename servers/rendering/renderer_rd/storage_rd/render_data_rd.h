@@ -102,6 +102,17 @@ public:
 	LocalVector<int> directional_shadows;
 	LocalVector<int> contact_shadows;
 
+	// GodotNext: light_source_parity (#140). Per-light screen-space contact shadow entries for directional and local lights.
+	struct ContactShadowLight {
+		RID light_instance;
+		RSE::LightType type = RSE::LIGHT_DIRECTIONAL;
+		float length = 0.0f;
+		bool world_space = false;
+		float blur = 1.0f;
+	};
+	LocalVector<ContactShadowLight> contact_shadow_lights;
+	HashMap<RID, uint32_t> contact_shadow_light_indices;
+
 	/* GI info */
 	const RendererSceneRender::RenderSDFGIData *render_sdfgi_regions = nullptr;
 	int render_sdfgi_region_count = 0;

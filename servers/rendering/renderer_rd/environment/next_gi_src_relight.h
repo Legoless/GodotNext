@@ -76,6 +76,19 @@ struct NextGILight {
 };
 static_assert(sizeof(NextGILight) == 64, "NextGILight must stay 64 bytes (plan D14).");
 
+// GodotNext: light_source_parity (#140, plan §21.3 contract M8). Companion 64-byte std430 record
+// per NextGILight carrying light basis (+X/+Y), area light size & atlas rect, IES layer/scale, and barn doors.
+struct NextGILightParity {
+	float axis_x_width[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+	float axis_y_height[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+	float area_tex_rect[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	uint32_t ies_layer = 0xFFFFFFFFu;
+	float ies_scale = 1.0f;
+	float barn_door_angle_rad = float(Math::PI * 0.5);
+	float barn_door_length = 0.2f;
+};
+static_assert(sizeof(NextGILightParity) == 64, "NextGILightParity must stay 64 bytes.");
+
 // std430, 96 bytes. matrix is column-major, matching GLSL mat4. atlas is xy origin and zw size in UV.
 struct NextGIShadowReuse {
 	float matrix[16] = {};

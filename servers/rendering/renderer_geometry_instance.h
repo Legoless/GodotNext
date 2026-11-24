@@ -79,6 +79,8 @@ public:
 	virtual void set_nextgeo_record_index(uint32_t p_index) {}
 	// GodotNext: vsm_caching (#212).
 	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) {}
+	// GodotNext: light_source_parity (#140). Tracks whether the instance casts shadows for contact-shadow intensity split.
+	virtual void set_casts_shadows(bool p_enable) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -137,6 +139,8 @@ public:
 		bool use_baked_light = false;
 		bool use_dynamic_gi = false;
 		bool cast_double_sided_shadows = false;
+		// GodotNext: light_source_parity (#140).
+		bool casts_shadows = true;
 		// GodotNext: vsm_caching (#212).
 		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
 		bool dirty_dependencies = false;
@@ -164,6 +168,8 @@ public:
 	virtual void set_cast_double_sided_shadows(bool p_enable) override;
 	// GodotNext: vsm_caching (#212).
 	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) override;
+	// GodotNext: light_source_parity (#140).
+	virtual void set_casts_shadows(bool p_enable) override;
 
 	virtual void reset_motion_vectors() override;
 

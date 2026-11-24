@@ -109,6 +109,8 @@ class NextGIRelight {
 	RID shadow_sampler;
 	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 	RID light_function_sampler;
+	// GodotNext: light_source_parity (#140). Linear-with-mipmaps clamp sampler for area & IES atlases.
+	RID parity_linear_sampler;
 	bool radiance_is_packed = true;
 	uint64_t radiance_bytes = 0;
 	bool atlases_ready = false;
@@ -167,6 +169,9 @@ class NextGIRelight {
 	RID far_light_shadow_buffer;
 	uint32_t light_shadow_capacity = 0;
 	uint32_t far_light_shadow_capacity = 0;
+	// GodotNext: light_source_parity (#140). Companion 64-byte per-light IES/area/barn-door buffer.
+	RID light_parity_buffer;
+	uint32_t light_parity_capacity = 0;
 	// The material retrace's records (next_gi_shadow_policy.h, NextGIShadowRetraceRecord), the bindless texture
 	// table's set, and the resolve pass that writes the retraced rays' mask bits.
 	RID retrace_buffer;

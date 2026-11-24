@@ -584,6 +584,13 @@ public:
 	FUNC2(light_set_shadow_method, RID, RSE::LightShadowMethod)
 	FUNC2(light_set_max_sdfgi_cascade, RID, uint32_t)
 	FUNC2(light_set_allow_contact_shadows, RID, bool)
+	// GodotNext: light_source_parity (#140, plan §21.3 contract M8).
+	FUNCRIDSPLIT(ies_profile)
+	FUNC3(ies_profile_set_data, RID, const Ref<Image> &, float)
+	FUNC2(light_set_ies_profile, RID, RID)
+	FUNC2(light_set_ies_use_intensity, RID, bool)
+	FUNC2(light_set_ies_intensity_scale, RID, float)
+	FUNC2(light_set_contact_shadow_length_world_space, RID, bool)
 
 	FUNC2(light_omni_set_shadow_mode, RID, RSE::LightOmniShadowMode)
 

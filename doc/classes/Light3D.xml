@@ -65,6 +65,18 @@
 		</method>
 	</methods>
 	<members>
+		<member name="contact_shadow_casting_intensity" type="float" setter="set_param" getter="get_param" default="1.0">
+			Contact shadow darkening strength applied to pixels belonging to shadow-casting geometry when contact shadows are active on this light.
+		</member>
+		<member name="contact_shadow_length" type="float" setter="set_param" getter="get_param" default="0.0">
+			Per-light screen-space contact shadow ray length. [code]0.0[/code] disables contact shadows for this light (byte-identical to contact shadows off). [code]-1.0[/code] inherits [member ProjectSettings.rendering/lights_and_shadows/contact_shadow/enabled] and [member ProjectSettings.rendering/lights_and_shadows/contact_shadow/shadow_length]. Values greater than [code]0.0[/code] enable contact shadows for this light with an explicit length (as a fraction of screen height when [member contact_shadow_length_world_space] is [code]false[/code], or in meters when [code]true[/code]).
+		</member>
+		<member name="contact_shadow_length_world_space" type="bool" setter="set_contact_shadow_length_world_space" getter="get_contact_shadow_length_world_space" default="false">
+			If [code]true[/code], [member contact_shadow_length] is interpreted in world-space meters and converted to screen-space ray length using each pixel's linear view depth. If [code]false[/code], [member contact_shadow_length] is a fraction of viewport height.
+		</member>
+		<member name="contact_shadow_non_casting_intensity" type="float" setter="set_param" getter="get_param" default="0.0">
+			Contact shadow darkening strength applied to pixels belonging to geometry that does not cast shadows ([constant GeometryInstance3D.SHADOW_CASTING_SETTING_OFF] or non-shadow-casting materials).
+		</member>
 		<member name="distance_fade_begin" type="float" setter="set_distance_fade_begin" getter="get_distance_fade_begin" default="40.0" keywords="lod_begin">
 			The distance from the camera at which the light begins to fade away (in 3D units).
 			[b]Note:[/b] Only effective for [OmniLight3D] and [SpotLight3D].
@@ -89,6 +101,15 @@
 		</member>
 		<member name="editor_only" type="bool" setter="set_editor_only" getter="is_editor_only" default="false">
 			If [code]true[/code], the light only appears in the editor and will not be visible at runtime. If [code]true[/code], the light will never be baked in [LightmapGI] regardless of its [member light_bake_mode].
+		</member>
+		<member name="ies_intensity_scale" type="float" setter="set_ies_intensity_scale" getter="get_ies_intensity_scale" default="1.0">
+			Multiplier applied to the sampled [member ies_profile] attenuation. Ignored on [DirectionalLight3D].
+		</member>
+		<member name="ies_profile" type="IESProfile" setter="set_ies_profile" getter="get_ies_profile">
+			Optional [IESProfile] photometric distribution applied to [OmniLight3D], [SpotLight3D], and [AreaLight3D]. On [SpotLight3D], the profile is clipped to the spot cone. Ignored on [DirectionalLight3D].
+		</member>
+		<member name="ies_use_intensity" type="bool" setter="set_ies_use_intensity" getter="get_ies_use_intensity" default="false">
+			If [code]true[/code] and [member ies_profile] is assigned, the profile's [member IESProfile.peak_candela] overrides the light's base intensity. Ignored on [DirectionalLight3D].
 		</member>
 		<member name="light_angular_distance" type="float" setter="set_param" getter="get_param" default="0.0" keywords="pcss">
 			The light's angular size in degrees. Increasing this will make shadows softer at greater distances (also called percentage-closer soft shadows, or PCSS). Only available for [DirectionalLight3D]s. For reference, the Sun from the Earth is approximately [code]0.5[/code]. Increasing this value above [code]0.0[/code] for lights with shadows enabled will have a noticeable performance cost due to PCSS.
@@ -162,7 +183,7 @@
 			The light will only cast shadows using objects in the selected layers.
 		</member>
 		<member name="shadow_contact_shadows_allow" type="bool" setter="set_allow_contact_shadows" getter="get_allow_contact_shadows" default="true">
-			Enables screen-space contact shadows for this light. Only used when [member ProjectSettings.rendering/lights_and_shadows/contact_shadow/enabled] is enabled.
+			Allows screen-space contact shadows for this light when [member contact_shadow_length] is non-zero (or [code]-1.0[/code] while [member ProjectSettings.rendering/lights_and_shadows/contact_shadow/enabled] is enabled).
 		</member>
 		<member name="shadow_contact_shadows_blur" type="float" setter="set_param" getter="get_param" default="1.0">
 			Blurs the edges of the contact shadow. [code]0.0[/code] produces sharp shadows; higher values increase the noise magnitude. Only used when [member shadow_contact_shadows_allow] is enabled.
@@ -272,7 +293,16 @@
 		<constant name="PARAM_SHADOW_RESOLUTION_BIAS" value="26" enum="Param">
 			Constant for accessing [member shadow_resolution_bias].
 		</constant>
-		<constant name="PARAM_MAX" value="27" enum="Param">
+		<constant name="PARAM_CONTACT_SHADOW_LENGTH" value="27" enum="Param">
+			Constant for accessing [member contact_shadow_length].
+		</constant>
+		<constant name="PARAM_CONTACT_SHADOW_CASTING_INTENSITY" value="28" enum="Param">
+			Constant for accessing [member contact_shadow_casting_intensity].
+		</constant>
+		<constant name="PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY" value="29" enum="Param">
+			Constant for accessing [member contact_shadow_non_casting_intensity].
+		</constant>
+		<constant name="PARAM_MAX" value="30" enum="Param">
 			Represents the size of the [enum Param] enum.
 		</constant>
 		<constant name="BAKE_DISABLED" value="0" enum="BakeMode">

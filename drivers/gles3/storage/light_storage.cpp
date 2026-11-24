@@ -100,6 +100,10 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	light.param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH] = 0.2;
 	// GodotNext: vsm_local_lights (#216).
 	light.param[RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS] = 0.0;
+	// GodotNext: light_source_parity (#140).
+	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH] = 0.0;
+	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY] = 1.0;
+	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY] = 0.0;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -307,6 +311,37 @@ RSE::LightShadowMethod LightStorage::light_get_shadow_method(RID p_light) const 
 	const Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL_V(light, RSE::LIGHT_SHADOW_METHOD_PROJECT);
 	return light->shadow_method;
+}
+
+// GodotNext: light_source_parity (#140). Stored only in Compatibility renderer.
+void LightStorage::light_set_ies_profile(RID p_light, RID p_ies_profile) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->ies_profile = p_ies_profile;
+}
+
+void LightStorage::light_set_ies_use_intensity(RID p_light, bool p_use_intensity) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->ies_use_intensity = p_use_intensity;
+}
+
+void LightStorage::light_set_ies_intensity_scale(RID p_light, float p_scale) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->ies_intensity_scale = MAX(p_scale, 0.0f);
+}
+
+void LightStorage::light_set_contact_shadow_length_world_space(RID p_light, bool p_world_space) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->contact_shadow_length_world_space = p_world_space;
+}
+
+bool LightStorage::light_get_contact_shadow_length_world_space(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, false);
+	return light->contact_shadow_length_world_space;
 }
 
 void LightStorage::light_omni_set_shadow_mode(RID p_light, RSE::LightOmniShadowMode p_mode) {

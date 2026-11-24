@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="IESProfile" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Photometric IES light distribution profile resampled into a normalized 256×64 half-float candela table.
+	</brief_description>
+	<description>
+		[IESProfile] represents an ANSI/IES LM-63-1995 or LM-63-2002 photometric luminaire distribution that can be assigned to [OmniLight3D], [SpotLight3D], or [AreaLight3D] via [member Light3D.ies_profile].
+		On import (via [ResourceImporterIES]) or runtime loading (via [method load_from_ies_string] or [method load_from_ies_file]), the raw candela grid is symmetrically unfolded according to photometric type (Type C, B, or A) and resampled into a normalized 256×64 [constant Image.FORMAT_RH] lookup texture, while preserving the peak candela intensity in [member peak_candela].
+		Only [code]TILT=NONE[/code] LM-63 files are supported; files specifying [code]TILT=INCLUDE[/code] or external tilt files are rejected with an error.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_candela_table" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+				Returns the resampled 256×64 normalized candela table as a flat row-major [PackedFloat32Array] (16,384 floats in [code][0, 1][/code]), or an empty array if [member profile_image] is unset.
+			</description>
+		</method>
+		<method name="load_from_ies_file">
+			<return type="int" enum="Error" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Reads an ANSI/IES LM-63-1995 or LM-63-2002 [code].ies[/code] file from [param path] and populates this resource. Returns [constant OK] on success, [constant ERR_UNAVAILABLE] if the file specifies a non-[code]NONE[/code] [code]TILT=[/code] directive, or [constant ERR_PARSE_ERROR] / [constant ERR_FILE_CANT_OPEN] on malformed or unreadable input.
+			</description>
+		</method>
+		<method name="load_from_ies_string">
+			<return type="int" enum="Error" />
+			<param index="0" name="text" type="String" />
+			<description>
+				Parses ANSI/IES LM-63-1995 or LM-63-2002 photometric text directly from [param text], resamples it into a normalized 256×64 [constant Image.FORMAT_RH] [member profile_image], and updates [member peak_candela], [member lumens], [member watts], [member photometric_type], [member vertical_angles], and [member horizontal_angles]. Returns [constant ERR_UNAVAILABLE] when [code]TILT=[/code] is not [code]NONE[/code].
+			</description>
+		</method>
+		<method name="sample" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="direction_local" type="Vector3" />
+			<description>
+				Bilinearly samples the normalized candela table for a direction vector in the light's local coordinate space (forward emission along [code]-Z[/code], right [code]+X[/code], up [code]+Y[/code]). Returns a multiplier in [code][0, 1][/code] matching the GPU IES atlas evaluation.
+			</description>
+		</method>
+		<method name="sample_angles" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="vertical_deg" type="float" />
+			<param index="1" name="horizontal_deg" type="float" />
+			<description>
+				Bilinearly samples the normalized candela table at the given polar angle [param vertical_deg] (in [code][0, 180][/code] degrees from forward [code]-Z[/code]) and azimuthal angle [param horizontal_deg] (in degrees around [code]-Z[/code]).
+			</description>
+		</method>
+		<method name="set_candela_table">
+			<return type="void" />
+			<param index="0" name="table" type="PackedFloat32Array" />
+			<description>
+				Builds and assigns [member profile_image] from a flat row-major 256×64 [PackedFloat32Array] (16,384 normalized entries clamped to [code][0, 1][/code]).
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="horizontal_angles" type="PackedFloat32Array" setter="set_horizontal_angles" getter="get_horizontal_angles" default="PackedFloat32Array()">
+			Original horizontal photometric angles (in degrees) parsed from the LM-63 source file.
+		</member>
+		<member name="lumens" type="float" setter="set_lumens" getter="get_lumens" default="0.0">
+			Total rated luminous flux (in lumens) parsed from the LM-63 header.
+		</member>
+		<member name="peak_candela" type="float" setter="set_peak_candela" getter="get_peak_candela" default="1.0">
+			Peak candela intensity (in candelas, after candela multiplier and ballast factors) used to normalize [member profile_image]. Applied when [member Light3D.ies_use_intensity] is [code]true[/code].
+		</member>
+		<member name="photometric_type" type="int" setter="set_photometric_type" getter="get_photometric_type" enum="IESProfile.PhotometricType" default="1">
+			Photometric coordinate system declared by the LM-63 header.
+		</member>
+		<member name="profile_image" type="Image" setter="set_profile_image" getter="get_profile_image">
+			Normalized 256×64 [constant Image.FORMAT_RH] candela lookup image uploaded to the GPU IES profile atlas.
+		</member>
+		<member name="vertical_angles" type="PackedFloat32Array" setter="set_vertical_angles" getter="get_vertical_angles" default="PackedFloat32Array()">
+			Original vertical photometric angles (in degrees) parsed from the LM-63 source file.
+		</member>
+		<member name="watts" type="float" setter="set_watts" getter="get_watts" default="0.0">
+			Input power (in watts) parsed from the LM-63 header.
+		</member>
+	</members>
+	<constants>
+		<constant name="PHOTOMETRIC_TYPE_C" value="1" enum="PhotometricType">
+			Type C photometry (vertical polar axis, standard architectural and roadway luminaires).
+		</constant>
+		<constant name="PHOTOMETRIC_TYPE_B" value="2" enum="PhotometricType">
+			Type B photometry (horizontal polar axis, floodlights).
+		</constant>
+		<constant name="PHOTOMETRIC_TYPE_A" value="3" enum="PhotometricType">
+			Type A photometry (automotive headlamps and signal lights).
+		</constant>
+	</constants>
+</class>

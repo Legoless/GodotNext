@@ -40,6 +40,15 @@ struct LightData { //this structure needs to be as packed as possible
 	uint vsm_flags;
 	uint light_function_index;
 	uint vsm_pad1;
+	// GodotNext: light_source_parity (#140). IES profile, barn-door shading, and per-light contact shadows.
+	uint ies_layer;
+	float ies_scale;
+	float barn_door_angle_rad;
+	float barn_door_length;
+	float contact_shadow_length;
+	uint contact_shadow_sscs_index;
+	float contact_shadow_casting_intensity;
+	float contact_shadow_non_casting_intensity;
 };
 
 #define REFLECTION_AMBIENT_DISABLED 0
@@ -102,4 +111,9 @@ struct DirectionalLightData {
 	uint vsm_flags;
 	float df_shadow_start;
 	float df_shadow_distance;
+	// GodotNext: light_source_parity (#140). Per-light contact shadow controls.
+	float contact_shadow_length;
+	uint contact_shadow_flags;
+	float contact_shadow_casting_intensity;
+	float contact_shadow_non_casting_intensity;
 };

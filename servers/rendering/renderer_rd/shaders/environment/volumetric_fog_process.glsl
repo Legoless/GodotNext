@@ -16,6 +16,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "../area_lights_inc.glsl"
 #include "../cluster_data_inc.glsl"
+#include "../ies_inc.glsl"
 #include "../light_data_inc.glsl"
 #include "../oct_inc.glsl"
 
@@ -278,6 +279,8 @@ layout(set = 0, binding = 25, std430) buffer restrict VSMCoarseMiss {
 }
 vsm_coarse_miss;
 layout(set = 0, binding = 26) uniform sampler vsm_nearest_sampler;
+// GodotNext: light_source_parity (#140). IES profile atlas for volumetric fog light evaluation.
+layout(set = 0, binding = 29) uniform texture2DArray ies_profile_atlas;
 
 #define VSM_COARSE_NEAREST_SAMPLER vsm_nearest_sampler
 #include "../vsm_page_table_inc.glsl"
@@ -584,6 +587,15 @@ void main() {
 
 					if (omni_lights.data[light_index].volumetric_fog_energy > 0.001 && d * omni_lights.data[light_index].inv_radius < 1.0) {
 						float attenuation = get_omni_attenuation(d, omni_lights.data[light_index].inv_radius, omni_lights.data[light_index].attenuation);
+						// GodotNext: light_source_parity (#140). IES profile attenuation in light local space.
+						if (omni_lights.data[light_index].ies_layer != IES_LAYER_NONE) {
+							vec3 light_dir_vs = safe_normalize(view_pos - light_pos);
+							vec3 lx = omni_lights.data[light_index].area_width;
+							vec3 ly = omni_lights.data[light_index].area_height;
+							vec3 lz = cross(lx, ly);
+							vec3 dir_ls = vec3(dot(light_dir_vs, lx), dot(light_dir_vs, ly), dot(light_dir_vs, lz));
+							attenuation *= ies_sample_atlas(omni_lights.data[light_index].ies_layer, omni_lights.data[light_index].ies_scale, dir_ls, ies_profile_atlas, linear_sampler);
+						}
 
 						vec3 light = omni_lights.data[light_index].color;
 
@@ -670,6 +682,15 @@ void main() {
 						float scos = max(dot(-safe_normalize(light_rel_vec), spot_dir), cone_angle);
 						float spot_rim = max(0.0001, (1.0 - scos) / (1.0 - cone_angle));
 						attenuation *= 1.0 - pow(spot_rim, spot_lights.data[light_index].cone_attenuation);
+						// GodotNext: light_source_parity (#140). IES profile attenuation clipped to spot cone.
+						if (spot_lights.data[light_index].ies_layer != IES_LAYER_NONE && attenuation > 0.0) {
+							vec3 light_dir_vs = safe_normalize(-light_rel_vec);
+							vec3 lx = spot_lights.data[light_index].area_width;
+							vec3 ly = spot_lights.data[light_index].area_height;
+							vec3 lz = -spot_dir;
+							vec3 dir_ls = vec3(dot(light_dir_vs, lx), dot(light_dir_vs, ly), dot(light_dir_vs, lz));
+							attenuation *= ies_sample_atlas(spot_lights.data[light_index].ies_layer, spot_lights.data[light_index].ies_scale, dir_ls, ies_profile_atlas, linear_sampler);
+						}
 
 						vec3 light = spot_lights.data[light_index].color;
 
@@ -746,7 +767,13 @@ void main() {
 						vec3 light_center = area_lights.data[light_index].position;
 						vec3 light_to_vert = view_pos - light_center;
 						vec3 pos_local_to_light = vec3(dot(light_to_vert, area_width_norm), dot(light_to_vert, area_height_norm), dot(light_to_vert, -area_direction)); // view_pos in LIGHT SPACE
-						vec3 closest_point_local_to_light = vec3(clamp(pos_local_to_light.x, -a_half_len, a_half_len), clamp(pos_local_to_light.y, -b_half_len, b_half_len), 0.0); // LIGHT SPACE
+						// GodotNext: light_source_parity (#140). Barn-door clipping and IES profile in fog.
+						vec2 barn_clip_min;
+						vec2 barn_clip_max;
+						if (!barn_door_clip_rect(pos_local_to_light, vec2(a_half_len, b_half_len), area_lights.data[light_index].barn_door_angle_rad, area_lights.data[light_index].barn_door_length, barn_clip_min, barn_clip_max)) {
+							continue;
+						}
+						vec3 closest_point_local_to_light = vec3(clamp(pos_local_to_light.x, barn_clip_min.x, barn_clip_max.x), clamp(pos_local_to_light.y, barn_clip_min.y, barn_clip_max.y), 0.0); // LIGHT SPACE
 						float inv_center_range = area_lights.data[light_index].cone_attenuation;
 						vec3 closest_point_on_light = light_center + closest_point_local_to_light.x * area_width_norm + closest_point_local_to_light.y * area_height_norm; // VIEW SPACE
 
@@ -765,21 +792,29 @@ void main() {
 						if (d * inv_center_range < 1.0) { // view_pos in range
 							// solid angle already decreases by inverse square, but subtracting 1 leads to results closer to spotlight, I'm somewhat unsure why
 							float attenuation = get_omni_attenuation(d, area_lights.data[light_index].inv_radius, area_lights.data[light_index].attenuation - 1.0);
-							vec3 h_area_width = area_width / 2.0;
-							vec3 h_area_height = area_height / 2.0;
+							vec3 area_min_x = area_width_norm * barn_clip_min.x;
+							vec3 area_max_x = area_width_norm * barn_clip_max.x;
+							vec3 area_min_y = area_height_norm * barn_clip_min.y;
+							vec3 area_max_y = area_height_norm * barn_clip_max.y;
+							vec3 area_rel_center = area_lights.data[light_index].position - view_pos;
 							vec3 light_points[4];
-							light_points[0] = area_lights.data[light_index].position - h_area_width - h_area_height - view_pos;
-							light_points[1] = area_lights.data[light_index].position + h_area_width - h_area_height - view_pos;
-							light_points[2] = area_lights.data[light_index].position + h_area_width + h_area_height - view_pos;
-							light_points[3] = area_lights.data[light_index].position - h_area_width + h_area_height - view_pos;
+							light_points[0] = area_rel_center + area_min_x + area_min_y;
+							light_points[1] = area_rel_center + area_max_x + area_min_y;
+							light_points[2] = area_rel_center + area_max_x + area_max_y;
+							light_points[3] = area_rel_center + area_min_x + area_max_y;
+							vec4 area_tex_rect = barn_door_clip_texture_rect(area_lights.data[light_index].projector_rect, vec2(a_half_len, b_half_len), barn_clip_min, barn_clip_max);
 
 							float cutoff = smoothstep(0.0, 0.1, dot(area_direction, view_pos - area_lights.data[light_index].position)); // makes light only effective in front
 							float ltc_diffuse = 0.0;
 							vec3 normal = light_vec;
 							float max_mipmap = area_lights.data[light_index].cone_angle;
 							vec3 texture_color = vec3(1.0);
-							ltc_evaluate_diff(normal, light_points, area_lights.data[light_index].projector_rect, max_mipmap, area_light_atlas, linear_sampler_with_mipmaps, ltc_diffuse, texture_color);
-							attenuation *= ltc_diffuse * cutoff;
+							ltc_evaluate_diff(normal, light_points, area_tex_rect, max_mipmap, area_light_atlas, linear_sampler_with_mipmaps, ltc_diffuse, texture_color);
+							float area_ies = 1.0;
+							if (area_lights.data[light_index].ies_layer != IES_LAYER_NONE) {
+								area_ies = ies_sample_atlas(area_lights.data[light_index].ies_layer, area_lights.data[light_index].ies_scale, safe_normalize(pos_local_to_light), ies_profile_atlas, linear_sampler);
+							}
+							attenuation *= ltc_diffuse * cutoff * area_ies;
 							vec3 light_color = area_lights.data[light_index].color * texture_color;
 
 							if (area_lights.data[light_index].shadow_opacity > 0.001) {

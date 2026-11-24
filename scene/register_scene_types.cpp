@@ -135,6 +135,8 @@
 #include "scene/resources/font.h"
 #include "scene/resources/gradient.h"
 #include "scene/resources/gradient_texture.h"
+// GodotNext: light_source_parity (#140).
+#include "scene/resources/ies_profile.h"
 #include "scene/resources/image_texture.h"
 #include "scene/resources/immediate_mesh.h"
 #include "scene/resources/label_settings.h"
@@ -1038,6 +1040,8 @@ void register_scene_types() {
 
 	GDREGISTER_CLASS(BitMap);
 	GDREGISTER_CLASS(Gradient);
+	// GodotNext: light_source_parity (#140).
+	GDREGISTER_CLASS(IESProfile);
 
 	GDREGISTER_CLASS(SkeletonProfile);
 	GDREGISTER_CLASS(SkeletonProfileHumanoid);

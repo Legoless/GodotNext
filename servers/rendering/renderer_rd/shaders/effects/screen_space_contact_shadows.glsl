@@ -16,6 +16,13 @@ layout(push_constant, std430) uniform Params {
 	float surface_thickness;
 	float blur;
 	float taa_frame_count;
+	// GodotNext: light_source_parity (#140). Per-light length & world-space linear depth conversion.
+	float contact_shadow_length;
+	uint world_space;
+	uint is_orthogonal;
+	float proj_scale_y;
+	float pad;
+	vec4 inv_proj_z;
 }
 params;
 
@@ -188,6 +195,25 @@ void main() {
 		return;
 	}
 
+	// GodotNext: light_source_parity (#140). Compute per-pixel screen-space ray length in pixels.
+	float target_pixels = params.contact_shadow_length * float(params.screen_size.y);
+	if (params.world_space != 0u) {
+		float view_w = params.inv_proj_z.z * sampling_depth[0] + params.inv_proj_z.w;
+		float safe_w = abs(view_w) > 1e-7 ? view_w : 1e-7;
+		float linear_depth = abs((params.inv_proj_z.x * sampling_depth[0] + params.inv_proj_z.y) / safe_w);
+		float half_h_scale = params.proj_scale_y * 0.5 * float(params.screen_size.y);
+		target_pixels = (params.is_orthogonal != 0u)
+				? (params.contact_shadow_length * half_h_scale)
+				: (params.contact_shadow_length * half_h_scale / max(linear_depth, 1e-4));
+	}
+	if (target_pixels <= 1e-3) {
+		return;
+	}
+	int effective_samples = clamp(int(ceil(target_pixels)), 1, SAMPLE_COUNT);
+	int hard_samples = min(HARD_SHADOW_SAMPLES, effective_samples);
+	int fade_samples = min(FADE_OUT_SAMPLES, max(effective_samples - hard_samples, 0));
+	int main_end = effective_samples - fade_samples;
+
 	float depth_scale;
 	float start_depth = sampling_depth[0];
 	if (converging != 0) {
@@ -207,21 +233,21 @@ void main() {
 	vec4 shadow_value = vec4(1.0);
 	float hard_shadow = 1.0;
 
-	for (int i = 0; i < HARD_SHADOW_SAMPLES; i++) {
+	for (int i = 0; i < hard_samples; i++) {
 		float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
 		hard_shadow = min(hard_shadow, depth_delta);
 	}
 
 	// Main averaged samples — accumulated into 4 buckets to soften aliasing
-	for (int i = HARD_SHADOW_SAMPLES; i < SAMPLE_COUNT - FADE_OUT_SAMPLES; i++) {
+	for (int i = hard_samples; i < main_end; i++) {
 		float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
 		shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta);
 	}
 
 	// Fade out samples — push distant shadow edge toward lit
-	for (int i = SAMPLE_COUNT - FADE_OUT_SAMPLES; i < SAMPLE_COUNT; i++) {
+	for (int i = main_end; i < effective_samples; i++) {
 		float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
-		float fade_out = float(i + 1 - (SAMPLE_COUNT - FADE_OUT_SAMPLES)) / float(FADE_OUT_SAMPLES + 1) * 0.75;
+		float fade_out = float(i + 1 - main_end) / float(fade_samples + 1) * 0.75;
 		shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta + fade_out);
 	}
 
@@ -231,5 +257,6 @@ void main() {
 
 	// Average the 4 buckets, then take the harder of hard_shadow and averaged result
 	float shadow = min(hard_shadow, dot(shadow_value, vec4(0.25)));
+	shadow = mix(1.0, shadow, clamp(target_pixels, 0.0, 1.0));
 	imageStore(output_shadow, write_xy, vec4(shadow, 0.0, 0.0, 0.0));
 }

@@ -3395,18 +3395,6 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #undef BIAS_FUNC
-
-					//process sscs
-					if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS) && directional_lights.data[i].sscs_index != 0xFFFFFFFF) {
-#ifdef USE_MULTIVIEW
-						float sscs_layer = float(directional_lights.data[i].sscs_index * 2u + uint(ViewIndex));
-#else
-					float sscs_layer = float(directional_lights.data[i].sscs_index);
-#endif // USE_MULTIVIEW
-						float sscs_shadow = textureLod(sampler2DArray(sscs_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, sscs_layer), 0.0).r;
-
-						shadow = min(shadow, sscs_shadow);
-					}
 				} // shadows
 
 				if (i < 4) {
@@ -3517,6 +3505,23 @@ void fragment_shader(in SceneData scene_data) {
 			}
 
 			shadow = mix(1.0, shadow, directional_lights.data[i].shadow_opacity);
+
+			// GodotNext: light_source_parity (#140). Per-light contact shadows with casting/non-casting intensities.
+			if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS) && directional_lights.data[i].sscs_index != 0xFFFFFFFFu) {
+				bool casts_shadows = bool(instances.data[instance_index].flags & INSTANCE_FLAGS_CASTS_SHADOWS);
+				float cs_intensity = casts_shadows
+						? directional_lights.data[i].contact_shadow_casting_intensity
+						: directional_lights.data[i].contact_shadow_non_casting_intensity;
+				if (cs_intensity > 0.0) {
+#ifdef USE_MULTIVIEW
+					float sscs_layer = float(directional_lights.data[i].sscs_index * 2u + uint(ViewIndex));
+#else
+					float sscs_layer = float(directional_lights.data[i].sscs_index);
+#endif // USE_MULTIVIEW
+					float sscs_shadow = textureLod(sampler2DArray(sscs_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, sscs_layer), 0.0).r;
+					shadow = min(shadow, mix(1.0, sscs_shadow, cs_intensity));
+				}
+			}
 #endif
 
 			blur_shadow(shadow);

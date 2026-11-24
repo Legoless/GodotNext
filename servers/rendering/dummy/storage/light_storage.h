@@ -104,6 +104,16 @@ public:
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) override {}
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) override {}
 	virtual bool light_get_allow_contact_shadows(RID p_light) const override { return false; }
+	// GodotNext: light_source_parity (#140).
+	virtual RID ies_profile_allocate() override { return RID(); }
+	virtual void ies_profile_initialize(RID p_rid) override {}
+	virtual void ies_profile_free(RID p_rid) override {}
+	virtual void ies_profile_set_data(RID p_ies_profile, const Ref<Image> &p_image, float p_peak_candela) override {}
+	virtual void light_set_ies_profile(RID p_light, RID p_ies_profile) override {}
+	virtual void light_set_ies_use_intensity(RID p_light, bool p_use_intensity) override {}
+	virtual void light_set_ies_intensity_scale(RID p_light, float p_scale) override {}
+	virtual void light_set_contact_shadow_length_world_space(RID p_light, bool p_world_space) override {}
+	virtual bool light_get_contact_shadow_length_world_space(RID p_light) const override { return false; }
 
 	virtual void light_omni_set_shadow_mode(RID p_light, RSE::LightOmniShadowMode p_mode) override {}
 

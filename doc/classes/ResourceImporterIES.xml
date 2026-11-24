@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="ResourceImporterIES" inherits="ResourceImporter" api_type="editor" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Imports an ANSI/IESNA LM-63 photometric light profile ([code].ies[/code]) as an [IESProfile] resource.
+	</brief_description>
+	<description>
+		Imports ASCII [code].ies[/code] files conforming to ANSI/IESNA LM-63-1995 or LM-63-2002 ([code]TILT=NONE[/code]), resamples their candela distribution (including photometric types C, B, and A and horizontal symmetries) into a normalized 256×64 half-float table, and saves an [IESProfile] resource for use on [OmniLight3D], [SpotLight3D], and [AreaLight3D].
+		Files declaring [code]TILT=INCLUDE[/code] or external tilt files are rejected with an import error.
+	</description>
+	<tutorials>
+	</tutorials>
+</class>

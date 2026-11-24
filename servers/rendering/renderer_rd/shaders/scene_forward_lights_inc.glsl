@@ -3,6 +3,36 @@
 #extension GL_EXT_control_flow_attributes : require
 
 #include "area_lights_inc.glsl"
+#include "ies_inc.glsl"
+
+// GodotNext: light_source_parity (#140, plan §21.3 contract M8, GM-11).
+// Evaluates a light's IES photometric profile in light local space (-Z forward, +X right, +Y up).
+float ies_attenuation(LightData p_light, vec3 p_dir_ls) {
+#ifdef FORWARD_CLUSTERED_IES_ATLAS
+	return ies_sample_atlas(p_light.ies_layer, p_light.ies_scale, p_dir_ls, ies_profile_atlas, SAMPLER_LINEAR_CLAMP);
+#else
+	return 1.0;
+#endif
+}
+
+#if defined(FORWARD_CLUSTERED_IES_ATLAS) && !defined(USING_MOBILE_RENDERER) && !defined(SHADOWS_DISABLED)
+half apply_local_contact_shadow(half p_shadow, uint p_sscs_index, float p_casting_intensity, float p_non_casting_intensity, vec2 p_screen_uv) {
+	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS) && p_sscs_index != 0xFFFFFFFFu) {
+		bool casts_shadows = bool(instances.data[instance_index_interp].flags & INSTANCE_FLAGS_CASTS_SHADOWS);
+		float cs_intensity = casts_shadows ? p_casting_intensity : p_non_casting_intensity;
+		if (cs_intensity > 0.0) {
+#ifdef USE_MULTIVIEW
+			float sscs_layer = float(p_sscs_index * 2u + uint(ViewIndex));
+#else
+			float sscs_layer = float(p_sscs_index);
+#endif
+			float sscs_shadow = textureLod(sampler2DArray(sscs_buffer, SAMPLER_LINEAR_CLAMP), vec3(p_screen_uv, sscs_layer), 0.0).r;
+			p_shadow = min(p_shadow, half(mix(1.0, sscs_shadow, cs_intensity)));
+		}
+	}
+	return p_shadow;
+}
+#endif
 
 // This annotation macro must be placed before any loops that rely on specialization constants as their upper bound.
 // Drivers may choose to unroll these loops based on the possible range of the value that can be deduced from the
@@ -604,6 +634,19 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	vec3 light_rel_vec = omni_lights.data[idx].position - vertex;
 	float light_length = length(light_rel_vec);
 	half omni_attenuation = get_omni_attenuation(light_length, omni_lights.data[idx].inv_radius, omni_lights.data[idx].attenuation);
+	// GodotNext: light_source_parity (#140). IES profile attenuation in light local space.
+	vec3 light_rel_vec_norm = light_rel_vec / max(light_length, 1e-6);
+	float omni_ies = 1.0;
+	if (omni_lights.data[idx].ies_layer != IES_LAYER_NONE) {
+		vec3 lx = vec3(omni_lights.data[idx].area_width);
+		vec3 ly = vec3(omni_lights.data[idx].area_height);
+		vec3 lz = cross(lx, ly);
+		vec3 dir_ls = vec3(dot(-light_rel_vec_norm, lx), dot(-light_rel_vec_norm, ly), dot(-light_rel_vec_norm, lz));
+		omni_ies = ies_attenuation(omni_lights.data[idx], dir_ls);
+		if (omni_ies <= 0.0) {
+			return;
+		}
+	}
 
 	// Compute size.
 	half size = half(0.0);
@@ -763,9 +806,13 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 			shadow = mix(half(1.0), sample_omni_pcf_shadow(shadow_atlas, omni_lights.data[idx].soft_shadow_scale / shadow_sample.z, pos, uv_rect, flip_offset, depth, taa_frame_count), half(omni_lights.data[idx].shadow_opacity));
 		}
 	}
+#if defined(FORWARD_CLUSTERED_IES_ATLAS) && !defined(USING_MOBILE_RENDERER)
+	// GodotNext: light_source_parity (#140). Per-light local contact shadows.
+	shadow = apply_local_contact_shadow(shadow, omni_lights.data[idx].contact_shadow_sscs_index, omni_lights.data[idx].contact_shadow_casting_intensity, omni_lights.data[idx].contact_shadow_non_casting_intensity, screen_uv);
+#endif
 #endif
 
-	vec3 color = omni_lights.data[idx].color;
+	vec3 color = omni_lights.data[idx].color * omni_ies;
 
 #ifdef LIGHT_TRANSMITTANCE_USED
 	half transmittance_z = transmittance_depth; //no transmittance by default
@@ -881,8 +928,6 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		color *= light_function_mask(light_function_data.data[omni_lights.data[idx].light_function_index], light_function_atlas, SAMPLER_LINEAR_CLAMP, lf_world_position(vertex));
 	}
 #endif
-
-	vec3 light_rel_vec_norm = light_rel_vec / light_length;
 	light_compute(normal, hvec3(light_rel_vec_norm), eye_vec, size, hvec3(color), false, omni_attenuation * shadow, f0, roughness, metallic, half(omni_lights.data[idx].specular_amount), albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 			backlight,
@@ -951,6 +996,21 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	// This conversion to a highp float is crucial to prevent light leaking due to precision errors.
 	float spot_rim = max(1e-4, (1.0 - scos) / (1.0 - cone_angle));
 	spot_attenuation *= half(1.0 - pow(spot_rim, spot_lights.data[idx].cone_attenuation));
+	// GodotNext: light_source_parity (#140). IES profile attenuation clipped to the spot cone.
+	float spot_ies = 1.0;
+	if (spot_lights.data[idx].ies_layer != IES_LAYER_NONE) {
+		if (spot_attenuation <= HALF_FLT_MIN) {
+			return;
+		}
+		vec3 lx = vec3(spot_lights.data[idx].area_width);
+		vec3 ly = vec3(spot_lights.data[idx].area_height);
+		vec3 lz = -spot_dir;
+		vec3 dir_ls = vec3(dot(-vec3(light_rel_vec_norm), lx), dot(-vec3(light_rel_vec_norm), ly), dot(-vec3(light_rel_vec_norm), lz));
+		spot_ies = ies_attenuation(spot_lights.data[idx], dir_ls);
+		if (spot_ies <= 0.0) {
+			return;
+		}
+	}
 
 	// Compute size.
 	half size = half(0.0);
@@ -1054,9 +1114,13 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 			shadow = mix(half(1.0), sample_pcf_shadow(shadow_atlas, spot_lights.data[idx].soft_shadow_scale * scene_data_block.data.shadow_atlas_pixel_size, shadow_uv, taa_frame_count), half(spot_lights.data[idx].shadow_opacity));
 		}
 	}
+#if defined(FORWARD_CLUSTERED_IES_ATLAS) && !defined(USING_MOBILE_RENDERER)
+	// GodotNext: light_source_parity (#140). Per-light local contact shadows.
+	shadow = apply_local_contact_shadow(shadow, spot_lights.data[idx].contact_shadow_sscs_index, spot_lights.data[idx].contact_shadow_casting_intensity, spot_lights.data[idx].contact_shadow_non_casting_intensity, screen_uv);
+#endif
 #endif // SHADOWS_DISABLED
 
-	vec3 color = spot_lights.data[idx].color;
+	vec3 color = spot_lights.data[idx].color * spot_ies;
 
 #ifdef LIGHT_TRANSMITTANCE_USED
 	half transmittance_z = transmittance_depth;
@@ -1188,7 +1252,21 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	hvec3 area_direction = hvec3(area_lights.data[idx].direction);
 	hvec3 pos_local_to_light = hvec3(dot(light_to_vert, area_a_dir), dot(light_to_vert, area_b_dir), dot(light_to_vert, -area_direction));
 
-	hvec3 closest_point_local_to_light = hvec3(clamp(pos_local_to_light.x, -a_half_len, a_half_len), clamp(pos_local_to_light.y, -b_half_len, b_half_len), 0);
+	// GodotNext: light_source_parity (#140). Barn-door rect clipping (no-op when barn_door_angle >= 89.99 deg) & IES profile.
+	vec2 barn_clip_min;
+	vec2 barn_clip_max;
+	if (!barn_door_clip_rect(vec3(pos_local_to_light), vec2(a_half_len, b_half_len), area_lights.data[idx].barn_door_angle_rad, area_lights.data[idx].barn_door_length, barn_clip_min, barn_clip_max)) {
+		return;
+	}
+	float area_ies = 1.0;
+	if (area_lights.data[idx].ies_layer != IES_LAYER_NONE) {
+		area_ies = ies_attenuation(area_lights.data[idx], normalize(vec3(pos_local_to_light)));
+		if (area_ies <= 0.0) {
+			return;
+		}
+	}
+
+	hvec3 closest_point_local_to_light = hvec3(clamp(float(pos_local_to_light.x), barn_clip_min.x, barn_clip_max.x), clamp(float(pos_local_to_light.y), barn_clip_min.y, barn_clip_max.y), 0.0);
 	half dist = saturateHalf(length(closest_point_local_to_light - pos_local_to_light));
 
 	half light_length = max(half(0.0), dist);
@@ -1332,10 +1410,14 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 			shadow = mix(half(1.0), sample_omni_pcf_shadow(shadow_atlas, area_lights.data[idx].soft_shadow_scale / shadow_sample.z, pos, uv_rect, vec2(0), depth, taa_frame_count), half(area_lights.data[idx].shadow_opacity));
 		}
 	}
+#if defined(FORWARD_CLUSTERED_IES_ATLAS) && !defined(USING_MOBILE_RENDERER)
+	// GodotNext: light_source_parity (#140). Per-light local contact shadows.
+	shadow = apply_local_contact_shadow(shadow, area_lights.data[idx].contact_shadow_sscs_index, area_lights.data[idx].contact_shadow_casting_intensity, area_lights.data[idx].contact_shadow_non_casting_intensity, screen_uv);
+#endif
 #endif
 	light_attenuation_ltc = light_attenuation_ltc * shadow;
 	half light_attenuation = light_attenuation_raw * shadow;
-	hvec3 color = hvec3(area_lights.data[idx].color);
+	hvec3 color = hvec3(area_lights.data[idx].color * area_ies);
 #ifdef LIGHT_FUNCTION_ATLAS
 	if (sc_use_light_function() && area_lights.data[idx].light_function_index != LIGHT_FUNCTION_NONE) {
 		color *= hvec3(light_function_mask(light_function_data.data[area_lights.data[idx].light_function_index], light_function_atlas, SAMPLER_LINEAR_CLAMP, lf_world_position(vertex)));
@@ -1344,12 +1426,16 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	float max_mipmap = area_lights.data[idx].cone_angle;
 
 	vec3 points[4];
-	hvec3 h_area_width = area_width / half(2.0);
-	hvec3 h_area_height = area_height / half(2.0);
-	points[0] = area_lights.data[idx].position - h_area_width - h_area_height - vertex;
-	points[1] = area_lights.data[idx].position + h_area_width - h_area_height - vertex;
-	points[2] = area_lights.data[idx].position + h_area_width + h_area_height - vertex;
-	points[3] = area_lights.data[idx].position - h_area_width + h_area_height - vertex;
+	vec3 area_min_x = vec3(area_a_dir) * barn_clip_min.x;
+	vec3 area_max_x = vec3(area_a_dir) * barn_clip_max.x;
+	vec3 area_min_y = vec3(area_b_dir) * barn_clip_min.y;
+	vec3 area_max_y = vec3(area_b_dir) * barn_clip_max.y;
+	vec3 area_rel_center = area_lights.data[idx].position - vertex;
+	points[0] = area_rel_center + area_min_x + area_min_y;
+	points[1] = area_rel_center + area_max_x + area_min_y;
+	points[2] = area_rel_center + area_max_x + area_max_y;
+	points[3] = area_rel_center + area_min_x + area_max_y;
+	vec4 area_tex_rect = barn_door_clip_texture_rect(area_lights.data[idx].projector_rect, vec2(a_half_len, b_half_len), barn_clip_min, barn_clip_max);
 
 	float ltc_diffuse = 0.0;
 	vec3 ltc_diffuse_tex_color = vec3(1.0);
@@ -1357,10 +1443,10 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	vec3 ltc_specular_tex_color = vec3(1.0);
 	vec2 ltc_fresnel = vec2(0.0);
 	hvec3 fresnel_color = hvec3(0.0);
-	ltc_evaluate(vec3(normal), vec3(eye_vec), mat3(1), points, area_lights.data[idx].projector_rect, max_mipmap, area_light_atlas, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP, ltc_diffuse, ltc_diffuse_tex_color);
+	ltc_evaluate(vec3(normal), vec3(eye_vec), mat3(1), points, area_tex_rect, max_mipmap, area_light_atlas, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP, ltc_diffuse, ltc_diffuse_tex_color);
 
 #if !defined(SPECULAR_DISABLED) || (defined(LIGHT_CODE_USED) && defined(AREA_LIGHT_CODE_USED))
-	ltc_evaluate_specular(vec3(normal), vec3(eye_vec), roughness, points, area_lights.data[idx].projector_rect, max_mipmap, area_light_atlas, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP, SAMPLER_LINEAR_CLAMP, ltc_lut1, ltc_lut2, ltc_specular, ltc_fresnel, ltc_specular_tex_color);
+	ltc_evaluate_specular(vec3(normal), vec3(eye_vec), roughness, points, area_tex_rect, max_mipmap, area_light_atlas, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP, SAMPLER_LINEAR_CLAMP, ltc_lut1, ltc_lut2, ltc_specular, ltc_fresnel, ltc_specular_tex_color);
 	half f90 = clamp(dot(f0, hvec3(50.0 * 0.33)), metallic, half(1.0));
 	fresnel_color = f0 * max(half(ltc_fresnel.x), half(0.0)) + (f90 - f0) * max(half(ltc_fresnel.y), half(0.0));
 #endif
@@ -1491,7 +1577,7 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	vec3 cc_specular_tex_color = vec3(1.0);
 	float cc_specular_ltc = 0.0;
 	vec2 cc_fresnel;
-	ltc_evaluate_specular(vec3(vertex_normal), vec3(eye_vec), sqrt(mix(0.001, 0.1, float(clearcoat_roughness))), points, area_lights.data[idx].projector_rect, max_mipmap, area_light_atlas, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP, SAMPLER_LINEAR_CLAMP, ltc_lut1, ltc_lut2, cc_specular_ltc, cc_fresnel, cc_specular_tex_color);
+	ltc_evaluate_specular(vec3(vertex_normal), vec3(eye_vec), sqrt(mix(0.001, 0.1, float(clearcoat_roughness))), points, area_tex_rect, max_mipmap, area_light_atlas, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP, SAMPLER_LINEAR_CLAMP, ltc_lut1, ltc_lut2, cc_specular_ltc, cc_fresnel, cc_specular_tex_color);
 	half Fr = (half(0.04) * max(half(cc_fresnel.x), half(0.0)) + half(1.0 - 0.04) * max(half(cc_fresnel.y), half(0.0))) * clearcoat;
 	cc_attenuation = half(1.0) - Fr;
 	specular_light += half(cc_specular_ltc) * hvec3(cc_specular_tex_color) * Fr * color * light_attenuation_ltc * specular_amount;

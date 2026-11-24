@@ -41,6 +41,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
+// GodotNext: light_source_parity (#140).
+#include "servers/rendering/renderer_rd/light_source_parity.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_retrace.glsl.gen.h"
@@ -48,6 +50,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/light_function_atlas.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
 
@@ -393,8 +396,8 @@ void NextGIRelight::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID buffers[12] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer, light_shadow_buffer, far_light_shadow_buffer, retrace_buffer, light_function_buffer };
-	for (int i = 0; i < 12; i++) {
+	RID buffers[13] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer, light_shadow_buffer, far_light_shadow_buffer, retrace_buffer, light_function_buffer, light_parity_buffer };
+	for (int i = 0; i < 13; i++) {
 		if (buffers[i].is_valid()) {
 			rd->free_rid(buffers[i]);
 		}
@@ -407,6 +410,9 @@ void NextGIRelight::free_resources() {
 	far_light_shadow_buffer = RID();
 	light_shadow_capacity = 0;
 	far_light_shadow_capacity = 0;
+	// GodotNext: light_source_parity (#140).
+	light_parity_buffer = RID();
+	light_parity_capacity = 0;
 	retrace_buffer = RID();
 	shadow_alpha_key = 0;
 	last_retrace_capacity = 0;
@@ -437,6 +443,9 @@ void NextGIRelight::free_resources() {
 	if (light_function_sampler.is_valid()) {
 		rd->free_rid(light_function_sampler);
 	}
+	if (parity_linear_sampler.is_valid()) {
+		rd->free_rid(parity_linear_sampler);
+	}
 	if (indirect_texture.is_valid()) {
 		rd->free_rid(indirect_texture);
 	}
@@ -452,6 +461,7 @@ void NextGIRelight::free_resources() {
 	material_sampler = RID();
 	shadow_sampler = RID();
 	light_function_sampler = RID();
+	parity_linear_sampler = RID();
 	atlases_ready = false;
 }
 
@@ -481,6 +491,15 @@ bool NextGIRelight::_ensure_atlases() {
 	lf_state.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	lf_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	light_function_sampler = rd->sampler_create(lf_state);
+	// GodotNext: light_source_parity (#140). Linear-with-mipmaps clamp sampler for area_light_atlas and ies_profile_atlas.
+	RD::SamplerState parity_state;
+	parity_state.mag_filter = RD::SAMPLER_FILTER_LINEAR;
+	parity_state.min_filter = RD::SAMPLER_FILTER_LINEAR;
+	parity_state.mip_filter = RD::SAMPLER_FILTER_LINEAR;
+	parity_state.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	parity_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	parity_state.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	parity_linear_sampler = rd->sampler_create(parity_state);
 
 	BitField<RD::TextureUsageBits> storage = RD::TEXTURE_USAGE_STORAGE_BIT;
 	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
@@ -1346,10 +1365,13 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		exposure = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);
 	}
 	const bool physical = RendererSceneRenderRD::get_singleton() != nullptr && RendererSceneRenderRD::get_singleton()->is_using_physical_light_units();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
 
 	struct CpuLight {
 		NextGILight gpu;
 		LightFunctionAtlasPacker::EntryGPU lf_entry; // GodotNext: light_function_atlas (#138)
+		// GodotNext: light_source_parity (#140).
+		NextGILightParity parity;
 		RID instance;
 		bool directional = false;
 		bool is_static = false;
@@ -1374,18 +1396,48 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		}
 		const Transform3D transform = light_storage->light_instance_get_base_transform(p_light_instance);
 		const Vector3 travel = -transform.basis.get_column(Vector3::AXIS_Z).normalized();
+		const Vector3 axis_x = transform.basis.get_column(Vector3::AXIS_X).normalized();
+		const Vector3 axis_y = transform.basis.get_column(Vector3::AXIS_Y).normalized();
 		Color color = RSG::light_storage->light_get_color(light).srgb_to_linear();
 		float energy = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY) * RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
 		const RSE::LightType type = RSG::light_storage->light_get_type(light);
-		if (physical) {
+
+		// GodotNext: light_source_parity (#140). IES profile, area rect texture & barn doors.
+		const RID ies_profile = light_storage->light_get_ies_profile(light);
+		const uint32_t ies_layer = light_storage->ies_profile_get_atlas_layer(ies_profile);
+		const bool ies_active = (type != RSE::LIGHT_DIRECTIONAL) && (ies_layer != LightSourceParity::IES_LAYER_NONE);
+		const float ies_peak = ies_active ? light_storage->ies_profile_get_peak_candela(ies_profile) : 1.0f;
+		const bool ies_use_intensity = ies_active && light_storage->light_get_ies_use_intensity(light);
+		const float ies_scale = ies_active ? light_storage->light_get_ies_intensity_scale(light) : 1.0f;
+
+		if (ies_use_intensity) {
+			energy *= ies_peak;
+		} else if (physical) {
 			energy *= RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_INTENSITY);
 			if (type == RSE::LIGHT_OMNI) {
 				energy *= 1.0f / (Math::PI * 4.0f);
+			} else if (type == RSE::LIGHT_AREA) {
+				energy *= 1.0f / (Math::PI * 2.0f);
 			} else if (type == RSE::LIGHT_SPOT) {
 				energy *= 1.0f / Math::PI;
 			}
 		}
 		energy *= exposure;
+		Vector2 area_size;
+		Rect2 area_tex_rect;
+		if (type == RSE::LIGHT_AREA) {
+			area_size = light_storage->light_area_get_size(light);
+			if (light_storage->light_area_get_normalize_energy(light)) {
+				const float surface_area = area_size.x * area_size.y;
+				if (surface_area > 1e-6f) {
+					energy /= surface_area;
+				}
+			}
+			const RID area_tex = light_storage->light_area_get_texture(light);
+			if (area_tex.is_valid() && texture_storage != nullptr) {
+				area_tex_rect = texture_storage->area_light_atlas_get_texture_rect(area_tex);
+			}
+		}
 		const float range = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);
 		const float spot_atten = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ATTENUATION);
 
@@ -1428,6 +1480,22 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 				any_light_function = true;
 			}
 		}
+		cpu.parity.axis_x_width[0] = axis_x.x;
+		cpu.parity.axis_x_width[1] = axis_x.y;
+		cpu.parity.axis_x_width[2] = axis_x.z;
+		cpu.parity.axis_x_width[3] = area_size.x;
+		cpu.parity.axis_y_height[0] = axis_y.x;
+		cpu.parity.axis_y_height[1] = axis_y.y;
+		cpu.parity.axis_y_height[2] = axis_y.z;
+		cpu.parity.axis_y_height[3] = area_size.y;
+		cpu.parity.area_tex_rect[0] = area_tex_rect.position.x;
+		cpu.parity.area_tex_rect[1] = area_tex_rect.position.y;
+		cpu.parity.area_tex_rect[2] = area_tex_rect.size.x;
+		cpu.parity.area_tex_rect[3] = area_tex_rect.size.y;
+		cpu.parity.ies_layer = ies_active ? ies_layer : LightSourceParity::IES_LAYER_NONE;
+		cpu.parity.ies_scale = ies_scale;
+		cpu.parity.barn_door_angle_rad = float(Math::deg_to_rad(CLAMP(double(RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_BARN_DOOR_ANGLE)), 0.0, 90.0)));
+		cpu.parity.barn_door_length = MAX(RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_BARN_DOOR_LENGTH), 0.0f);
 		cpu_lights.push_back(cpu);
 		if (p_directional) {
 			last_directional++;
@@ -1609,12 +1677,15 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	schedule_cursor = flat.is_empty() ? 0 : (schedule_cursor + scheduled_count) % flat.size();
 
 	LocalVector<NextGILight> gpu_lights;
+	LocalVector<NextGILightParity> gpu_parities;
 	gpu_lights.resize(MAX(cpu_lights.size(), 1u));
 	LocalVector<LightFunctionAtlasPacker::EntryGPU> gpu_lf_entries;
 	gpu_lf_entries.resize(gpu_lights.size());
+	gpu_parities.resize(gpu_lights.size());
 	for (uint32_t i = 0; i < cpu_lights.size(); i++) {
 		gpu_lights[i] = cpu_lights[i].gpu;
 		gpu_lf_entries[i] = cpu_lights[i].lf_entry;
+		gpu_parities[i] = cpu_lights[i].parity;
 	}
 	// GodotNext: nextgi_shadow_policy (#145). Per light, the light word and the caster mask trace_shadow() takes. The
 	// far TLAS's proxies carry every bit and no shadow instance words, so the far dispatch traces them all as
@@ -1676,11 +1747,25 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 				const int type = int(cpu.gpu.direction_type[3] + 0.5f);
 				if (type == RSE::LIGHT_SPOT) {
 					atten = nextgi_spot_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation, (-to_light).dot(travel), cpu.gpu.cos_spot, cpu.gpu.inv_spot_atten);
+				} else if (type == RSE::LIGHT_AREA) {
+					// GodotNext: light_source_parity (#140). Measure distance from closest point on area rect.
+					const Vector3 ax(cpu.parity.axis_x_width[0], cpu.parity.axis_x_width[1], cpu.parity.axis_x_width[2]);
+					const Vector3 ay(cpu.parity.axis_y_height[0], cpu.parity.axis_y_height[1], cpu.parity.axis_y_height[2]);
+					const Vector3 rel = center - light_position;
+					const float hx = cpu.parity.axis_x_width[3] * 0.5f;
+					const float hy = cpu.parity.axis_y_height[3] * 0.5f;
+					const Vector3 closest = light_position + ax * CLAMP(rel.dot(ax), -hx, hx) + ay * CLAMP(rel.dot(ay), -hy, hy);
+					const Vector3 c_delta = closest - center;
+					const float c_dist = c_delta.length();
+					const Vector3 c_to_light = c_dist > 1e-4f ? c_delta / c_dist : -travel;
+					ndotl = MAX(normal.dot(c_to_light), ndotl);
+					atten = nextgi_omni_attenuation(c_dist, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation) * MAX(cpu.parity.axis_x_width[3] * cpu.parity.axis_y_height[3], 1e-3f);
 				} else {
 					atten = nextgi_omni_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation);
 				}
 			}
-			const float rank = cpu.gpu.color_energy[3] * atten * MAX(ndotl, 0.0f);
+			const float ies_rank_scale = cpu.parity.ies_layer != LightSourceParity::IES_LAYER_NONE ? cpu.parity.ies_scale : 1.0f;
+			const float rank = cpu.gpu.color_energy[3] * ies_rank_scale * atten * MAX(ndotl, 0.0f);
 			if (rank <= 0.0f) {
 				continue;
 			}
@@ -1740,6 +1825,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	_storage_buffer(light_buffer, light_capacity, gpu_lights.size(), sizeof(NextGILight));
 	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 	_storage_buffer(light_function_buffer, light_function_capacity, gpu_lf_entries.size(), sizeof(LightFunctionAtlasPacker::EntryGPU));
+	// GodotNext: light_source_parity (#140).
+	_storage_buffer(light_parity_buffer, light_parity_capacity, gpu_parities.size(), sizeof(NextGILightParity));
 	// GodotNext: nextgi_shadow_policy (#145)
 	_storage_buffer(light_shadow_buffer, light_shadow_capacity, gpu_lights.size(), sizeof(uint32_t) * 2);
 	_storage_buffer(far_light_shadow_buffer, far_light_shadow_capacity, gpu_lights.size(), sizeof(uint32_t) * 2);
@@ -1776,6 +1863,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		rd->buffer_update(light_buffer, 0, gpu_lights.size() * sizeof(NextGILight), gpu_lights.ptr());
 		// GodotNext: light_function_atlas (#138).
 		rd->buffer_update(light_function_buffer, 0, gpu_lf_entries.size() * sizeof(LightFunctionAtlasPacker::EntryGPU), gpu_lf_entries.ptr());
+		// GodotNext: light_source_parity (#140).
+		rd->buffer_update(light_parity_buffer, 0, gpu_parities.size() * sizeof(NextGILightParity), gpu_parities.ptr());
 		// GodotNext: nextgi_shadow_policy (#145)
 		rd->buffer_update(light_shadow_buffer, 0, light_shadows.size() * sizeof(uint32_t), light_shadows.ptr());
 		rd->buffer_update(far_light_shadow_buffer, 0, far_light_shadows.size() * sizeof(uint32_t), far_light_shadows.ptr());
@@ -1892,9 +1981,17 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		}
 	}
 	const RID lf_atlas_tex = lf_atlas != nullptr ? lf_atlas->get_atlas_texture_or_default() : src->get_atlas_texture(NextGISRC::ATLAS_ALBEDO);
+	// GodotNext: light_source_parity (#140). Area light texture atlas & IES profile atlas.
+	RID area_atlas_tex = texture_storage != nullptr ? texture_storage->area_light_atlas_get_texture() : RID();
+	if (!area_atlas_tex.is_valid() && texture_storage != nullptr) {
+		area_atlas_tex = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+	}
+	const RID ies_atlas_tex = light_storage->get_ies_atlas_texture();
 	static RID cached_lf_atlas;
 	static RID cached_lf_buffer;
-	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != record_buffer || cached_near_tlas != tlas || cached_far_tlas != far_tlas || cached_swrt != swrt || cached_lf_atlas != lf_atlas_tex || cached_lf_buffer != light_function_buffer) {
+	static RID cached_area_atlas;
+	static RID cached_ies_atlas;
+	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != record_buffer || cached_near_tlas != tlas || cached_far_tlas != far_tlas || cached_swrt != swrt || cached_lf_atlas != lf_atlas_tex || cached_lf_buffer != light_function_buffer || cached_area_atlas != area_atlas_tex || cached_ies_atlas != ies_atlas_tex) {
 		_reset_uniform_set();
 		cached_directional = directional_tex;
 		cached_positional = positional_tex;
@@ -1905,6 +2002,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cached_swrt = swrt;
 		cached_lf_atlas = lf_atlas_tex;
 		cached_lf_buffer = light_function_buffer;
+		cached_area_atlas = area_atlas_tex;
+		cached_ies_atlas = ies_atlas_tex;
 	}
 	if (!uniform_set.is_valid()) {
 		RD::Uniform uniforms[23] = {
@@ -1933,11 +2032,17 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, shadow_alpha),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, light_shadow_buffer),
 		};
+		auto append_parity_uniforms = [&](LocalVector<RD::Uniform> &r_list) {
+			r_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, light_parity_buffer));
+			r_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 32, area_atlas_tex));
+			r_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 33, ies_atlas_tex));
+			r_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 34, parity_linear_sampler));
+		};
 		if (swrt) {
 			// GodotNext: ps_swrt_trace (#186, #188). The sibling's set 0 holds the per-light candidate
 			// lists in place of the TLAS (#186 step 5), and there is no far field (HWRT only, plan L8).
 			LocalVector<RD::Uniform> swrt_list;
-			swrt_list.reserve(22);
+			swrt_list.reserve(26);
 			swrt_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, candidate_buffer));
 			for (int i = 1; i < 20; i++) {
 				swrt_list.push_back(uniforms[i]);
@@ -1945,6 +2050,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 			swrt_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 29, Vector<RID>({ light_function_sampler, lf_atlas_tex })));
 			swrt_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, light_function_buffer));
+			append_parity_uniforms(swrt_list);
 			uniform_set = rd->uniform_set_create(swrt_list, shader_rid, 0);
 		} else if (shadow_instances.is_valid() && shadow_alpha.is_valid()) {
 			// GodotNext: nextgi_shadow_policy (#145). Variant 1 adds the alpha path's arena chunks and sampler (23 to
@@ -1962,6 +2068,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 			list.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 29, Vector<RID>({ light_function_sampler, lf_atlas_tex })));
 			list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, light_function_buffer));
+			append_parity_uniforms(list);
 			uniform_set = rd->uniform_set_create(list, shader_rid, 0);
 			list[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
 			list[22] = RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, far_light_shadow_buffer);

@@ -178,10 +178,13 @@ public:
 	struct SSCSSettings {
 		RSE::ScreenSpaceContactShadowsLength quality = RSE::SCREEN_SPACE_CONTACT_SHADOWS_LENGTH_MEDIUM;
 		float surface_thickness = 0.01f;
+		// GodotNext: light_source_parity (#140). Per-light contact shadow length (screen-height fraction or world-space meters).
+		float contact_shadow_length = 0.12f;
+		bool world_space = false;
 	};
 
 	void sscs_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, SSCSRenderBuffers &p_sscs_buffers, uint32_t p_contact_shadow_count);
-	void screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_buffers, SSCSRenderBuffers &p_sscs_buffers, const SSCSSettings &p_settings, const Projection *p_projections, Vector3 p_light_direction, uint32_t p_light_index, float p_blur, float p_taa_frame_count);
+	void screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_buffers, SSCSRenderBuffers &p_sscs_buffers, const SSCSSettings &p_settings, const Projection *p_projections, Vector3 p_light_coord, bool p_is_directional, uint32_t p_light_index, float p_blur, float p_taa_frame_count);
 
 private:
 	/* Settings */
@@ -545,7 +548,15 @@ private:
 		float surface_thickness;
 		float blur;
 		float taa_frame_count;
+		// GodotNext: light_source_parity (#140). Per-light length & world-space linear depth conversion.
+		float contact_shadow_length;
+		uint32_t world_space;
+		uint32_t is_orthogonal;
+		float proj_scale_y;
+		float pad;
+		float inv_proj_z[4];
 	};
+	static_assert(sizeof(ScreenSpaceContactShadowsPushConstant) == 80, "ScreenSpaceContactShadowsPushConstant must match screen_space_contact_shadows.glsl.");
 
 	/* Subsurface scattering */
 

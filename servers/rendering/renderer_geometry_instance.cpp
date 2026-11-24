@@ -151,6 +151,14 @@ void RenderGeometryInstanceBase::set_shadow_cache_invalidation(RSE::ShadowCacheI
 	data->shadow_cache_invalidation = p_invalidation;
 }
 
+// GodotNext: light_source_parity (#140).
+void RenderGeometryInstanceBase::set_casts_shadows(bool p_enable) {
+	if (data->casts_shadows != p_enable) {
+		data->casts_shadows = p_enable;
+		_mark_dirty();
+	}
+}
+
 void RenderGeometryInstanceBase::reset_motion_vectors() {
 }
 

@@ -349,6 +349,8 @@ public:
 		// GodotNext: light_function_atlas (#138). Last bound atlas/buffer RIDs for density uniform-set invalidation.
 		RID bound_light_function_atlas;
 		RID bound_light_function_buffer;
+		// GodotNext: light_source_parity (#140).
+		RID bound_ies_profile_atlas;
 
 		int last_shadow_filter = -1;
 
@@ -409,6 +411,8 @@ public:
 		RID light_function_atlas;
 		RID light_function_buffer;
 		uint32_t light_function_count = 0;
+		// GodotNext: light_source_parity (#140). IES profile atlas for volumetric fog light evaluation.
+		RID ies_profile_atlas;
 	};
 	void volumetric_fog_update(const VolumetricFogSettings &p_settings, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes);
 };

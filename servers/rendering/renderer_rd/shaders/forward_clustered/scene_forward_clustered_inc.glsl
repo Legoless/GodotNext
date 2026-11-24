@@ -242,6 +242,8 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 
 // GodotNext: nextgi_alpha_policy (#61).
 #define INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY (1 << 0)
+// GodotNext: light_source_parity (#140).
+#define INSTANCE_FLAGS_CASTS_SHADOWS (1 << 1)
 #define INSTANCE_FLAGS_DYNAMIC (1 << 3)
 #define INSTANCE_FLAGS_NON_UNIFORM_SCALE (1 << 4)
 #define INSTANCE_FLAGS_USE_GI_BUFFERS (1 << 5)
@@ -667,6 +669,11 @@ layout(set = 1, binding = 63, std430) buffer restrict readonly LightFunctionBuff
 light_function_data;
 
 #define FORWARD_CLUSTERED_LIGHT_GRID
+
+// GodotNext: light_source_parity (#140, plan §21.3 contract M8). IES profile Texture2DArray atlas
+// bound at Set 1 binding 64 (bindings 62..63 are reserved for #138 Light Function Atlas).
+layout(set = 1, binding = 64) uniform texture2DArray ies_profile_atlas;
+#define FORWARD_CLUSTERED_IES_ATLAS
 
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #define LIGHT_FUNCTION_ATLAS

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/io/image.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/storage/render_scene_buffers.h"
 
@@ -79,6 +80,19 @@ public:
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) = 0;
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) = 0;
 	virtual bool light_get_allow_contact_shadows(RID p_light) const = 0;
+	// GodotNext: light_source_parity (#140).
+	virtual RID ies_profile_allocate() = 0;
+	virtual void ies_profile_initialize(RID p_rid) = 0;
+	virtual void ies_profile_free(RID p_rid) = 0;
+	virtual void ies_profile_set_data(RID p_ies_profile, const Ref<Image> &p_image, float p_peak_candela) = 0;
+	virtual void light_set_ies_profile(RID p_light, RID p_ies_profile) = 0;
+	virtual RID light_get_ies_profile(RID p_light) const { return RID(); }
+	virtual void light_set_ies_use_intensity(RID p_light, bool p_use_intensity) = 0;
+	virtual bool light_get_ies_use_intensity(RID p_light) const { return false; }
+	virtual void light_set_ies_intensity_scale(RID p_light, float p_scale) = 0;
+	virtual float light_get_ies_intensity_scale(RID p_light) const { return 1.0f; }
+	virtual void light_set_contact_shadow_length_world_space(RID p_light, bool p_world_space) = 0;
+	virtual bool light_get_contact_shadow_length_world_space(RID p_light) const = 0;
 
 	virtual void light_omni_set_shadow_mode(RID p_light, RSE::LightOmniShadowMode p_mode) = 0;
 

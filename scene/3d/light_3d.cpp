@@ -176,6 +176,44 @@ bool Light3D::get_allow_contact_shadows() const {
 	return allow_contact_shadows;
 }
 
+// GodotNext: light_source_parity (#140).
+void Light3D::set_ies_profile(const Ref<IESProfile> &p_profile) {
+	ies_profile = p_profile;
+	RID profile_rid = ies_profile.is_valid() ? ies_profile->get_rid() : RID();
+	RS::get_singleton()->light_set_ies_profile(light, profile_rid);
+}
+
+Ref<IESProfile> Light3D::get_ies_profile() const {
+	return ies_profile;
+}
+
+void Light3D::set_ies_use_intensity(bool p_use_intensity) {
+	ies_use_intensity = p_use_intensity;
+	RS::get_singleton()->light_set_ies_use_intensity(light, p_use_intensity);
+}
+
+bool Light3D::get_ies_use_intensity() const {
+	return ies_use_intensity;
+}
+
+void Light3D::set_ies_intensity_scale(float p_scale) {
+	ies_intensity_scale = MAX(p_scale, 0.0f);
+	RS::get_singleton()->light_set_ies_intensity_scale(light, ies_intensity_scale);
+}
+
+float Light3D::get_ies_intensity_scale() const {
+	return ies_intensity_scale;
+}
+
+void Light3D::set_contact_shadow_length_world_space(bool p_world_space) {
+	contact_shadow_length_world_space = p_world_space;
+	RS::get_singleton()->light_set_contact_shadow_length_world_space(light, p_world_space);
+}
+
+bool Light3D::get_contact_shadow_length_world_space() const {
+	return contact_shadow_length_world_space;
+}
+
 AABB Light3D::get_aabb() const {
 	if (type == RSE::LIGHT_DIRECTIONAL) {
 		return AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2));
@@ -421,8 +459,8 @@ void Light3D::_validate_property(PropertyInfo &p_property) const {
 		p_property.usage = PROPERTY_USAGE_NONE;
 	} else if (get_light_type() == RSE::LIGHT_AREA && p_property.name == "light_projector") {
 		p_property.usage = PROPERTY_USAGE_NONE;
-	} else if (get_light_type() != RSE::LIGHT_DIRECTIONAL && (p_property.name == "shadow_contact_shadows_allow" || p_property.name == "shadow_contact_shadows_blur")) {
-		// Contact shadows are currently only supported on DirectionalLight3D.
+	} else if (get_light_type() == RSE::LIGHT_DIRECTIONAL && (p_property.name == "ies_profile" || p_property.name == "ies_use_intensity" || p_property.name == "ies_intensity_scale")) {
+		// GodotNext: light_source_parity (#140). IES profiles apply to positional (omni, spot, area) lights.
 		p_property.usage = PROPERTY_USAGE_NONE;
 	} else if (get_light_type() != RSE::LIGHT_DIRECTIONAL && (p_property.name == "distance_field_shadow_start" || p_property.name == "distance_field_shadow_distance")) {
 		// GodotNext: df_shadows (#214). Directional DF far-shadow handoff distances apply only to DirectionalLight3D.
@@ -469,6 +507,19 @@ void Light3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_allow_contact_shadows", "enabled"), &Light3D::set_allow_contact_shadows);
 	ClassDB::bind_method(D_METHOD("get_allow_contact_shadows"), &Light3D::get_allow_contact_shadows);
+
+	// GodotNext: light_source_parity (#140).
+	ClassDB::bind_method(D_METHOD("set_ies_profile", "profile"), &Light3D::set_ies_profile);
+	ClassDB::bind_method(D_METHOD("get_ies_profile"), &Light3D::get_ies_profile);
+
+	ClassDB::bind_method(D_METHOD("set_ies_use_intensity", "use_intensity"), &Light3D::set_ies_use_intensity);
+	ClassDB::bind_method(D_METHOD("get_ies_use_intensity"), &Light3D::get_ies_use_intensity);
+
+	ClassDB::bind_method(D_METHOD("set_ies_intensity_scale", "scale"), &Light3D::set_ies_intensity_scale);
+	ClassDB::bind_method(D_METHOD("get_ies_intensity_scale"), &Light3D::get_ies_intensity_scale);
+
+	ClassDB::bind_method(D_METHOD("set_contact_shadow_length_world_space", "world_space"), &Light3D::set_contact_shadow_length_world_space);
+	ClassDB::bind_method(D_METHOD("get_contact_shadow_length_world_space"), &Light3D::get_contact_shadow_length_world_space);
 
 	ClassDB::bind_method(D_METHOD("set_bake_mode", "bake_mode"), &Light3D::set_bake_mode);
 	ClassDB::bind_method(D_METHOD("get_bake_mode"), &Light3D::get_bake_mode);
@@ -527,6 +578,18 @@ void Light3D::_bind_methods() {
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "shadow_contact_shadows_blur", PROPERTY_HINT_RANGE, "0,10,0.001"), "set_param", "get_param", PARAM_CONTACT_SHADOW_BLUR);
 	ADD_SUBGROUP("", "");
 
+	// GodotNext: light_source_parity (#140). Per-light contact shadow controls and IES profile.
+	ADD_GROUP("Contact Shadow", "contact_shadow_");
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "contact_shadow_length", PROPERTY_HINT_RANGE, "-1,10,0.001,or_greater"), "set_param", "get_param", PARAM_CONTACT_SHADOW_LENGTH);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "contact_shadow_length_world_space"), "set_contact_shadow_length_world_space", "get_contact_shadow_length_world_space");
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "contact_shadow_casting_intensity", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_param", "get_param", PARAM_CONTACT_SHADOW_CASTING_INTENSITY);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "contact_shadow_non_casting_intensity", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_param", "get_param", PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY);
+
+	ADD_GROUP("IES Profile", "ies_");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "ies_profile", PROPERTY_HINT_RESOURCE_TYPE, "IESProfile"), "set_ies_profile", "get_ies_profile");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ies_use_intensity"), "set_ies_use_intensity", "get_ies_use_intensity");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ies_intensity_scale", PROPERTY_HINT_RANGE, "0,100,0.01,or_greater"), "set_ies_intensity_scale", "get_ies_intensity_scale");
+
 	// GodotNext: df_shadows (#214, plan §21.3 contract S7).
 	ADD_GROUP("Distance Field Shadow", "distance_field_shadow_");
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_start", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_START);
@@ -573,6 +636,10 @@ void Light3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(PARAM_BARN_DOOR_LENGTH);
 	// GodotNext: vsm_local_lights (#216).
 	BIND_ENUM_CONSTANT(PARAM_SHADOW_RESOLUTION_BIAS);
+	// GodotNext: light_source_parity (#140).
+	BIND_ENUM_CONSTANT(PARAM_CONTACT_SHADOW_LENGTH);
+	BIND_ENUM_CONSTANT(PARAM_CONTACT_SHADOW_CASTING_INTENSITY);
+	BIND_ENUM_CONSTANT(PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY);
 	BIND_ENUM_CONSTANT(PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(BAKE_DISABLED);
@@ -643,6 +710,13 @@ Light3D::Light3D(RSE::LightType p_type) {
 	set_param(PARAM_BARN_DOOR_LENGTH, 0.2);
 	// GodotNext: vsm_local_lights (#216).
 	set_param(PARAM_SHADOW_RESOLUTION_BIAS, 0.0);
+	// GodotNext: light_source_parity (#140). Default contact shadow length 0 (off) is byte-identical to disabled.
+	set_param(PARAM_CONTACT_SHADOW_LENGTH, 0.0);
+	set_param(PARAM_CONTACT_SHADOW_CASTING_INTENSITY, 1.0);
+	set_param(PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY, 0.0);
+	set_contact_shadow_length_world_space(false);
+	set_ies_use_intensity(false);
+	set_ies_intensity_scale(1.0);
 	// For OmniLight3D and SpotLight3D, specified in Lumens.
 	set_param(PARAM_INTENSITY, 1000.0);
 	set_temperature(6500.0); // Nearly white.

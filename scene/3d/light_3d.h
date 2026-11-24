@@ -31,6 +31,8 @@
 #pragma once
 
 #include "scene/3d/visual_instance_3d.h"
+// GodotNext: light_source_parity (#140).
+#include "scene/resources/ies_profile.h"
 
 class Material;
 
@@ -69,6 +71,10 @@ public:
 		PARAM_BARN_DOOR_LENGTH = RSE::LIGHT_PARAM_BARN_DOOR_LENGTH,
 		// GodotNext: vsm_local_lights (#216).
 		PARAM_SHADOW_RESOLUTION_BIAS = RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS,
+		// GodotNext: light_source_parity (#140).
+		PARAM_CONTACT_SHADOW_LENGTH = RSE::LIGHT_PARAM_CONTACT_SHADOW_LENGTH,
+		PARAM_CONTACT_SHADOW_CASTING_INTENSITY = RSE::LIGHT_PARAM_CONTACT_SHADOW_CASTING_INTENSITY,
+		PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY = RSE::LIGHT_PARAM_CONTACT_SHADOW_NON_CASTING_INTENSITY,
 		PARAM_MAX = RSE::LIGHT_PARAM_MAX
 	};
 
@@ -112,6 +118,11 @@ private:
 	Color correlated_color = Color(1.0, 1.0, 1.0);
 	float temperature = 6500.0;
 	bool allow_contact_shadows = true;
+	// GodotNext: light_source_parity (#140).
+	Ref<IESProfile> ies_profile;
+	bool ies_use_intensity = false;
+	float ies_intensity_scale = 1.0f;
+	bool contact_shadow_length_world_space = false;
 	// bind helpers
 
 	virtual void owner_changed_notify() override;
@@ -166,6 +177,19 @@ public:
 
 	void set_allow_contact_shadows(bool p_enable);
 	bool get_allow_contact_shadows() const;
+
+	// GodotNext: light_source_parity (#140).
+	void set_ies_profile(const Ref<IESProfile> &p_profile);
+	Ref<IESProfile> get_ies_profile() const;
+
+	void set_ies_use_intensity(bool p_use_intensity);
+	bool get_ies_use_intensity() const;
+
+	void set_ies_intensity_scale(float p_scale);
+	float get_ies_intensity_scale() const;
+
+	void set_contact_shadow_length_world_space(bool p_world_space);
+	bool get_contact_shadow_length_world_space() const;
 
 	void set_bake_mode(BakeMode p_mode);
 	BakeMode get_bake_mode() const;

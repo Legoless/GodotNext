@@ -346,6 +346,13 @@ public:
 	virtual void light_set_reverse_cull_face_mode(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_shadow_caster_mask(RID p_light, uint32_t p_caster_mask) = 0;
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) = 0;
+	// GodotNext: light_source_parity (#140, plan §21.3 contract M8).
+	virtual RID ies_profile_create() = 0;
+	virtual void ies_profile_set_data(RID p_profile, const Ref<Image> &p_image, float p_peak_candela) = 0;
+	virtual void light_set_ies_profile(RID p_light, RID p_ies_profile) = 0;
+	virtual void light_set_ies_use_intensity(RID p_light, bool p_enable) = 0;
+	virtual void light_set_ies_intensity_scale(RID p_light, float p_scale) = 0;
+	virtual void light_set_contact_shadow_length_world_space(RID p_light, bool p_enable) = 0;
 
 	virtual void light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mode) = 0;
 	// GodotNext: vsm_settings_debug (#221).

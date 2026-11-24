@@ -1910,7 +1910,7 @@ void SSEffects::sscs_allocate_buffers(Ref<RenderSceneBuffersRD> p_render_buffers
 	}
 }
 
-void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_buffers, SSCSRenderBuffers &p_sscs_buffers, const SSCSSettings &p_settings, const Projection *p_projections, Vector3 p_light_direction, uint32_t p_light_index, float p_blur, float p_taa_frame_count) {
+void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_buffers, SSCSRenderBuffers &p_sscs_buffers, const SSCSSettings &p_settings, const Projection *p_projections, Vector3 p_light_coord, bool p_is_directional, uint32_t p_light_index, float p_blur, float p_taa_frame_count) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
@@ -1925,15 +1925,18 @@ void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_
 	correction.set_depth_correction(true);
 
 	for (uint32_t v = 0; v < view_count; v++) {
-		// Calculate light coordinate in screen space
+		// Calculate light coordinate in screen space (directional: w = 0 direction toward light; local: w = 1 view-space position).
 		Projection projection = correction * p_projections[v];
-		Vector4 projected_light = projection.xform(Vector4(p_light_direction.x, p_light_direction.y, p_light_direction.z, 0));
+		Projection inv_projection = projection.inverse();
+		Vector4 projected_light = projection.xform(Vector4(p_light_coord.x, p_light_coord.y, p_light_coord.z, p_is_directional ? 0.0f : 1.0f));
 
 		const int wave_size = 64;
 		Vector4 light;
 		Vector2i bound_start;
 		Vector2i bound_end;
-		if (Math::abs(projected_light.w) > 1e-6) {
+		const float max_xy = MAX(Math::abs(projected_light.x), Math::abs(projected_light.y));
+		// Treat near-horizon / near-camera-plane lights as parallel rays to prevent integer offset overflow.
+		if (Math::abs(projected_light.w) > MAX(1e-6f, max_xy * 1e-3f)) {
 			// Need precise XY pixel coordinates of the light
 			light = Vector4(
 					(projected_light.x / projected_light.w * 0.5f + 0.5f) * p_sscs_buffers.size.width,
@@ -1953,7 +1956,11 @@ void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_
 					projected_light.y * p_sscs_buffers.size.height * 0.5,
 					projected_light.z,
 					0);
-			light = light / MAX(Math::abs(light.x), Math::abs(light.y));
+			const float denom = MAX(Math::abs(light.x), Math::abs(light.y));
+			if (denom <= 1e-6f) {
+				continue;
+			}
+			light = light / denom;
 
 			bound_start = Vector2i(
 					light.x > 0 && light.x < Math::abs(light.y) ? -1 : 0,
@@ -1964,6 +1971,9 @@ void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_
 		}
 
 		Size2i bound_size = bound_end - bound_start;
+		if (bound_size.x <= 0 || bound_size.y <= 0) {
+			continue;
+		}
 
 		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, sscs.sscs_pipelines[p_settings.quality].get_rid());
@@ -1980,6 +1990,16 @@ void SSEffects::screen_space_contact_shadows(Ref<RenderSceneBuffersRD> p_render_
 		push_constant.light_coordinates[3] = light.w;
 		push_constant.light_offset[0] = bound_start.x * wave_size;
 		push_constant.light_offset[1] = bound_start.y * wave_size;
+		// GodotNext: light_source_parity (#140). Per-light length & depth conversion coefficients.
+		push_constant.contact_shadow_length = MAX(p_settings.contact_shadow_length, 0.0f);
+		push_constant.world_space = p_settings.world_space ? 1u : 0u;
+		push_constant.is_orthogonal = p_projections[v].is_orthogonal() ? 1u : 0u;
+		push_constant.proj_scale_y = Math::abs(p_projections[v].columns[1][1]);
+		push_constant.pad = 0.0f;
+		push_constant.inv_proj_z[0] = inv_projection.columns[2][2];
+		push_constant.inv_proj_z[1] = inv_projection.columns[3][2];
+		push_constant.inv_proj_z[2] = inv_projection.columns[2][3];
+		push_constant.inv_proj_z[3] = inv_projection.columns[3][3];
 
 		RID depth_buffer = p_render_buffers->get_depth_texture(v);
 		uint32_t layer = p_light_index * view_count + v;
