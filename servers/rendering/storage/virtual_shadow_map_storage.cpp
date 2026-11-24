@@ -2246,6 +2246,8 @@ const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING
 const char *const RendererVirtualShadowMapStorage::SETTING_DISTANT_LIGHT_SCREEN_RADIUS = "rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius";
 // GodotNext: df_shadows (#214).
 const char *const RendererVirtualShadowMapStorage::SETTING_DF_MAX_LIGHTS = "rendering/lights_and_shadows/virtual_shadows/df_max_lights";
+// GodotNext: rt_shadows (#141, plan §21.3 contract M9).
+const char *const RendererVirtualShadowMapStorage::SETTING_RAY_TRACED_SHADOWS = "rendering/lights_and_shadows/ray_traced_shadows";
 
 namespace {
 
@@ -2264,6 +2266,9 @@ SafeNumeric<uint64_t> vsm_frame_stats[RendererVirtualShadowMapStorage::FRAME_STA
 SafeFlag vsm_df_nextgi_hwrt;
 SafeFlag vsm_df_fallback_reported;
 SafeNumeric<uint32_t> vsm_df_fallback_lines;
+// GodotNext: rt_shadows (#141).
+SafeFlag vsm_rt_fallback_reported;
+SafeNumeric<uint32_t> vsm_rt_fallback_lines;
 
 } // namespace
 
@@ -2300,7 +2305,7 @@ String RendererVirtualShadowMapStorage::format_fallback_line(TierReason p_reason
 }
 
 bool RendererVirtualShadowMapStorage::is_light_shadow_method_implemented(RSE::LightShadowMethod p_method) {
-	return p_method == RSE::LIGHT_SHADOW_METHOD_PROJECT || p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL || p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS || p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD;
+	return p_method == RSE::LIGHT_SHADOW_METHOD_PROJECT || p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL || p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS || p_method == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED || p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD;
 }
 
 const char *RendererVirtualShadowMapStorage::get_light_shadow_method_name(RSE::LightShadowMethod p_method) {
@@ -2320,25 +2325,104 @@ const char *RendererVirtualShadowMapStorage::get_light_shadow_method_name(RSE::L
 	}
 }
 
-bool RendererVirtualShadowMapStorage::light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_df_available) {
+bool RendererVirtualShadowMapStorage::light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_df_available, bool p_rt_available, bool p_project_rt) {
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL) {
 		return true;
 	}
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS) {
 		return false;
 	}
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED) {
+		return !p_rt_available && p_project == SHADOW_METHOD_VIRTUAL;
+	}
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD) {
 		return !p_df_available && p_project == SHADOW_METHOD_VIRTUAL;
 	}
-	// PROJECT, and methods that are not implemented yet (RAY_TRACED resolves to PROJECT).
+	// PROJECT: ray_traced_shadows takes precedence when HWRT is active; otherwise follow p_project.
+	if (p_project_rt && p_rt_available) {
+		return false;
+	}
 	return p_project == SHADOW_METHOD_VIRTUAL;
 }
 
-RSE::LightShadowMethod RendererVirtualShadowMapStorage::resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available, bool p_df_available) {
+RSE::LightShadowMethod RendererVirtualShadowMapStorage::resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available, bool p_df_available, bool p_rt_available, bool p_project_rt) {
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED && p_rt_available) {
+		return RSE::LIGHT_SHADOW_METHOD_RAY_TRACED;
+	}
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_PROJECT && p_project_rt && p_rt_available) {
+		return RSE::LIGHT_SHADOW_METHOD_RAY_TRACED;
+	}
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD && p_df_available) {
 		return RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD;
 	}
-	return (p_vsm_available && light_shadow_method_wants_virtual(p_method, p_project, p_df_available)) ? RSE::LIGHT_SHADOW_METHOD_VIRTUAL : RSE::LIGHT_SHADOW_METHOD_ATLAS;
+	return (p_vsm_available && light_shadow_method_wants_virtual(p_method, p_project, p_df_available, p_rt_available, p_project_rt)) ? RSE::LIGHT_SHADOW_METHOD_VIRTUAL : RSE::LIGHT_SHADOW_METHOD_ATLAS;
+}
+
+/* RAY-TRACED SHADOWS (#141, plan §21.3 contract M9) */
+
+RendererVirtualShadowMapStorage::RTTierReason RendererVirtualShadowMapStorage::evaluate_rt_tier(const RTTierInputs &p_inputs) {
+	if (!p_inputs.forward_plus) {
+		return RT_TIER_REASON_UNSUPPORTED_RENDERER;
+	}
+	if (!p_inputs.nextgi_hwrt) {
+		return RT_TIER_REASON_HWRT_UNAVAILABLE;
+	}
+	return RT_TIER_REASON_NONE;
+}
+
+const char *RendererVirtualShadowMapStorage::get_rt_tier_reason_name(RTTierReason p_reason) {
+	switch (p_reason) {
+		case RT_TIER_REASON_NONE:
+			return "NONE";
+		case RT_TIER_REASON_UNSUPPORTED_RENDERER:
+			return "UNSUPPORTED_RENDERER";
+		case RT_TIER_REASON_HWRT_UNAVAILABLE:
+			return "HWRT_UNAVAILABLE";
+		default:
+			return "INVALID";
+	}
+}
+
+String RendererVirtualShadowMapStorage::format_rt_fallback_line(RTTierReason p_reason) {
+	return vformat("RT Shadows: standalone ray-traced shadows are not available (reason=%s); lights fall back to the primary shadow method.", get_rt_tier_reason_name(p_reason));
+}
+
+RendererVirtualShadowMapStorage::RTTierReason RendererVirtualShadowMapStorage::get_rt_tier_reason() {
+	RTTierInputs inputs;
+	inputs.forward_plus = get_tier_reason() != TIER_REASON_UNSUPPORTED_RENDERER;
+	inputs.nextgi_hwrt = vsm_df_nextgi_hwrt.is_set();
+	return evaluate_rt_tier(inputs);
+}
+
+bool RendererVirtualShadowMapStorage::read_ray_traced_shadows() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName name = SETTING_RAY_TRACED_SHADOWS;
+	if (settings == nullptr || !settings->has_setting(name)) {
+		return false;
+	}
+	return bool(settings->get_setting_with_override(name));
+}
+
+bool RendererVirtualShadowMapStorage::light_uses_rt(RSE::LightShadowMethod p_method) {
+	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available(), is_df_available(), is_rt_available(), read_ray_traced_shadows()) == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED;
+}
+
+bool RendererVirtualShadowMapStorage::light_uses_vsm_fallback(RSE::LightShadowMethod p_method) {
+	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available(), is_df_available(), false, false) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL;
+}
+
+bool RendererVirtualShadowMapStorage::report_rt_fallback() {
+	const RTTierReason reason = get_rt_tier_reason();
+	if (reason == RT_TIER_REASON_NONE || !vsm_rt_fallback_reported.set_if_clear()) {
+		return false;
+	}
+	vsm_rt_fallback_lines.increment();
+	print_line(format_rt_fallback_line(reason));
+	return true;
+}
+
+uint32_t RendererVirtualShadowMapStorage::get_rt_fallback_line_count() {
+	return vsm_rt_fallback_lines.get();
 }
 
 /* DISTANCE-FIELD SHADOWS (#214, plan §21.3 contract S7, GV-10) */
@@ -2548,6 +2632,7 @@ void RendererVirtualShadowMapStorage::reset_startup_state() {
 	// A renderer created after this one reports its own fallback line and warnings once again.
 	vsm_fallback_reported.clear();
 	vsm_df_fallback_reported.clear();
+	vsm_rt_fallback_reported.clear();
 	vsm_df_nextgi_hwrt.clear();
 	vsm_unimplemented_warned.set(0);
 	reset_frame_stats();
@@ -2566,7 +2651,7 @@ bool RendererVirtualShadowMapStorage::is_dev_switch_forcing() {
 }
 
 bool RendererVirtualShadowMapStorage::light_uses_vsm(RSE::LightShadowMethod p_method) {
-	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available(), is_df_available()) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL;
+	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available(), is_df_available(), is_rt_available(), read_ray_traced_shadows()) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL;
 }
 
 bool RendererVirtualShadowMapStorage::report_fallback() {
@@ -2591,10 +2676,15 @@ void RendererVirtualShadowMapStorage::note_light_shadow_method(RSE::LightShadowM
 		}
 	}
 	const bool df_avail = is_df_available();
+	const bool rt_avail = is_rt_available();
+	const bool project_rt = read_ray_traced_shadows();
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD && !df_avail) {
 		report_df_fallback();
 	}
-	if (light_shadow_method_wants_virtual(p_method, get_project_shadow_method(), df_avail)) {
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED && !rt_avail) {
+		report_rt_fallback();
+	}
+	if (light_shadow_method_wants_virtual(p_method, get_project_shadow_method(), df_avail, rt_avail, project_rt)) {
 		report_fallback();
 	}
 }
@@ -2604,6 +2694,9 @@ void RendererVirtualShadowMapStorage::report_project_shadow_method(bool p_print)
 		// No Forward+ storage (Mobile, Compatibility, the dummy renderer): the tier reason stays
 		// UNSUPPORTED_RENDERER, and the project's method still decides whether lights wanted VSM.
 		vsm_project_method.set(uint32_t(read_project_shadow_method()));
+	}
+	if (p_print && read_ray_traced_shadows()) {
+		report_rt_fallback();
 	}
 	if (p_print && get_project_shadow_method() == SHADOW_METHOD_VIRTUAL) {
 		report_fallback();

@@ -50,6 +50,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_lighting.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_check.h"
 // GodotNext: nextgeo_rt_native (#156)
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
@@ -1037,6 +1038,17 @@ Dictionary NextGI::get_counters() const {
 	if (hit_lighting != nullptr) {
 		hit_lighting->fill_counters(counters);
 	}
+	// GodotNext: rt_shadows (#141). Standalone HWRT ray-traced shadows telemetry.
+	if (rt_shadows != nullptr) {
+		const NextGIRTShadows::ViewStats &rts = rt_shadows->get_last_stats();
+		counters["rt_shadows_lights_traced"] = int64_t(rts.lights_traced);
+		counters["rt_shadows_tiles_allocated"] = int64_t(rts.tiles_allocated);
+		counters["rt_shadows_tile_budget"] = int64_t(rts.tile_budget);
+		counters["rt_shadows_overflow_tiles"] = int64_t(rts.overflow_tiles);
+		counters["rt_shadows_overflow_lights"] = int64_t(rts.overflow_lights);
+		counters["rt_shadows_fallback_lights"] = int64_t(rts.fallback_lights);
+		counters["rt_shadows_atlas_vram_bytes"] = int64_t(rts.atlas_vram_bytes);
+	}
 	return counters;
 }
 
@@ -1741,7 +1753,7 @@ RID NextGI::get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, in
 	return p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, MAX(p_view, 0), 0);
 }
 
-void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution) {
+void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution, bool p_defer_compact) {
 	// The shadow batch fills RENDER_LIST_SECONDARY, which SRC card capture shares (plan §4.1).
 	DEV_ASSERT(!shadow_batch_open);
 	ERR_FAIL_COND_MSG(shadow_batch_open, "The NextGI frame block must not run inside a shadow batch.");
@@ -1955,7 +1967,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	}
 	// Compaction copies invalidate the TLAS when the device frame restarts. Card capture can
 	// force that restart with a readback, so the copy is queued only after this frame's traces.
-	if (rt_scene != nullptr) {
+	if (rt_scene != nullptr && !p_defer_compact) {
 		rt_scene->compact_after_traces();
 	}
 	// GodotNext: nextgi_frame_tier (#186). begin_frame() owns _ensure_rt_scene() on a tier change.
@@ -1966,6 +1978,48 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	rd->draw_command_end_label();
 	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));
+}
+
+// GodotNext: rt_shadows (#141, plan §21.3 contract M9).
+void NextGI::prepare_rt_scene_for_shadows(RenderDataRD *p_render_data) {
+	if (p_render_data == nullptr || result.tier != TIER_HWRT) {
+		return;
+	}
+	const uint64_t render_frame_number = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	begin_frame(render_frame_number);
+	if (result.tier != TIER_HWRT) {
+		return;
+	}
+	_ensure_rt_scene();
+	if (rt_scene == nullptr) {
+		return;
+	}
+	if (!nextgi_multiview_should_run_scenario(scenario_frame, render_frame_number)) {
+		return;
+	}
+	scenario_frame = render_frame_number;
+	view_ordinal = 0;
+	set_hit_consumer(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, rt_scene->wants_shadow_retrace());
+	_update_hit_materials(true, render_frame_number);
+	rt_scene->set_surface_sources_wanted(false);
+	rt_scene->rebuild_tlas(p_render_data);
+	const int64_t budget_override = GLOBAL_GET_CACHED(int64_t, "rendering/global_illumination/nextgi/debug/as_budget_bytes");
+	rt_scene->set_as_budget_bytes(budget_override > 0 ? uint64_t(budget_override) : NEXTGI_RT_AS_BUDGET_BYTES);
+	rt_scene->build_dirty_blas(p_render_data);
+	note_as_memory_budget(!rt_scene->is_as_memory_exceeded(), render_frame_number);
+}
+
+void NextGI::compact_after_traces() {
+	if (rt_scene != nullptr) {
+		rt_scene->compact_after_traces();
+	}
+}
+
+NextGIRTShadows *NextGI::ensure_rt_shadows() {
+	if (rt_shadows == nullptr) {
+		rt_shadows = memnew(NextGIRTShadows);
+	}
+	return rt_shadows;
 }
 
 NextGI::NextGI() {
@@ -2030,6 +2084,11 @@ NextGI::~NextGI() {
 	// GodotNext: nextgi_hit_groups (#130). Before the RT scene: its pipeline and tables are its own.
 	_free_hit_materials();
 	_free_shadow_check(); // GodotNext: nextgi_shadow_policy (#145)
+	// GodotNext: rt_shadows (#141).
+	if (rt_shadows != nullptr) {
+		memdelete(rt_shadows);
+		rt_shadows = nullptr;
+	}
 
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {

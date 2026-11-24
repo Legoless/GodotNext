@@ -44,8 +44,9 @@
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
-// GodotNext: vsm_page_marking (#219).
+// GodotNext: vsm_page_marking (#219) / rt_shadows (#141).
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 // GodotNext: vsm_non_nanite (#218).
@@ -2336,10 +2337,12 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 			RID li = p_render_data->render_shadows[i].light;
 			RID base = light_storage->light_instance_get_base_light(li);
-			// GodotNext: vsm_projection (#222, issue step 7) / df_shadows (#214). A light this view samples
-			// through virtual shadow maps or per-light distance-field shadows gets no atlas pass.
+			// GodotNext: vsm_projection (#222, issue step 7) / df_shadows (#214) / rt_shadows (#141). A light this view samples
+			// through virtual shadow maps, distance-field shadows, or standalone HWRT ray-traced shadows gets no atlas pass.
 			// Contact shadows keep their entry.
-			const bool atlas_pass = !(vsm_sample_view && vsm_light_skips_atlas(li, p_render_data->environment)) && !(df_shadows_view && df_light_skips_atlas(li, p_render_data->environment));
+			const bool atlas_pass = !(vsm_sample_view && vsm_light_skips_atlas(li, p_render_data->environment)) &&
+					!(df_shadows_view && df_light_skips_atlas(li, p_render_data->environment)) &&
+					!(rt_shadows_view && rt_light_skips_atlas(li, p_render_data->environment, p_render_data->render_buffers));
 			if (atlas_pass) {
 				vsm_atlas_passes++;
 			} else {
@@ -2669,7 +2672,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	if (p_use_nextgi && rb.is_valid()) {
 		next_gi.set_active_debug_view(RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode()));
 		_render_nextgi_translucency_mark(p_render_data);
-		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution());
+		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution(), rt_shadows_view);
+	} else if (rt_shadows_view && rb.is_valid()) {
+		// GodotNext: rt_shadows (#141). Standalone HWRT ray-traced shadows prepare the RT scene TLAS
+		// and shadow visibility tables without running NextGI diffuse/reflection passes.
+		next_gi.prepare_rt_scene_for_shadows(p_render_data);
 	}
 
 	if (rb_data.is_valid() && ss_effects) {
@@ -2739,6 +2746,15 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		vsm_storage->set_view_samples(vsm_sample_view);
 		const RendererVirtualShadowMapStorage::PoolQuality df_quality = vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality();
 		vsm_storage->set_df_view_enabled(df_shadows_view, RendererVirtualShadowMapStorage::df_read_max_lights(df_quality));
+	}
+	// GodotNext: rt_shadows (#141). Open per-view RT shadow registration before LightStorage fills LightData.
+	if (rt_shadows_view) {
+		RendererRD::NextGIRTShadows *rt_shadows = next_gi.ensure_rt_shadows();
+		if (rt_shadows != nullptr) {
+			const RendererVirtualShadowMapStorage::PoolQuality rt_quality = (vsm_storage != nullptr && vsm_storage->is_active()) ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality();
+			const uint32_t rt_tile_budget = RendererRD::nextgi_rt_shadow_preset_tile_budget(rt_quality);
+			rt_shadows->begin_view(p_render_data, next_gi.get_rt_scene(), rt_tile_budget);
+		}
 	}
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
 	if (vsm_storage != nullptr) {
@@ -2821,6 +2837,44 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	}
 	if (vsm_storage != nullptr) {
 		vsm_storage->set_df_view_enabled(false);
+	}
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone HWRT tile-sparse ray-traced shadows.
+	if (rt_shadows_view) {
+		RendererRD::NextGIRTShadows *rt_shadows = next_gi.get_rt_shadows();
+		if (rt_shadows != nullptr) {
+			const RID nr_tex = p_normal_roughness_slices != nullptr ? p_normal_roughness_slices[0] : RID();
+			const bool vel_enabled = rb.is_valid() && rb->has_velocity_buffer(false);
+			const RID vel_tex = vel_enabled ? rb->get_velocity_buffer(false) : RID();
+			rt_shadows->render(p_render_data, &next_gi, nr_tex, vel_tex, vel_enabled);
+			rt_bind_mask = rt_shadows->get_bound_mask_atlas();
+			rt_bind_lookup = rt_shadows->get_bound_tile_lookup();
+			rt_bind_hit_dist = rt_shadows->get_bound_hit_dist_atlas();
+			if (vsm_storage != nullptr) {
+				const RendererRD::NextGIRTShadows::ViewStats &st = rt_shadows->get_last_stats();
+				RendererRD::VirtualShadowMapStorage::RTShadowStats rs;
+				rs.lights_traced = st.lights_traced;
+				rs.directional_lights = st.directional_lights;
+				rs.local_lights = st.local_lights;
+				rs.tiles_allocated = st.tiles_allocated;
+				rs.tile_budget = st.tile_budget;
+				rs.overflow_tiles = st.overflow_tiles;
+				rs.overflow_lights = st.overflow_lights;
+				rs.fallback_lights = st.fallback_lights;
+				rs.atlas_vram_bytes = st.atlas_vram_bytes;
+				rs.atlas_passes_skipped = vsm_atlas_passes_skipped;
+				rs.retrace_active = st.retrace_active;
+				vsm_storage->record_rt_shadow_stats(rs);
+			}
+			rt_shadows->end_view();
+		}
+		next_gi.compact_after_traces();
+	} else {
+		rt_bind_mask = RID();
+		rt_bind_lookup = RID();
+		rt_bind_hit_dist = RID();
+		if (vsm_storage != nullptr) {
+			vsm_storage->record_rt_shadow_stats(RendererRD::VirtualShadowMapStorage::RTShadowStats());
+		}
 	}
 
 	if (rb_data.is_valid()) {
@@ -3124,6 +3178,137 @@ bool RenderForwardClustered::_df_view_has_lights(const RenderDataRD *p_render_da
 		}
 	}
 	return false;
+}
+
+// GodotNext: rt_shadows (#141, plan §21.3 contract M9).
+bool RenderForwardClustered::rt_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) {
+	if (p_reflection_probe || p_render_buffers.is_null() || p_view_count != 1) {
+		return false;
+	}
+	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	if (rb.is_null() || !rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	return RendererVirtualShadowMapStorage::is_rt_available();
+}
+
+bool RenderForwardClustered::rt_light_skips_atlas(RID p_light_instance, RID p_environment, const Ref<RenderSceneBuffers> &p_render_buffers) const {
+	(void)p_environment;
+	if (!RendererVirtualShadowMapStorage::is_rt_available()) {
+		return false;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	if (!light_storage->owns_light_instance(p_light_instance)) {
+		return false;
+	}
+	const RID base = light_storage->light_instance_get_base_light(p_light_instance);
+	if (base.is_null() || !light_storage->light_has_shadow(base)) {
+		return false;
+	}
+	if (!RendererVirtualShadowMapStorage::light_uses_rt(light_storage->light_get_shadow_method(base))) {
+		return false;
+	}
+	// Overflow-fallback lights keep VSM/atlas until they fit inside the tile budget again.
+	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	if (RendererRD::NextGIRTShadows::is_light_in_overflow_fallback(rb, p_light_instance)) {
+		return false;
+	}
+	return true;
+}
+
+bool RenderForwardClustered::rt_light_in_overflow_fallback(RID p_light_instance, const Ref<RenderSceneBuffers> &p_render_buffers) const {
+	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	return RendererRD::NextGIRTShadows::is_light_in_overflow_fallback(rb, p_light_instance);
+}
+
+bool RenderForwardClustered::_rt_view_has_lights(const RenderDataRD *p_render_data) const {
+	if (p_render_data == nullptr || p_render_data->lights == nullptr || p_render_data->scene_data == nullptr) {
+		return false;
+	}
+	if (p_render_data->reflection_probe.is_valid() || p_render_data->render_buffers.is_null() || p_render_data->scene_data->view_count != 1) {
+		return false;
+	}
+	if (!p_render_data->render_buffers->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	if (!RendererVirtualShadowMapStorage::is_rt_available()) {
+		return false;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+		const RID li = (*p_render_data->lights)[i];
+		if (!light_storage->owns_light_instance(li)) {
+			continue;
+		}
+		const RID base = light_storage->light_instance_get_base_light(li);
+		if (base.is_null() || !light_storage->light_has_shadow(base)) {
+			continue;
+		}
+		if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL &&
+				light_storage->light_directional_get_sky_mode(base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+			continue;
+		}
+		if (RendererVirtualShadowMapStorage::light_uses_rt(light_storage->light_get_shadow_method(base))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void RenderForwardClustered::_ensure_rt_shadow_default_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	if (rt_default_mask.is_null()) {
+		RD::TextureFormat fmt;
+		fmt.format = RD::DATA_FORMAT_R8_UNORM;
+		fmt.texture_type = RD::TEXTURE_TYPE_2D;
+		fmt.width = 1;
+		fmt.height = 1;
+		fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<uint8_t> one;
+		one.resize(1);
+		one.write[0] = 255u;
+		Vector<Vector<uint8_t>> slices;
+		slices.push_back(one);
+		rt_default_mask = rd->texture_create(fmt, RD::TextureView(), slices);
+		rd->set_resource_name(rt_default_mask, "RT Shadow Default Mask");
+	}
+	if (rt_default_hit_dist.is_null()) {
+		RD::TextureFormat fmt;
+		fmt.format = RD::DATA_FORMAT_R16_SFLOAT;
+		fmt.texture_type = RD::TEXTURE_TYPE_2D;
+		fmt.width = 1;
+		fmt.height = 1;
+		fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<uint8_t> miss;
+		miss.resize(2);
+		const uint16_t miss_fp16 = Math::make_half_float(RendererRD::NEXTGI_RT_SHADOW_HIT_MISS);
+		memcpy(miss.ptrw(), &miss_fp16, sizeof(uint16_t));
+		Vector<Vector<uint8_t>> slices;
+		slices.push_back(miss);
+		rt_default_hit_dist = rd->texture_create(fmt, RD::TextureView(), slices);
+		rd->set_resource_name(rt_default_hit_dist, "RT Shadow Default Hit Dist");
+	}
+	if (rt_default_lookup.is_null()) {
+		rt_default_lookup = rd->storage_buffer_create(16u);
+		rd->set_resource_name(rt_default_lookup, "RT Shadow Default Lookup");
+		rd->buffer_clear(rt_default_lookup, 0, 16u);
+	}
+}
+
+void RenderForwardClustered::_free_rt_shadow_default_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	for (RID *rid : { &rt_default_mask, &rt_default_hit_dist, &rt_default_lookup }) {
+		if (rd != nullptr && rid->is_valid()) {
+			rd->free_rid(*rid);
+		}
+		*rid = RID();
+	}
+	rt_bind_mask = RID();
+	rt_bind_lookup = RID();
+	rt_bind_hit_dist = RID();
 }
 
 void RenderForwardClustered::_ensure_df_default_textures() {
@@ -6347,6 +6532,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_voxelgi = false;
 	// GodotNext: nextgi_frame_block
 	bool using_nextgi = false;
+	// GodotNext: rt_shadows (#141). Standalone HWRT tile-sparse ray-traced shadows.
+	bool using_rt_shadows = false;
+	bool prepass_velocity_consumer = false;
 	// GodotNext: nextgeo_visibility_raster (#83)
 	bool using_nextgeo = false;
 	bool nextgeo_drew = false;
@@ -6443,7 +6631,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		} else if (using_taa || ce_needs_motion_vectors) {
 			velocity_mode = NEXTGI_VELOCITY_TAA;
 		}
-		velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, using_nextgi, using_nextgeo);
+		// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone HWRT ray-traced shadows
+		// reuse #37's prepass velocity plan alongside depth and normal-roughness.
+		using_rt_shadows = _rt_view_has_lights(p_render_data);
+		prepass_velocity_consumer = using_nextgi || using_rt_shadows;
+		velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, prepass_velocity_consumer, using_nextgeo);
 		if (velocity_plan.prepass_writes) {
 			if (!p_render_data->scene_data->calculate_motion_vectors) {
 				color_pass_flags |= COLOR_PASS_FLAG_MOTION_VECTORS;
@@ -6574,9 +6766,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 	RendererRD::MegaLightsInputs::begin_layer_groups();
 
-	// GodotNext: nextgi_frame_block
+	// GodotNext: nextgi_frame_block / rt_shadows (#141)
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, prepass_velocity_consumer && velocity_plan.prepass_writes, using_nextgi);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -6616,9 +6808,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// GodotNext: megalights_inputs (#136). The input targets and the ML_ALBEDO / ML_MATERIAL
 		// debug draws need the normal-roughness prepass. Do not downgrade a voxel GI prepass.
 		// GodotNext: rr_guides (#205). So does the RR guide pack.
-		// GodotNext: df_shadows (#214). Half-res DF cone trace and 2x2 bilateral upsample guide use normal-roughness.
+		// GodotNext: df_shadows (#214) / rt_shadows (#141). DF and standalone RT shadows read prepass normal-roughness.
 		const bool ml_debug_draw = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL;
-		if ((megalights_inputs_active || ml_debug_draw || rr_guides_active || using_df_shadows) && depth_pass_mode == PASS_MODE_DEPTH) {
+		if ((megalights_inputs_active || ml_debug_draw || rr_guides_active || using_df_shadows || using_rt_shadows) && depth_pass_mode == PASS_MODE_DEPTH) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -6629,7 +6821,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
 				// GodotNext: megalights_inputs (#136). Two clears sit between normal-roughness and velocity.
 				if (megalights_inputs_active) {
-					if (using_nextgi && velocity_plan.prepass_writes) {
+					if (prepass_velocity_consumer && velocity_plan.prepass_writes) {
 						depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VELOCITY_ML);
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
@@ -6641,7 +6833,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					}
-				} else if (using_nextgi && velocity_plan.prepass_writes) {
+				} else if (prepass_velocity_consumer && velocity_plan.prepass_writes) {
 					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VELOCITY);
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
@@ -6653,7 +6845,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
 				// GodotNext: megalights_inputs (#136)
 				if (megalights_inputs_active) {
-					if (using_nextgi && velocity_plan.prepass_writes) {
+					if (prepass_velocity_consumer && velocity_plan.prepass_writes) {
 						depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY_ML);
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
@@ -6667,7 +6859,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
 						depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					}
-				} else if (using_nextgi && velocity_plan.prepass_writes) {
+				} else if (prepass_velocity_consumer && velocity_plan.prepass_writes) {
 					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY);
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
@@ -6839,9 +7031,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83) / nextgeo_residency (#78)
 	// GodotNext: megalights_inputs (#136) / rr_guides (#205)
 	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo || megalights_inputs_active || rr_guides_active;
-	// GodotNext: vsm_page_marking (#219) / df_shadows (#214). Page marking and DF shadow mask read prepass depth.
+	// GodotNext: vsm_page_marking (#219) / df_shadows (#214) / rt_shadows (#141). Page marking, DF and RT shadow masks read prepass depth.
 	const bool using_vsm = _vsm_marks_view(p_render_data);
-	force_depth_pre_pass = force_depth_pre_pass || using_vsm || using_df_shadows;
+	force_depth_pre_pass = force_depth_pre_pass || using_vsm || using_df_shadows || using_rt_shadows;
 	// GodotNext: light_grid (#139, plan §21.3 contract M2). Activate packed light grid only when
 	// MegaLights is enabled for this view or positional light count exceeds the legacy bitmask cap.
 	uint32_t packed_positional_light_hint = 0u;
@@ -6867,6 +7059,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	df_shadows_view = using_df_shadows && depth_pre_pass;
 	df_bind_mask = RID();
 	df_bind_guide = RID();
+	rt_shadows_view = using_rt_shadows && depth_pre_pass;
+	rt_bind_mask = RID();
+	rt_bind_lookup = RID();
+	rt_bind_hit_dist = RID();
 	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite/Nanite cull.
 	vsm_debug_view_marked = false;
 	vsm_debug_view_pairs = false;
@@ -6880,6 +7076,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
 	base_specialization.use_vsm = vsm_sample_view; // GodotNext: vsm_projection (#222)
 	base_specialization.use_df_shadows = df_shadows_view; // GodotNext: df_shadows (#214)
+	base_specialization.use_rt_shadows = rt_shadows_view; // GodotNext: rt_shadows (#141)
 
 	if (depth_pre_pass) { //depth pre pass
 		// GodotNext: megalights_decals (#136). The MegaLights input prepass runs the decal loop, but
@@ -6918,12 +7115,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
 		finish_depth = finish_depth || using_nextgi || using_nextgeo;
-		// GodotNext: vsm_page_marking (#219) / df_shadows (#214) / light_grid (#139). With MSAA, marking, DF mask,
-		// and packed light-grid Hi-Z cell culling read the resolved prepass depth.
-		finish_depth = finish_depth || using_vsm || using_df_shadows || using_packed_light_grid;
+		// GodotNext: vsm_page_marking (#219) / df_shadows (#214) / light_grid (#139) / rt_shadows (#141).
+		// With MSAA, marking, DF/RT shadow masks, and packed light-grid Hi-Z cell culling read the resolved prepass depth.
+		finish_depth = finish_depth || using_vsm || using_df_shadows || using_packed_light_grid || using_rt_shadows;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		render_list_params.use_nextgeo_proxy = is_reflection_probe;
-		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
+		render_list_params.prepass_motion = prepass_velocity_consumer && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
 		// GodotNext: megalights_inputs (#136)
 		render_list_params.megalights_inputs = ml_prepass;
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
@@ -6960,7 +7157,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			raster_inputs.taa_jitter = scene_data->taa_jitter;
 			raster_inputs.prev_taa_jitter = scene_data->prev_taa_jitter;
 			raster_inputs.velocity_clear = Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0.0f, 0.0f);
-			raster_inputs.clear_velocity = !using_nextgi && velocity_plan.prepass_writes;
+			raster_inputs.clear_velocity = !prepass_velocity_consumer && velocity_plan.prepass_writes;
 			raster_inputs.reset_velocity = reset_temporal_history;
 			raster_inputs.reverse_cull = reverse_cull;
 			raster_inputs.debug_backface = bool(GLOBAL_GET("rendering/nextgeo/debug_backface")) || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_CRACKS;
@@ -7105,7 +7302,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
 				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 					resolve_effects->resolve_gi(rb->get_depth_msaa(v), rb_data->get_normal_roughness_msaa(v), using_voxelgi ? rb_data->get_voxelgi_msaa(v) : RID(), rb->get_depth_texture(v), rb_data->get_normal_roughness(v), using_voxelgi ? rb_data->get_voxelgi(v) : RID(), rb->get_internal_size(), texture_multisamples[msaa]);
-					if (using_nextgi && velocity_plan.prepass_writes) {
+					if (prepass_velocity_consumer && velocity_plan.prepass_writes) {
 						RD::get_singleton()->texture_resolve_multisample(rb->get_velocity_buffer(true, v), rb->get_velocity_buffer(false, v));
 					}
 				}
@@ -7117,7 +7314,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RD::get_singleton()->draw_command_end_label();
 		}
 	}
-	velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, using_nextgi, nextgeo_drew);
+	velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, prepass_velocity_consumer, nextgeo_drew);
 
 	{
 		if (ce_pre_opaque_resolved_color) {
@@ -9618,12 +9815,20 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	}
 	{
 		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Bindings 62 and 63 hold the
-		// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 stays free for #140 IES).
+		// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 holds #140 IES).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 62, light_function_atlas.get_atlas_texture_or_default()));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 63, light_function_atlas.get_view_entry_buffer_or_default()));
-		// GodotNext: light_source_parity (#140, plan §21.3 contract M8). IES profile Texture2DArray atlas
-		// bound at Set 1 binding 64 (bindings 62..63 are reserved for #138 Light Function Atlas).
+		// GodotNext: light_source_parity (#140, plan §21.3 contract M8). IES profile Texture2DArray atlas.
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 64, light_storage->get_ies_atlas_texture()));
+	}
+	{
+		// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Tile-sparse denoised R8 RT shadow mask atlas,
+		// per-light screen-tile lookup table, and R16F hit-distance atlas (defaults when off or in depth prepass).
+		_ensure_rt_shadow_default_resources();
+		const bool bind_rt = p_render_data != nullptr && rt_shadows_view && rt_bind_mask.is_valid() && rt_bind_lookup.is_valid() && rt_bind_hit_dist.is_valid();
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 65, bind_rt ? rt_bind_mask : rt_default_mask));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 66, bind_rt ? rt_bind_lookup : rt_default_lookup));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 67, bind_rt ? rt_bind_hit_dist : rt_default_hit_dist));
 	}
 	{
 		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Per-render-list spline deform SSBO.
@@ -11711,6 +11916,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 	_free_vsm_raster_resources();
 	_free_vsm_projection_resources(); // GodotNext: vsm_projection (#222)
 	_free_df_resources(); // GodotNext: df_shadows (#214)
+	_free_rt_shadow_default_resources(); // GodotNext: rt_shadows (#141)
 	vsm_cull_instances.reset();
 	next_gi.free_far_field();
 	nextgeo_cut.free_resources();

@@ -205,10 +205,14 @@ private:
 		uint32_t contact_shadow_sscs_index;
 		float contact_shadow_casting_intensity;
 		float contact_shadow_non_casting_intensity;
+		// GodotNext: rt_shadows (#141). Tile-sparse lookup base (UINT32_MAX when unused) and packed screen-tile rect + flags.
+		uint32_t rt_shadow_tile_base;
+		uint32_t rt_shadow_flags;
+		uint32_t rt_shadow_pad[2];
 	};
-	// GodotNext: vsm_page_pool (#220), light_source_parity (#140). An std430 array element: keep the GLSL copy in
+	// GodotNext: vsm_page_pool (#220), light_source_parity (#140), rt_shadows (#141). An std430 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
-	static_assert(sizeof(LightData) == 272, "LightData must match light_data_inc.glsl.");
+	static_assert(sizeof(LightData) == 288, "LightData must match light_data_inc.glsl.");
 	static_assert(sizeof(LightData) % 16 == 0, "LightData must stay a multiple of 16 bytes.");
 
 	struct LightInstanceDepthSort {
@@ -267,7 +271,7 @@ private:
 		float uv_scale3[2];
 		float uv_scale4[2];
 		// GodotNext: vsm_page_pool (#220) and df_shadows (#214). As LightData's, plus directional DF
-		// far-shadow handoff distances in the two trailing floats (same 480-byte std140 layout).
+		// far-shadow handoff distances in the two trailing floats.
 		uint32_t vsm_map_base;
 		uint32_t vsm_flags;
 		float df_shadow_start;
@@ -277,10 +281,14 @@ private:
 		uint32_t contact_shadow_flags;
 		float contact_shadow_casting_intensity;
 		float contact_shadow_non_casting_intensity;
+		// GodotNext: rt_shadows (#141). Tile-sparse lookup base (UINT32_MAX when unused) and packed screen-tile rect + flags.
+		uint32_t rt_shadow_tile_base;
+		uint32_t rt_shadow_flags;
+		uint32_t rt_shadow_pad[2];
 	};
-	// GodotNext: vsm_page_pool (#220), light_source_parity (#140). An std140 array element: keep the GLSL copy in
+	// GodotNext: vsm_page_pool (#220), light_source_parity (#140), rt_shadows (#141). An std140 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
-	static_assert(sizeof(DirectionalLightData) == 496, "DirectionalLightData must match light_data_inc.glsl.");
+	static_assert(sizeof(DirectionalLightData) == 512, "DirectionalLightData must match light_data_inc.glsl.");
 	static_assert(sizeof(DirectionalLightData) % 16 == 0, "DirectionalLightData must stay a multiple of 16 bytes.");
 
 	uint32_t max_directional_lights;

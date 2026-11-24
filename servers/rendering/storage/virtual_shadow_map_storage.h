@@ -737,16 +737,42 @@ public:
 	// The one line printed when a light would use virtual shadow maps below the tier.
 	static String format_fallback_line(TierReason p_reason);
 
-	// What a light's shadow method resolves to: LIGHT_SHADOW_METHOD_VIRTUAL, LIGHT_SHADOW_METHOD_ATLAS, or
-	// LIGHT_SHADOW_METHOD_DISTANCE_FIELD (#214). PROJECT takes p_project; RAY_TRACED (#141) is not
-	// implemented yet and takes PROJECT; DISTANCE_FIELD takes DISTANCE_FIELD when p_df_available is true and
-	// otherwise falls back to p_project; VIRTUAL without p_vsm_available takes ATLAS. Pure.
-	static RSE::LightShadowMethod resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available, bool p_df_available = false);
+	// What a light's shadow method resolves to: LIGHT_SHADOW_METHOD_VIRTUAL, LIGHT_SHADOW_METHOD_ATLAS,
+	// LIGHT_SHADOW_METHOD_RAY_TRACED (#141), or LIGHT_SHADOW_METHOD_DISTANCE_FIELD (#214). PROJECT takes
+	// RAY_TRACED when p_project_rt && p_rt_available, otherwise p_project; RAY_TRACED takes RAY_TRACED when
+	// p_rt_available and otherwise falls back to p_project; DISTANCE_FIELD takes DISTANCE_FIELD when
+	// p_df_available and otherwise falls back to p_project; VIRTUAL without p_vsm_available takes ATLAS. Pure.
+	static RSE::LightShadowMethod resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available, bool p_df_available = false, bool p_rt_available = false, bool p_project_rt = false);
 	// Whether p_method resolves to VIRTUAL before the VSM tier is applied (resolve_light_shadow_method()
 	// with VSM available).
-	static bool light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_df_available = false);
+	static bool light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_df_available = false, bool p_rt_available = false, bool p_project_rt = false);
 	static bool is_light_shadow_method_implemented(RSE::LightShadowMethod p_method);
 	static const char *get_light_shadow_method_name(RSE::LightShadowMethod p_method);
+
+	/* RAY-TRACED SHADOWS (#141, plan §21.3 contract M9) */
+
+	static const char *const SETTING_RAY_TRACED_SHADOWS;
+	enum RTTierReason : uint32_t {
+		RT_TIER_REASON_NONE,
+		RT_TIER_REASON_UNSUPPORTED_RENDERER, // Mobile, Compatibility, or no Forward+ renderer.
+		RT_TIER_REASON_HWRT_UNAVAILABLE, // NextGI HWRT tier is not active.
+		RT_TIER_REASON_MAX,
+	};
+	struct RTTierInputs {
+		bool forward_plus = false;
+		bool nextgi_hwrt = false;
+	};
+	static RTTierReason evaluate_rt_tier(const RTTierInputs &p_inputs);
+	static const char *get_rt_tier_reason_name(RTTierReason p_reason);
+	static String format_rt_fallback_line(RTTierReason p_reason);
+	static RTTierReason get_rt_tier_reason();
+	static bool is_rt_available() { return get_rt_tier_reason() == RT_TIER_REASON_NONE; }
+	static bool read_ray_traced_shadows();
+	static bool light_uses_rt(RSE::LightShadowMethod p_method);
+	// Whether an RT-shadowed light whose tiles overflowed the tile budget falls back to VSM (else atlas).
+	static bool light_uses_vsm_fallback(RSE::LightShadowMethod p_method);
+	static bool report_rt_fallback();
+	static uint32_t get_rt_fallback_line_count();
 
 	/* DISTANCE-FIELD SHADOWS (#214, plan §21.3 contract S7, GV-10) */
 

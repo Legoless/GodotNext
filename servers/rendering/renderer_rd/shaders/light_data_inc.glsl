@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  light_data_inc.glsl                                                   */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 #define LIGHT_BAKE_DISABLED 0
 #define LIGHT_BAKE_STATIC 1
 #define LIGHT_BAKE_DYNAMIC 2
@@ -49,6 +79,11 @@ struct LightData { //this structure needs to be as packed as possible
 	uint contact_shadow_sscs_index;
 	float contact_shadow_casting_intensity;
 	float contact_shadow_non_casting_intensity;
+	// GodotNext: rt_shadows (#141). Tile-sparse lookup base (UINT32_MAX when unused) and packed screen-tile rect + flags.
+	uint rt_shadow_tile_base;
+	uint rt_shadow_flags;
+	uint rt_shadow_pad0;
+	uint rt_shadow_pad1;
 };
 
 #define REFLECTION_AMBIENT_DISABLED 0
@@ -116,4 +151,9 @@ struct DirectionalLightData {
 	uint contact_shadow_flags;
 	float contact_shadow_casting_intensity;
 	float contact_shadow_non_casting_intensity;
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone RT shadow tile lookup base and flags.
+	uint rt_shadow_tile_base;
+	uint rt_shadow_flags;
+	uint rt_shadow_pad0;
+	uint rt_shadow_pad1;
 };

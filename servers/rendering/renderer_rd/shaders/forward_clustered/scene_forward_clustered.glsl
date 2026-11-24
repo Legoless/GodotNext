@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  scene_forward_clustered.glsl                                          */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 #[vertex]
 
 #version 450
@@ -3245,14 +3275,22 @@ void fragment_shader(in SceneData scene_data) {
 	m_var.xyz += normal_bias;
 
 #ifdef VSM_PROJECTION
-					// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214). The light's virtual
-					// shadow maps replace its cascades (with coarse-page lookup on forward transparents when coarse mode is
-					// on); directional DF handoff blends from primary shadow (VSM/atlas) to the half-res DF mask across a
-					// 10% band ending at df_shadow_start, up to df_shadow_distance.
+					// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214), rt_shadows (#141).
+					// Standalone RT shadows take priority when resolved to RAY_TRACED; otherwise VSM/DF/atlas.
 					const uint dir_vsm_flags = directional_lights.data[i].vsm_flags;
-					const bool dir_df_sampled = df_light_sampled(dir_vsm_flags);
+#ifdef RT_SHADOW_SAMPLING
+					const bool dir_rt_sampled = rt_shadow_light_sampled(directional_lights.data[i].rt_shadow_flags);
+#else
+					const bool dir_rt_sampled = false;
+#endif
+					const bool dir_df_sampled = !dir_rt_sampled && df_light_sampled(dir_vsm_flags);
 					const bool dir_df_full = dir_df_sampled && df_light_full(dir_vsm_flags);
 					const float dir_df_blend = dir_df_full ? 1.0 : (dir_df_sampled ? df_directional_blend(depth_z, directional_lights.data[i].df_shadow_start, directional_lights.data[i].df_shadow_distance) : 0.0);
+#ifdef RT_SHADOW_SAMPLING
+					if (dir_rt_sampled) {
+						shadow = rt_shadow_sample(directional_lights.data[i].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+					} else
+#endif
 					if (dir_df_blend < 0.999) {
 						if (vsm_light_sampled(dir_vsm_flags)) {
 							if (sc_use_vsm_coarse()) {
@@ -3504,15 +3542,28 @@ void fragment_shader(in SceneData scene_data) {
 			float transmittance_z = transmittance_depth;
 #ifndef SHADOWS_DISABLED
 #ifdef VSM_PROJECTION
-			// GodotNext: vsm_projection (#222).
-			const bool vsm_transmittance = vsm_light_sampled(directional_lights.data[i].vsm_flags);
+			// GodotNext: vsm_projection (#222), rt_shadows (#141).
+#ifdef RT_SHADOW_SAMPLING
+			const bool rt_transmittance = rt_shadow_light_sampled(directional_lights.data[i].rt_shadow_flags);
+#else
+			const bool rt_transmittance = false;
+#endif
+			const bool vsm_transmittance = !rt_transmittance && vsm_light_sampled(directional_lights.data[i].vsm_flags);
+#ifdef RT_SHADOW_SAMPLING
+			if (rt_transmittance && directional_lights.data[i].shadow_opacity > 0.001) {
+				float rt_thickness = rt_shadow_sample_hit_dist(directional_lights.data[i].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+				if (rt_thickness >= 0.0) {
+					transmittance_z = rt_thickness;
+				}
+			} else
+#endif
 			if (vsm_transmittance && directional_lights.data[i].shadow_opacity > 0.001) {
 				float vsm_thickness = vsm_transmittance_directional(directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex - geo_normal * directional_lights.data[i].shadow_transmittance_bias.x), -vertex.z);
 				if (vsm_thickness >= 0.0) {
 					transmittance_z = vsm_thickness;
 				}
 			}
-			if (!vsm_transmittance && directional_lights.data[i].shadow_opacity > 0.001) {
+			if (!rt_transmittance && !vsm_transmittance && directional_lights.data[i].shadow_opacity > 0.001) {
 #else
 			if (directional_lights.data[i].shadow_opacity > 0.001) {
 #endif

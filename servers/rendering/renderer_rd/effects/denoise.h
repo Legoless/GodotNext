@@ -34,6 +34,7 @@
 #include "core/math/vector3.h"
 #include "core/variant/variant.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_diffuse.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_specular.glsl.gen.h"
 
 namespace RendererRD {
@@ -113,8 +114,36 @@ public:
 		bool stabilizer_enabled = true;
 	};
 
-	NextGIDenoise();
+	explicit NextGIDenoise(bool p_init_gi_shaders = true);
 	~NextGIDenoise();
+
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Per-light shadow denoiser over the
+	// allocated tile-sparse R8 shadow-mask atlas: temporal reprojection with velocity + twin
+	// history atlas (light-ID invalidated), 2 à-trous spatial passes guided by depth/normal/penumbra,
+	// and previous-frame depth/normal guide copy.
+	struct ShadowDenoiseParams {
+		RID raw_mask; // Traced raw R8 mask atlas (also reused as spatial scratch).
+		RID history_mask_prev; // Previous frame's temporally accumulated R8 atlas (overwritten with final spatial output).
+		RID history_mask_cur; // Current frame's temporally accumulated R8 atlas.
+		RID history_len_prev; // Previous frame's R8UI history length atlas.
+		RID history_len_cur; // Current frame's R8UI history length atlas.
+		RID hit_dist; // R16F hit distance atlas for penumbra width estimation.
+		RID depth; // Resolved prepass depth (reverse-Z).
+		RID normal_roughness; // Prepass normal-roughness guide.
+		RID velocity; // Prepass motion vectors (#37) or dummy texture.
+		RID prev_depth_normal; // Previous frame's RGBA16F (view normal, linear depth) guide.
+		RID params_buffer; // RTShadowParams SSBO.
+		RID lights_buffer; // RTShadowLight[] SSBO.
+		RID tile_list_buffer; // Active allocated tile list uvec4[].
+		RID alloc_state_buffer; // Alloc state SSBO (active_tiles).
+		RID cur_lookup_buffer; // Current frame tile lookup SSBO.
+		RID prev_lookup_buffer; // Previous frame tile lookup SSBO.
+		RID prev_owner_buffer; // Previous frame tile owner (stable_id, packed_st) SSBO.
+		RID indirect_buffer; // 16-byte indirect dispatch buffer written by MODE_FINALIZE.
+		Size2i screen_size;
+	};
+	void shadow_denoise(const ShadowDenoiseParams &p_params);
+	static Vector<String> get_shadow_shader_variant_defines();
 
 	// GodotNext: nextgi_denoise_specular (#54). Joint-bilateral upsample of the specular trace from
 	// its trace resolution into RB_TEX_REFLECTION.
@@ -233,6 +262,21 @@ private:
 	RID specular_upsample;
 	RID specular_params_buffer;
 	RID temporal_params_buffer;
+	bool gi_shaders_initialized = false;
+
+	// GodotNext: rt_shadows (#141). Lazily initialized on first shadow_denoise() call.
+	enum ShadowMode {
+		SHADOW_MODE_TEMPORAL = 0,
+		SHADOW_MODE_SPATIAL = 1,
+		SHADOW_MODE_COPY_PREV_GUIDE = 2,
+		SHADOW_MODE_MAX,
+	};
+	NextgiDenoiseShadowShaderRD shadow_shader;
+	RID shadow_version;
+	RID shadow_pipelines[SHADOW_MODE_MAX];
+	bool shadow_shader_ready = false;
+	bool shadow_shader_failed = false;
+	bool _ensure_shadow_shader();
 };
 
 } // namespace RendererRD

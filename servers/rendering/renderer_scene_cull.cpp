@@ -219,8 +219,8 @@ void RendererSceneCull::occluder_set_mesh(RID p_occluder, const PackedVector3Arr
 
 /* SCENARIO API */
 
-// GodotNext: light_grid (#139, plan §21.3 contract M2).
-bool RendererSceneCull::light_should_skip_geometry_pairing(bool p_mobile_light_pairing, bool p_casts_shadow, RSE::LightShadowMethod p_shadow_method, bool p_megalights_active, bool p_uses_projector, bool p_uses_softshadow) {
+// GodotNext: light_grid (#139, plan §21.3 contract M2) / rt_shadows (#141).
+bool RendererSceneCull::light_should_skip_geometry_pairing(bool p_mobile_light_pairing, bool p_casts_shadow, RSE::LightShadowMethod p_shadow_method, bool p_megalights_active, bool p_uses_projector, bool p_uses_softshadow, bool p_rt_shadows_active) {
 	// Mobile and Compatibility renderers rely on per-geometry paired light lists for shading.
 	if (p_mobile_light_pairing) {
 		return false;
@@ -229,8 +229,8 @@ bool RendererSceneCull::light_should_skip_geometry_pairing(bool p_mobile_light_p
 	if (p_shadow_method == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED) {
 		return true;
 	}
-	// Under MegaLights, positional lights following the project default need no shadow map.
-	if (p_megalights_active && p_shadow_method == RSE::LIGHT_SHADOW_METHOD_PROJECT) {
+	// Under MegaLights or standalone HWRT ray-traced shadows, positional lights following the project default need no shadow map.
+	if ((p_megalights_active || p_rt_shadows_active) && p_shadow_method == RSE::LIGHT_SHADOW_METHOD_PROJECT) {
 		return true;
 	}
 	// Unshadowed lights without projector or soft-shadow specialization flags need no geometry pairing on Forward+.
@@ -245,7 +245,8 @@ bool RendererSceneCull::_light_skips_geometry_pairing(const Instance *p_light_in
 	const bool casts_shadow = RSG::light_storage->light_has_shadow(p_light_instance->base);
 	const RSE::LightShadowMethod shadow_method = RSG::light_storage->light_get_shadow_method(p_light_instance->base);
 	const bool megalights_active = RendererRD::MegaLightsInputs::is_requested();
-	return light_should_skip_geometry_pairing(mobile_light_pairing, casts_shadow, shadow_method, megalights_active, p_light->uses_projector, p_light->uses_softshadow);
+	const bool rt_shadows_active = RendererVirtualShadowMapStorage::is_rt_available() && RendererVirtualShadowMapStorage::read_ray_traced_shadows();
+	return light_should_skip_geometry_pairing(mobile_light_pairing, casts_shadow, shadow_method, megalights_active, p_light->uses_projector, p_light->uses_softshadow, rt_shadows_active);
 }
 
 void RendererSceneCull::_instance_pair(Instance *p_A, Instance *p_B) {
@@ -4351,11 +4352,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	uint32_t vsm_local_light_count = 0;
 
 	if (p_using_shadows) { //setup shadow maps
-		// GodotNext: vsm_projection (#222) and df_shadows (#214). Whether this view's light loop samples
-		// virtual shadow maps or distance-field shadows.
+		// GodotNext: vsm_projection (#222), df_shadows (#214), rt_shadows (#141). Whether this view's light loop
+		// samples virtual shadow maps, distance-field shadows, or standalone HWRT ray-traced shadows.
 		const bool vsm_view_samples = scene_render->vsm_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count);
 		const bool vsm_check_casters = vsm_view_samples && scene_render->vsm_raster_check_armed();
 		const bool df_view_samples = scene_render->df_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count);
+		const bool rt_view_samples = scene_render->rt_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count);
 
 		// Directional Shadows
 
@@ -4403,6 +4405,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			// GodotNext: df_shadows (#214). Per-light DISTANCE_FIELD local lights trace the SDF mask instead of
 			// drawing into the shadow atlas (unless volumetric fog still reads the atlas).
 			if (df_view_samples && scene_render->df_light_skips_atlas(light->instance, p_environment)) {
+				RSG::light_storage->shadow_atlas_remove_light(p_shadow_atlas, light->instance);
+				continue;
+			}
+			// GodotNext: rt_shadows (#141). Standalone HWRT ray-traced lights bypass the shadow atlas unless in overflow fallback.
+			if (rt_view_samples && scene_render->rt_light_skips_atlas(light->instance, p_environment, p_render_buffers)) {
 				RSG::light_storage->shadow_atlas_remove_light(p_shadow_atlas, light->instance);
 				continue;
 			}
@@ -4601,8 +4608,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (dir_light == nullptr || !RSG::light_storage->light_has_shadow(dir_ins->base) || RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
 					continue;
 				}
-				// GodotNext: vsm_settings_debug (#221). Only lights whose shadow method resolves to VIRTUAL.
-				if (!RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(dir_ins->base))) {
+				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141). Only lights whose shadow method resolves to VIRTUAL
+				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL).
+				const RSE::LightShadowMethod dir_sm = RSG::light_storage->light_get_shadow_method(dir_ins->base);
+				const bool dir_vsm = RendererVirtualShadowMapStorage::light_uses_vsm(dir_sm) ||
+						(scene_render->rt_light_in_overflow_fallback(dir_light->instance, p_render_buffers) &&
+								RendererVirtualShadowMapStorage::light_uses_vsm_fallback(dir_sm));
+				if (!dir_vsm) {
 					continue;
 				}
 				HashSet<RenderGeometryInstance *> csm_casters;
@@ -4722,8 +4734,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (pos_light == nullptr || !RSG::light_storage->light_has_shadow(pos_ins->base)) {
 					continue;
 				}
-				// GodotNext: vsm_settings_debug (#221). Only lights whose shadow method resolves to VIRTUAL.
-				if (!RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(pos_ins->base))) {
+				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141). Only lights whose shadow method resolves to VIRTUAL
+				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL).
+				const RSE::LightShadowMethod pos_sm = RSG::light_storage->light_get_shadow_method(pos_ins->base);
+				const bool pos_vsm = RendererVirtualShadowMapStorage::light_uses_vsm(pos_sm) ||
+						(scene_render->rt_light_in_overflow_fallback(pos_light->instance, p_render_buffers) &&
+								RendererVirtualShadowMapStorage::light_uses_vsm_fallback(pos_sm));
+				if (!pos_vsm) {
 					continue;
 				}
 				if (!RSG::light_storage->light_instance_is_shadow_visible_at_position(pos_light->instance, camera_position)) {
@@ -4833,11 +4850,36 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.vsm_static_mode_invalidations = scenario->vsm_static_mode_invalidations;
 		}
 
-		// GodotNext: nextgi_rt_registry
+		// GodotNext: nextgi_rt_registry / rt_shadows (#141).
 		// One selection per scenario per frame, within rt_scene_radius of the first view's camera.
 		// No frustum cull: an instance behind the camera and inside the radius stays in the TLAS.
 		sdfgi_update_data.nextgi_rt_instances = &scene_cull_result.nextgi_rt_instances;
-		if (p_reflection_probe.is_null() && p_environment.is_valid() && scene_render->environment_get_nextgi_enabled(p_environment)) {
+		const bool nextgi_env = p_environment.is_valid() && scene_render->environment_get_nextgi_enabled(p_environment);
+		bool rt_shadows_need_tlas = false;
+		if (!nextgi_env && p_using_shadows && p_reflection_probe.is_null() && scene_render->rt_view_samples(p_render_buffers, false, p_camera_data->view_count)) {
+			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size() && !rt_shadows_need_tlas; i++) {
+				Instance *ins = scene_cull_result.lights[i];
+				if (RSG::light_storage->light_has_shadow(ins->base) &&
+						RendererVirtualShadowMapStorage::light_uses_rt(RSG::light_storage->light_get_shadow_method(ins->base))) {
+					rt_shadows_need_tlas = true;
+				}
+			}
+			for (Instance *dir_ins : scenario->directional_lights) {
+				if (rt_shadows_need_tlas) {
+					break;
+				}
+				if (!dir_ins->visible || !(dir_ins->layer_mask & p_visible_layers)) {
+					continue;
+				}
+				if (RSG::light_storage->light_has_shadow(dir_ins->base) &&
+						RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) != RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY &&
+						RendererVirtualShadowMapStorage::light_uses_rt(RSG::light_storage->light_get_shadow_method(dir_ins->base))) {
+					rt_shadows_need_tlas = true;
+					break;
+				}
+			}
+		}
+		if (p_reflection_probe.is_null() && (nextgi_env || rt_shadows_need_tlas)) {
 			const uint64_t frame = RSG::rasterizer->get_frame_number();
 			if (scenario->nextgi_rt_selection_frame != frame) {
 				scenario->nextgi_dirty_published = scenario->nextgi_dirty_writing;
@@ -4870,7 +4912,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 				for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
 					Instance *instance = E->self();
-					if (!instance->visible || !(instance->baked_light || instance->dynamic_gi)) {
+					const bool standalone_shadow_caster = !nextgi_env && rt_shadows_need_tlas && instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF;
+					if (!instance->visible || !(instance->baked_light || instance->dynamic_gi || standalone_shadow_caster)) {
 						continue;
 					}
 					const AABB &parent_aabb = instance->transformed_aabb;

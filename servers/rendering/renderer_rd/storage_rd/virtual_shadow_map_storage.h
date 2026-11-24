@@ -363,6 +363,22 @@ public:
 		bool reused_nextgi_swrt = false;
 		uint64_t views = 0;
 	};
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone RT shadow telemetry.
+	struct RTShadowStats {
+		uint32_t lights_traced = 0;
+		uint32_t directional_lights = 0;
+		uint32_t local_lights = 0;
+		uint32_t tiles_allocated = 0;
+		uint32_t tile_budget = 0;
+		uint32_t overflow_tiles = 0;
+		uint32_t overflow_lights = 0;
+		uint32_t fallback_lights = 0;
+		uint64_t total_overflow_fallbacks = 0;
+		uint64_t atlas_vram_bytes = 0;
+		uint32_t atlas_passes_skipped = 0;
+		bool retrace_active = false;
+		uint64_t views = 0;
+	};
 
 private:
 	bool df_view_enabled = false;
@@ -372,6 +388,7 @@ private:
 	float df_view_max_distance = 0.0f;
 	HashMap<RID, float> df_view_handoff_starts;
 	DFStats last_df_stats;
+	RTShadowStats last_rt_stats;
 
 	bool _ensure_shader();
 	RID _shader(ShaderMode p_mode);
@@ -389,7 +406,7 @@ public:
 
 	// GodotNext: vsm_page_marking (#219). LightStorage::LightData's layout (light_data_inc.glsl), for the
 	// GPU check's read-back of the light buffers; LightStorage::update_light_buffers() asserts it.
-	static constexpr uint32_t LIGHT_DATA_BYTES = 272;
+	static constexpr uint32_t LIGHT_DATA_BYTES = 288;
 	static constexpr uint32_t LIGHT_DATA_POSITION = 0;
 	static constexpr uint32_t LIGHT_DATA_INV_RADIUS = 12;
 	static constexpr uint32_t LIGHT_DATA_DIRECTION = 16;
@@ -440,6 +457,9 @@ public:
 	float get_df_max_distance() const { return df_view_max_distance; }
 	float get_df_handoff_start(RID p_light_instance) const;
 	void record_df_stats(const DFStats &p_stats);
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9).
+	void record_rt_shadow_stats(const RTShadowStats &p_stats);
+	const RTShadowStats &get_rt_shadow_stats() const { return last_rt_stats; }
 	// The view that samples the maps: its shadow-atlas passes kept and skipped, after update_light() ran for
 	// its lights; then its SMRT counts (set_projection_params()). get_debug_info() reports them as "projection".
 	void record_projection_view(uint32_t p_atlas_passes, uint32_t p_atlas_passes_skipped, uint32_t p_local_lights_culled = 0) {

@@ -2439,6 +2439,12 @@ Dictionary RenderingServer::virtual_shadow_maps_get_tier_info() {
 	info["df_reason"] = String(RendererVirtualShadowMapStorage::get_df_tier_reason_name(df_reason));
 	info["df_fallback_lines"] = int64_t(RendererVirtualShadowMapStorage::get_df_fallback_line_count());
 	info["df_max_lights"] = int64_t(RendererVirtualShadowMapStorage::df_read_max_lights(RendererVirtualShadowMapStorage::read_quality()));
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone RT shadow tier status.
+	const RendererVirtualShadowMapStorage::RTTierReason rt_reason = RendererVirtualShadowMapStorage::get_rt_tier_reason();
+	info["rt_available"] = rt_reason == RendererVirtualShadowMapStorage::RT_TIER_REASON_NONE;
+	info["rt_reason"] = String(RendererVirtualShadowMapStorage::get_rt_tier_reason_name(rt_reason));
+	info["ray_traced_shadows"] = RendererVirtualShadowMapStorage::read_ray_traced_shadows();
+	info["rt_fallback_lines"] = int64_t(RendererVirtualShadowMapStorage::get_rt_fallback_line_count());
 	bool active = false;
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
@@ -4161,6 +4167,8 @@ void RenderingServer::init() {
 	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1, budget V6). Existing and new projects keep the
 	// atlas until #223 flips the new-project default (RendererVirtualShadowMapStorage::NEW_PROJECT_SHADOW_METHOD).
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/shadow_method", PROPERTY_HINT_ENUM, "Atlas,Virtual"), int(RendererVirtualShadowMapStorage::DEFAULT_SHADOW_METHOD));
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone HWRT ray-traced shadows; default off.
+	GLOBAL_DEF(PropertyInfo(Variant::BOOL, RendererVirtualShadowMapStorage::SETTING_RAY_TRACED_SHADOWS), false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, RendererVirtualShadowMapStorage::SETTING_QUALITY, PROPERTY_HINT_ENUM, "Low,Medium,High,Epic"), int(RendererVirtualShadowMapStorage::DEFAULT_QUALITY));
 	for (uint32_t quality = 0; quality < RendererVirtualShadowMapStorage::POOL_QUALITY_MAX; quality++) {
 		const RendererVirtualShadowMapStorage::Scalability values = RendererVirtualShadowMapStorage::default_scalability(RendererVirtualShadowMapStorage::PoolQuality(quality));

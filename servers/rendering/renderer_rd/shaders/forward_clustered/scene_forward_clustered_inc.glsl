@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  scene_forward_clustered_inc.glsl                                      */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 #define M_PI 3.14159265359
 #define M_TAU 6.28318530718
 #define ROUGHNESS_MAX_LOD 5
@@ -210,6 +240,12 @@ bool sc_use_df_shadows() {
 // for lights whose light_function_index != LIGHT_FUNCTION_NONE (off on forward transparents by default).
 bool sc_use_light_function() {
 	return ((sc_packed_1() >> 14) & 1U) != 0;
+}
+
+// GodotNext: rt_shadows (#141, plan §21.3 contract M9). The view's light loop samples the denoised
+// tile-sparse R8 RT shadow mask atlas for lights whose rt_shadow_flags carry RT_SHADOW_LIGHT_FLAG_SAMPLE.
+bool sc_use_rt_shadows() {
+	return ((sc_packed_1() >> 15) & 1U) != 0;
 }
 
 float sc_luminance_multiplier() {
@@ -671,13 +707,22 @@ layout(set = 1, binding = 61, std430) buffer restrict readonly PackedLightGridIn
 packed_light_grid_indices;
 
 // GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Bindings 62 and 63 hold the
-// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 stays free for #140 IES).
+// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 holds #140 IES).
 #include "../light_function_inc.glsl"
 layout(set = 1, binding = 62) uniform texture2D light_function_atlas;
 layout(set = 1, binding = 63, std430) buffer restrict readonly LightFunctionBuffer {
 	LightFunctionEntry data[];
 }
 light_function_data;
+
+// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Tile-sparse denoised R8 RT shadow mask atlas,
+// per-light screen-tile lookup table (tile_id + 1, 0 = none), and R16F hit-distance atlas (defaults when off).
+layout(set = 1, binding = 65) uniform texture2D rt_shadow_atlas;
+layout(set = 1, binding = 66, std430) buffer restrict readonly RTShadowTileLookup {
+	uint data[];
+}
+rt_shadow_tile_lookup;
+layout(set = 1, binding = 67) uniform texture2D rt_shadow_hit_dist;
 
 #define FORWARD_CLUSTERED_LIGHT_GRID
 
@@ -689,6 +734,7 @@ layout(set = 1, binding = 64) uniform texture2DArray ies_profile_atlas;
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #define LIGHT_FUNCTION_ATLAS
 #define VSM_PROJECTION
+#define RT_SHADOW_SAMPLING
 #define VSM_COARSE_NEAREST_SAMPLER SAMPLER_NEAREST_CLAMP
 #include "../vsm_page_table_inc.glsl"
 #include "../vsm_coarse_inc.glsl"

@@ -2483,7 +2483,7 @@
 			<param index="0" name="light" type="RID" />
 			<param index="1" name="method" type="int" enum="RenderingServer.LightShadowMethod" />
 			<description>
-				Sets the shadow method of this 3D light. Equivalent to [member Light3D.shadow_method]. [constant LIGHT_SHADOW_METHOD_DISTANCE_FIELD] traces soft distance-field shadows through the PS global and mesh SDFs on Forward+ when mesh SDFs are enabled (otherwise falling back to [constant LIGHT_SHADOW_METHOD_PROJECT]). [constant LIGHT_SHADOW_METHOD_RAY_TRACED] is not implemented yet: the light keeps the value and uses [constant LIGHT_SHADOW_METHOD_PROJECT], and the first light set to it prints one warning.
+				Sets the shadow method of this 3D light. Equivalent to [member Light3D.shadow_method]. [constant LIGHT_SHADOW_METHOD_RAY_TRACED] traces standalone hardware ray-traced shadows on Forward+ when the NextGI HWRT tier is active (falling back to [member ProjectSettings.rendering/lights_and_shadows/shadow_method] when HWRT is unavailable or the tile budget overflows). [constant LIGHT_SHADOW_METHOD_DISTANCE_FIELD] traces soft distance-field shadows through the PS global and mesh SDFs on Forward+ when mesh SDFs are enabled (otherwise falling back to [constant LIGHT_SHADOW_METHOD_PROJECT]).
 			</description>
 		</method>
 		<method name="lightmap_create">
@@ -5022,7 +5022,7 @@
 		<method name="virtual_shadow_maps_get_tier_info">
 			<return type="Dictionary" />
 			<description>
-				Returns the virtual shadow map tier rule's result, on every renderer: [code]available[/code] is [code]true[/code] when the Forward+ renderer runs on a device with 32-bit image atomics and indirect-count draws; otherwise [code]reason[/code] names the first missing need ([code]UNSUPPORTED_RENDERER[/code], [code]NO_IMAGE_ATOMIC_32[/code] or [code]NO_INDIRECT_COUNT[/code]) and lights that would use virtual shadow maps use the shadow atlas. Also returns [code]project_shadow_method[/code] ([code]"atlas"[/code] or [code]"virtual"[/code], as read at startup), [code]dev_switch[/code] (the [code]GODOT_DEV_VSM[/code] override is set), [code]active[/code] (the page pool exists), and the counts of fallback lines and unimplemented-method warnings printed so far ([code]fallback_lines[/code], [code]unimplemented_warnings[/code]).
+				Returns the virtual shadow map tier rule's result, on every renderer: [code]available[/code] is [code]true[/code] when the Forward+ renderer runs on a device with 32-bit image atomics and indirect-count draws; otherwise [code]reason[/code] names the first missing need ([code]UNSUPPORTED_RENDERER[/code], [code]NO_IMAGE_ATOMIC_32[/code] or [code]NO_INDIRECT_COUNT[/code]) and lights that would use virtual shadow maps use the shadow atlas. Also returns [code]project_shadow_method[/code] ([code]"atlas"[/code] or [code]"virtual"[/code], as read at startup), [code]dev_switch[/code] (the [code]GODOT_DEV_VSM[/code] override is set), [code]active[/code] (the page pool exists), [code]df_available[/code] and [code]df_reason[/code] for distance-field shadows, [code]rt_available[/code], [code]rt_reason[/code], [code]ray_traced_shadows[/code] and [code]rt_fallback_lines[/code] for standalone hardware ray-traced shadows, and the counts of fallback lines and unimplemented-method warnings printed so far ([code]fallback_lines[/code], [code]unimplemented_warnings[/code]).
 				[b]Note:[/b] Virtual shadow maps on a device without 64-bit atomics (including Apple M1) are an extension that is not validated against Unreal Engine 5.9, which requires them.
 			</description>
 		</method>
@@ -5686,7 +5686,7 @@
 			The light uses the shadow atlas.
 		</constant>
 		<constant name="LIGHT_SHADOW_METHOD_RAY_TRACED" value="3" enum="LightShadowMethod">
-			Ray-traced shadows. Not implemented yet: the light uses [constant LIGHT_SHADOW_METHOD_PROJECT].
+			The light traces standalone hardware ray-traced shadows into a tile-sparse R8 shadow-mask atlas on Forward+ when the NextGI HWRT tier is active; falls back to [member ProjectSettings.rendering/lights_and_shadows/shadow_method] when HWRT is unavailable or when the tile budget overflows.
 		</constant>
 		<constant name="LIGHT_SHADOW_METHOD_DISTANCE_FIELD" value="4" enum="LightShadowMethod">
 			The light traces soft distance-field shadows through the PS global and mesh SDFs on Forward+ when mesh SDFs are enabled; falls back to [constant LIGHT_SHADOW_METHOD_PROJECT] when unavailable.

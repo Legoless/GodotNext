@@ -252,13 +252,16 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 		warnings.push_back(RTR("A light's scale does not affect the visual size of the light."));
 	}
 
-	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1) and df_shadows (#214, contract S7).
-	// The tier rule's reason on every light that would use virtual or distance-field shadows but cannot.
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1), df_shadows (#214, contract S7), and rt_shadows (#141, contract M9).
+	// The tier rule's reason on every light that would use virtual, ray-traced, or distance-field shadows but cannot.
 	if (shadow && RS::get_singleton() != nullptr) {
-		if (shadow_method == SHADOW_METHOD_RAY_TRACED) {
-			warnings.push_back(RTR("This shadow method is not implemented yet. The light uses the project's shadow method (Rendering > Lights and Shadows > Shadow Method)."));
-		}
 		const Dictionary tier = RS::get_singleton()->virtual_shadow_maps_get_tier_info();
+		const bool rt_available = bool(tier.get("rt_available", false));
+		const String rt_reason = String(tier.get("rt_reason", ""));
+		const bool project_rt = bool(tier.get("ray_traced_shadows", false));
+		if ((shadow_method == SHADOW_METHOD_RAY_TRACED || (shadow_method == SHADOW_METHOD_PROJECT && project_rt)) && !rt_available) {
+			warnings.push_back(vformat(RTR("Ray-traced shadows are not available (%s). Enable NextGI hardware ray tracing on a Forward+ renderer. This light falls back to the project's shadow method."), rt_reason));
+		}
 		const bool df_available = bool(tier.get("df_available", false));
 		const String df_reason = String(tier.get("df_reason", ""));
 		if (shadow_method == SHADOW_METHOD_DISTANCE_FIELD && !df_available) {
@@ -268,8 +271,10 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 			warnings.push_back(vformat(RTR("Directional distance-field far-shadow handoff is not available (%s). Enable Rendering > Global Illumination > Mesh SDF > Generate on a Forward+ renderer; shadows continue with the primary shadow method to full distance."), df_reason));
 		}
 		const bool project_virtual = String(tier.get("project_shadow_method", "atlas")) == "virtual";
+		const bool project_uses_rt = project_rt && rt_available;
+		const bool rt_falls_back = shadow_method == SHADOW_METHOD_RAY_TRACED && !rt_available;
 		const bool df_falls_back = shadow_method == SHADOW_METHOD_DISTANCE_FIELD && !df_available;
-		const bool wants_virtual = shadow_method == SHADOW_METHOD_VIRTUAL || ((shadow_method == SHADOW_METHOD_PROJECT || shadow_method == SHADOW_METHOD_RAY_TRACED || df_falls_back) && project_virtual);
+		const bool wants_virtual = shadow_method == SHADOW_METHOD_VIRTUAL || ((shadow_method == SHADOW_METHOD_PROJECT && !project_uses_rt) && project_virtual) || ((rt_falls_back || df_falls_back) && project_virtual);
 		if (wants_virtual && !bool(tier.get("available", false))) {
 			warnings.push_back(vformat(RTR("Virtual shadow maps are not available on this renderer or device (%s). This light uses the shadow atlas."), String(tier.get("reason", ""))));
 		}

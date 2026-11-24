@@ -95,6 +95,8 @@ nextgi_shadow_alpha;
 bool nextgi_shadow_retrace = false;
 // Alpha samples the last trace_shadow() took.
 uint nextgi_shadow_alpha_samples = 0u;
+// GodotNext: rt_shadows (#141). Committed hit distance from the last trace_shadow(), or -1.0 on miss.
+float nextgi_shadow_hit_t = -1.0;
 
 #ifdef NEXTGI_SHADOW_RETRACE_BINDING
 // next_gi_shadow_policy.h, NextGIShadowRetraceRecord: three uvec4 per record. info = (the caller's word, the
@@ -226,6 +228,7 @@ bool nextgi_shadow_alpha_kept(NextGIShadowAlpha p_entry, uint p_primitive, vec2 
 float trace_shadow(vec3 p_origin, vec3 p_direction, float p_tmax, uint p_light_mask_mode, uint p_layer_mask) {
 	nextgi_shadow_retrace = false;
 	nextgi_shadow_alpha_samples = 0u;
+	nextgi_shadow_hit_t = -1.0;
 	uint cull = p_light_mask_mode & NEXTGI_SHADOW_MODE_CULL_MASK;
 	if (cull == 0u || !(p_tmax > 0.0)) {
 		return 1.0;
@@ -235,7 +238,11 @@ float trace_shadow(vec3 p_origin, vec3 p_direction, float p_tmax, uint p_light_m
 		rayQueryEXT fast;
 		rayQueryInitializeEXT(fast, NEXTGI_SHADOW_TLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, cull, p_origin, 0.0, p_direction, p_tmax);
 		rayQueryProceedEXT(fast);
-		return rayQueryGetIntersectionTypeEXT(fast, true) != gl_RayQueryCommittedIntersectionNoneEXT ? 0.0 : 1.0;
+		if (rayQueryGetIntersectionTypeEXT(fast, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+			nextgi_shadow_hit_t = rayQueryGetIntersectionTEXT(fast, true);
+			return 0.0;
+		}
+		return 1.0;
 	}
 	// The candidate loop. The fallback makes every hit a candidate and checks its layers; otherwise only the
 	// alpha-tested (non-opaque) instances reach it.
@@ -284,6 +291,9 @@ float trace_shadow(vec3 p_origin, vec3 p_direction, float p_tmax, uint p_light_m
 	}
 	nextgi_shadow_alpha_samples = samples;
 	bool occluded = rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+	if (occluded) {
+		nextgi_shadow_hit_t = rayQueryGetIntersectionTEXT(rq, true);
+	}
 	nextgi_shadow_retrace = deferred && !occluded;
 	return occluded ? 0.0 : 1.0;
 }

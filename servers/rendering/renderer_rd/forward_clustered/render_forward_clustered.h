@@ -1273,6 +1273,19 @@ private:
 	bool _df_view_has_lights(const RenderDataRD *p_render_data) const;
 	void _render_df_shadows(RenderDataRD *p_render_data, RID p_normal_roughness, bool p_use_nextgi);
 
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone HWRT tile-sparse ray-traced shadows.
+	bool rt_shadows_view = false;
+	RID rt_bind_mask;
+	RID rt_bind_lookup;
+	RID rt_bind_hit_dist;
+	RID rt_default_mask;
+	RID rt_default_lookup;
+	RID rt_default_hit_dist;
+
+	void _ensure_rt_shadow_default_resources();
+	void _free_rt_shadow_default_resources();
+	bool _rt_view_has_lights(const RenderDataRD *p_render_data) const;
+
 protected:
 	/* setup */
 
@@ -1350,6 +1363,10 @@ public:
 	// GodotNext: df_shadows (#214).
 	virtual bool df_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) override;
 	virtual bool df_light_skips_atlas(RID p_light_instance, RID p_environment) const override;
+	// GodotNext: rt_shadows (#141).
+	virtual bool rt_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) override;
+	virtual bool rt_light_skips_atlas(RID p_light_instance, RID p_environment, const Ref<RenderSceneBuffers> &p_render_buffers) const override;
+	virtual bool rt_light_in_overflow_fallback(RID p_light_instance, const Ref<RenderSceneBuffers> &p_render_buffers) const override;
 
 	RenderForwardClustered();
 	~RenderForwardClustered();

@@ -486,6 +486,14 @@ void VirtualShadowMapStorage::record_df_stats(const DFStats &p_stats) {
 	last_df_stats.views = prev_views + (p_stats.lights_traced > 0 ? 1u : 0u);
 }
 
+void VirtualShadowMapStorage::record_rt_shadow_stats(const RTShadowStats &p_stats) {
+	const uint64_t prev_views = last_rt_stats.views;
+	const uint64_t prev_fallbacks = last_rt_stats.total_overflow_fallbacks;
+	last_rt_stats = p_stats;
+	last_rt_stats.views = prev_views + (p_stats.lights_traced > 0 ? 1u : 0u);
+	last_rt_stats.total_overflow_fallbacks = prev_fallbacks + uint64_t(p_stats.fallback_lights);
+}
+
 void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpdate &p_light, uint32_t &r_map_base, uint32_t &r_flags) {
 	r_map_base = MAP_NONE;
 	r_flags = 0;
@@ -706,6 +714,29 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 		df["reused_nextgi_swrt"] = last_df_stats.reused_nextgi_swrt;
 		df["views"] = int64_t(last_df_stats.views);
 		info["df_shadows"] = df;
+	}
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone RT shadows status and telemetry.
+	{
+		const RTTierReason rt_reason = get_rt_tier_reason();
+		Dictionary rt;
+		rt["available"] = rt_reason == RT_TIER_REASON_NONE;
+		rt["active"] = last_rt_stats.lights_traced > 0u;
+		rt["reason"] = String(get_rt_tier_reason_name(rt_reason));
+		rt["setting_enabled"] = read_ray_traced_shadows();
+		rt["lights_traced"] = int64_t(last_rt_stats.lights_traced);
+		rt["directional_lights"] = int64_t(last_rt_stats.directional_lights);
+		rt["local_lights"] = int64_t(last_rt_stats.local_lights);
+		rt["tiles_allocated"] = int64_t(last_rt_stats.tiles_allocated);
+		rt["tile_budget"] = int64_t(last_rt_stats.tile_budget);
+		rt["overflow_tiles"] = int64_t(last_rt_stats.overflow_tiles);
+		rt["overflow_lights"] = int64_t(last_rt_stats.overflow_lights);
+		rt["fallback_lights"] = int64_t(last_rt_stats.fallback_lights);
+		rt["total_overflow_fallbacks"] = int64_t(last_rt_stats.total_overflow_fallbacks);
+		rt["atlas_vram_bytes"] = int64_t(last_rt_stats.atlas_vram_bytes);
+		rt["atlas_passes_skipped"] = int64_t(last_rt_stats.atlas_passes_skipped);
+		rt["retrace_active"] = last_rt_stats.retrace_active;
+		rt["views"] = int64_t(last_rt_stats.views);
+		info["rt_shadows"] = rt;
 	}
 	if (state_buffer.is_valid() && RD::get_singleton() != nullptr) {
 		const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(state_buffer, 0, STATE_SIZE * uint32_t(sizeof(uint32_t)));

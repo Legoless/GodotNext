@@ -122,6 +122,33 @@ shader (such as a `discard` in a helper function per #304).
   `barn_door_length` culling) were written from first principles, plan §21.3 contract M8, issue #140, and
   Godot's own Forward+ and NextGI shaders. No Unreal Engine source, shaders, or third-party code were consulted.
 
+### Standalone ray-traced shadows (#141, contract M9), 2026-11-24
+
+Written from the plan (§21.3 contract M9, GM-3, GM-4, budget M-7, §8.2 ray origin offset, LQ6 translucent-as-opaque
+shadow policy), issue #141, and GodotNext's own subsystems: #145 (`trace_shadow()` visibility policy, 20-layer caster
+masks, bindless alpha cutout and #130 material retrace), #37 (prepass velocity plan), #54 (64x64 RG8 blue-noise tile),
+#221 (`Light3D.ShadowMethod` / tier reporting), and Forward+ light shading. No outside source code was consulted.
+
+Contract decisions for M9:
+
+- **Tile-sparse R8 shadow-mask atlas (`16x16` pixel tiles):** Each `(light, visible 16x16 screen tile)` allocates one
+  `16x16` tile in an `R8_UNORM` atlas (translucent casters shadow as opaque per LQ6, so a single scalar visibility
+  channel suffices). Quality presets budget `16,384` (Low, 4 MiB), `32,768` (Medium, 8 MiB), `65,536` (High, 16 MiB,
+  matching budget M-7), and `131,072` (Epic, 32 MiB) tiles per view, with no fixed light-count cap.
+- **Counted overflow fallback:** Lights that overflow the per-view tile budget increment GPU overflow counters, report
+  back asynchronously, and fall back cleanly to VSM or shadow atlas (`light_uses_vsm_fallback`) on subsequent frames
+  until the tile budget has headroom again.
+- **Auxiliary hit-distance atlas (`R16_SFLOAT`):** Records per-pixel blocker distance from `trace_shadow()` for both
+  penumbra-guided spatial denoising (`hit_distance / light_size`) and subsurface transmittance
+  (`LIGHT_PARAM_TRANSMITTANCE_BIAS`).
+- **Per-light spatio-temporal denoising (`NextGIDenoise::shadow_denoise()`):** Temporal accumulation uses #37 prepass
+  velocity with a twin history atlas, invalidating tile history whenever a tile's stable light ID or screen-tile owner
+  changes (or on depth/normal disocclusion), followed by 2 à-trous spatial passes (step sizes 1 and 2) guided by depth,
+  normal, and penumbra radius.
+- **Zero-cost setting-off path:** When `rendering/lights_and_shadows/ray_traced_shadows` is `false` and no visible
+  light uses `SHADOW_METHOD_RAY_TRACED`, `NextGIRTShadows` is never instantiated, zero atlas VRAM is allocated, zero
+  RT shadow passes run, and specialization bit 15 (`use_rt_shadows`) remains `false`.
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

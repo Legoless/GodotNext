@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  scene_forward_lights_inc.glsl                                         */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 // Functions related to lighting
 
 #extension GL_EXT_control_flow_attributes : require
@@ -590,6 +620,53 @@ float df_shadow_upsample(uint p_layer, float p_depth, vec3 p_view_normal) {
 }
 #endif
 
+#ifdef RT_SHADOW_SAMPLING
+// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Tile-sparse R8 RT shadow mask and hit-distance lookup.
+#define RT_SHADOW_LIGHT_FLAG_SAMPLE (1u << 0u)
+#define RT_SHADOW_TILE_NONE 0xFFFFFFFFu
+#define RT_SHADOW_HIT_MISS 65504.0
+
+bool rt_shadow_light_sampled(uint p_rt_flags) {
+	return sc_use_rt_shadows() && (p_rt_flags & RT_SHADOW_LIGHT_FLAG_SAMPLE) != 0u;
+}
+
+uint rt_shadow_lookup_tile(uint p_base, uvec2 p_screen_px) {
+	uvec2 st = p_screen_px >> 4u;
+	uint pmin = rt_shadow_tile_lookup.data[p_base];
+	uint pdim = rt_shadow_tile_lookup.data[p_base + 1u];
+	uvec2 min_t = uvec2(pmin & 0xFFFFu, pmin >> 16u);
+	uvec2 dim_t = uvec2(pdim & 0xFFFFu, pdim >> 16u);
+	if (st.x < min_t.x || st.y < min_t.y) {
+		return RT_SHADOW_TILE_NONE;
+	}
+	uvec2 rel = st - min_t;
+	if (rel.x >= dim_t.x || rel.y >= dim_t.y) {
+		return RT_SHADOW_TILE_NONE;
+	}
+	uint entry = rt_shadow_tile_lookup.data[p_base + 2u + rel.y * dim_t.x + rel.x];
+	return entry > 0u ? (entry - 1u) : RT_SHADOW_TILE_NONE;
+}
+
+float rt_shadow_sample(uint p_base, uvec2 p_screen_px) {
+	uint tile_id = rt_shadow_lookup_tile(p_base, p_screen_px);
+	if (tile_id == RT_SHADOW_TILE_NONE) {
+		return 1.0;
+	}
+	ivec2 atlas_px = ivec2(int((tile_id & 0xFFu) * 16u + (p_screen_px.x & 15u)), int((tile_id >> 8u) * 16u + (p_screen_px.y & 15u)));
+	return texelFetch(sampler2D(rt_shadow_atlas, SAMPLER_NEAREST_CLAMP), atlas_px, 0).r;
+}
+
+float rt_shadow_sample_hit_dist(uint p_base, uvec2 p_screen_px) {
+	uint tile_id = rt_shadow_lookup_tile(p_base, p_screen_px);
+	if (tile_id == RT_SHADOW_TILE_NONE) {
+		return -1.0;
+	}
+	ivec2 atlas_px = ivec2(int((tile_id & 0xFFu) * 16u + (p_screen_px.x & 15u)), int((tile_id >> 8u) * 16u + (p_screen_px.y & 15u)));
+	float hd = texelFetch(sampler2D(rt_shadow_hit_dist, SAMPLER_NEAREST_CLAMP), atlas_px, 0).r;
+	return hd < RT_SHADOW_HIT_MISS * 0.5 ? hd : -1.0;
+}
+#endif
+
 #endif // SHADOWS_DISABLED
 
 #ifdef LIGHT_FUNCTION_ATLAS
@@ -660,10 +737,21 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #ifndef SHADOWS_DISABLED
 	// Omni light shadow.
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214). A light sampled through DF
-	// or VSM has no atlas tile; forward transparents take one coarse-page VSM tap when coarse mode is on.
-	const bool df_sampled = df_light_sampled(omni_lights.data[idx].vsm_flags);
-	const bool vsm_sampled = !df_sampled && vsm_light_sampled(omni_lights.data[idx].vsm_flags);
+	// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214), rt_shadows (#141).
+	// A light sampled through RT shadows, DF, or VSM has no atlas tile.
+#ifdef RT_SHADOW_SAMPLING
+	const bool rt_sampled = rt_shadow_light_sampled(omni_lights.data[idx].rt_shadow_flags);
+#else
+	const bool rt_sampled = false;
+#endif
+	const bool df_sampled = !rt_sampled && df_light_sampled(omni_lights.data[idx].vsm_flags);
+	const bool vsm_sampled = !rt_sampled && !df_sampled && vsm_light_sampled(omni_lights.data[idx].vsm_flags);
+#ifdef RT_SHADOW_SAMPLING
+	if (rt_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
+		float rt_shadow = rt_shadow_sample(omni_lights.data[idx].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+		shadow = mix(half(1.0), half(rt_shadow), half(omni_lights.data[idx].shadow_opacity));
+	} else
+#endif
 	if (df_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
 		float df_shadow = df_shadow_upsample(df_light_layer(omni_lights.data[idx].vsm_flags), -vertex.z, vec3(normal));
 		shadow = mix(half(1.0), half(df_shadow), half(omni_lights.data[idx].shadow_opacity));
@@ -676,7 +764,7 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		}
 		shadow = mix(half(1.0), half(vsm_shadow), half(omni_lights.data[idx].shadow_opacity));
 	}
-	if (!vsm_sampled && !df_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
+	if (!rt_sampled && !vsm_sampled && !df_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
 #else
 	if (omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
 #endif
@@ -819,14 +907,22 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	transmittance_color.a *= omni_attenuation;
 #ifndef SHADOWS_DISABLED
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222).
+	// GodotNext: vsm_projection (#222), rt_shadows (#141).
+#ifdef RT_SHADOW_SAMPLING
+	if (rt_sampled && omni_lights.data[idx].shadow_opacity > 0.001) {
+		float rt_thickness = rt_shadow_sample_hit_dist(omni_lights.data[idx].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+		if (rt_thickness >= 0.0) {
+			transmittance_z = half(rt_thickness);
+		}
+	} else
+#endif
 	if (vsm_sampled && omni_lights.data[idx].shadow_opacity > 0.001) {
 		float vsm_thickness = vsm_transmittance_local(omni_lights.data[idx].vsm_map_base, omni_lights.data[idx].vsm_flags, vsm_world_position(vertex - vec3(normal) * omni_lights.data[idx].transmittance_bias), -vertex.z);
 		if (vsm_thickness >= 0.0) {
 			transmittance_z = half(vsm_thickness);
 		}
 	}
-	if (!vsm_sampled && !df_sampled && omni_lights.data[idx].shadow_opacity > 0.001) {
+	if (!rt_sampled && !vsm_sampled && !df_sampled && omni_lights.data[idx].shadow_opacity > 0.001) {
 #else
 	if (omni_lights.data[idx].shadow_opacity > 0.001) {
 #endif
@@ -1024,10 +1120,21 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #ifndef SHADOWS_DISABLED
 	// Spot light shadow.
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214). A light sampled through DF
-	// or VSM has no atlas tile; forward transparents take one coarse-page VSM tap when coarse mode is on.
-	const bool df_sampled = df_light_sampled(spot_lights.data[idx].vsm_flags);
-	const bool vsm_sampled = !df_sampled && vsm_light_sampled(spot_lights.data[idx].vsm_flags);
+	// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214), rt_shadows (#141).
+	// A light sampled through RT shadows, DF, or VSM has no atlas tile.
+#ifdef RT_SHADOW_SAMPLING
+	const bool rt_sampled = rt_shadow_light_sampled(spot_lights.data[idx].rt_shadow_flags);
+#else
+	const bool rt_sampled = false;
+#endif
+	const bool df_sampled = !rt_sampled && df_light_sampled(spot_lights.data[idx].vsm_flags);
+	const bool vsm_sampled = !rt_sampled && !df_sampled && vsm_light_sampled(spot_lights.data[idx].vsm_flags);
+#ifdef RT_SHADOW_SAMPLING
+	if (rt_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
+		float rt_shadow = rt_shadow_sample(spot_lights.data[idx].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+		shadow = mix(half(1.0), half(rt_shadow), half(spot_lights.data[idx].shadow_opacity));
+	} else
+#endif
 	if (df_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
 		float df_shadow = df_shadow_upsample(df_light_layer(spot_lights.data[idx].vsm_flags), -vertex.z, vec3(normal));
 		shadow = mix(half(1.0), half(df_shadow), half(spot_lights.data[idx].shadow_opacity));
@@ -1040,7 +1147,7 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		}
 		shadow = mix(half(1.0), half(vsm_shadow), half(spot_lights.data[idx].shadow_opacity));
 	}
-	if (!vsm_sampled && !df_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
+	if (!rt_sampled && !vsm_sampled && !df_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
 #else
 	if (spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
 #endif
@@ -1127,14 +1234,22 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	transmittance_color.a *= spot_attenuation;
 #ifndef SHADOWS_DISABLED
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222).
+	// GodotNext: vsm_projection (#222), rt_shadows (#141).
+#ifdef RT_SHADOW_SAMPLING
+	if (rt_sampled && spot_lights.data[idx].shadow_opacity > 0.001) {
+		float rt_thickness = rt_shadow_sample_hit_dist(spot_lights.data[idx].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+		if (rt_thickness >= 0.0) {
+			transmittance_z = half(rt_thickness);
+		}
+	} else
+#endif
 	if (vsm_sampled && spot_lights.data[idx].shadow_opacity > 0.001) {
 		float vsm_thickness = vsm_transmittance_local(spot_lights.data[idx].vsm_map_base, spot_lights.data[idx].vsm_flags, vsm_world_position(vertex - vec3(normal) * spot_lights.data[idx].transmittance_bias), -vertex.z);
 		if (vsm_thickness >= 0.0) {
 			transmittance_z = half(vsm_thickness);
 		}
 	}
-	if (!vsm_sampled && !df_sampled && spot_lights.data[idx].shadow_opacity > 0.001) {
+	if (!rt_sampled && !vsm_sampled && !df_sampled && spot_lights.data[idx].shadow_opacity > 0.001) {
 #else
 	if (spot_lights.data[idx].shadow_opacity > 0.001) {
 #endif
@@ -1277,10 +1392,21 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #ifndef SHADOWS_DISABLED
 	// Area light shadow.
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214). A light sampled through DF
-	// or VSM has no atlas tile; forward transparents take one coarse-page VSM tap when coarse mode is on.
-	const bool df_sampled = df_light_sampled(area_lights.data[idx].vsm_flags);
-	const bool vsm_sampled = !df_sampled && vsm_light_sampled(area_lights.data[idx].vsm_flags);
+	// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214), rt_shadows (#141).
+	// A light sampled through RT shadows, DF, or VSM has no atlas tile.
+#ifdef RT_SHADOW_SAMPLING
+	const bool rt_sampled = rt_shadow_light_sampled(area_lights.data[idx].rt_shadow_flags);
+#else
+	const bool rt_sampled = false;
+#endif
+	const bool df_sampled = !rt_sampled && df_light_sampled(area_lights.data[idx].vsm_flags);
+	const bool vsm_sampled = !rt_sampled && !df_sampled && vsm_light_sampled(area_lights.data[idx].vsm_flags);
+#ifdef RT_SHADOW_SAMPLING
+	if (rt_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
+		float rt_shadow = rt_shadow_sample(area_lights.data[idx].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+		shadow = mix(half(1.0), half(rt_shadow), half(area_lights.data[idx].shadow_opacity));
+	} else
+#endif
 	if (df_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
 		float df_shadow = df_shadow_upsample(df_light_layer(area_lights.data[idx].vsm_flags), -vertex.z, vec3(normal));
 		shadow = mix(half(1.0), half(df_shadow), half(area_lights.data[idx].shadow_opacity));
@@ -1293,7 +1419,7 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		}
 		shadow = mix(half(1.0), half(vsm_shadow), half(area_lights.data[idx].shadow_opacity));
 	}
-	if (!vsm_sampled && !df_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
+	if (!rt_sampled && !vsm_sampled && !df_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
 #else
 	if (light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
 #endif
@@ -1527,14 +1653,22 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		transmittance_color.a *= light_attenuation_raw; // not including shadows or ltc falloff
 #ifndef SHADOWS_DISABLED
 #ifdef VSM_PROJECTION
-		// GodotNext: vsm_projection (#222).
+		// GodotNext: vsm_projection (#222), rt_shadows (#141).
+#ifdef RT_SHADOW_SAMPLING
+		if (rt_sampled && area_lights.data[idx].shadow_opacity > 0.001) {
+			float rt_thickness = rt_shadow_sample_hit_dist(area_lights.data[idx].rt_shadow_tile_base, uvec2(NEXTGEO_FRAG_COORD.xy));
+			if (rt_thickness >= 0.0) {
+				transmittance_z = half(rt_thickness);
+			}
+		} else
+#endif
 		if (vsm_sampled && area_lights.data[idx].shadow_opacity > 0.001) {
 			float vsm_thickness = vsm_transmittance_local(area_lights.data[idx].vsm_map_base, area_lights.data[idx].vsm_flags, vsm_world_position(vertex - vec3(normal) * area_lights.data[idx].transmittance_bias), -vertex.z);
 			if (vsm_thickness >= 0.0) {
 				transmittance_z = half(vsm_thickness);
 			}
 		}
-		if (!vsm_sampled && !df_sampled && area_lights.data[idx].shadow_opacity > 0.001) {
+		if (!rt_sampled && !vsm_sampled && !df_sampled && area_lights.data[idx].shadow_opacity > 0.001) {
 #else
 		if (area_lights.data[idx].shadow_opacity > 0.001) {
 #endif

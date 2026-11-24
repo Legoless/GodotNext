@@ -74,6 +74,9 @@ class PathTracer;
 // GodotNext: nextgi_shadow_policy (#145)
 class NextGIShadowCheck;
 
+// GodotNext: rt_shadows (#141)
+class NextGIRTShadows;
+
 // GodotNext: nextgi_src_relight
 class NextGIRelight;
 
@@ -362,6 +365,9 @@ private:
 	NextGIShadowCheck *shadow_check = nullptr;
 	void _free_shadow_check();
 	void _release_unused_hit_materials();
+
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone HWRT ray-traced shadows, created lazily.
+	NextGIRTShadows *rt_shadows = nullptr;
 
 	// GodotNext: nextgi_src_relight
 	NextGIRelight *relight = nullptr;
@@ -706,7 +712,16 @@ public:
 	// view_uses_frame_block holds. It writes RB_TEX_AMBIENT and RB_TEX_REFLECTION and emits every
 	// PASS_SLOTS timestamp, empty slots included. Until the gather lands both buffers are cleared to
 	// (0, 0, 0, 0), so the opaque pass keeps its own ambient and specular through the buffer alpha.
-	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution);
+	// When p_defer_compact is true (standalone RT shadows trace later in _pre_opaque_render), the
+	// caller calls compact_after_traces() once RT shadow tracing completes.
+	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution, bool p_defer_compact = false);
+	// GodotNext: rt_shadows (#141, plan §21.3 contract M9).
+	// Ensures the HWRT TLAS + dirty BLAS + material hit groups are up to date for views that run
+	// standalone ray-traced shadows without Environment.nextgi_enabled.
+	void prepare_rt_scene_for_shadows(RenderDataRD *p_render_data);
+	void compact_after_traces();
+	NextGIRTShadows *ensure_rt_shadows();
+	NextGIRTShadows *get_rt_shadows() const { return rt_shadows; }
 	// GodotNext: ps_swrt_trace (#186). The software tier's tracer (SOFTWARE only), and the voxel
 	// lighting that shades its global-SDF hits. begin_frame() drops both on a tier change.
 	NextGISWRTTrace *get_swrt_trace() const { return swrt_trace; }

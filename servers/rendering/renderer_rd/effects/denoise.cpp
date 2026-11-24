@@ -35,7 +35,10 @@
 
 using namespace RendererRD;
 
-NextGIDenoise::NextGIDenoise() {
+NextGIDenoise::NextGIDenoise(bool p_init_gi_shaders) {
+	if (!p_init_gi_shaders) {
+		return;
+	}
 	Vector<String> shader_modes;
 	shader_modes.push_back("\n#define MODE_PROBE_SPATIAL\n");
 	shader_modes.push_back("\n#define MODE_PROBE_TEMPORAL\n");
@@ -56,19 +59,199 @@ NextGIDenoise::NextGIDenoise() {
 		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
 	}
 	temporal_params_buffer = RD::get_singleton()->storage_buffer_create(sizeof(TemporalParamsGPU));
+	gi_shaders_initialized = true;
 }
 
 NextGIDenoise::~NextGIDenoise() {
-	for (int i = 0; i < MODE_MAX; i++) {
-		RD::get_singleton()->free_rid(pipelines[i]);
+	RenderingDevice *rd = RD::get_singleton();
+	if (gi_shaders_initialized) {
+		for (int i = 0; i < MODE_MAX; i++) {
+			if (rd != nullptr && pipelines[i].is_valid()) {
+				rd->free_rid(pipelines[i]);
+			}
+		}
+		if (rd != nullptr && temporal_params_buffer.is_valid()) {
+			rd->free_rid(temporal_params_buffer);
+		}
+		if (shader_version.is_valid()) {
+			shader.version_free(shader_version);
+		}
+		if (rd != nullptr) {
+			if (specular_temporal.is_valid()) {
+				rd->free_rid(specular_temporal);
+			}
+			if (specular_spatial.is_valid()) {
+				rd->free_rid(specular_spatial);
+			}
+			if (specular_upsample.is_valid()) {
+				rd->free_rid(specular_upsample);
+			}
+			if (specular_params_buffer.is_valid()) {
+				rd->free_rid(specular_params_buffer);
+			}
+		}
+		if (specular_version.is_valid()) {
+			specular_shader.version_free(specular_version);
+		}
 	}
-	RD::get_singleton()->free_rid(temporal_params_buffer);
-	shader.version_free(shader_version);
-	RD::get_singleton()->free_rid(specular_temporal);
-	RD::get_singleton()->free_rid(specular_spatial);
-	RD::get_singleton()->free_rid(specular_upsample);
-	RD::get_singleton()->free_rid(specular_params_buffer);
-	specular_shader.version_free(specular_version);
+	if (shadow_version.is_valid()) {
+		for (int i = 0; i < SHADOW_MODE_MAX; i++) {
+			if (rd != nullptr && shadow_pipelines[i].is_valid()) {
+				rd->free_rid(shadow_pipelines[i]);
+			}
+			shadow_pipelines[i] = RID();
+		}
+		shadow_shader.version_free(shadow_version);
+		shadow_version = RID();
+	}
+}
+
+Vector<String> NextGIDenoise::get_shadow_shader_variant_defines() {
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_TEMPORAL\n");
+	modes.push_back("\n#define MODE_SPATIAL\n");
+	modes.push_back("\n#define MODE_COPY_PREV_GUIDE\n");
+	return modes;
+}
+
+bool NextGIDenoise::_ensure_shadow_shader() {
+	if (shadow_shader_ready) {
+		return true;
+	}
+	if (shadow_shader_failed) {
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	shadow_shader.initialize(get_shadow_shader_variant_defines());
+	shadow_version = shadow_shader.version_create(false);
+	if (shadow_version.is_null()) {
+		shadow_shader_failed = true;
+		ERR_FAIL_V_MSG(false, "NextGIDenoise: could not create RT shadow denoiser shader version.");
+	}
+	for (int i = 0; i < SHADOW_MODE_MAX; i++) {
+		const RID shader_rid = shadow_shader.version_get_shader(shadow_version, i);
+		if (shader_rid.is_null()) {
+			for (int j = 0; j < i; j++) {
+				if (shadow_pipelines[j].is_valid()) {
+					rd->free_rid(shadow_pipelines[j]);
+					shadow_pipelines[j] = RID();
+				}
+			}
+			shadow_shader.version_free(shadow_version);
+			shadow_version = RID();
+			shadow_shader_failed = true;
+			ERR_FAIL_V_MSG(false, "NextGIDenoise: RT shadow denoiser shader failed to compile.");
+		}
+		shadow_pipelines[i] = rd->compute_pipeline_create(shader_rid);
+	}
+	shadow_shader_ready = true;
+	return true;
+}
+
+void NextGIDenoise::shadow_denoise(const ShadowDenoiseParams &p_params) {
+	ERR_FAIL_COND(!p_params.raw_mask.is_valid() || !p_params.history_mask_prev.is_valid() || !p_params.history_mask_cur.is_valid());
+	ERR_FAIL_COND(!p_params.history_len_prev.is_valid() || !p_params.history_len_cur.is_valid() || !p_params.hit_dist.is_valid());
+	ERR_FAIL_COND(!p_params.depth.is_valid() || !p_params.normal_roughness.is_valid() || !p_params.velocity.is_valid() || !p_params.prev_depth_normal.is_valid());
+	ERR_FAIL_COND(!p_params.params_buffer.is_valid() || !p_params.lights_buffer.is_valid() || !p_params.tile_list_buffer.is_valid() || !p_params.alloc_state_buffer.is_valid());
+	ERR_FAIL_COND(!p_params.cur_lookup_buffer.is_valid() || !p_params.prev_lookup_buffer.is_valid() || !p_params.prev_owner_buffer.is_valid() || !p_params.indirect_buffer.is_valid());
+	if (p_params.screen_size.width <= 0 || p_params.screen_size.height <= 0) {
+		return;
+	}
+	if (!_ensure_shadow_shader()) {
+		return;
+	}
+
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_COND(rd == nullptr || uniform_set_cache == nullptr || material_storage == nullptr);
+
+	const RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	// 1. Temporal reprojection over allocated tiles: reads raw_mask + history_mask_prev -> writes history_mask_cur.
+	{
+		const RID shader_rid = shadow_shader.version_get_shader(shadow_version, SHADOW_MODE_TEMPORAL);
+		RD::Uniform u_raw(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_params.raw_mask }));
+		RD::Uniform u_hist_prev(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.history_mask_prev }));
+		RD::Uniform u_len_prev(RD::UNIFORM_TYPE_IMAGE, 2, Vector<RID>({ p_params.history_len_prev }));
+		RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.depth }));
+		RD::Uniform u_normal(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, p_params.normal_roughness }));
+		RD::Uniform u_velocity(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.velocity }));
+		RD::Uniform u_prev_guide(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, p_params.prev_depth_normal }));
+		RD::Uniform u_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_params.params_buffer);
+		RD::Uniform u_lights(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_params.lights_buffer);
+		RD::Uniform u_tiles(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_params.tile_list_buffer);
+		RD::Uniform u_state(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, p_params.alloc_state_buffer);
+		RD::Uniform u_cur_lookup(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, p_params.cur_lookup_buffer);
+		RD::Uniform u_prev_lookup(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, p_params.prev_lookup_buffer);
+		RD::Uniform u_prev_owner(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, p_params.prev_owner_buffer);
+		RD::Uniform u_hist_cur(RD::UNIFORM_TYPE_IMAGE, 14, Vector<RID>({ p_params.history_mask_cur }));
+		RD::Uniform u_len_cur(RD::UNIFORM_TYPE_IMAGE, 15, Vector<RID>({ p_params.history_len_cur }));
+
+		const RID uniform_set = uniform_set_cache->get_cache(shader_rid, 0, u_raw, u_hist_prev, u_len_prev, u_depth, u_normal, u_velocity, u_prev_guide, u_params, u_lights, u_tiles, u_state, u_cur_lookup, u_prev_lookup, u_prev_owner, u_hist_cur, u_len_cur);
+		ERR_FAIL_COND(uniform_set.is_null());
+
+		const RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shadow_pipelines[SHADOW_MODE_TEMPORAL]);
+		rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
+		rd->compute_list_dispatch_indirect(cl, p_params.indirect_buffer, 0);
+		rd->compute_list_end();
+	}
+
+	// 2. Spatial à-trous pass 1 (step = 1) and pass 2 (step = 2):
+	//    pass 1: history_mask_cur -> raw_mask (scratch)
+	//    pass 2: raw_mask (scratch) -> history_mask_prev (now dead as previous history; becomes final output).
+	struct SpatialPush {
+		uint32_t step_size = 1;
+		uint32_t pad[3] = {};
+	};
+	const RID spatial_shader_rid = shadow_shader.version_get_shader(shadow_version, SHADOW_MODE_SPATIAL);
+	const RID spatial_sources[2] = { p_params.history_mask_cur, p_params.raw_mask };
+	const RID spatial_outputs[2] = { p_params.raw_mask, p_params.history_mask_prev };
+	const uint32_t spatial_steps[2] = { 1u, 2u };
+	for (int pass = 0; pass < 2; pass++) {
+		RD::Uniform u_src(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, spatial_sources[pass] }));
+		RD::Uniform u_hit(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.hit_dist }));
+		RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, p_params.depth }));
+		RD::Uniform u_normal(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.normal_roughness }));
+		RD::Uniform u_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, p_params.params_buffer);
+		RD::Uniform u_lights(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_params.lights_buffer);
+		RD::Uniform u_tiles(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_params.tile_list_buffer);
+		RD::Uniform u_state(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_params.alloc_state_buffer);
+		RD::Uniform u_cur_lookup(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_params.cur_lookup_buffer);
+		RD::Uniform u_out(RD::UNIFORM_TYPE_IMAGE, 9, Vector<RID>({ spatial_outputs[pass] }));
+
+		const RID uniform_set = uniform_set_cache->get_cache(spatial_shader_rid, 0, u_src, u_hit, u_depth, u_normal, u_params, u_lights, u_tiles, u_state, u_cur_lookup, u_out);
+		ERR_FAIL_COND(uniform_set.is_null());
+
+		SpatialPush push;
+		push.step_size = spatial_steps[pass];
+		const RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shadow_pipelines[SHADOW_MODE_SPATIAL]);
+		rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
+		rd->compute_list_set_push_constant(cl, &push, sizeof(push));
+		rd->compute_list_dispatch_indirect(cl, p_params.indirect_buffer, 0);
+		rd->compute_list_end();
+	}
+
+	// 3. Save current view-space normal + linear depth as next frame's disocclusion guide.
+	{
+		const RID copy_shader_rid = shadow_shader.version_get_shader(shadow_version, SHADOW_MODE_COPY_PREV_GUIDE);
+		RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_params.depth }));
+		RD::Uniform u_normal(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.normal_roughness }));
+		RD::Uniform u_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_params.params_buffer);
+		RD::Uniform u_prev_guide(RD::UNIFORM_TYPE_IMAGE, 3, Vector<RID>({ p_params.prev_depth_normal }));
+
+		const RID uniform_set = uniform_set_cache->get_cache(copy_shader_rid, 0, u_depth, u_normal, u_params, u_prev_guide);
+		ERR_FAIL_COND(uniform_set.is_null());
+
+		const RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shadow_pipelines[SHADOW_MODE_COPY_PREV_GUIDE]);
+		rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
+		rd->compute_list_dispatch_threads(cl, uint32_t(p_params.screen_size.width), uint32_t(p_params.screen_size.height), 1);
+		rd->compute_list_end();
+	}
 }
 
 void NextGIDenoise::process_specular_temporal(const SpecularTemporalParams &p_params) {

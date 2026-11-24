@@ -34,13 +34,18 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
-// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141)
+#include "servers/rendering/renderer_rd/effects/denoise.h"
 #include "servers/rendering/renderer_rd/effects/path_tracer.h"
 #include "servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_shadow_alloc.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_shadows.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
@@ -67,6 +72,10 @@ struct NextGIBakeShaders::Instances {
 	PathTracerShaderRD path_tracer;
 	// GodotNext: path_tracer_denoise (#168). The screen-space JNLM denoiser (plain compute, no ray query).
 	PathTracerDenoiseShaderRD path_tracer_denoise;
+	// GodotNext: rt_shadows (#141). Standalone RT shadow allocation, ray-query trace, and per-light denoiser.
+	NextgiRtShadowAllocShaderRD rt_shadow_alloc;
+	NextgiRtShadowsShaderRD rt_shadows;
+	NextgiDenoiseShadowShaderRD denoise_shadow;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
@@ -95,6 +104,9 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->selftest, NextGI::get_selftest_variant_defines());
 	_add(instances->path_tracer, PathTracer::get_shader_variant_defines()); // GodotNext: path_tracer (#167)
 	_add(instances->path_tracer_denoise, PathTracer::get_denoise_shader_variant_defines()); // GodotNext: path_tracer_denoise (#168)
+	_add(instances->rt_shadow_alloc, NextGIRTShadows::get_alloc_shader_variant_defines()); // GodotNext: rt_shadows (#141)
+	_add(instances->rt_shadows, NextGIRTShadows::get_trace_shader_variant_defines()); // GodotNext: rt_shadows (#141)
+	_add(instances->denoise_shadow, NextGIDenoise::get_shadow_shader_variant_defines()); // GodotNext: rt_shadows (#141)
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {

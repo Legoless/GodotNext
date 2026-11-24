@@ -478,6 +478,12 @@ public:
 	// GodotNext: df_shadows (#214). Whether the view supports DF shadows and whether a light skips the atlas.
 	virtual bool df_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) { return false; }
 	virtual bool df_light_skips_atlas(RID p_light_instance, RID p_environment) const { return false; }
+	// GodotNext: rt_shadows (#141). Whether the view supports standalone HWRT ray-traced shadows,
+	// whether a light skips the shadow atlas (false when in tile-budget overflow fallback), and
+	// whether an overflow-fallback light should fall back to VSM caster collection.
+	virtual bool rt_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) { return false; }
+	virtual bool rt_light_skips_atlas(RID p_light_instance, RID p_environment, const Ref<RenderSceneBuffers> &p_render_buffers) const { return false; }
+	virtual bool rt_light_in_overflow_fallback(RID p_light_instance, const Ref<RenderSceneBuffers> &p_render_buffers) const { return false; }
 	// A raster check is armed: lights that skip the atlas still get their atlas caster lists, for its diff.
 	virtual bool vsm_raster_check_armed() const { return false; }
 	virtual Dictionary geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const { return Dictionary(); }

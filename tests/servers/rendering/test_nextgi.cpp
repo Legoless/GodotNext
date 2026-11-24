@@ -63,6 +63,7 @@ TEST_FORCE_LINK(test_nextgi)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_shadows.glsl.gen.h" // GodotNext: rt_shadows (#141)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
@@ -271,28 +272,30 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 	CHECK(NextgiSelftestShaderRD().requires_ray_query());
 	CHECK(NextgiRqSelftestShaderRD().requires_ray_query());
 	CHECK(PathTracerShaderRD().requires_ray_query()); // GodotNext: path_tracer (#167)
+	CHECK(NextgiRtShadowsShaderRD().requires_ray_query()); // GodotNext: rt_shadows (#141)
 }
 
 // GodotNext: nextgi_vulkan (#50)
 TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	// GodotNext: path_tracer (#167), path_tracer_denoise (#168). The path tracer's inline backend is the eleventh
-	// and its screen-space denoiser is the twelfth (no ray query).
-	REQUIRE(versions.size() == 12);
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141).
+	REQUIRE(versions.size() == 15);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	const char *expected[12] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
-		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD", "PathTracerShaderRD", "PathTracerDenoiseShaderRD" };
-	for (int i = 0; i < 12; i++) {
+	const char *expected[15] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD",
+		"PathTracerShaderRD", "PathTracerDenoiseShaderRD", "NextgiRtShadowAllocShaderRD", "NextgiRtShadowsShaderRD", "NextgiDenoiseShadowShaderRD" };
+	for (int i = 0; i < 15; i++) {
 		CHECK_EQ(names[i], String(expected[i]));
 	}
-	// The hardware instances and the self-test need ray query; the software siblings and the denoiser bake everywhere (#261, #168).
-	for (int i = 0; i < 12; i++) {
-		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11;
+	// The hardware instances and the self-test need ray query; the software siblings, path-tracer denoiser,
+	// and RT-shadow alloc/denoise passes bake everywhere (#261, #168, #141).
+	for (int i = 0; i < 15; i++) {
+		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14;
 		CHECK_EQ(versions[i].first->requires_ray_query(), !no_ray_query);
 	}
 

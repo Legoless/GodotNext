@@ -1418,7 +1418,7 @@ TEST_CASE("[VSM] Mocked capabilities: a virtual project with no VSM tier uses th
 	VSM::reset_startup_state();
 }
 
-TEST_CASE("[VSM] Light shadow methods resolve to VIRTUAL, ATLAS or DISTANCE_FIELD; unimplemented ones take PROJECT (#221, #214)") {
+TEST_CASE("[VSM] Light shadow methods resolve to VIRTUAL, ATLAS, RAY_TRACED or DISTANCE_FIELD (#221, #214, #141)") {
 	using M = RSE::LightShadowMethod;
 	const VSM::ShadowMethod projects[2] = { VSM::SHADOW_METHOD_ATLAS, VSM::SHADOW_METHOD_VIRTUAL };
 	for (VSM::ShadowMethod project : projects) {
@@ -1427,10 +1427,13 @@ TEST_CASE("[VSM] Light shadow methods resolve to VIRTUAL, ATLAS or DISTANCE_FIEL
 		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_VIRTUAL, project, true, false) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
 		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_ATLAS, project, true, false) == RSE::LIGHT_SHADOW_METHOD_ATLAS);
 		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED, project, true, false) == project_result);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED, project, true, false, true, false) == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED, project, false, false, true, false) == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_PROJECT, project, true, false, true, true) == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
 		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD, project, true, false) == project_result);
 		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD, project, true, true) == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
 		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD, project, false, true) == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
-		// Below both tiers everything takes the atlas.
+		// Below all tiers everything takes the atlas.
 		for (uint32_t method = 0; method < RSE::LIGHT_SHADOW_METHOD_MAX; method++) {
 			CHECK(VSM::resolve_light_shadow_method(M(method), project, false, false) == RSE::LIGHT_SHADOW_METHOD_ATLAS);
 		}
@@ -1438,31 +1441,26 @@ TEST_CASE("[VSM] Light shadow methods resolve to VIRTUAL, ATLAS or DISTANCE_FIEL
 	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_PROJECT));
 	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_VIRTUAL));
 	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_ATLAS));
-	CHECK_FALSE(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED));
+	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED));
 	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD));
 }
 
-TEST_CASE("[VSM] Unimplemented shadow methods warn once each (#221, #214)") {
+TEST_CASE("[VSM] All shadow methods are implemented and warn zero unimplemented times; RT fallback logs once (#221, #214, #141)") {
 	VSM::reset_startup_state();
 	const uint32_t before = VSM::get_unimplemented_warning_count();
+	const uint32_t rt_lines_before = VSM::get_rt_fallback_line_count();
 	ERR_PRINT_OFF;
 	for (int i = 0; i < 3; i++) {
 		VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
 	}
-	ERR_PRINT_ON;
-	CHECK(VSM::get_unimplemented_warning_count() - before == 1);
-	ERR_PRINT_OFF;
 	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
 	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
-	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
-	ERR_PRINT_ON;
-	CHECK(VSM::get_unimplemented_warning_count() - before == 1);
-	// Implemented methods never warn.
 	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_PROJECT);
 	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
 	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_ATLAS);
-	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
-	CHECK(VSM::get_unimplemented_warning_count() - before == 1);
+	ERR_PRINT_ON;
+	CHECK(VSM::get_unimplemented_warning_count() - before == 0);
+	CHECK(VSM::get_rt_fallback_line_count() - rt_lines_before == 1);
 	VSM::reset_startup_state();
 }
 
@@ -1572,10 +1570,11 @@ TEST_CASE("[VSM][SceneTree] Light3D shows the tier reason on lights that would u
 	CHECK_FALSE(vsm_has_warning(light->get_configuration_warnings(), fallback));
 	light->set_shadow_method(Light3D::SHADOW_METHOD_VIRTUAL);
 	CHECK(vsm_has_warning(light->get_configuration_warnings(), fallback));
-	// Unimplemented methods take PROJECT (here Virtual), so they show both warnings.
+	// RAY_TRACED is implemented; when HWRT is unavailable it names the RT tier reason and falls back to PROJECT (here Virtual).
 	light->set_shadow_method(Light3D::SHADOW_METHOD_RAY_TRACED);
 	warnings = light->get_configuration_warnings();
-	CHECK(vsm_has_warning(warnings, "not implemented yet"));
+	CHECK_FALSE(vsm_has_warning(warnings, "not implemented yet"));
+	CHECK(vsm_has_warning(warnings, "Ray-traced shadows are not available"));
 	CHECK(vsm_has_warning(warnings, fallback));
 	// A light without shadows shows nothing.
 	light->set_shadow(false);

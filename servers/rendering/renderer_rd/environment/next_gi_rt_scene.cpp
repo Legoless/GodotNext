@@ -59,6 +59,8 @@
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: rt_shadows (#141).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 #include "servers/rendering/storage/environment_storage.h"
 // GodotNext: spline_meshes (#161)
 #include "servers/rendering/storage/spline_deform.h"
@@ -1435,7 +1437,7 @@ void NextGIRTScene::_ensure_record_buffers(uint32_t p_instance_count, uint32_t p
 	}
 }
 
-// GodotNext: nextgi_shadow_policy (#145)
+// GodotNext: nextgi_shadow_policy (#145) / rt_shadows (#141)
 void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_data) {
 	LocalVector<uint32_t> masks;
 	const RendererSceneRender::RenderSDFGIUpdateData *feed = p_render_data != nullptr ? p_render_data->sdfgi_update_data : nullptr;
@@ -1465,6 +1467,27 @@ void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_dat
 		}
 		for (uint32_t i = 0; i < feed->nextgi_static_light_count; i++) {
 			add(feed->nextgi_static_light_instances[i], false);
+		}
+	}
+	// GodotNext: rt_shadows (#141). Also include standalone RT-shadowed view lights (regardless of bake mode)
+	// so they receive 6-bit dynamic TLAS caster masks and take the opaque fast path whenever possible.
+	if (p_render_data != nullptr && p_render_data->lights != nullptr && light_storage != nullptr && RendererVirtualShadowMapStorage::is_rt_available()) {
+		for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+			const RID li = (*p_render_data->lights)[i];
+			if (!light_storage->owns_light_instance(li)) {
+				continue;
+			}
+			const RID light = light_storage->light_instance_get_base_light(li);
+			if (!light_storage->light_has_shadow(light)) {
+				continue;
+			}
+			if (light_storage->light_get_type(light) == RSE::LIGHT_DIRECTIONAL && light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+				continue;
+			}
+			if (!RendererVirtualShadowMapStorage::light_uses_rt(light_storage->light_get_shadow_method(light))) {
+				continue;
+			}
+			masks.push_back(light_storage->light_get_shadow_caster_mask(light));
 		}
 	}
 	// GodotNext: nextgi_hit_lighting (#129). Reserve TLAS mask bit 1 for alpha-blended instances when hit lighting runs.

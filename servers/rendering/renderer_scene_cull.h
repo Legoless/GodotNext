@@ -422,10 +422,10 @@ public:
 	static void _instance_pair(Instance *p_A, Instance *p_B);
 	static void _instance_unpair(Instance *p_A, Instance *p_B);
 
-	// GodotNext: light_grid (#139, plan §21.3 contract M2). CPU light-geometry pairing skip.
+	// GodotNext: light_grid (#139, plan §21.3 contract M2) / rt_shadows (#141). CPU light-geometry pairing skip.
 	struct InstanceLightData;
 	bool _light_skips_geometry_pairing(const Instance *p_light_instance, const InstanceLightData *p_light) const;
-	static bool light_should_skip_geometry_pairing(bool p_mobile_light_pairing, bool p_casts_shadow, RSE::LightShadowMethod p_shadow_method, bool p_megalights_active, bool p_uses_projector, bool p_uses_softshadow);
+	static bool light_should_skip_geometry_pairing(bool p_mobile_light_pairing, bool p_casts_shadow, RSE::LightShadowMethod p_shadow_method, bool p_megalights_active, bool p_uses_projector, bool p_uses_softshadow, bool p_rt_shadows_active = false);
 
 	void _instance_update_mesh_instance(Instance *p_instance) const;
 	// GodotNext: nextgeo_instance_records (#75).

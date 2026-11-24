@@ -27,11 +27,11 @@ extends Node3D
 ##    the stats count pages in it, and a non-Nanite raster check passes on it.
 ## 5. With --mixed=true: a shadowed OmniLight3D or SpotLight3D in the camera's view is set to
 ##    Light3D.SHADOW_METHOD_ATLAS and another one to SHADOW_METHOD_VIRTUAL. The atlas light has no virtual
-##    maps: setting it to PROJECT, RAY_TRACED (unimplemented, takes PROJECT), DISTANCE_FIELD (takes DF when
-##    mesh SDFs are enabled, or falls back to PROJECT when disabled) and RAY_TRACED again updates its map
-##    count accordingly, and ATLAS after each removes it. The unimplemented-method warnings rise by exactly
-##    1 (RAY_TRACED once). The non-Nanite raster check (virtual_shadow_maps_get_raster_check_result())
-##    passes with the mixed light set.
+##    maps: setting it to PROJECT, RAY_TRACED (takes RT when HWRT is active, or falls back to PROJECT),
+##    DISTANCE_FIELD (takes DF when mesh SDFs are enabled, or falls back to PROJECT when disabled) and
+##    RAY_TRACED again updates its map count accordingly, and ATLAS after each removes it. Zero
+##    unimplemented-method warnings are emitted. The non-Nanite raster check
+##    (virtual_shadow_maps_get_raster_check_result()) passes with the mixed light set.
 ## 6. With --expect-headless=true (run with --headless in a Virtual project): the dummy renderer draws no
 ##    shadows, so after one shadowed light is set to SHADOW_METHOD_VIRTUAL and another to RAY_TRACED, no
 ##    fallback line and no unimplemented-method warning has been printed, and nothing is active. Only this
@@ -380,16 +380,19 @@ func _step_mixed_toggle() -> void:
 
 func _check_mixed_counts() -> void:
 	var warnings := _unimplemented_warnings() - _mixed_warnings_before
-	var df_available := bool(RenderingServer.virtual_shadow_maps_get_tier_info().get("df_available", false))
+	var tier := RenderingServer.virtual_shadow_maps_get_tier_info()
+	var df_available := bool(tier.get("df_available", false))
+	var rt_available := bool(tier.get("rt_available", false))
 	_result["mixed_light_counts"] = _mixed_counts
 	_result["mixed_unimplemented_warnings"] = warnings
 	var n := int(_mixed_counts["atlas"])
 	for method_name: String in MIXED_METHOD_NAMES:
-		var expected_active := n if (method_name == "distance_field" and df_available) else n + 1
+		var skips_vsm := (method_name == "distance_field" and df_available) or (method_name == "ray_traced" and rt_available)
+		var expected_active := n if skips_vsm else n + 1
 		if int(_mixed_counts.get(method_name, -1)) != expected_active or int(_mixed_counts.get("atlas_after_" + method_name, -1)) != n:
 			_failures.append("lights with virtual maps while the atlas light is ATLAS, %s, ATLAS: %s; expected %d, %d, %d" % [method_name.to_upper(), str(_mixed_counts), n, expected_active, n])
-	if warnings != 1:
-		_failures.append("the unimplemented-method warnings rose by %d; expected 1 (RAY_TRACED once; DISTANCE_FIELD is implemented)" % warnings)
+	if warnings != 0:
+		_failures.append("the unimplemented-method warnings rose by %d; expected 0 (all ShadowMethod values are implemented)" % warnings)
 
 
 func _unimplemented_warnings() -> int:
