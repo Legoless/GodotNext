@@ -238,6 +238,27 @@ NextGISkinnedShadowPolicy nextgi_shadow_skinned_policy(bool p_mesh_material_is_a
 	return policy;
 }
 
+// GodotNext: nextgi_shadow_dual_route (#307).
+NextGIShadowAlphaRoute nextgi_shadow_alpha_route(
+		NextGIShadowClass p_shadow_class,
+		bool p_code_has_texture_alpha,
+		bool p_uses_discard,
+		bool p_retrace_mode_available,
+		bool p_instance_retrace,
+		bool p_has_shader_serial,
+		NextGIShadowRetraceVerdict p_verdict) {
+	NextGIShadowAlphaRoute route;
+	if (p_shadow_class != NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+		return route;
+	}
+	route.use_texture_alpha = p_code_has_texture_alpha;
+	const bool wants_retrace = !p_code_has_texture_alpha || p_uses_discard;
+	const bool can_retrace = wants_retrace && p_retrace_mode_available && p_instance_retrace && p_has_shader_serial;
+	route.poll_verdict = can_retrace;
+	route.use_retrace = can_retrace && p_verdict != NEXTGI_SHADOW_VERDICT_OPAQUE;
+	return route;
+}
+
 NextGIShadowModelResult nextgi_shadow_model_trace(uint32_t p_mode, uint32_t p_caster_mask, const NextGIShadowModelHit *p_hits, uint32_t p_count, bool p_retrace) {
 	NextGIShadowModelResult result;
 	const uint32_t cull = p_mode & NEXTGI_SHADOW_MODE_CULL_MASK;
@@ -272,8 +293,11 @@ NextGIShadowModelResult nextgi_shadow_model_trace(uint32_t p_mode, uint32_t p_ca
 			}
 			if (result.alpha_samples < NEXTGI_SHADOW_MAX_ALPHA_SAMPLES) {
 				result.alpha_samples++;
-				// Without the retrace, the shader's alpha is not known here: opaque.
-				if (!hit.retrace && !hit.alpha_kept) {
+				// GodotNext: nextgi_shadow_dual_route (#307). Matches nextgi_shadow_ray_inc.glsl: when retrace
+				// cannot run, a dual-route entry falls back to its inline texture-alpha cut instead of opaque;
+				// a retrace-only entry without texture alpha shadows as opaque.
+				const bool inline_kept = hit.retrace ? (hit.texture_alpha ? hit.texture_alpha_kept : true) : hit.alpha_kept;
+				if (!inline_kept) {
 					continue;
 				}
 			}

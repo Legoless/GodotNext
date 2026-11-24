@@ -629,6 +629,9 @@ private:
 		uint64_t serial = 0;
 		uint64_t frame = 0; // The last TLAS phase (shadow_frame) that used it.
 		bool texture_alpha = false;
+		// GodotNext: nextgi_shadow_dual_route (#307). True when ShaderCompiler saw a discard statement in this
+		// shader: BaseMaterial3D-pattern shaders that also discard take the dual route (retrace + texture alpha).
+		bool uses_discard = false;
 		bool hash = false;
 		uint32_t sampler_flags = 0; // NEXTGI_SHADOW_ALPHA_NEAREST and NEXTGI_SHADOW_ALPHA_CLAMP.
 		NextGIShadowRetraceVerdict verdict = NEXTGI_SHADOW_VERDICT_UNKNOWN;

@@ -162,3 +162,12 @@ stage, so #145's retrace verdict for it is RETRACE at Full; Simplified Material 
 so its casters stay opaque there. The hit check also traces the texels its raster capture did not cover, where a
 discard panel's `fragment()` discarded: the closest-hit stage must report them discarded and the any-hit stage must
 ignore them.
+
+## Dual-route BaseMaterial3D-pattern shaders with discard (#307), 2026-11-24
+
+No new outside input. Extends #145's alpha routing and #304's any-hit `discard` support: a spatial shader whose code
+matches BaseMaterial3D's alpha-scissor pattern AND also uses `discard` (`ShaderData::uses_discard`) keeps its
+bindless texture-alpha entry while also requesting retrace (`NEXTGI_SHADOW_ALPHA_RETRACE`) at Full mode unless its
+verdict is `OPAQUE` (helper-function `discard` remains refused per #304). Where retrace cannot run (Simplified
+Material, Inline, GPU-written instances, fallback lights, or a refused shader), `nextgi_shadow_ray_inc.glsl` falls
+back to the texture-alpha entry rather than treating the caster as fully opaque.

@@ -18,6 +18,11 @@ extends Node3D
 ## fragment() discards, so the retrace leaves its hole lit, and its ground card's mask is checked the same way. An
 ## eighth plate, off the ground, discards in a helper function: the hit groups still refuse such a shader (#130), so it
 ## must shadow as opaque and leave no retrace entry once its verdict is known.
+## GodotNext: nextgi_shadow_dual_route (#307). Beside the discard hole on the same ground sits dual_route_hole, a
+## BaseMaterial3D-pattern alpha-scissor shader with an albedo texture hole on its left half AND an extra discard region
+## in fragment() on its right half: at Full mode (allocated lights) retrace lets light through BOTH holes; in
+## Simplified Material, Inline, --no-retrace and on the fallback sun it keeps the texture-alpha hole lit (not opaque)
+## while the extra discard region shadows as opaque.
 ## GodotNext: nextgi_skinned_alpha_shadows (#302). Three posed 2-bone skinned casters on a ground of their own to the
 ## left of the main ground (each mesh's bind pose sits 3 m away in -Z and Bone 1 poses it directly over its target):
 ##   skinned_texture_hole  BaseMaterial3D alpha scissor with the hole albedo texture as the mesh's surface material
@@ -76,11 +81,20 @@ const FALLBACK_SUN := 6
 const HOLD_FRAMES := 60
 const LONG_HIDE_FRAMES := 200
 const REFUSED_POSITION := Vector3(-18.0, 1.5, -16.0) ## Off every ground: it shadows nothing the mask check reads.
-## GodotNext: nextgi_hit_discard (#304). The discard hole's ground (center x, z, and size): beside the main ground, and
-## near enough to the camera that its card keeps mask texels for the hole and the ring.
+## GodotNext: nextgi_hit_discard (#304) / nextgi_shadow_dual_route (#307). The discard and dual-route casters'
+## ground (center x, z, and size): beside the main ground, mirroring the skinned ground so its card keeps mask
+## texels for every cutout region and surrounding solid ring.
 const MAIN_GROUND_HALF := 10.0
-const DISCARD_GROUND_CENTER := Vector2(15.5, 3.0)
-const DISCARD_GROUND_SIZE := 9.0
+const DISCARD_GROUND_CENTER := Vector2(17.5, 3.0)
+const DISCARD_GROUND_SIZE := 14.0
+## Dual-route plate cutout bounds in local (dx, dz) over the 4.8 m plate (UV x in [0.125, 0.45] for the texture-alpha
+## hole, UV x in [0.55, 0.875] for the extra fragment() discard hole, UV y in [0.20, 0.80] for both).
+const DUAL_TEX_X0 := -1.80
+const DUAL_TEX_X1 := -0.24
+const DUAL_DISCARD_X0 := 0.24
+const DUAL_DISCARD_X1 := 1.80
+const DUAL_Z0 := -1.44
+const DUAL_Z1 := 1.44
 ## GodotNext: nextgi_skinned_alpha_shadows (#302). The skinned casters' ground (left of the main ground) and bind-pose
 ## offset: Bone 1 translates each skinned plate by -SKINNED_BIND_OFFSET so only the posed slot covers its footprint.
 const SKINNED_GROUND_CENTER := Vector2(-17.5, 3.0)
@@ -103,9 +117,10 @@ const CASTERS := [
 	["stack", Vector2(0.0, 4.0), "shadow"],
 	["glass", Vector2(6.4, 4.0), "shadow"],
 ]
-## GodotNext: nextgi_hit_discard (#304). The caster on the discard hole's ground.
+## GodotNext: nextgi_hit_discard (#304) / nextgi_shadow_dual_route (#307). Casters on the discard ground.
 const DISCARD_CASTERS := [
-	["discard_hole", Vector2(15.5, 3.0), "hole"],
+	["discard_hole", Vector2(14.2, 6.2), "hole"],
+	["dual_route_hole", Vector2(14.2, -0.2), "dual"],
 ]
 ## GodotNext: nextgi_skinned_alpha_shadows (#302). The posed skinned casters on the skinned ground.
 const SKINNED_CASTERS := [
@@ -231,6 +246,39 @@ void fragment() {
 """
 	var discard_material := ShaderMaterial.new()
 	discard_material.shader = discard_shader
+	# GodotNext: nextgi_shadow_dual_route (#307). BaseMaterial3D-pattern alpha scissor with a texture-alpha hole
+	# on the left half (u in [0.125, 0.45]) AND an extra discard region in fragment() on the right half (u in [0.55, 0.875]).
+	var dual_image := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	for y in 64:
+		var v := (y + 0.5) / 64.0
+		for x in 64:
+			var u := (x + 0.5) / 64.0
+			var tex_hole := u > 0.125 and u < 0.45 and v > 0.20 and v < 0.80
+			dual_image.set_pixel(x, y, Color(0.7, 0.7, 0.7, 0.0 if tex_hole else 1.0))
+	var dual_shader := Shader.new()
+	dual_shader.code = """shader_type spatial;
+uniform vec4 albedo : source_color = vec4(0.7, 0.7, 0.7, 1.0);
+uniform sampler2D texture_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform float alpha_scissor_threshold : hint_range(0.0, 1.0, 0.001) = 0.5;
+uniform vec3 uv1_scale = vec3(1.0, 1.0, 1.0);
+uniform vec3 uv1_offset = vec3(0.0, 0.0, 0.0);
+void vertex() {
+	UV = UV * uv1_scale.xy + uv1_offset.xy;
+}
+void fragment() {
+	vec2 base_uv = UV;
+	vec4 albedo_tex = texture(texture_albedo, base_uv);
+	ALBEDO = albedo.rgb * albedo_tex.rgb;
+	ALPHA *= albedo.a * albedo_tex.a;
+	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
+	if (base_uv.x > 0.55 && base_uv.x < 0.875 && base_uv.y > 0.20 && base_uv.y < 0.80) {
+		discard;
+	}
+}
+"""
+	var dual_material := ShaderMaterial.new()
+	dual_material.shader = dual_shader
+	dual_material.set_shader_parameter("texture_albedo", ImageTexture.create_from_image(dual_image))
 	# The refused plate discards in a helper function, which the hit groups refuse.
 	var refused_shader := Shader.new()
 	refused_shader.code = """shader_type spatial;
@@ -255,6 +303,7 @@ void fragment() {
 		discard_ground.position = Vector3(DISCARD_GROUND_CENTER.x, -0.1, DISCARD_GROUND_CENTER.y)
 		add_child(discard_ground, true)
 		_add_plate("discard_hole", discard_material, true, [PLATE_Y])
+		_add_plate("dual_route_hole", dual_material, true, [PLATE_Y])
 
 		var refused_plate := MeshInstance3D.new()
 		refused_plate.name = "refused_plate"
@@ -516,11 +565,10 @@ func _run() -> void:
 		_result[key] = info.get(key, -1)
 	_check(int(counters.get("shadow_alpha_instances", 0)) > 0, "non-opaque (alpha-tested) TLAS instances")
 	_check(int(counters.get("shadow_only_instances", 0)) > 0, "shadow-only TLAS instances (surfaces GI does not see)")
-	# Exactly the fixture's alpha entries: the texture hole, skinned texture hole, NextGeo masked mesh and NextGeo
-	# texture override are sampled (a detector that missed BaseMaterial3D's texture alpha would send them to the
-	# retrace), the constant cut and the five stack plates are constants (the stack's GPU-written elements share their
-	# MultiMesh's one entry).
-	var texture_entries := 1 if _gpu_written else 4
+	# Exactly the fixture's alpha entries: the texture hole, dual-route hole (#307), skinned texture hole (#302),
+	# NextGeo masked mesh and NextGeo texture override (#303) are sampled, the constant cut and the five stack plates
+	# are constants (the stack's GPU-written elements share their MultiMesh's one entry).
+	var texture_entries := 1 if _gpu_written else 5
 	var cut_entries := 2 if _gpu_written else 6
 	_check(int(counters.get("shadow_texture_entries", 0)) == texture_entries, "%d sampled-texture alpha entries (%d)" % [texture_entries, int(counters.get("shadow_texture_entries", 0))])
 	_check(int(counters.get("shadow_cut_entries", 0)) == cut_entries, "%d constant-alpha entries, the constant cut and the stack (%d)" % [cut_entries, int(counters.get("shadow_cut_entries", 0))])
@@ -540,17 +588,18 @@ func _run() -> void:
 	if _gpu_written:
 		pass
 	elif _expect_retrace:
-		# The shader hole, discard hole (#304), skinned shader hole (#302) and NextGeo shader hole (#303) go to the
-		# retrace; the refused plate's shader is refused by the hit groups, so once its verdict is known it shadows as opaque.
-		_check(int(counters.get("shadow_retrace_entries", 0)) == 4, "four retrace entries, the shader, discard, skinned shader and NextGeo shader holes (%d)" % int(counters.get("shadow_retrace_entries", 0)))
+		# The shader hole, discard hole (#304), dual-route hole (#307), skinned shader hole (#302) and NextGeo shader
+		# hole (#303) go to the retrace; the refused plate's shader is refused by the hit groups, so once its verdict
+		# is known it shadows as opaque.
+		_check(int(counters.get("shadow_retrace_entries", 0)) == 5, "five retrace entries, the shader, discard, dual-route, skinned shader and NextGeo shader holes (%d)" % int(counters.get("shadow_retrace_entries", 0)))
 		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 1, "one opaque alpha entry, the refused plate (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
 		_check(int(info.get("src_shadow_retrace_appended", 0)) > 0, "the relight appended retrace records")
 		_check(int(info.get("src_shadow_retrace_occluded", 0)) > 0, "the retrace found occluded rays")
 		_check(int(info.get("src_shadow_retrace_clear", 0)) > 0, "the retrace found clear rays")
 	elif _expect_mode != "FULL":
-		# GodotNext: nextgi_hwrt_mode (#286). No material hit group exists in this mode: the shader hole, discard hole,
-		# refused plate, skinned shader hole and NextGeo shader hole are opaque entries, the material retrace reports
-		# the mode and the relight leaves it nothing.
+		# GodotNext: nextgi_hwrt_mode (#286) / nextgi_shadow_dual_route (#307). No material hit group exists in this
+		# mode: the dual-route hole keeps its sampled texture-alpha entry (counted in texture_entries, NOT opaque),
+		# while the five non-texture shader casters are opaque entries.
 		_check(_result["material_retrace"] == "HWRT_MODE_" + _expect_mode, "the material retrace reports HWRT_MODE_%s (%s)" % [_expect_mode, _result["material_retrace"]])
 		_check(int(counters.get("shadow_retrace_entries", -1)) == 0, "no retrace entry in %s (%d)" % [_expect_mode, int(counters.get("shadow_retrace_entries", -1))])
 		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 5, "five opaque alpha entries, the shader, discard, refused, skinned shader and NextGeo shader casters (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
@@ -594,7 +643,7 @@ func _wait_for_retrace() -> Dictionary:
 		if _gpu_written:
 			paths_ready = paths_ready and int(counters.get("rt_gpu_written_instances", 0)) == GPU_WRITTEN_ELEMENTS
 		elif _native_nextgeo:
-			paths_ready = paths_ready and int(info.get("rt_native_instances", 0)) == 3 and int(counters.get("shadow_texture_entries", 0)) == 4
+			paths_ready = paths_ready and int(info.get("rt_native_instances", 0)) == 3 and int(counters.get("shadow_texture_entries", 0)) == 5
 		if not retrace:
 			if ready_frame < 0:
 				if paths_ready:
@@ -636,7 +685,7 @@ func _find_fallback_slot(p_counters: Dictionary) -> void:
 
 
 func _set_holes_visible(p_visible: bool) -> void:
-	for plate_name in ["texture_hole", "shader_hole", "discard_hole", "skinned_texture_hole", "skinned_shader_hole", "nextgeo_texture_hole", "nextgeo_texture_override", "nextgeo_shader_hole"]:
+	for plate_name in ["texture_hole", "shader_hole", "discard_hole", "dual_route_hole", "skinned_texture_hole", "skinned_shader_hole", "nextgeo_texture_hole", "nextgeo_texture_override", "nextgeo_shader_hole"]:
 		if _plates.has(plate_name):
 			(_plates[plate_name] as Node3D).visible = p_visible
 
@@ -684,7 +733,7 @@ func _check_hold() -> void:
 	_result["shown_created"] = int(counters.get("hit_materials_created", -1))
 	_check(int(counters.get("hit_materials_created", -1)) == created + 1, "showing the holes again makes the hit groups once more (%d after %d)" % [int(counters.get("hit_materials_created", -1)), created])
 	_check(int(info.get("src_shadow_relight_variant", -1)) == 1, "the relight runs its alpha variant again (%d)" % int(info.get("src_shadow_relight_variant", -1)))
-	_check(int(counters.get("shadow_retrace_entries", 0)) == 4 and int(counters.get("shadow_texture_entries", 0)) == 4, "the alpha entries are back (retrace %d, texture %d)" % [int(counters.get("shadow_retrace_entries", 0)), int(counters.get("shadow_texture_entries", 0))])
+	_check(int(counters.get("shadow_retrace_entries", 0)) == 5 and int(counters.get("shadow_texture_entries", 0)) == 5, "the alpha entries are back (retrace %d, texture %d)" % [int(counters.get("shadow_retrace_entries", 0)), int(counters.get("shadow_texture_entries", 0))])
 	_check(int(counters.get("shadow_word_misaligned", -1)) == 0, "the shadow instance words stay in step (%d)" % int(counters.get("shadow_word_misaligned", -1)))
 	_check_mask(info, "shown again: ")
 	_check_mask(info, "shown again: ", "discard")
@@ -692,17 +741,33 @@ func _check_hold() -> void:
 	_check_mask(info, "shown again: ", "nextgeo")
 
 
+func _near_rect_edge(p_local: Vector2, p_x0: float, p_x1: float, p_z0: float, p_z1: float, p_margin: float) -> bool:
+	var near_x := (absf(p_local.x - p_x0) <= p_margin or absf(p_local.x - p_x1) <= p_margin) and p_local.y >= p_z0 - p_margin and p_local.y <= p_z1 + p_margin
+	var near_z := (absf(p_local.y - p_z0) <= p_margin or absf(p_local.y - p_z1) <= p_margin) and p_local.x >= p_x0 - p_margin and p_local.x <= p_x1 + p_margin
+	return near_x or near_z
+
+
 func _expected_lit(p_world: Vector3, p_margin: float, p_slot: int, p_casters: Array = CASTERS) -> int:
 	# 1 lit, 0 shadowed, -1 too close to an edge to judge.
 	var point := Vector2(p_world.x, p_world.z)
 	for caster in p_casters:
-		var offset: Vector2 = (point - (caster[1] as Vector2)).abs()
+		var local := point - (caster[1] as Vector2)
+		var offset := local.abs()
 		var half := PLATE * 0.5
 		if offset.x > half + p_margin or offset.y > half + p_margin:
 			continue
 		if absf(offset.x - half) <= p_margin or absf(offset.y - half) <= p_margin:
 			return -1
 		var kind: String = caster[2]
+		if kind == "dual":
+			if _near_rect_edge(local, DUAL_TEX_X0, DUAL_TEX_X1, DUAL_Z0, DUAL_Z1, p_margin) or _near_rect_edge(local, DUAL_DISCARD_X0, DUAL_DISCARD_X1, DUAL_Z0, DUAL_Z1, p_margin):
+				return -1
+			if local.x > DUAL_TEX_X0 and local.x < DUAL_TEX_X1 and local.y > DUAL_Z0 and local.y < DUAL_Z1:
+				return 1 # Texture-alpha hole stays lit in every mode (including Simplified Material, Inline and fallback sun).
+			if local.x > DUAL_DISCARD_X0 and local.x < DUAL_DISCARD_X1 and local.y > DUAL_Z0 and local.y < DUAL_Z1:
+				var retrace_active := _expect_retrace and not _gpu_written and p_slot != _fallback_slot
+				return 1 if retrace_active else 0 # Extra fragment() discard hole is lit only when retrace runs.
+			return 0
 		# Without the retrace, for the fallback light (its layer check needs the candidate loop, which the retrace
 		# cannot do) and for GPU-written instances (no hit record), the shader and discard holes shadow as opaque.
 		if kind == "hole" and caster[0] in SHADER_ALPHA_HOLES and (not _expect_retrace or _gpu_written or p_slot == _fallback_slot):
@@ -773,10 +838,14 @@ func _check_mask(p_info: Dictionary, p_prefix: String, p_ground := "") -> void:
 	_result[key + "margin"] = margin
 	var slot_results := []
 	for slot in _suns:
-		# Per caster: [checked, bad, checked in the hole, bad in the hole]; the hole casters' other texels are the ring.
+		# Per caster: [checked, bad, checked in the hole, bad in the hole]; for "dual" casters (#307), dual_counts
+		# tracks [checked_tex_hole, bad_tex_hole, checked_discard_hole, bad_discard_hole].
 		var regions := {}
+		var dual_counts := {}
 		for caster in casters:
 			regions[caster[0]] = [0, 0, 0, 0]
+			if caster[2] == "dual":
+				dual_counts[caster[0]] = [0, 0, 0, 0]
 		regions["outside"] = [0, 0, 0, 0]
 		var bad_samples := PackedStringArray()
 		for y in mask_h:
@@ -788,28 +857,58 @@ func _check_mask(p_info: Dictionary, p_prefix: String, p_ground := "") -> void:
 				var lit := (mask[y * mask_w + x] & (1 << slot)) != 0
 				var region := "outside"
 				var in_hole := false
+				var in_dual_tex := false
+				var in_dual_discard := false
 				for caster in casters:
-					var offset: Vector2 = (Vector2(world.x, world.z) - (caster[1] as Vector2)).abs()
+					var local := Vector2(world.x, world.z) - (caster[1] as Vector2)
+					var offset := local.abs()
 					if offset.x <= PLATE * 0.5 and offset.y <= PLATE * 0.5:
 						region = caster[0]
-						in_hole = offset.x < HOLE and offset.y < HOLE
+						if caster[2] == "dual":
+							in_dual_tex = local.x > DUAL_TEX_X0 and local.x < DUAL_TEX_X1 and local.y > DUAL_Z0 and local.y < DUAL_Z1
+							in_dual_discard = local.x > DUAL_DISCARD_X0 and local.x < DUAL_DISCARD_X1 and local.y > DUAL_Z0 and local.y < DUAL_Z1
+							in_hole = in_dual_tex or in_dual_discard
+						else:
+							in_hole = offset.x < HOLE and offset.y < HOLE
 				var counts: Array = regions[region]
 				counts[0] += 1
 				if in_hole:
 					counts[2] += 1
+				if dual_counts.has(region):
+					var dc: Array = dual_counts[region]
+					if in_dual_tex:
+						dc[0] += 1
+					elif in_dual_discard:
+						dc[2] += 1
 				if lit != (expected == 1):
 					counts[1] += 1
 					if in_hole:
 						counts[3] += 1
+					if dual_counts.has(region):
+						var dc: Array = dual_counts[region]
+						if in_dual_tex:
+							dc[1] += 1
+						elif in_dual_discard:
+							dc[3] += 1
 					if bad_samples.size() < 8:
 						bad_samples.append("%s (%.2f, %.2f) lit=%s" % [region, world.x, world.z, lit])
-		slot_results.append({"slot": slot, "regions": regions, "bad_samples": bad_samples})
+		slot_results.append({"slot": slot, "regions": regions, "dual": dual_counts, "bad_samples": bad_samples})
 		var label := prefix + ("" if _suns == 1 else "light %d: " % slot)
 		for region in regions:
 			var counts: Array = regions[region]
 			_check(int(counts[0]) >= MIN_CHECKED, "%s%s: %d texels checked, expected at least %d" % [label, region, counts[0], MIN_CHECKED])
 			_check(int(counts[1]) == 0, "%s%s: %d of %d texels disagree with the expected shadow (%d in the hole)" % [label, region, counts[1], counts[0], counts[3]])
 		for caster in casters:
+			if caster[2] == "dual":
+				var dual_name: String = caster[0]
+				var counts: Array = regions[dual_name]
+				var dc: Array = dual_counts[dual_name]
+				_check(int(dc[0]) >= MIN_CHECKED, "%s%s: %d texels checked in the texture-alpha hole, expected at least %d" % [label, dual_name, dc[0], MIN_CHECKED])
+				_check(int(dc[1]) == 0, "%s%s: %d of %d texture-alpha hole texels disagree" % [label, dual_name, dc[1], dc[0]])
+				_check(int(dc[2]) >= MIN_CHECKED, "%s%s: %d texels checked in the extra discard hole, expected at least %d" % [label, dual_name, dc[2], MIN_CHECKED])
+				_check(int(dc[3]) == 0, "%s%s: %d of %d extra discard hole texels disagree" % [label, dual_name, dc[3], dc[2]])
+				_check(int(counts[0]) - int(counts[2]) >= MIN_CHECKED, "%s%s: %d texels checked in the solid ring, expected at least %d" % [label, dual_name, int(counts[0]) - int(counts[2]), MIN_CHECKED])
+				continue
 			if caster[2] != "hole":
 				continue
 			var hole: String = caster[0]

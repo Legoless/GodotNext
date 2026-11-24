@@ -95,6 +95,18 @@ for #156 native NextGeo BLASes when an instance carries an alpha-tested effectiv
 TLAS instances register in the #145 alpha table, set `FORCE_NO_OPAQUE`, and bind #130 hit groups for Full HWRT
 material retrace.
 
+### Dual-route RT shadows for BaseMaterial3D-pattern shaders with discard (#307), 2026-11-24
+
+Written from the plan (§21.3 M4), issue #307 and GodotNext's own #145 RT visibility policy, #286 Hardware Ray
+Tracing Mode and #304 any-hit discard support. No outside paper, article or code was consulted. Spatial shaders
+matching BaseMaterial3D's alpha-scissor pattern that also contain a `discard` statement (`ShaderData::uses_discard`)
+now keep their bindless texture-alpha entry AND also set `NEXTGI_SHADOW_ALPHA_RETRACE` when retrace is available
+and the shader's retrace verdict is not `OPAQUE` (`nextgi_shadow_alpha_route()` / `nextgi_shadow_alpha_route_for_mode()`).
+`nextgi_shadow_ray_inc.glsl` therefore retraces at Full mode (so the any-hit stage evaluates both the alpha test
+and `fragment()`'s `discard`) and falls back to the bindless texture-alpha cut — instead of shadowing as opaque —
+in Simplified Material, Inline, on GPU-written instances, on fallback lights, or when the hit groups refuse the
+shader (such as a `discard` in a helper function per #304).
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

@@ -977,4 +977,180 @@ TEST_CASE("[NextGIShadow] NextGeo proxy UVs pack into #130 stream and plan shado
 	}
 }
 
+TEST_CASE("[NextGIShadow] Dual-route alpha matrix across HWRT modes and caster kinds (#307)") {
+	const NextGIHitMode modes[3] = {
+		NEXTGI_HIT_MODE_FULL,
+		NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL,
+		NEXTGI_HIT_MODE_INLINE,
+	};
+
+	// 1. Opaque and translucent casters never take texture-alpha or retrace in any mode.
+	for (NextGIHitMode mode : modes) {
+		for (NextGIShadowClass cls : { NEXTGI_SHADOW_CLASS_OPAQUE, NEXTGI_SHADOW_CLASS_TRANSLUCENT }) {
+			const NextGIShadowAlphaRoute r = nextgi_shadow_alpha_route_for_mode(cls, true, true, mode, true, true, NEXTGI_SHADOW_VERDICT_RETRACE);
+			CHECK_FALSE(r.use_texture_alpha);
+			CHECK_FALSE(r.poll_verdict);
+			CHECK_FALSE(r.use_retrace);
+		}
+	}
+
+	// 2. BaseMaterial3D alpha-scissor (no discard): texture-alpha only, never polls verdict or wakes hit groups.
+	for (NextGIHitMode mode : modes) {
+		const NextGIShadowAlphaRoute r = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, true, false, mode, true, true, NEXTGI_SHADOW_VERDICT_UNKNOWN);
+		CHECK(r.use_texture_alpha);
+		CHECK_FALSE(r.poll_verdict);
+		CHECK_FALSE(r.use_retrace);
+	}
+
+	// 3. BaseMaterial3D alpha-scissor + extra discard in fragment():
+	//    - Full mode (CPU instance, valid serial, verdict != OPAQUE): dual route (BOTH texture-alpha AND retrace).
+	//    - Simplified Material & Inline: keeps texture-alpha, never polls verdict or sets retrace.
+	//    - GPU-written (p_instance_retrace = false) or serial 0: keeps texture-alpha, no retrace.
+	for (NextGIHitMode mode : modes) {
+		const NextGIShadowAlphaRoute r_unknown = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, true, true, mode, true, true, NEXTGI_SHADOW_VERDICT_UNKNOWN);
+		const NextGIShadowAlphaRoute r_retrace = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, true, true, mode, true, true, NEXTGI_SHADOW_VERDICT_RETRACE);
+		const bool expect_retrace = (mode == NEXTGI_HIT_MODE_FULL);
+		CHECK(r_unknown.use_texture_alpha);
+		CHECK_EQ(r_unknown.poll_verdict, expect_retrace);
+		CHECK_EQ(r_unknown.use_retrace, expect_retrace);
+		CHECK(r_retrace.use_texture_alpha);
+		CHECK_EQ(r_retrace.poll_verdict, expect_retrace);
+		CHECK_EQ(r_retrace.use_retrace, expect_retrace);
+
+		// Helper-function discard refused per #304 (verdict = OPAQUE): drops retrace AND keeps texture-alpha cut.
+		const NextGIShadowAlphaRoute r_refused = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, true, true, mode, true, true, NEXTGI_SHADOW_VERDICT_OPAQUE);
+		CHECK(r_refused.use_texture_alpha);
+		CHECK_EQ(r_refused.poll_verdict, expect_retrace);
+		CHECK_FALSE(r_refused.use_retrace);
+
+		// GPU-written instance or missing serial: keeps texture-alpha cut, no retrace.
+		const NextGIShadowAlphaRoute r_gpu = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, true, true, mode, false, true, NEXTGI_SHADOW_VERDICT_RETRACE);
+		CHECK(r_gpu.use_texture_alpha);
+		CHECK_FALSE(r_gpu.poll_verdict);
+		CHECK_FALSE(r_gpu.use_retrace);
+
+		const NextGIShadowAlphaRoute r_noserial = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, true, true, mode, true, false, NEXTGI_SHADOW_VERDICT_RETRACE);
+		CHECK(r_noserial.use_texture_alpha);
+		CHECK_FALSE(r_noserial.poll_verdict);
+		CHECK_FALSE(r_noserial.use_retrace);
+	}
+
+	// 4. Custom discard / custom shader alpha (not BaseMaterial3D pattern):
+	//    - Full mode: retrace when not refused; opaque when refused (helper-function discard), GPU-written, or serial 0.
+	//    - Simplified Material & Inline: neither texture-alpha nor retrace (opaque, never polls verdict).
+	for (NextGIHitMode mode : modes) {
+		const bool expect_retrace = (mode == NEXTGI_HIT_MODE_FULL);
+		const NextGIShadowAlphaRoute r_custom = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, false, true, mode, true, true, NEXTGI_SHADOW_VERDICT_RETRACE);
+		CHECK_FALSE(r_custom.use_texture_alpha);
+		CHECK_EQ(r_custom.poll_verdict, expect_retrace);
+		CHECK_EQ(r_custom.use_retrace, expect_retrace);
+
+		const NextGIShadowAlphaRoute r_refused = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, false, true, mode, true, true, NEXTGI_SHADOW_VERDICT_OPAQUE);
+		CHECK_FALSE(r_refused.use_texture_alpha);
+		CHECK_EQ(r_refused.poll_verdict, expect_retrace);
+		CHECK_FALSE(r_refused.use_retrace);
+
+		const NextGIShadowAlphaRoute r_gpu = nextgi_shadow_alpha_route_for_mode(NEXTGI_SHADOW_CLASS_ALPHA_TESTED, false, true, mode, false, true, NEXTGI_SHADOW_VERDICT_RETRACE);
+		CHECK_FALSE(r_gpu.use_texture_alpha);
+		CHECK_FALSE(r_gpu.poll_verdict);
+		CHECK_FALSE(r_gpu.use_retrace);
+	}
+
+	// 5. Shader pattern + #304 hit classification: BaseMaterial3D alpha-scissor + fragment() discard matches
+	//    texture-alpha AND is hit-group eligible; helper-function discard stays refused (NEXTGI_HIT_INELIGIBLE_DISCARD).
+	const String base_code =
+			"shader_type spatial;\n"
+			"uniform vec4 albedo : source_color;\n"
+			"uniform sampler2D texture_albedo : source_color, filter_linear_mipmap, repeat_enable;\n"
+			"uniform float alpha_scissor_threshold;\n"
+			"uniform vec3 uv1_scale;\n"
+			"uniform vec3 uv1_offset;\n"
+			"void vertex() {\n"
+			"\tUV = UV * uv1_scale.xy + uv1_offset.xy;\n"
+			"}\n"
+			"void fragment() {\n"
+			"\tvec2 base_uv = UV;\n"
+			"\tvec4 albedo_tex = texture(texture_albedo, base_uv);\n"
+			"\tALPHA *= albedo.a * albedo_tex.a;\n"
+			"\tALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;\n"
+			"\tif (base_uv.x > 0.55) { discard; }\n"
+			"}\n";
+	bool is_hash = true;
+	CHECK(nextgi_shadow_code_has_texture_alpha(base_code, is_hash));
+	CHECK_FALSE(is_hash);
+
+	NextGIHitShaderSource frag_discard_src;
+	frag_discard_src.fragment_code = "if (base_uv.x > 0.55) { NEXTGI_HIT_DISCARD; }";
+	CHECK_EQ(nextgi_hit_classify(frag_discard_src), NEXTGI_HIT_ELIGIBLE);
+
+	NextGIHitShaderSource helper_discard_src;
+	helper_discard_src.globals = "void cut(vec2 uv) { if (uv.x > 0.55) { discard; } }";
+	helper_discard_src.fragment_code = "cut(base_uv);";
+	CHECK_EQ(nextgi_hit_classify(helper_discard_src), NEXTGI_HIT_INELIGIBLE_DISCARD);
+
+	// 6. CPU trace model: dual-route entry retraces at Full (allocated light) and falls back to texture-alpha
+	//    (not opaque) when retrace is unavailable or the light uses the fallback path.
+	const uint32_t light_masks[2] = { 1u << 0, 1u << 1 };
+	const Allocation allocation = _allocation(light_masks, 2);
+	const uint32_t inst_mask = nextgi_shadow_instance_mask(allocation, 0xFFFFFu, true);
+	const uint32_t mode_alloc = nextgi_shadow_light_mode(allocation, 1u << 0, inst_mask);
+	const uint32_t mode_fallback = nextgi_shadow_light_mode(allocation, 1u << 5, inst_mask);
+	REQUIRE((mode_alloc & NEXTGI_SHADOW_MODE_LOOP) != 0u);
+	REQUIRE((mode_alloc & NEXTGI_SHADOW_MODE_FALLBACK) == 0u);
+	REQUIRE((mode_fallback & NEXTGI_SHADOW_MODE_FALLBACK) != 0u);
+
+	// Region A: cut by texture-alpha (alpha_kept = false, texture_alpha_kept = false).
+	NextGIShadowModelHit hit_tex_cut;
+	hit_tex_cut.mask = inst_mask;
+	hit_tex_cut.layers = 0xFFFFFu;
+	hit_tex_cut.opaque_instance = false;
+	hit_tex_cut.geometry_class = NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+	hit_tex_cut.retrace = true;
+	hit_tex_cut.texture_alpha = true;
+	hit_tex_cut.alpha_kept = false;
+	hit_tex_cut.texture_alpha_kept = false;
+
+	// Full allocated: defers to retrace -> clear.
+	NextGIShadowModelResult r_full_tex = nextgi_shadow_model_trace(mode_alloc, 1u << 0, &hit_tex_cut, 1, true);
+	CHECK_FALSE(r_full_tex.occluded);
+	CHECK(r_full_tex.deferred);
+	CHECK_FALSE(r_full_tex.retraced_occluded);
+	// No retrace (Simplified Material / Inline / Metal): falls back to texture-alpha -> STILL CLEAR (not opaque)!
+	NextGIShadowModelResult r_inline_tex = nextgi_shadow_model_trace(mode_alloc, 1u << 0, &hit_tex_cut, 1, false);
+	CHECK_FALSE(r_inline_tex.occluded);
+	CHECK_FALSE(r_inline_tex.deferred);
+	// Fallback light: cannot defer -> falls back to texture-alpha -> STILL CLEAR (not opaque)!
+	NextGIShadowModelResult r_fb_tex = nextgi_shadow_model_trace(mode_fallback, 1u << 5, &hit_tex_cut, 1, true);
+	CHECK_FALSE(r_fb_tex.occluded);
+	CHECK_FALSE(r_fb_tex.deferred);
+
+	// Region B: cut ONLY by extra discard (alpha_kept = false, texture_alpha_kept = true).
+	NextGIShadowModelHit hit_extra_discard = hit_tex_cut;
+	hit_extra_discard.alpha_kept = false;
+	hit_extra_discard.texture_alpha_kept = true;
+
+	// Full allocated: defers to retrace -> any-hit discards -> CLEAR!
+	NextGIShadowModelResult r_full_disc = nextgi_shadow_model_trace(mode_alloc, 1u << 0, &hit_extra_discard, 1, true);
+	CHECK_FALSE(r_full_disc.occluded);
+	CHECK(r_full_disc.deferred);
+	CHECK_FALSE(r_full_disc.retraced_occluded);
+	// No retrace or fallback light: inline texture-alpha keeps texel -> OCCLUDED!
+	NextGIShadowModelResult r_inline_disc = nextgi_shadow_model_trace(mode_alloc, 1u << 0, &hit_extra_discard, 1, false);
+	CHECK(r_inline_disc.occluded);
+	CHECK_FALSE(r_inline_disc.deferred);
+	NextGIShadowModelResult r_fb_disc = nextgi_shadow_model_trace(mode_fallback, 1u << 5, &hit_extra_discard, 1, true);
+	CHECK(r_fb_disc.occluded);
+	CHECK_FALSE(r_fb_disc.deferred);
+
+	// Region C: solid ring (alpha_kept = true, texture_alpha_kept = true) -> always occluded.
+	NextGIShadowModelHit hit_solid = hit_tex_cut;
+	hit_solid.alpha_kept = true;
+	hit_solid.texture_alpha_kept = true;
+	NextGIShadowModelResult r_full_solid = nextgi_shadow_model_trace(mode_alloc, 1u << 0, &hit_solid, 1, true);
+	CHECK(r_full_solid.deferred);
+	CHECK(r_full_solid.retraced_occluded);
+	CHECK(nextgi_shadow_model_trace(mode_alloc, 1u << 0, &hit_solid, 1, false).occluded);
+	CHECK(nextgi_shadow_model_trace(mode_fallback, 1u << 5, &hit_solid, 1, true).occluded);
+}
+
 } // namespace TestNextGIShadowPolicy

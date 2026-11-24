@@ -1297,34 +1297,34 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 		ShadowMaterialAlpha read;
 		read.serial = scene_shader->nextgi_hit_serial;
 		read.texture_alpha = nextgi_shadow_code_has_texture_alpha(scene_shader->code, read.hash);
+		read.uses_discard = scene_shader->uses_discard;
 		read.sampler_flags = read.texture_alpha ? nextgi_shadow_code_albedo_sampler_flags(scene_shader->code) : 0u;
 		shadow_material_alpha[p_material] = read;
 		known = shadow_material_alpha.getptr(p_material);
 	}
 	known->frame = shadow_frame;
-	if (!known->texture_alpha) {
-		// A GPU-written instance has no hit record (#57): the retrace would meet its fallback group.
-		// GodotNext: nextgi_hwrt_mode (#286). Only Full compiles material hit groups: in Simplified Material and
-		// Inline the retrace never runs, so these casters shadow as opaque (the texture path above stays inline).
-		// Check retrace_mode before polling hit_materials so Simplified Material does not latch known->verdict to OPAQUE.
-		const NextGI *next_gi = NextGI::get_singleton();
-		const bool retrace_mode = next_gi == nullptr || nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NextGIHitMode(next_gi->get_hardware_ray_tracing_mode())) == NEXTGI_HIT_AVAILABLE;
-		if (!p_retrace || !retrace_mode || known->serial == 0) {
-			stats.shadow_opaque_alpha_entries++;
-			return;
-		}
-		// Alpha from shader code: the retrace decides, unless the hit groups refused the shader or its group has no
-		// any-hit stage. Then nothing can evaluate it: it shadows as opaque, and asks for no retrace.
+	// GodotNext: nextgi_shadow_dual_route (#307). A BaseMaterial3D-pattern shader that also discards keeps its
+	// bindless texture-alpha entry AND sets NEXTGI_SHADOW_ALPHA_RETRACE when retrace is available and not refused,
+	// so nextgi_shadow_ray_inc.glsl retraces at Full mode and falls back to the texture-alpha cut otherwise.
+	const NextGI *next_gi = NextGI::get_singleton();
+	const NextGIHitMode hwrt_mode = next_gi != nullptr ? NextGIHitMode(next_gi->get_hardware_ray_tracing_mode()) : NEXTGI_HIT_MODE_FULL;
+	const NextGIShadowClass shadow_class = NextGIShadowClass(r_entry.flags & NEXTGI_SHADOW_ALPHA_CLASS_MASK);
+	NextGIShadowAlphaRoute route = nextgi_shadow_alpha_route_for_mode(shadow_class, known->texture_alpha, known->uses_discard, hwrt_mode, p_retrace, known->serial != 0, known->verdict);
+	if (route.poll_verdict) {
 		const NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton();
 		if (hit_materials != nullptr) {
 			known->verdict = nextgi_shadow_retrace_verdict(known->verdict, hit_materials->get_shadow_retrace_verdict(known->serial));
 		}
-		if (known->verdict == NEXTGI_SHADOW_VERDICT_OPAQUE) {
-			stats.shadow_opaque_alpha_entries++;
-			return;
-		}
+		route = nextgi_shadow_alpha_route_for_mode(shadow_class, known->texture_alpha, known->uses_discard, hwrt_mode, p_retrace, known->serial != 0, known->verdict);
+	}
+	if (route.use_retrace) {
 		r_entry.flags |= NEXTGI_SHADOW_ALPHA_RETRACE;
 		stats.shadow_retrace_entries++;
+	}
+	if (!route.use_texture_alpha) {
+		if (!route.use_retrace) {
+			stats.shadow_opaque_alpha_entries++;
+		}
 		return;
 	}
 	auto param = [&](const StringName &p_name) {
@@ -1354,7 +1354,7 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 		return;
 	}
 	// The bindless path reads the UV from the surface's attribute stream: NextGI keeps the streams while a caster
-	// needs one. Until it can sample, the geometry shadows as opaque.
+	// needs one. Until it can sample, the geometry shadows as opaque (unless retrace is already set).
 	if (p_can_have_stream) {
 		shadow_streams_wanted = true;
 	}
@@ -1370,7 +1370,9 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 	} else {
 		MeshStorage::NextGIRTSurfaceInfo info;
 		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, p_surface, info)) {
-			stats.shadow_opaque_alpha_entries++;
+			if (!route.use_retrace) {
+				stats.shadow_opaque_alpha_entries++;
+			}
 			return;
 		}
 		attribute_chunk = info.attribute_chunk;
@@ -1383,18 +1385,24 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 		}
 	}
 	if (attribute_chunk == UINT32_MAX || index_chunk == UINT32_MAX) {
-		stats.shadow_opaque_alpha_entries++;
-		return; // Opaque until the surface has its stream.
+		if (!route.use_retrace) {
+			stats.shadow_opaque_alpha_entries++;
+		}
+		return; // Opaque until the surface has its stream (unless retrace is active).
 	}
 	if (attribute_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS || index_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS) {
-		stats.shadow_opaque_alpha_entries++;
-		return; // The shaders bind the first chunks only: opaque.
+		if (!route.use_retrace) {
+			stats.shadow_opaque_alpha_entries++;
+		}
+		return; // The shaders bind the first chunks only: opaque (unless retrace is active).
 	}
 	TextureStorage *texture_storage = TextureStorage::get_singleton();
 	const RID rd_texture = texture_storage != nullptr ? texture_storage->texture_get_rd_texture(texture_rid) : RID();
 	const uint32_t slot = _shadow_texture_slot(rd_texture);
 	if (slot == UINT32_MAX) {
-		stats.shadow_opaque_alpha_entries++;
+		if (!route.use_retrace) {
+			stats.shadow_opaque_alpha_entries++;
+		}
 		return;
 	}
 	r_entry.flags |= NEXTGI_SHADOW_ALPHA_TEXTURE | (known->hash ? uint32_t(NEXTGI_SHADOW_ALPHA_HASH) : 0u) | known->sampler_flags;

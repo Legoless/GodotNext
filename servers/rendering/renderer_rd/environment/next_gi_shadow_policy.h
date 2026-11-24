@@ -140,6 +140,32 @@ _FORCE_INLINE_ NextGIShadowRetraceVerdict nextgi_shadow_retrace_verdict(NextGISh
 	return p_reported != NEXTGI_SHADOW_VERDICT_UNKNOWN ? p_reported : p_kept;
 }
 
+// GodotNext: nextgi_shadow_dual_route (#307). Pure routing decision for one shadow-casting geometry's alpha
+// evaluation:
+// - use_texture_alpha: fill the bindless texture-alpha (or constant-alpha cut) fields on the alpha entry.
+// - poll_verdict: whether the caller may poll NextGIHitMaterials for the shader's retrace verdict (false when
+//   the Hardware Ray Tracing Mode cannot retrace, so Simplified Material / Inline never latch OPAQUE).
+// - use_retrace: set NEXTGI_SHADOW_ALPHA_RETRACE so Full-mode allocated lights defer to the RT-pipeline any-hit
+//   stage.
+// When a BaseMaterial3D-pattern shader also uses `discard`, both use_texture_alpha and use_retrace are true when
+// retrace is available and not refused: nextgi_shadow_ray_inc.glsl retraces at Full mode and falls back to the
+// texture-alpha cut (instead of opaque) wherever retrace cannot run (Simplified Material, Inline, GPU-written
+// instances, fallback lights, or shaders refused by the hit groups such as helper-function discard per #304).
+struct NextGIShadowAlphaRoute {
+	bool use_texture_alpha = false;
+	bool poll_verdict = false;
+	bool use_retrace = false;
+};
+
+NextGIShadowAlphaRoute nextgi_shadow_alpha_route(
+		NextGIShadowClass p_shadow_class,
+		bool p_code_has_texture_alpha,
+		bool p_uses_discard,
+		bool p_retrace_mode_available,
+		bool p_instance_retrace,
+		bool p_has_shader_serial,
+		NextGIShadowRetraceVerdict p_verdict);
+
 // The SRC relight's retrace turn (nextgi_src_relight_inc.glsl). On frame f a mask texel traces the page's shadowed
 // lights in a pair, slots (2f, 2f + 1) mod n, and appends at most one retrace record, for the first light of the
 // pair that needs one. The pairs repeat every n / 2 frames for an even n and every n frames for an odd n; which
@@ -285,6 +311,11 @@ struct NextGIShadowModelHit {
 	NextGIShadowClass geometry_class = NEXTGI_SHADOW_CLASS_OPAQUE;
 	bool alpha_kept = true; // An alpha-tested geometry: the sample keeps the texel.
 	bool retrace = false; // An alpha-tested geometry whose alpha comes from shader code (NEXTGI_SHADOW_ALPHA_RETRACE).
+	// GodotNext: nextgi_shadow_dual_route (#307). For dual-route entries (both RETRACE and TEXTURE/CUT),
+	// texture_alpha is true and texture_alpha_kept is the inline texture-alpha decision used when retrace
+	// cannot run (Simplified Material, Inline, GPU-written, fallback light, or refused shader).
+	bool texture_alpha = false;
+	bool texture_alpha_kept = true;
 };
 
 struct NextGIShadowModelResult {

@@ -210,6 +210,20 @@ enum NextGIHitAvailability {
 // What the settings alone decide, known without a frame block: NO_CONSUMER, the mode's reason when it lets none
 // of the consumers run, or AVAILABLE when the tier and the device decide.
 NextGIHitAvailability nextgi_hit_setting_availability(uint32_t p_consumers, NextGIHitMode p_mode);
+
+// GodotNext: nextgi_shadow_dual_route (#307). Evaluates the shadow alpha routing choice directly for a
+// Hardware Ray Tracing Mode (FULL, SIMPLIFIED_MATERIAL, INLINE).
+_FORCE_INLINE_ NextGIShadowAlphaRoute nextgi_shadow_alpha_route_for_mode(
+		NextGIShadowClass p_shadow_class,
+		bool p_code_has_texture_alpha,
+		bool p_uses_discard,
+		NextGIHitMode p_hwrt_mode,
+		bool p_instance_retrace,
+		bool p_has_shader_serial,
+		NextGIShadowRetraceVerdict p_verdict) {
+	const bool retrace_mode = nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, p_hwrt_mode) == NEXTGI_HIT_AVAILABLE;
+	return nextgi_shadow_alpha_route(p_shadow_class, p_code_has_texture_alpha, p_uses_discard, retrace_mode, p_instance_retrace, p_has_shader_serial, p_verdict);
+}
 // p_init_failed: NextGIHitMaterials failed to initialize since the consumers were last off (latched, so it is
 // not created again every frame). The mode comes right after the consumers, as a project setting, before the
 // tier and the device (as the tier rule puts SETTING_OFF before the device's reasons).
