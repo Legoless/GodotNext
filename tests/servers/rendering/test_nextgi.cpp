@@ -573,6 +573,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 // GodotNext: nextgi_src_cards
 #include "core/config/project_settings.h"
+#include "core/object/class_db.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
@@ -675,11 +676,23 @@ TEST_CASE("[NextGI] Tier rule: lavapipe gives CPU_DEVICE, or NO_RAY_QUERY withou
 	check_tier(lavapipe_no_rq, NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
-TEST_CASE("[NextGI] Tier rule: Apple7 and Apple8 give NOT_HW_ACCELERATED") {
-	// The Metal ray-tracing API exists on M1 and M2, but there is no RT hardware (#48 feeds this).
-	NextGI::TierInputs apple = hwrt_inputs();
-	apple.ray_query_hw = false;
-	check_tier(apple, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+TEST_CASE("[NextGI] Tier rule: Apple7 gives NOT_HW_ACCELERATED, while Apple8+ on Metal opts into HWRT (EXPERIMENTAL) (#131)") {
+	// Apple7 (M1) has no RT hardware and does not skip NOT_HW_ACCELERATED under Auto.
+	NextGI::TierInputs apple7 = hwrt_inputs();
+	apple7.ray_query_hw = false;
+	apple7.is_metal = true;
+	apple7.metal_gpu_family = 1007;
+	check_tier(apple7, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+
+	// Apple8 (M2) skips NOT_HW_ACCELERATED only when opted in with Auto on Metal.
+	NextGI::TierInputs apple8 = hwrt_inputs();
+	apple8.ray_query_hw = false;
+	apple8.is_metal = true;
+	apple8.metal_gpu_family = 1008;
+	const NextGI::TierResult apple8_result = NextGI::evaluate_tier(apple8);
+	CHECK_EQ(apple8_result.tier, NextGI::TIER_HWRT);
+	CHECK_EQ(apple8_result.reason, NextGI::TIER_REASON_NONE);
+	CHECK(apple8_result.experimental_hwrt);
 }
 
 TEST_CASE("[NextGI] Tier rule: D3D12 without DXR gives D3D12_NO_DXR") {
@@ -1311,26 +1324,149 @@ static RenderingDeviceDriver::MetalRayQueryCaps metal_family(uint32_t p_family, 
 	return RenderingDeviceDriver::metal_ray_query_caps(p_family, p_macos, p_os_major, p_supports_raytracing, p_msl_version, p_gpu_address, p_barriers, p_argument_buffers);
 }
 
-static void check_metal_tier(const RenderingDeviceDriver::MetalRayQueryCaps &p_caps, NextGI::Tier p_tier, NextGI::TierReason p_reason, NextGI::HardwareRayTracing p_hwrt = NextGI::HARDWARE_RAY_TRACING_AUTO) {
+static NextGI::TierInputs metal_tier_inputs(uint32_t p_family, const RenderingDeviceDriver::MetalRayQueryCaps &p_caps, NextGI::HardwareRayTracing p_hwrt = NextGI::HARDWARE_RAY_TRACING_AUTO) {
 	NextGI::TierInputs inputs = hwrt_inputs();
 	inputs.hwrt_setting = p_hwrt;
+	inputs.is_metal = true;
+	inputs.metal_gpu_family = p_family;
 	inputs.ray_query = p_caps.ray_query;
 	inputs.ray_query_hw = p_caps.hardware;
 	inputs.driver_reason = p_caps.ray_query ? NextGI::TIER_REASON_NONE : metal_tier_reason(p_caps.reason);
-	const bool warn_force = p_hwrt == NextGI::HARDWARE_RAY_TRACING_FORCE && !p_caps.ray_query;
-	check_tier(inputs, p_tier, p_reason, warn_force);
+	return inputs;
 }
 
-TEST_CASE("[NextGI][Metal] Apple7 and Apple8 on macOS 14+ report ray_query=true, hardware=false (NOT_HW_ACCELERATED) and HWRT under force") {
-	for (uint32_t family : { 1007u, 1008u }) {
+static void check_metal_tier(uint32_t p_family, const RenderingDeviceDriver::MetalRayQueryCaps &p_caps, NextGI::Tier p_tier, NextGI::TierReason p_reason, NextGI::HardwareRayTracing p_hwrt = NextGI::HARDWARE_RAY_TRACING_AUTO) {
+	const NextGI::TierInputs inputs = metal_tier_inputs(p_family, p_caps, p_hwrt);
+	const bool warn_force = p_hwrt == NextGI::HARDWARE_RAY_TRACING_FORCE && !p_caps.ray_query;
+	check_tier(inputs, p_tier, p_reason, warn_force);
+	const NextGI::TierResult result = NextGI::evaluate_tier(inputs);
+	CHECK_EQ(result.experimental_hwrt, p_tier == NextGI::TIER_HWRT);
+}
+
+TEST_CASE("[NextGI][Metal] Apple7 reports NOT_HW_ACCELERATED under Auto; Apple8 reports ray_query=true, hardware=false and runs HWRT (EXPERIMENTAL) under Auto (#171, #131)") {
+	const RenderingDeviceDriver::MetalRayQueryCaps a7 = metal_family(1007);
+	CHECK(a7.ray_query);
+	CHECK_FALSE(a7.hardware);
+	CHECK_EQ(a7.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+	CHECK(String(a7.hardware_note).contains("NOT_HW_ACCELERATED"));
+	check_metal_tier(1007, a7, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+	check_metal_tier(1007, a7, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_FORCE);
+
+	const RenderingDeviceDriver::MetalRayQueryCaps a8 = metal_family(1008);
+	CHECK(a8.ray_query);
+	CHECK_FALSE(a8.hardware);
+	CHECK_EQ(a8.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+	CHECK(String(a8.hardware_note).contains("NOT_HW_ACCELERATED"));
+	// Under Mac policy (#131), Auto on Apple8 skips NOT_HW_ACCELERATED only and runs HWRT (EXPERIMENTAL).
+	check_metal_tier(1008, a8, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_AUTO);
+	check_metal_tier(1008, a8, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_FORCE);
+}
+
+TEST_CASE("[NextGI][Metal] Mac HWRT policy (#131): Off -> SWRT on all; Auto -> HWRT (EXPERIMENTAL) on Apple8+, NOT_HW_ACCELERATED on Apple7; safety & OS checks still apply") {
+	// Off gives SWRT (SETTING_OFF) on every Apple GPU family, never HWRT (EXPERIMENTAL).
+	for (uint32_t family : { 1007u, 1008u, 1009u, 1010u }) {
 		const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(family);
-		CHECK(caps.ray_query);
-		CHECK_FALSE(caps.hardware);
-		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
-		CHECK(String(caps.hardware_note).contains("NOT_HW_ACCELERATED"));
-		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
-		check_metal_tier(caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_FORCE);
+		check_metal_tier(family, caps, NextGI::TIER_SOFTWARE, NextGI::SETTING_OFF, NextGI::HARDWARE_RAY_TRACING_OFF);
 	}
+
+	// Auto on Apple7 (M1) falls back to SWRT with NOT_HW_ACCELERATED.
+	check_metal_tier(1007, metal_family(1007), NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED, NextGI::HARDWARE_RAY_TRACING_AUTO);
+
+	// Auto on Apple8/9/10 runs HWRT (EXPERIMENTAL) on macOS 14+, with label in log & overlay (not reason).
+	for (uint32_t family : { 1008u, 1009u, 1010u }) {
+		const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(family);
+		const NextGI::TierInputs inputs = metal_tier_inputs(family, caps, NextGI::HARDWARE_RAY_TRACING_AUTO);
+		NextGI next_gi;
+		String line;
+		REQUIRE(next_gi.update_tier(inputs, NextGI::QUALITY_HIGH, line));
+		const NextGI::TierResult result = next_gi.get_tier_result();
+		CHECK_EQ(result.tier, NextGI::TIER_HWRT);
+		CHECK_EQ(result.reason, NextGI::TIER_REASON_NONE);
+		CHECK(result.experimental_hwrt);
+		CHECK_EQ(NextGI::get_tier_name(result.tier), "HWRT");
+		CHECK_EQ(NextGI::get_tier_display_name(result), "HWRT (EXPERIMENTAL)");
+		CHECK_EQ(line, "NextGI: tier=HWRT (EXPERIMENTAL) reason=NONE quality=HIGH");
+
+		const NextGI::DebugView tier_view = NextGI::resolve_debug_view(NextGI::DEBUG_VIEW_TIER, result);
+		CHECK_EQ(tier_view.label, "HWRT (EXPERIMENTAL) NONE");
+
+		const Dictionary info = next_gi.get_tier_info();
+		CHECK_EQ(String(info["tier"]), "HWRT");
+		CHECK_EQ(String(info["reason"]), "NONE");
+		CHECK(bool(info["hwrt_experimental"]));
+		const Dictionary status = next_gi.get_status();
+		CHECK(bool(status["hwrt_experimental"]));
+#ifdef TOOLS_ENABLED
+		CHECK(NextGIEditorPlugin::format_tier_readout(info).begins_with("NextGI: HWRT (EXPERIMENTAL)"));
+		CHECK(NextGIEditorPlugin::format_status_panel(status).begins_with("NextGI HWRT (EXPERIMENTAL) (NONE)"));
+#endif // TOOLS_ENABLED
+
+		// Self-test mismatch, latched fault, and AS memory exhaustion still fall back to SWRT on Apple8+.
+		NextGI::TierInputs bad_selftest = inputs;
+		bad_selftest.selftest_passed = false;
+		check_tier(bad_selftest, NextGI::TIER_SOFTWARE, NextGI::SELFTEST_FAILED);
+		CHECK_FALSE(NextGI::evaluate_tier(bad_selftest).experimental_hwrt);
+
+		NextGI::TierInputs faulted = inputs;
+		faulted.fault_latched = true;
+		check_tier(faulted, NextGI::TIER_SOFTWARE, NextGI::HWRT_FAULTED);
+
+		NextGI::TierInputs oom = inputs;
+		oom.as_memory_ok = false;
+		check_tier(oom, NextGI::TIER_SOFTWARE, NextGI::AS_MEMORY);
+
+		// macOS 13 gives METAL_OS_TOO_OLD on Apple8/9/10.
+		const RenderingDeviceDriver::MetalRayQueryCaps macos13 = metal_family(family, true, true, true, 13);
+		check_metal_tier(family, macos13, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD, NextGI::HARDWARE_RAY_TRACING_AUTO);
+
+		// Sync mode and argument-buffer checks still apply on Apple8/9/10.
+		check_metal_tier(family, metal_family(family, false, true), NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE, NextGI::HARDWARE_RAY_TRACING_AUTO);
+		check_metal_tier(family, metal_family(family, true, false), NextGI::TIER_SOFTWARE, NextGI::METAL_NO_ARGUMENT_BUFFERS, NextGI::HARDWARE_RAY_TRACING_AUTO);
+	}
+
+	// Non-Metal HWRT does not carry the Mac EXPERIMENTAL label.
+	const NextGI::TierResult non_mac = NextGI::evaluate_tier(hwrt_inputs());
+	CHECK_EQ(non_mac.tier, NextGI::TIER_HWRT);
+	CHECK_FALSE(non_mac.experimental_hwrt);
+	CHECK_EQ(NextGI::get_tier_display_name(non_mac), "HWRT");
+	CHECK_EQ(NextGI::format_tier_line(non_mac, NextGI::QUALITY_HIGH), "NextGI: tier=HWRT reason=NONE quality=HIGH");
+}
+
+TEST_CASE("[NextGI][Metal] Mac HWRT setting override defaults to Off, preserves explicit values, and keeps family query non-script (#131)") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	const char *base_key = "rendering/global_illumination/nextgi/hardware_ray_tracing";
+	const char *macos_key = "rendering/global_illumination/nextgi/hardware_ray_tracing.macos";
+	REQUIRE(ps->has_setting(base_key));
+	REQUIRE(ps->has_setting(macos_key));
+	CHECK_EQ(int(ps->get_setting(macos_key)), int(NextGI::HARDWARE_RAY_TRACING_OFF));
+
+	// Feature-tag resolution gives Off on macOS and Auto on non-macOS by default.
+	Vector<String> macos_features;
+	macos_features.push_back("macos");
+	Vector<String> linux_features;
+	linux_features.push_back("linuxbsd");
+	CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(base_key, macos_features)), int(NextGI::HARDWARE_RAY_TRACING_OFF));
+	CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(base_key, linux_features)), int(NextGI::HARDWARE_RAY_TRACING_AUTO));
+
+	// Explicit project value on .macos is preserved and wins over the default.
+	{
+		NextGISettingOverride opt_in(macos_key, int(NextGI::HARDWARE_RAY_TRACING_AUTO));
+		CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(base_key, macos_features)), int(NextGI::HARDWARE_RAY_TRACING_AUTO));
+	}
+	CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(base_key, macos_features)), int(NextGI::HARDWARE_RAY_TRACING_OFF));
+
+#ifdef TOOLS_ENABLED
+	// EditorNode::get_initial_settings() writes nothing new for hardware_ray_tracing.macos.
+	const HashMap<String, Variant> initial = EditorNode::get_initial_settings();
+	CHECK_FALSE(initial.has(macos_key));
+#endif // TOOLS_ENABLED
+
+	// The Metal GPU family query is C++-only (not bound to scripts) and returns 0 without a Metal driver.
+	CHECK_FALSE(ClassDB::has_method("RenderingDevice", "get_metal_gpu_family"));
+	RenderingDevice *rd = memnew(RenderingDevice);
+	CHECK_EQ(rd->get_metal_gpu_family(), 0u);
+	memdelete(rd);
 }
 
 TEST_CASE("[NextGI][Metal] Apple8 limits: 64-bit atomics max/min only and no indirect mesh draws (#171)") {
@@ -1382,7 +1518,7 @@ TEST_CASE("[NextGI][Metal] Apple9, Apple10 and Apple11 give HWRT") {
 		CHECK(caps.ray_query);
 		CHECK(caps.hardware);
 		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
-		check_metal_tier(caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+		check_metal_tier(family, caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
 	}
 }
 
@@ -1391,19 +1527,19 @@ TEST_CASE("[NextGI][Metal] No Barriers sync gives METAL_SYNC_MODE") {
 	CHECK_FALSE(caps.ray_query);
 	CHECK_FALSE(caps.hardware);
 	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE);
-	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
+	check_metal_tier(1010, caps, NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
 
 	// Barriers is checked before argument buffers.
 	const RenderingDeviceDriver::MetalRayQueryCaps both = metal_family(1010, false, false);
 	CHECK_EQ(both.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE);
-	check_metal_tier(both, NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
+	check_metal_tier(1010, both, NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
 }
 
 TEST_CASE("[NextGI][Metal] Argument buffers off gives METAL_NO_ARGUMENT_BUFFERS") {
 	const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(1010, true, false);
 	CHECK_FALSE(caps.ray_query);
 	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS);
-	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_NO_ARGUMENT_BUFFERS);
+	check_metal_tier(1010, caps, NextGI::TIER_SOFTWARE, NextGI::METAL_NO_ARGUMENT_BUFFERS);
 }
 
 TEST_CASE("[NextGI][Metal] macOS 13 gives METAL_OS_TOO_OLD on Apple8 and Apple9+ (#171)") {
@@ -1412,9 +1548,9 @@ TEST_CASE("[NextGI][Metal] macOS 13 gives METAL_OS_TOO_OLD on Apple8 and Apple9+
 		CHECK_FALSE(caps.ray_query);
 		CHECK_FALSE(caps.hardware);
 		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_OS_TOO_OLD);
-		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD);
+		check_metal_tier(family, caps, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD);
 		// Force still cannot bypass a missing OS capability and warns.
-		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD, NextGI::HARDWARE_RAY_TRACING_FORCE);
+		check_metal_tier(family, caps, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD, NextGI::HARDWARE_RAY_TRACING_FORCE);
 	}
 	// Apply driver reason directly through apply_driver_ray_query too.
 	NextGI::TierInputs inputs = hwrt_inputs();
@@ -1427,7 +1563,7 @@ TEST_CASE("[NextGI][Metal] A missing ray-query capability gives NO_RAY_QUERY") {
 	CHECK_EQ(metal_family(1010, true, true, true, 14, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
 	CHECK_EQ(metal_family(1010, true, true, true, 14, true, 20300).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
 	CHECK_EQ(metal_family(1010, true, true, true, 14, true, RenderingDeviceDriver::METAL_RAY_QUERY_MIN_MSL, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
-	check_metal_tier(metal_family(1009, true, true, false), NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
+	check_metal_tier(1009, metal_family(1009, true, true, false), NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
 TEST_CASE("[NextGI][Metal] The acceleration structure instance size is 72") {

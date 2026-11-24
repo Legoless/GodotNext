@@ -206,13 +206,18 @@ NextGI::TierResult NextGI::evaluate_tier(const TierInputs &p_inputs) {
 		r.warn_force = force;
 		return r;
 	}
+	const bool is_metal = p_inputs.is_metal || p_inputs.metal_gpu_family != 0;
 	if (!force) {
 		// The CPU device-type check lives in the rule alone (D11).
 		if (p_inputs.cpu_device) {
 			r.reason = CPU_DEVICE;
 			return r;
 		}
-		if (!p_inputs.ray_query_hw) {
+		// GodotNext: mac_hwrt_policy (#131). On Metal with Auto, Apple8 (M2) skips
+		// NOT_HW_ACCELERATED only (runs HWRT EXPERIMENTAL when opted in); Apple7 (M1)
+		// still reports NOT_HW_ACCELERATED and falls back to SWRT.
+		const bool apple8_optin = is_metal && p_inputs.metal_gpu_family >= RenderingDeviceDriver::METAL_RAY_QUERY_APPLE8_FAMILY;
+		if (!p_inputs.ray_query_hw && !apple8_optin) {
 			r.reason = NOT_HW_ACCELERATED;
 			return r;
 		}
@@ -231,12 +236,16 @@ NextGI::TierResult NextGI::evaluate_tier(const TierInputs &p_inputs) {
 	}
 
 	r.tier = TIER_HWRT;
+	r.experimental_hwrt = is_metal;
 	return r;
 }
 
 void NextGI::collect_device_inputs(const RenderingDevice *p_device, const String &p_api_name, RenderingDeviceEnums::DeviceType p_device_type, TierInputs &r_inputs) {
 	r_inputs.ray_query = p_device != nullptr && p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY);
 	r_inputs.cpu_device = p_device_type == RenderingDeviceEnums::DEVICE_TYPE_CPU;
+	// GodotNext: mac_hwrt_policy (#131). Non-script driver query supplies Metal's highestFamily.
+	r_inputs.is_metal = p_api_name == "Metal";
+	r_inputs.metal_gpu_family = p_device != nullptr ? p_device->get_metal_gpu_family() : 0;
 
 	// Every driver reports its reason and the hardware flag from its capability helper; Vulkan and
 	// D3D12 take the flag from the RT-core check (#22, #283). Without a driver (the mocked devices of
@@ -354,6 +363,8 @@ void NextGI::_select_swrt_auto_quality() {
 }
 
 void NextGI::_append_swrt_info(Dictionary &r_info) const {
+	// GodotNext: mac_hwrt_policy (#131). Label HWRT as EXPERIMENTAL on all Macs (label, not reason).
+	r_info["hwrt_experimental"] = result.tier == TIER_HWRT && result.experimental_hwrt;
 	// The EXPERIMENTAL label marks the runtime HWRT/SWRT switch (§21.2.1), so only where it is live.
 	r_info["experimental_toggle"] = is_active() && keep_when_hwrt();
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
@@ -468,6 +479,14 @@ String NextGI::get_tier_name(Tier p_tier) {
 	return _nextgi_tier_names[p_tier];
 }
 
+// GodotNext: mac_hwrt_policy (#131).
+String NextGI::get_tier_display_name(const TierResult &p_result) {
+	if (p_result.tier == TIER_HWRT && p_result.experimental_hwrt) {
+		return "HWRT (EXPERIMENTAL)";
+	}
+	return get_tier_name(p_result.tier);
+}
+
 String NextGI::get_reason_name(TierReason p_reason) {
 	ERR_FAIL_INDEX_V(p_reason, TIER_REASON_MAX, String());
 	return _nextgi_reason_names[p_reason];
@@ -479,7 +498,7 @@ String NextGI::get_quality_name(Quality p_quality) {
 }
 
 String NextGI::format_tier_line(const TierResult &p_result, Quality p_quality_setting) {
-	String line = vformat("NextGI: tier=%s reason=%s", get_tier_name(p_result.tier), get_reason_name(p_result.reason));
+	String line = vformat("NextGI: tier=%s reason=%s", get_tier_display_name(p_result), get_reason_name(p_result.reason));
 	if (p_result.swrt_reduced) {
 		line += " SWRT_REDUCED";
 	}
@@ -1129,7 +1148,7 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 	if (p_view == DEBUG_VIEW_TIER) {
 		view.has_data = true;
 		view.tint = p_result.tier == TIER_HWRT ? debug_tint_hwrt() : debug_tint_fallback();
-		view.label = vformat("%s %s", get_tier_name(p_result.tier), get_reason_name(p_result.reason));
+		view.label = vformat("%s %s", get_tier_display_name(p_result), get_reason_name(p_result.reason));
 		return view;
 	}
 

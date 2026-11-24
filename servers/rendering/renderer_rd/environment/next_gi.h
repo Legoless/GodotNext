@@ -185,6 +185,10 @@ public:
 		TierReason driver_reason = NO_RAY_QUERY; // The driver's reason code when ray_query is false.
 		bool cpu_device = false; // get_device_type() == DEVICE_TYPE_CPU. Only the rule checks it.
 		bool ray_query_hw = false; // SUPPORTS_RAY_QUERY_HARDWARE: driver knowledge only.
+		// GodotNext: mac_hwrt_policy (#131). Metal backend flag and highest MTL::GPUFamily
+		// (1007=Apple7, 1008=Apple8, 1009=Apple9, ...; 0 on non-Metal drivers).
+		bool is_metal = false;
+		uint32_t metal_gpu_family = 0;
 		// #36 feeds selftest_passed and fault_latched. The AS budget stays a pass until #39.
 		bool selftest_passed = true;
 		bool fault_latched = false;
@@ -196,8 +200,11 @@ public:
 		TierReason reason = TIER_REASON_NONE;
 		bool warn_force = false; // Force was requested on a device without ray query.
 		bool swrt_reduced = false; // Global-SDF levels were dropped. The HWRT reason stays.
+		// GodotNext: mac_hwrt_policy (#131). True when HWRT runs on Metal/Mac: displayed as
+		// "HWRT (EXPERIMENTAL)" in the overlay and one-line log (label only, not reason).
+		bool experimental_hwrt = false;
 
-		bool operator==(const TierResult &p_other) const { return tier == p_other.tier && reason == p_other.reason && warn_force == p_other.warn_force && swrt_reduced == p_other.swrt_reduced; }
+		bool operator==(const TierResult &p_other) const { return tier == p_other.tier && reason == p_other.reason && warn_force == p_other.warn_force && swrt_reduced == p_other.swrt_reduced && experimental_hwrt == p_other.experimental_hwrt; }
 		bool operator!=(const TierResult &p_other) const { return !(*this == p_other); }
 	};
 
@@ -530,6 +537,8 @@ public:
 	Quality get_resolved_quality() const { return resolve_quality(quality_setting); }
 
 	static String get_tier_name(Tier p_tier);
+	// GodotNext: mac_hwrt_policy (#131). "HWRT (EXPERIMENTAL)" on Metal/Mac HWRT; else get_tier_name(p_result.tier).
+	static String get_tier_display_name(const TierResult &p_result);
 	static String get_reason_name(TierReason p_reason);
 	static String get_quality_name(Quality p_quality);
 	// The one printed line, e.g. "NextGI: tier=SWRT reason=D3D12_NO_DXR quality=HIGH (auto selection pending)".

@@ -2290,6 +2290,8 @@ public:
 	String get_device_api_version() const;
 	// GodotNext: hwrt_safety_net
 	String get_driver_version_key() const;
+	// GodotNext: mac_hwrt_policy (#131). Metal's highestFamily (0 on non-Metal drivers). Not script-bound.
+	uint32_t get_metal_gpu_family() const;
 	void set_device_lost_callback(RenderingDeviceDriver::DeviceLostCallback p_callback, void *p_userdata);
 	String get_device_pipeline_cache_uuid() const;
 

@@ -191,8 +191,16 @@ bool NextGIEditorPlugin::should_show_inspector_vulkan_button(const String &p_hos
 	return p_host_os == "Windows" && p_driver_windows == "d3d12" && !p_d3d12_hwrt_active;
 }
 
-static String _nextgi_overlay_tier_name(const String &p_tier) {
-	return p_tier == "DISABLED" ? String("SDFGI-legacy") : p_tier;
+static String _nextgi_overlay_tier_name(const Dictionary &p_info) {
+	const String tier = p_info.get("tier", String());
+	if (tier == "DISABLED") {
+		return String("SDFGI-legacy");
+	}
+	// GodotNext: mac_hwrt_policy (#131). Label HWRT as EXPERIMENTAL on all Macs (label, not reason).
+	if (tier == "HWRT" && bool(p_info.get("hwrt_experimental", false))) {
+		return String("HWRT (EXPERIMENTAL)");
+	}
+	return tier;
 }
 
 static String _nextgi_overlay_suffix(const Dictionary &p_info) {
@@ -215,7 +223,7 @@ static String _nextgi_overlay_suffix(const Dictionary &p_info) {
 }
 
 String NextGIEditorPlugin::format_status_panel(const Dictionary &p_status) {
-	const String tier = _nextgi_overlay_tier_name(p_status.get("tier", String()));
+	const String tier = _nextgi_overlay_tier_name(p_status);
 	String line = vformat("NextGI %s (%s), quality %s (%s), driver %s", tier, String(p_status.get("reason", String())), String(p_status.get("quality", String())), String(p_status.get("quality_reason", String())), String(p_status.get("driver", String())));
 	line += _nextgi_overlay_suffix(p_status);
 	return line;
@@ -227,7 +235,7 @@ String NextGIEditorPlugin::get_vulkan_switch_dialog_text() {
 }
 
 String NextGIEditorPlugin::format_tier_readout(const Dictionary &p_tier_info) {
-	const String tier = _nextgi_overlay_tier_name(p_tier_info.get("tier", String()));
+	const String tier = _nextgi_overlay_tier_name(p_tier_info);
 	const String reason = p_tier_info.get("reason", String());
 	String line;
 	if (reason.is_empty() || reason == "NONE") {

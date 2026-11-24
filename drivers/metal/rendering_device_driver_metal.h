@@ -651,6 +651,8 @@ public:
 	virtual bool has_feature(Features p_feature) override final;
 	// GodotNext: metal_ray_query
 	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const override { return ray_query_reason; }
+	// GodotNext: mac_hwrt_policy (#131)
+	virtual uint32_t get_metal_gpu_family() const override { return device_properties != nullptr ? (uint32_t)device_properties->features.highestFamily : 0; }
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;

@@ -1258,6 +1258,9 @@ public:
 
 	// NO_RAY_QUERY until a driver overrides it. Metal, Vulkan and D3D12 do.
 	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const { return RAY_QUERY_REASON_NO_RAY_QUERY; }
+	// GodotNext: mac_hwrt_policy (#131). Metal's MTL::GPUFamily highestFamily (e.g., 1007=Apple7,
+	// 1008=Apple8, 1009=Apple9); 0 on non-Metal drivers. Non-script tier-rule input.
+	virtual uint32_t get_metal_gpu_family() const { return 0; }
 
 	virtual bool has_feature(Features p_feature) = 0;
 	virtual const MultiviewCapabilities &get_multiview_capabilities() = 0;

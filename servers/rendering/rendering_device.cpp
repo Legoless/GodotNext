@@ -9640,6 +9640,14 @@ String RenderingDevice::get_driver_version_key() const {
 	return driver->get_driver_version_key();
 }
 
+// GodotNext: mac_hwrt_policy (#131)
+uint32_t RenderingDevice::get_metal_gpu_family() const {
+	if (driver == nullptr) {
+		return 0;
+	}
+	return driver->get_metal_gpu_family();
+}
+
 void RenderingDevice::set_device_lost_callback(RenderingDeviceDriver::DeviceLostCallback p_callback, void *p_userdata) {
 	if (driver == nullptr) {
 		return;
