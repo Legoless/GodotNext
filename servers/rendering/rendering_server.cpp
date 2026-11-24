@@ -2299,6 +2299,29 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 		stats["page_upload_ms"] = RSG::virtual_mesh_storage->get_last_page_upload_ms();
 		stats["skin_palette_used_bones"] = int64_t(RSG::virtual_mesh_storage->get_palette_arena_used_bones());
 		stats["skin_palette_bytes"] = int64_t(uint64_t(RSG::virtual_mesh_storage->get_palette_arena_bone_capacity()) * 3u * 16u);
+		// GodotNext: nextgeo_dynamic_wind (#296). Dynamic Wind simulation & promotion counters.
+		const RendererVirtualMeshStorage::DynamicWindStats dw = RSG::virtual_mesh_storage->get_dynamic_wind_stats();
+		stats["dynamic_wind_enabled"] = dw.setting_enabled;
+		stats["dynamic_wind_mode"] = dw.mode == RendererVirtualMeshStorage::DYNAMIC_WIND_MODE_PARAMETRIC ? "parametric" : "force_based";
+		stats["dynamic_wind_supported"] = dw.setting_enabled && dw.floor_supported;
+		stats["dynamic_wind_active"] = RSG::virtual_mesh_storage->is_dynamic_wind_active();
+		stats["dynamic_wind_shared_slots"] = int64_t(dw.shared_slots);
+		stats["dynamic_wind_promoted_instances"] = int64_t(dw.promoted_instances);
+		stats["dynamic_wind_active_slots"] = int64_t(dw.active_slots);
+		stats["dynamic_wind_local_forces"] = int64_t(dw.local_force_count);
+		stats["dynamic_wind_palette_bones"] = int64_t(dw.palette_bones);
+		if (!stats.has("dynamic_wind_floor_reason")) {
+			static const char *const DW_REASON_NAMES[] = {
+				"NONE",
+				"DISABLED",
+				"NEXTGEO_UNAVAILABLE",
+				"BELOW_TIER_FLOOR",
+				"SKINNED_UNAVAILABLE",
+				"FOLIAGE_UNAVAILABLE",
+			};
+			const uint32_t ridx = dw.floor_reason < (sizeof(DW_REASON_NAMES) / sizeof(DW_REASON_NAMES[0])) ? dw.floor_reason : 1u;
+			stats["dynamic_wind_floor_reason"] = DW_REASON_NAMES[ridx];
+		}
 	}
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 	RendererRD::NextGeoDebug::fill_debug_stats(stats);
@@ -3714,6 +3737,11 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("scenario_set_compositor", "scenario", "compositor"), &RenderingServer::scenario_set_compositor);
 	// GodotNext: nextgeo_foliage_wind (#152)
 	ClassDB::bind_method(D_METHOD("scenario_set_wind", "scenario", "direction", "strength", "gust_frequency"), &RenderingServer::scenario_set_wind);
+	// GodotNext: nextgeo_dynamic_wind (#296)
+	ClassDB::bind_method(D_METHOD("scenario_add_wind_force", "scenario", "position", "radius", "direction", "strength", "falloff"), &RenderingServer::scenario_add_wind_force, DEFVAL(1.0f));
+	ClassDB::bind_method(D_METHOD("scenario_update_wind_force", "scenario", "force_id", "position", "radius", "direction", "strength", "falloff"), &RenderingServer::scenario_update_wind_force, DEFVAL(1.0f));
+	ClassDB::bind_method(D_METHOD("scenario_remove_wind_force", "scenario", "force_id"), &RenderingServer::scenario_remove_wind_force);
+	ClassDB::bind_method(D_METHOD("scenario_clear_wind_forces", "scenario"), &RenderingServer::scenario_clear_wind_forces);
 
 	/* INSTANCE */
 
@@ -4437,6 +4465,10 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10, GN-7, GN-12, N6, MN3). EXPERIMENTAL Nanite Voxels
 	// sparse 4^3 brick LOD for distant foliage. Off by default with zero voxel buffers and zero dispatches.
 	GLOBAL_DEF("rendering/nextgeo/experimental/voxels", false);
+	// GodotNext: nextgeo_dynamic_wind (#296, plan §21.4). EXPERIMENTAL GPU per-bone dynamic wind simulation
+	// for skinned NextGeo foliage (off by default), with Force Based (0) and Parametric (1) modes.
+	GLOBAL_DEF("rendering/nextgeo/experimental/dynamic_wind", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/experimental/dynamic_wind_mode", PROPERTY_HINT_ENUM, "Force Based,Parametric"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

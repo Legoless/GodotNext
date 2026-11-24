@@ -174,8 +174,8 @@ struct VirtualGeometryDesc {
 	};
 	Vector<AssemblyPartDesc> assembly_parts;
 	Vector<AssemblyChildDesc> assembly_children;
-	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
-	// Optional procedural wind skeleton per virtual mesh (1 trunk + <= 8 branches, 0 bytes per-instance palette).
+	// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296, plan §21.4 contract N10).
+	// Optional wind skeleton per virtual mesh (1 trunk + <= 8 branches) with per-bone mass and wind catch.
 	struct WindBoneDesc {
 		Vector3 rest_position;
 		float lever_length = 1.0f;
@@ -183,6 +183,8 @@ struct VirtualGeometryDesc {
 		float stiffness = 0.5f;
 		float max_sway = 0.0f;
 		float sway_phase = 0.0f;
+		float mass = 1.0f;
+		float wind_catch = 1.0f;
 	};
 	Vector<WindBoneDesc> wind_bones;
 	float wind_max_sway = 0.0f;

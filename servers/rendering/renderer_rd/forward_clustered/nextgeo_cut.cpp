@@ -203,6 +203,11 @@ bool s_voxels_buffers_allocated = false;
 uint32_t s_voxel_raster_dispatches = 0;
 uint32_t s_voxel_bricks_phase1 = 0;
 uint32_t s_voxel_bricks_phase2 = 0;
+// GodotNext: nextgeo_dynamic_wind (#296). Dynamic Wind GPU dispatch & floor telemetry.
+bool s_dynamic_wind_buffers_allocated = false;
+uint32_t s_dynamic_wind_dispatches = 0u;
+uint64_t s_dynamic_wind_total_dispatches = 0u;
+const char *s_dynamic_wind_floor_reason = "DISABLED";
 
 Mutex s_page_req_registry_mutex;
 HashMap<uint64_t, NextGeoCut *> s_page_req_registry;
@@ -250,7 +255,7 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 		const RendererVirtualMeshStorage::Record &record = eff_records[record_index];
 		const RendererVirtualMeshStorage::InstanceAttributes &attr = eff_attrs[record_index];
 		const RendererVirtualMeshStorage::Record *parent_ptr = (attr.meta[0] < eff_records.size()) ? &eff_records[attr.meta[0]] : nullptr;
-		const float wind_sway = RendererVirtualMeshStorage::is_foliage_wind_enabled() ? p_storage->mesh_index_get_wind_max_sway(record.virtual_mesh) : 0.0f;
+		const float wind_sway = p_storage->is_any_wind_active() ? p_storage->mesh_index_get_wind_max_sway(record.virtual_mesh) : 0.0f;
 		if (!RendererVirtualMeshStorage::cull_instance_cpu(record, attr, parent_ptr, p_cut.frustum, eye, cull_mask, is_shadow_view, wind_sway)) {
 			continue;
 		}
@@ -287,6 +292,9 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 			const RID skel = p_storage->instance_record_get_skeleton(record_index);
 			if (skel.is_valid()) {
 				skin_palette = p_storage->get_skeleton_palette_data(skel, false, skin_palette_bones);
+			} else {
+				// GodotNext: nextgeo_dynamic_wind (#296). Use CPU mirror of simulated bone palette for CPU_cut_hash parity.
+				skin_palette = p_storage->get_record_dynamic_wind_palette_data(record_index, false, skin_palette_bones);
 			}
 		}
 		auto projected = [&](const float p_sphere[4], float p_error, float p_bone_scale, bool p_use_world_aabb_dist) {
@@ -2470,6 +2478,266 @@ void NextGeoCut::prepare_gpu_records(RendererVirtualMeshStorage *p_storage) {
 				}
 			}
 		}
+	}
+}
+
+// GodotNext: nextgeo_dynamic_wind (#296, plan §21.4).
+RendererRD::NextGeoDynamicWindFloor NextGeoCut::evaluate_dynamic_wind_floor(const RendererVirtualMeshStorage *p_storage, bool p_setting_enabled) {
+	RenderingDevice *rd = RD::get_singleton();
+	const bool nextgeo_ok = (p_storage != nullptr && rd != nullptr && !failed);
+	const bool tier_ok = nextgeo_ok && RendererRD::nextgeo_raster_tier(rd).hybrid;
+	const bool skinned_ok = nextgeo_ok;
+	const bool foliage_ok = nextgeo_ok;
+	const RendererRD::NextGeoDynamicWindFloor floor = RendererRD::nextgeo_dynamic_wind_evaluate_floor(p_setting_enabled, nextgeo_ok, tier_ok, skinned_ok, foliage_ok);
+	dynamic_wind_floor_logger.record_and_log_once(floor.reason, true);
+	{
+		MutexLock lock(s_stats_mutex);
+		s_dynamic_wind_floor_reason = RendererRD::nextgeo_dynamic_wind_reason_name(floor.reason);
+	}
+	return floor;
+}
+
+bool NextGeoCut::needs_dynamic_wind_step(const RendererVirtualMeshStorage *p_storage, bool p_force_based_active) const {
+	if (p_storage == nullptr) {
+		return false;
+	}
+	if (!p_force_based_active) {
+		return p_storage->get_dynamic_wind_stats().active_slots > 0u || dynamic_wind_ready;
+	}
+	return last_dynamic_wind_frame != p_storage->get_frame();
+}
+
+bool NextGeoCut::_ensure_dynamic_wind(RenderingDevice *p_rd, uint32_t p_slot_count, uint32_t p_force_count) {
+	if (p_rd == nullptr || p_slot_count == 0u) {
+		return false;
+	}
+	if (!dynamic_wind_ready) {
+		if (dynamic_wind_shader.get_variant_count() == 0) {
+			dynamic_wind_shader.initialize(Vector<String>({ "" }));
+		}
+		if (dynamic_wind_version.is_null()) {
+			dynamic_wind_version = dynamic_wind_shader.version_create();
+		}
+		if (dynamic_wind_version.is_null()) {
+			return false;
+		}
+		const RID sh = dynamic_wind_shader.version_get_shader(dynamic_wind_version, 0);
+		if (sh.is_null()) {
+			return false;
+		}
+		dynamic_wind_pipeline = p_rd->compute_pipeline_create(sh);
+		if (dynamic_wind_pipeline.is_null()) {
+			return false;
+		}
+		if (dynamic_wind_params_buf.is_null()) {
+			Vector<uint8_t> zeros;
+			zeros.resize_initialized(sizeof(RendererRD::NextGeoDynamicWindSimParamsGPU));
+			dynamic_wind_params_buf = p_rd->storage_buffer_create(sizeof(RendererRD::NextGeoDynamicWindSimParamsGPU), zeros);
+			if (dynamic_wind_params_buf.is_null()) {
+				return false;
+			}
+		}
+		dynamic_wind_ready = true;
+	}
+
+	// Ensure slot descriptor buffer.
+	const uint32_t need_slots = MAX(p_slot_count, 1u);
+	if (dynamic_wind_slots_buf.is_null() || dynamic_wind_slots_capacity < need_slots) {
+		if (dynamic_wind_slots_buf.is_valid()) {
+			p_rd->free_rid(dynamic_wind_slots_buf);
+			dynamic_wind_slots_buf = RID();
+		}
+		const uint32_t new_cap = MAX(Math::next_power_of_2(need_slots), 16u);
+		Vector<uint8_t> zeros;
+		zeros.resize_initialized(new_cap * sizeof(RendererVirtualMeshStorage::DynamicWindSlotDescGPU));
+		dynamic_wind_slots_buf = p_rd->storage_buffer_create(zeros.size(), zeros);
+		if (dynamic_wind_slots_buf.is_null()) {
+			dynamic_wind_slots_capacity = 0u;
+			return false;
+		}
+		dynamic_wind_slots_capacity = new_cap;
+	}
+
+	// Ensure ping-pong GPU spring state buffers, preserving existing slot states across growth.
+	if (dynamic_wind_state_buf[0].is_null() || dynamic_wind_state_buf[1].is_null() || dynamic_wind_state_capacity < need_slots) {
+		const uint32_t old_cap = dynamic_wind_state_capacity;
+		const RID old_active = dynamic_wind_state_buf[dynamic_wind_state_ping];
+		const RID old_other = dynamic_wind_state_buf[1u - dynamic_wind_state_ping];
+		const uint32_t new_cap = MAX(Math::next_power_of_2(need_slots), 16u);
+		const uint32_t elem_bytes = RendererVirtualMeshStorage::WIND_MAX_BONES * uint32_t(sizeof(RendererVirtualMeshStorage::DynamicWindBoneStateGPU));
+		const uint32_t new_bytes = new_cap * elem_bytes;
+		Vector<uint8_t> zeros;
+		zeros.resize_initialized(new_bytes);
+		RID new_buf0 = p_rd->storage_buffer_create(new_bytes, zeros);
+		RID new_buf1 = p_rd->storage_buffer_create(new_bytes, zeros);
+		if (new_buf0.is_null() || new_buf1.is_null()) {
+			if (new_buf0.is_valid()) {
+				p_rd->free_rid(new_buf0);
+			}
+			if (new_buf1.is_valid()) {
+				p_rd->free_rid(new_buf1);
+			}
+			return false;
+		}
+		if (old_active.is_valid() && old_cap > 0u) {
+			p_rd->buffer_copy(old_active, new_buf0, 0u, 0u, old_cap * elem_bytes);
+		}
+		if (old_active.is_valid()) {
+			p_rd->free_rid(old_active);
+		}
+		if (old_other.is_valid()) {
+			p_rd->free_rid(old_other);
+		}
+		dynamic_wind_state_buf[0] = new_buf0;
+		dynamic_wind_state_buf[1] = new_buf1;
+		dynamic_wind_state_capacity = new_cap;
+		dynamic_wind_state_ping = 0u;
+	}
+
+	// Ensure local wind forces buffer (always >= 1 entry so descriptor binding is valid).
+	const uint32_t need_forces = MAX(p_force_count, 1u);
+	if (dynamic_wind_forces_buf.is_null() || dynamic_wind_forces_capacity < need_forces) {
+		if (dynamic_wind_forces_buf.is_valid()) {
+			p_rd->free_rid(dynamic_wind_forces_buf);
+			dynamic_wind_forces_buf = RID();
+		}
+		const uint32_t new_cap = MAX(Math::next_power_of_2(need_forces), 8u);
+		Vector<uint8_t> zeros;
+		zeros.resize_initialized(new_cap * sizeof(RendererVirtualMeshStorage::WindForceGPU));
+		dynamic_wind_forces_buf = p_rd->storage_buffer_create(zeros.size(), zeros);
+		if (dynamic_wind_forces_buf.is_null()) {
+			dynamic_wind_forces_capacity = 0u;
+			return false;
+		}
+		dynamic_wind_forces_capacity = new_cap;
+	}
+	return true;
+}
+
+void NextGeoCut::_free_dynamic_wind_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		if (dynamic_wind_version.is_valid()) {
+			dynamic_wind_shader.version_free(dynamic_wind_version);
+			dynamic_wind_version = RID();
+		}
+		for (RID *buf : { &dynamic_wind_params_buf, &dynamic_wind_slots_buf, &dynamic_wind_state_buf[0], &dynamic_wind_state_buf[1], &dynamic_wind_forces_buf }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+	}
+	dynamic_wind_pipeline = RID();
+	dynamic_wind_slots_capacity = 0u;
+	dynamic_wind_state_capacity = 0u;
+	dynamic_wind_state_ping = 0u;
+	dynamic_wind_forces_capacity = 0u;
+	dynamic_wind_ready = false;
+	last_dynamic_wind_frame = UINT64_MAX;
+	dynamic_wind_dispatches_last_frame = 0u;
+}
+
+void NextGeoCut::dispatch_dynamic_wind(RendererVirtualMeshStorage *p_storage, const Vector3 &p_direction, float p_strength, float p_gust_frequency, float p_time, float p_dt, bool p_force_based_active) {
+	if (!p_force_based_active || p_storage == nullptr) {
+		if (dynamic_wind_ready || dynamic_wind_params_buf.is_valid()) {
+			_free_dynamic_wind_resources();
+		}
+		dynamic_wind_dispatches_last_frame = 0u;
+		MutexLock lock(s_stats_mutex);
+		s_dynamic_wind_buffers_allocated = false;
+		s_dynamic_wind_dispatches = 0u;
+		return;
+	}
+
+	const uint64_t cur_frame = p_storage->get_frame();
+	if (last_dynamic_wind_frame == cur_frame) {
+		return;
+	}
+
+	const LocalVector<RendererVirtualMeshStorage::DynamicWindSlotDescGPU> &descs = p_storage->get_dynamic_wind_slot_descs();
+	const RID skin_palette_buf = p_storage->get_skin_palette_buffer();
+	const RID wind_meshes_buf = p_storage->get_wind_meshes_buffer();
+	if (descs.is_empty() || skin_palette_buf.is_null() || wind_meshes_buf.is_null()) {
+		dynamic_wind_dispatches_last_frame = 0u;
+		last_dynamic_wind_frame = cur_frame;
+		MutexLock lock(s_stats_mutex);
+		s_dynamic_wind_buffers_allocated = dynamic_wind_ready;
+		s_dynamic_wind_dispatches = 0u;
+		return;
+	}
+
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || uniform_set_cache == nullptr) {
+		return;
+	}
+
+	const LocalVector<RendererVirtualMeshStorage::WindForceGPU> &forces = p_storage->get_dynamic_wind_forces();
+	if (!_ensure_dynamic_wind(rd, descs.size(), forces.size())) {
+		dynamic_wind_dispatches_last_frame = 0u;
+		return;
+	}
+
+	Vector3 gdir = p_direction;
+	if (gdir.length_squared() > real_t(1e-10)) {
+		gdir.normalize();
+	} else {
+		gdir = Vector3(1.0f, 0.0f, 0.0f);
+	}
+	RendererRD::NextGeoDynamicWindSimParamsGPU sim_params;
+	sim_params.wind_dir_strength[0] = float(gdir.x);
+	sim_params.wind_dir_strength[1] = float(gdir.y);
+	sim_params.wind_dir_strength[2] = float(gdir.z);
+	sim_params.wind_dir_strength[3] = MAX(Math::is_finite(p_strength) ? p_strength : 0.0f, 0.0f);
+	sim_params.time_dt_gust_pad[0] = Math::is_finite(p_time) ? p_time : 0.0f;
+	sim_params.time_dt_gust_pad[1] = CLAMP(Math::is_finite(p_dt) ? p_dt : 0.0f, 0.0f, 0.05f);
+	sim_params.time_dt_gust_pad[2] = MAX(Math::is_finite(p_gust_frequency) ? p_gust_frequency : 1.0f, 0.05f);
+	sim_params.time_dt_gust_pad[3] = 0.0f;
+	sim_params.meta[0] = descs.size();
+	sim_params.meta[1] = p_storage->get_wind_params().mesh_count;
+	sim_params.meta[2] = forces.size();
+	sim_params.meta[3] = 0u;
+
+	rd->buffer_update(dynamic_wind_params_buf, 0u, sizeof(sim_params), &sim_params);
+	rd->buffer_update(dynamic_wind_slots_buf, 0u, descs.size() * uint32_t(sizeof(RendererVirtualMeshStorage::DynamicWindSlotDescGPU)), descs.ptr());
+	if (!forces.is_empty()) {
+		rd->buffer_update(dynamic_wind_forces_buf, 0u, forces.size() * uint32_t(sizeof(RendererVirtualMeshStorage::WindForceGPU)), forces.ptr());
+	}
+
+	const uint32_t in_idx = dynamic_wind_state_ping;
+	const uint32_t out_idx = 1u - dynamic_wind_state_ping;
+	LocalVector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, dynamic_wind_params_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, dynamic_wind_slots_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, wind_meshes_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, dynamic_wind_forces_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, dynamic_wind_state_buf[in_idx]));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, dynamic_wind_state_buf[out_idx]));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, skin_palette_buf));
+	const RID sh = dynamic_wind_shader.version_get_shader(dynamic_wind_version, 0);
+	const RID set = uniform_set_cache->get_cache_vec(sh, 0, uniforms);
+	if (set.is_valid()) {
+		const uint32_t total_threads = descs.size() * RendererVirtualMeshStorage::WIND_MAX_BONES;
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, dynamic_wind_pipeline);
+		rd->compute_list_bind_uniform_set(list, set, 0);
+		rd->compute_list_dispatch(list, (total_threads + 63u) / 64u, 1u, 1u);
+		rd->compute_list_end();
+
+		dynamic_wind_state_ping = out_idx;
+		last_dynamic_wind_frame = cur_frame;
+		dynamic_wind_dispatches_last_frame = 1u;
+		dynamic_wind_total_dispatches++;
+	} else {
+		dynamic_wind_dispatches_last_frame = 0u;
+	}
+
+	{
+		MutexLock lock(s_stats_mutex);
+		s_dynamic_wind_buffers_allocated = dynamic_wind_ready;
+		s_dynamic_wind_dispatches = dynamic_wind_dispatches_last_frame;
+		s_dynamic_wind_total_dispatches = dynamic_wind_total_dispatches;
 	}
 }
 
@@ -4962,6 +5230,9 @@ void NextGeoCut::free_resources() {
 		rd->free_rid(dummy_sampler);
 		dummy_sampler = RID();
 	}
+	_free_dynamic_wind_resources();
+	dynamic_wind_floor_logger.reset();
+	dynamic_wind_total_dispatches = 0u;
 	{
 		MutexLock lock(s_stats_mutex);
 		s_last_stats.clear();
@@ -4988,6 +5259,10 @@ void NextGeoCut::free_resources() {
 		s_voxel_raster_dispatches = 0;
 		s_voxel_bricks_phase1 = 0;
 		s_voxel_bricks_phase2 = 0;
+		s_dynamic_wind_buffers_allocated = false;
+		s_dynamic_wind_dispatches = 0u;
+		s_dynamic_wind_total_dispatches = 0u;
+		s_dynamic_wind_floor_reason = "DISABLED";
 	}
 	initialized = false;
 }
@@ -5044,5 +5319,10 @@ Dictionary NextGeoCut::get_last_stats() {
 	stats["voxel_bricks_phase1"] = int64_t(s_voxel_bricks_phase1);
 	stats["voxel_bricks_phase2"] = int64_t(s_voxel_bricks_phase2);
 	stats["voxel_bricks"] = int64_t(s_voxel_bricks_phase1) + int64_t(s_voxel_bricks_phase2);
+	// GodotNext: nextgeo_dynamic_wind (#296).
+	stats["dynamic_wind_buffers_allocated"] = s_dynamic_wind_buffers_allocated;
+	stats["dynamic_wind_dispatches"] = int64_t(s_dynamic_wind_dispatches);
+	stats["dynamic_wind_total_dispatches"] = int64_t(s_dynamic_wind_total_dispatches);
+	stats["dynamic_wind_floor_reason"] = s_dynamic_wind_floor_reason;
 	return stats;
 }

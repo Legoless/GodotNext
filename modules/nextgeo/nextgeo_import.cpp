@@ -188,11 +188,13 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 		return ERR_INVALID_DATA;
 	}
 
-	// GodotNext: nextgeo_foliage_wind (#152). Generate procedural wind skeleton (1 trunk + <= 8 branches)
+	// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296). Generate wind skeleton
+	// (1 trunk + <= 8 branches) with per-bone mass and wind catch computed from bind-pose geometry,
 	// and write #159 4-influence skinning data so `.ngm` clusters carry vertex wind bone weights.
 	Ref<VirtualGeometryWind> wind_resource;
 	if (p_wind) {
 		PackedVector3Array all_positions;
+		PackedInt32Array all_indices;
 		PackedInt32Array all_src_bones;
 		PackedFloat32Array all_src_weights;
 		int src_inf = 0;
@@ -207,6 +209,20 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 			all_positions.resize(prev_size + vcount);
 			for (int v = 0; v < vcount; v++) {
 				all_positions.write[prev_size + v] = s.positions[v];
+			}
+			if (!s.indices.is_empty() && s.indices.size() % 3 == 0) {
+				const int prev_i = all_indices.size();
+				const int add_i = s.indices.size();
+				all_indices.resize(prev_i + add_i);
+				for (int k = 0; k < add_i; k++) {
+					all_indices.write[prev_i + k] = prev_size + s.indices[k];
+				}
+			} else if (vcount % 3 == 0) {
+				const int prev_i = all_indices.size();
+				all_indices.resize(prev_i + vcount);
+				for (int k = 0; k < vcount; k++) {
+					all_indices.write[prev_i + k] = prev_size + k;
+				}
 			}
 			if (s.skin_influences != 4u && s.skin_influences != 8u) {
 				all_have_src_skin = false;
@@ -251,8 +267,11 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 				}
 			}
 			// Populate #159 4-influence skinning weights on every surface with vertices (including ineligible
-			// border-lock surfaces so nextgeo_build_dag sees a consistent skin_influences across surfaces).
+			// border-lock surfaces so nextgeo_build_dag sees a consistent skin_influences across surfaces),
+			// and accumulate eligible skin weights for exact triangle-area mass & wind-catch computation (#296).
 			const int wind_bones = wind_resource->get_bone_count();
+			PackedInt32Array all_dst_bones;
+			PackedFloat32Array all_dst_weights;
 			for (int i = 0; i < input.surfaces.size(); i++) {
 				NextGeoSurfaceInput &s = input.surfaces.write[i];
 				if (s.positions.is_empty()) {
@@ -285,6 +304,19 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 					s.weights.write[k] = dst_weights[k];
 				}
 				s.skin_influences = VirtualGeometryWind::SKIN_INFLUENCES;
+				if (s.eligible) {
+					const int prev_n = all_dst_bones.size();
+					const int add_n = dst_bones.size();
+					all_dst_bones.resize(prev_n + add_n);
+					all_dst_weights.resize(prev_n + add_n);
+					for (int k = 0; k < add_n; k++) {
+						all_dst_bones.write[prev_n + k] = dst_bones[k];
+						all_dst_weights.write[prev_n + k] = dst_weights[k];
+					}
+				}
+			}
+			if (all_dst_bones.size() == all_positions.size() * VirtualGeometryWind::SKIN_INFLUENCES) {
+				wind_resource->compute_bone_physics_from_geometry(all_positions, all_indices, all_dst_bones, all_dst_weights, VirtualGeometryWind::SKIN_INFLUENCES);
 			}
 		}
 	}

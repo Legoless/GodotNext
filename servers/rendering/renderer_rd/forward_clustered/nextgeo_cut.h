@@ -48,6 +48,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_tessellation.h"
 // GodotNext: nextgeo_voxels (#165).
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_voxels.h"
+// GodotNext: nextgeo_dynamic_wind (#296).
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_dynamic_wind.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_vsm.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
@@ -56,6 +58,8 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/instance_cull.glsl.gen.h"
 // GodotNext: nextgeo_foliage_instancing (#151).
 #include "servers/rendering/renderer_rd/shaders/nextgeo/multimesh_expand.glsl.gen.h"
+// GodotNext: nextgeo_dynamic_wind (#296).
+#include "servers/rendering/renderer_rd/shaders/nextgeo/nextgeo_dynamic_wind.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_bin_compact.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/sw_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_export.glsl.gen.h"
@@ -247,6 +251,10 @@ public:
 
 	// GodotNext: nextgeo_foliage_instancing (#151). Expands dirty MultiMeshes and active 2-level Assemblies on GPU.
 	void prepare_gpu_records(RendererVirtualMeshStorage *p_storage);
+	// GodotNext: nextgeo_dynamic_wind (#296). Floor evaluation (logs once below tier) and GPU per-bone wind simulation.
+	RendererRD::NextGeoDynamicWindFloor evaluate_dynamic_wind_floor(const RendererVirtualMeshStorage *p_storage, bool p_setting_enabled);
+	bool needs_dynamic_wind_step(const RendererVirtualMeshStorage *p_storage, bool p_force_based_active) const;
+	void dispatch_dynamic_wind(RendererVirtualMeshStorage *p_storage, const Vector3 &p_direction, float p_strength, float p_gust_frequency, float p_time, float p_dt, bool p_force_based_active);
 
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
 	bool dispatch_shadows(RendererVirtualMeshStorage *p_storage, const NextGeoShadowViewDesc *p_views, uint32_t p_view_count, bool p_debug_stats);
@@ -316,6 +324,9 @@ private:
 	void _free_voxel_resources();
 	bool _ensure_vsm_voxels(RenderingDevice *p_rd);
 	void _free_vsm_voxel_resources();
+	// GodotNext: nextgeo_dynamic_wind (#296). Lazily allocated ONLY when dynamic_wind == true && Force Based.
+	bool _ensure_dynamic_wind(RenderingDevice *p_rd, uint32_t p_slot_count, uint32_t p_force_count);
+	void _free_dynamic_wind_resources();
 	void _request_vsm_tess_stats(uint32_t p_ring_slot);
 	void _publish_vsm_tess_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
 	static void _readback_vsm_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
@@ -594,4 +605,22 @@ private:
 	RID vsm_voxel_pipeline;
 	RID vsm_voxel_bricks;
 	RID vsm_voxel_args;
+
+	// GodotNext: nextgeo_dynamic_wind (#296). Lazily allocated ONLY when dynamic_wind == true && Force Based.
+	RendererRD::NextGeoDynamicWindFloorLogger dynamic_wind_floor_logger;
+	NextgeoDynamicWindShaderRD dynamic_wind_shader;
+	RID dynamic_wind_version;
+	RID dynamic_wind_pipeline;
+	RID dynamic_wind_params_buf;
+	RID dynamic_wind_slots_buf;
+	uint32_t dynamic_wind_slots_capacity = 0u;
+	RID dynamic_wind_state_buf[2];
+	uint32_t dynamic_wind_state_capacity = 0u;
+	uint32_t dynamic_wind_state_ping = 0u;
+	RID dynamic_wind_forces_buf;
+	uint32_t dynamic_wind_forces_capacity = 0u;
+	bool dynamic_wind_ready = false;
+	uint64_t last_dynamic_wind_frame = UINT64_MAX;
+	uint32_t dynamic_wind_dispatches_last_frame = 0u;
+	uint64_t dynamic_wind_total_dispatches = 0u;
 };

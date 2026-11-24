@@ -104,6 +104,12 @@ public:
 	void set_wind_gust_frequency(float p_frequency);
 	float get_wind_gust_frequency() const;
 
+	// GodotNext: nextgeo_dynamic_wind (#296). Local wind force spheres for this world's scenario.
+	int add_wind_force(const Vector3 &p_position, float p_radius, const Vector3 &p_direction = Vector3(), float p_strength = 1.0f, float p_falloff = 1.0f);
+	void update_wind_force(int p_force_id, const Vector3 &p_position, float p_radius, const Vector3 &p_direction = Vector3(), float p_strength = 1.0f, float p_falloff = 1.0f);
+	void remove_wind_force(int p_force_id);
+	void clear_wind_forces();
+
 	_FORCE_INLINE_ const HashSet<Camera3D *> &get_cameras() const { return cameras; }
 
 #ifndef PHYSICS_3D_DISABLED

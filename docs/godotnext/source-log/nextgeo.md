@@ -245,6 +245,10 @@ parameters left for PQ measurement: `NEXTGEO_VOXEL_PROVISIONAL_ERROR_RATIO = 0.0
 `NEXTGEO_VOXEL_TERMINAL_ERROR_FRACTION = 0.04`, `NEXTGEO_VOXEL_ERROR_TO_SIZE_SCALE = 1.0`,
 and `NEXTGEO_VOXEL_PROVISIONAL_SCREEN_THRESHOLD_PX = 8.0`. Copied files: none.
 
+## Dynamic Wind for Nanite Foliage (#296)
+
+No outside input. Experimental GPU per-bone dynamic wind for skinned NextGeo foliage (#296, plan §25 / §21.4) — `rendering/nextgeo/experimental/dynamic_wind` (default `false`) and `rendering/nextgeo/experimental/dynamic_wind_mode` (`0 = Force Based`, `1 = Parametric`), the hardware/feature floor check (`NextGeoDynamicWindSim::evaluate_floor`) with one-time session reason logging (`FloorLogger`), import-time per-bone `mass` and `wind_catch` calculation from bind-pose triangle surface area and vertex distribution in `VirtualGeometryWind` (`compute_bone_physics_from_geometry`) and `modules/nextgeo/nextgeo_import.cpp`, the dedicated ping-pong GPU compute pass (`servers/rendering/renderer_rd/shaders/nextgeo/nextgeo_dynamic_wind.glsl`) simulating per-bone damped harmonic slow sway plus high-frequency flutter clamped within `max_sway` and writing current and previous `mat3x4` palettes directly into `#160`'s skin palette arena (zero new bindings in NextGeo cull/raster/resolve/VSM shaders), shared simulation pooling (`4` phase-varied shared slots per wind mesh), local spherical directional/radial wind force scenario API (`RenderingServer.scenario_{add,update,remove,clear}_wind_force` and `World3D` wrappers) with seamless warm-started promotion of overlapping foliage instances to dedicated per-instance slots and settled demotion back to the shared pool, CPU mirror parity for `CPU_cut_hash`, and Parametric mode routing through `#152`'s procedural shader bones with zero palette memory — is an original clean-room implementation built directly on GodotNext's #152 foliage wind, #160 skinned Nanite runtime, #151 MultiMesh instancing, and #212/#217 VSM pipeline. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

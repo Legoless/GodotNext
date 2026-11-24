@@ -609,4 +609,13 @@ void VirtualMeshStorage::_reset_wind() {
 	wind_meshes_capacity = 0;
 }
 
+bool VirtualMeshStorage::_query_device_dynamic_wind_tier() const {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	return rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT) &&
+			(rd->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS) || rd->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS));
+}
+
 } // namespace RendererRD

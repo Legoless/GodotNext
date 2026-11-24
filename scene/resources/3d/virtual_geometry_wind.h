@@ -56,6 +56,10 @@ private:
 	PackedFloat32Array bone_sway_phases;
 	PackedFloat32Array bone_max_sway;
 	PackedFloat32Array bone_lever_lengths;
+	// GodotNext: nextgeo_dynamic_wind (#296). Per-bone part mass and aerodynamic wind catch
+	// computed from bind-pose geometry (backward-compatible default 1.0 when empty/missing).
+	PackedFloat32Array bone_masses;
+	PackedFloat32Array bone_wind_catches;
 	float max_sway = 0.0f;
 	Vector3 trunk_axis = Vector3(0.0f, 1.0f, 0.0f);
 	float base_height = 0.0f;
@@ -71,7 +75,7 @@ public:
 	void clear();
 	int get_bone_count() const;
 
-	Error add_bone(const Vector3 &p_rest_position, const Vector3 &p_axis, float p_stiffness = 0.5f, float p_sway_phase = 0.0f, float p_max_sway = 0.25f, float p_lever_length = 1.0f);
+	Error add_bone(const Vector3 &p_rest_position, const Vector3 &p_axis, float p_stiffness = 0.5f, float p_sway_phase = 0.0f, float p_max_sway = 0.25f, float p_lever_length = 1.0f, float p_mass = 1.0f, float p_wind_catch = 1.0f);
 
 	void set_bone_rest_positions(const PackedVector3Array &p_positions);
 	PackedVector3Array get_bone_rest_positions() const;
@@ -90,6 +94,16 @@ public:
 
 	void set_bone_lever_lengths(const PackedFloat32Array &p_lever_lengths);
 	PackedFloat32Array get_bone_lever_lengths() const;
+
+	void set_bone_masses(const PackedFloat32Array &p_masses);
+	PackedFloat32Array get_bone_masses() const;
+
+	void set_bone_wind_catches(const PackedFloat32Array &p_wind_catches);
+	PackedFloat32Array get_bone_wind_catches() const;
+
+	// GodotNext: nextgeo_dynamic_wind (#296). Computes per-bone mass and aerodynamic wind_catch
+	// (drag/sail area factor) from bind-pose geometry (triangle surface area and vertex distribution).
+	void compute_bone_physics_from_geometry(const PackedVector3Array &p_positions, const PackedInt32Array &p_indices = PackedInt32Array(), const PackedInt32Array &p_bones = PackedInt32Array(), const PackedFloat32Array &p_weights = PackedFloat32Array(), int p_influences = SKIN_INFLUENCES);
 
 	void set_max_sway(float p_max_sway);
 	float get_max_sway() const;

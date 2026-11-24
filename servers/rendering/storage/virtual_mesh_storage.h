@@ -476,9 +476,14 @@ public:
 		float max_sway = 0.0f;
 		float sway_phase = 0.0f;
 		float branch_weight = 0.0f;
-		float pad = 0.0f;
+		float pad0 = 0.0f;
+		// GodotNext: nextgeo_dynamic_wind (#296). Per-bone mass and aerodynamic wind catch.
+		float mass = 1.0f;
+		float wind_catch = 1.0f;
+		float pad1 = 0.0f;
+		float pad2 = 0.0f;
 	};
-	static_assert(sizeof(WindBoneGPU) == 48, "WindBoneGPU must match GLSL std430 layout (48 bytes).");
+	static_assert(sizeof(WindBoneGPU) == 64, "WindBoneGPU must match GLSL std430 layout (64 bytes).");
 
 	struct WindMeshGPU {
 		uint32_t bone_count = 0u;
@@ -487,7 +492,69 @@ public:
 		float top_height = 1.0f;
 		WindBoneGPU bones[WIND_MAX_BONES];
 	};
-	static_assert(sizeof(WindMeshGPU) == 448, "WindMeshGPU must match GLSL std430 layout (448 bytes).");
+	static_assert(sizeof(WindMeshGPU) == 592, "WindMeshGPU must match GLSL std430 layout (592 bytes).");
+
+	// GodotNext: nextgeo_dynamic_wind (#296, plan §21.4).
+	// GPU per-bone dynamic wind simulation modes, local wind forces, shared/promoted simulation slots,
+	// and per-bone spring+flutter state layout matching shaders/nextgeo/nextgeo_dynamic_wind.glsl.
+	enum DynamicWindMode : uint32_t {
+		DYNAMIC_WIND_MODE_FORCE_BASED = 0u,
+		DYNAMIC_WIND_MODE_PARAMETRIC = 1u,
+	};
+	static constexpr uint32_t DYNAMIC_WIND_SHARED_SLOTS_PER_MESH = 4u;
+	static constexpr uint32_t DYNAMIC_WIND_SETTLE_MIN_FRAMES = 8u;
+	static constexpr uint32_t DYNAMIC_WIND_SETTLE_MAX_FRAMES = 90u;
+
+	enum DynamicWindSlotFlags : uint32_t {
+		DYNAMIC_WIND_SLOT_FLAG_ACTIVE = 1u << 0,
+		DYNAMIC_WIND_SLOT_FLAG_PROMOTED = 1u << 1,
+		DYNAMIC_WIND_SLOT_FLAG_RESET = 1u << 2,
+		DYNAMIC_WIND_SLOT_FLAG_WARM_START = 1u << 3,
+	};
+
+	struct WindForceGPU {
+		float position_radius[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // xyz = world pos, w = radius
+		float direction_strength[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // xyz = normalized dir (or 0 for radial), w = strength
+		float falloff_flags[4] = { 1.0f, 0.0f, 0.0f, 0.0f }; // x = falloff, y = is_radial (>0.5 radial), zw = pad
+	};
+	static_assert(sizeof(WindForceGPU) == 48, "WindForceGPU must match GLSL std430 layout (48 bytes).");
+
+	struct DynamicWindSlotDescGPU {
+		float transform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+		uint32_t mesh_index = UINT32_MAX;
+		uint32_t bone_count = 0u;
+		uint32_t palette_bone_offset = UINT32_MAX;
+		uint32_t flags = 0u;
+		int32_t warm_start_slot = -1;
+		float phase_offset = 0.0f;
+		float pad0 = 0.0f;
+		float pad1 = 0.0f;
+	};
+	static_assert(sizeof(DynamicWindSlotDescGPU) == 80, "DynamicWindSlotDescGPU must match GLSL std430 layout (80 bytes).");
+
+	struct DynamicWindBoneStateGPU {
+		float sway_u = 0.0f;
+		float vel_u = 0.0f;
+		float sway_v = 0.0f;
+		float vel_v = 0.0f;
+		float prev_total_u = 0.0f;
+		float prev_total_v = 0.0f;
+		float flutter_phase = 0.0f;
+		float initialized = 0.0f;
+	};
+	static_assert(sizeof(DynamicWindBoneStateGPU) == 32, "DynamicWindBoneStateGPU must match GLSL std430 layout (32 bytes).");
+
+	struct DynamicWindStats {
+		bool setting_enabled = false;
+		uint32_t mode = DYNAMIC_WIND_MODE_FORCE_BASED;
+		bool floor_supported = false;
+		uint32_t floor_reason = 1u;
+		uint32_t shared_slots = 0u;
+		uint32_t promoted_instances = 0u;
+		uint32_t active_slots = 0u;
+		uint32_t local_force_count = 0u;
+		uint32_t palette_bones = 0u;
+	};
 
 	// GodotNext: nextgeo_residency (#78). CPU mirror of resident cluster
 	// refinement metadata so CPU_cut_hash matches cluster_cull.glsl bit-for-bit.
@@ -690,6 +757,34 @@ public:
 	void set_wind_params(const Vector3 &p_direction, float p_strength, float p_gust_frequency, float p_time, float p_prev_time, bool p_enabled);
 	const WindParamsGPU &get_wind_params() const { return wind_params; }
 
+	// GodotNext: nextgeo_dynamic_wind (#296, plan §21.4).
+	static bool is_dynamic_wind_enabled();
+	static DynamicWindMode get_dynamic_wind_mode();
+	bool is_dynamic_wind_floor_supported() const;
+	void set_dynamic_wind_floor_state(bool p_supported, uint32_t p_reason);
+	void clear_dynamic_wind_floor_override();
+	bool is_dynamic_wind_active() const;
+	bool is_dynamic_wind_force_based_active() const;
+	bool is_dynamic_wind_parametric_active() const;
+	bool is_any_wind_active() const;
+	void update_dynamic_wind(
+			const Vector3 &p_direction,
+			float p_strength,
+			float p_gust_frequency,
+			float p_time,
+			float p_dt,
+			const WindForceGPU *p_forces,
+			uint32_t p_force_count,
+			bool p_force_based_active);
+	void release_all_dynamic_wind_slots();
+	uint32_t get_record_dynamic_wind_slot(uint32_t p_record) const;
+	bool is_record_dynamic_wind_promoted(uint32_t p_record) const;
+	const float *get_record_dynamic_wind_palette_data(uint32_t p_record, bool p_previous, uint32_t &r_bone_count) const;
+	const LocalVector<DynamicWindSlotDescGPU> &get_dynamic_wind_slot_descs() const { return dynamic_wind_slot_descs_gpu; }
+	const LocalVector<WindForceGPU> &get_dynamic_wind_forces() const { return dynamic_wind_forces_gpu; }
+	uint32_t get_dynamic_wind_slot_table_size() const { return dynamic_wind_slot_descs_gpu.size(); }
+	DynamicWindStats get_dynamic_wind_stats() const;
+
 	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10, GN-7, GN-12).
 	// Bucket slots (O(scene nodes)), per-instance attributes, MultiMesh contiguous GPU ranges, and Assemblies.
 	static bool are_assemblies_enabled();
@@ -881,6 +976,9 @@ protected:
 	virtual void _upload_wind_params(const WindParamsGPU &p_params) {}
 	virtual void _upload_wind_meshes(uint32_t p_first, uint32_t p_count) {}
 	virtual void _reset_wind() {}
+	// GodotNext: nextgeo_dynamic_wind (#296). Queries whether the underlying graphics device meets the
+	// NextGeo device tier (64-bit atomics + indirect-count) before the first NextGeoCut evaluation.
+	virtual bool _query_device_dynamic_wind_tier() const { return false; }
 	// Renderer-specific bookkeeping after a record slot is reused.
 	virtual void _record_reused(uint32_t p_record) {}
 	// Renderer-specific refusal (for example an out-of-memory RD buffer).
@@ -900,6 +998,28 @@ protected:
 		uint32_t free_frame = UINT32_MAX;
 		uint32_t bucket_slot = UINT32_MAX;
 		uint32_t bucket_slot_count = 0u;
+		// GodotNext: nextgeo_dynamic_wind (#296). Active Dynamic Wind simulation slot (UINT32_MAX = none).
+		uint32_t dynamic_wind_slot = UINT32_MAX;
+	};
+
+	// GodotNext: nextgeo_dynamic_wind (#296). One active shared or promoted dynamic wind simulation slot.
+	struct DynamicWindSimSlot {
+		bool active = false;
+		bool is_promoted = false;
+		bool needs_reset = false;
+		uint32_t mesh_index = UINT32_MAX;
+		uint32_t bone_count = 0u;
+		uint32_t palette_bone_offset = UINT32_MAX;
+		uint32_t owner_record = UINT32_MAX;
+		uint32_t shared_variant = 0u;
+		int32_t warm_start_slot = -1;
+		uint32_t settle_frames = 0u;
+		uint32_t ref_count = 0u;
+		float phase_offset = 0.0f;
+		float transform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+		DynamicWindBoneStateGPU cpu_state[WIND_MAX_BONES];
+		float cpu_cur_palette[WIND_MAX_BONES * 12u] = {};
+		float cpu_prev_palette[WIND_MAX_BONES * 12u] = {};
 	};
 
 	// GodotNext: nextgeo_skinned_runtime (#160). One active skeleton's current+previous bone palette
@@ -1048,6 +1168,25 @@ protected:
 	bool wind_meshes_dirty = false;
 	WindParamsGPU wind_params;
 	bool wind_params_dirty = true;
+	// GodotNext: nextgeo_dynamic_wind (#296). Shared simulation pool & local-force promoted slots.
+	bool dynamic_wind_floor_override = false;
+	bool dynamic_wind_floor_supported = false;
+	uint32_t dynamic_wind_floor_reason = 1u; // REASON_DISABLED
+	LocalVector<DynamicWindSimSlot> dynamic_wind_slots;
+	LocalVector<uint32_t> dynamic_wind_free_slots;
+	HashMap<uint64_t, uint32_t> dynamic_wind_shared_map;
+	LocalVector<DynamicWindSlotDescGPU> dynamic_wind_slot_descs_gpu;
+	LocalVector<WindForceGPU> dynamic_wind_forces_gpu;
+	uint32_t dynamic_wind_shared_count = 0u;
+	uint32_t dynamic_wind_promoted_count = 0u;
+	uint32_t dynamic_wind_palette_bones = 0u;
+	uint32_t _dynamic_wind_alloc_slot(uint32_t p_mesh_index, bool p_promoted, uint32_t p_shared_variant, uint32_t p_owner_record, int32_t p_warm_start_slot);
+	void _dynamic_wind_free_slot(uint32_t p_slot_id);
+	uint32_t _dynamic_wind_get_or_create_shared_slot(uint32_t p_mesh_index, uint32_t p_variant);
+	void _dynamic_wind_detach_record(uint32_t p_record, bool p_mark_record_dirty = true);
+	void _dynamic_wind_assign_record(uint32_t p_record, uint32_t p_slot_id, bool p_set_record_flag, bool p_defer_free = false);
+	void _dynamic_wind_release_mesh_slots(uint32_t p_mesh_index);
+	void _dynamic_wind_compact_empty_palette_if_unused();
 	LocalVector<SlotState> slot_states;
 	LocalVector<uint32_t> free_now;
 	LocalVector<uint32_t> free_next;

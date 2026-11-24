@@ -421,6 +421,9 @@ public:
 		Vector3 wind_direction = Vector3(1.0f, 0.0f, 0.0f);
 		float wind_strength = 0.0f;
 		float wind_gust_frequency = 1.0f;
+		// GodotNext: nextgeo_dynamic_wind (#296). Active local sphere wind forces for this scenario.
+		const void *wind_forces = nullptr; // Points to RendererVirtualMeshStorage::WindForceGPU array.
+		uint32_t wind_force_count = 0u;
 	};
 
 	struct CameraData {

@@ -6480,22 +6480,50 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		if (p_render_data == nullptr || !p_render_data->reflection_probe.is_valid()) {
 			RSG::virtual_mesh_storage->nextgeo_reset_counters();
 		}
-		// GodotNext: nextgeo_foliage_wind (#152). Update per-scenario wind params and TIME / prev_TIME
-		// before flush() so shadows, VSM, main cull, raster, velocity export, and resolve share one consistent snapshot.
-		{
+		// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296).
+		// Evaluate Dynamic Wind floor, update per-scenario wind params & local forces,
+		// assign shared/promoted Dynamic Wind simulation slots before flush(), and dispatch
+		// GPU per-bone spring+flutter simulation into #160's skin palette arena once per frame.
+		const bool is_main_wind_view = (p_render_data == nullptr || !p_render_data->reflection_probe.is_valid());
+		bool dynamic_wind_force_based = false;
+		Vector3 frame_wind_dir(1.0f, 0.0f, 0.0f);
+		float frame_wind_strength = 0.0f;
+		float frame_wind_gust = 1.0f;
+		float frame_wind_time = 0.0f;
+		float frame_wind_dt = 0.0f;
+		if (is_main_wind_view) {
 			const bool foliage_wind_enabled = RendererVirtualMeshStorage::is_foliage_wind_enabled();
-			const Vector3 wind_dir = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_direction : Vector3(1.0f, 0.0f, 0.0f);
-			const float wind_strength = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_strength : 0.0f;
-			const float wind_gust = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_gust_frequency : 1.0f;
-			const float cur_time = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? float(p_render_data->scene_data->time) : 0.0f;
-			const float step = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? float(p_render_data->scene_data->time_step) : 0.0f;
-			RSG::virtual_mesh_storage->set_wind_params(wind_dir, wind_strength, wind_gust, cur_time, cur_time - step, foliage_wind_enabled);
+			const bool dynamic_wind_enabled = RendererVirtualMeshStorage::is_dynamic_wind_enabled();
+			const RendererRD::NextGeoDynamicWindFloor dw_floor = nextgeo_cut.evaluate_dynamic_wind_floor(RSG::virtual_mesh_storage, dynamic_wind_enabled);
+			RSG::virtual_mesh_storage->set_dynamic_wind_floor_state(dw_floor.supported, uint32_t(dw_floor.reason));
+			const bool dynamic_wind_active = dynamic_wind_enabled && dw_floor.supported;
+			dynamic_wind_force_based = dynamic_wind_active && (RendererVirtualMeshStorage::get_dynamic_wind_mode() == RendererVirtualMeshStorage::DYNAMIC_WIND_MODE_FORCE_BASED);
+
+			frame_wind_dir = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_direction : Vector3(1.0f, 0.0f, 0.0f);
+			frame_wind_strength = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_strength : 0.0f;
+			frame_wind_gust = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_gust_frequency : 1.0f;
+			frame_wind_time = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? float(p_render_data->scene_data->time) : 0.0f;
+			frame_wind_dt = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? float(p_render_data->scene_data->time_step) : 0.0f;
+
+			const bool wind_shader_enabled = foliage_wind_enabled || dynamic_wind_active;
+			RSG::virtual_mesh_storage->set_wind_params(frame_wind_dir, frame_wind_strength, frame_wind_gust, frame_wind_time, frame_wind_time - frame_wind_dt, wind_shader_enabled);
+
+			const RendererVirtualMeshStorage::WindForceGPU *wf_ptr = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr)
+					? static_cast<const RendererVirtualMeshStorage::WindForceGPU *>(p_render_data->sdfgi_update_data->wind_forces)
+					: nullptr;
+			const uint32_t wf_count = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_force_count : 0u;
+			if (nextgeo_cut.needs_dynamic_wind_step(RSG::virtual_mesh_storage, dynamic_wind_force_based)) {
+				RSG::virtual_mesh_storage->update_dynamic_wind(frame_wind_dir, frame_wind_strength, frame_wind_gust, frame_wind_time, frame_wind_dt, wf_ptr, wf_count, dynamic_wind_force_based);
+			}
 		}
 		// GodotNext: nextgeo_instance_records (#75). Upload dirty records
 		// before this frame's views inspect record buffers; idempotent after
 		// the first view.
 		RSG::virtual_mesh_storage->flush();
 		nextgeo_cut.prepare_gpu_records(RSG::virtual_mesh_storage);
+		if (is_main_wind_view) {
+			nextgeo_cut.dispatch_dynamic_wind(RSG::virtual_mesh_storage, frame_wind_dir, frame_wind_strength, frame_wind_gust, frame_wind_time, frame_wind_dt, dynamic_wind_force_based);
+		}
 	}
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();

@@ -38,6 +38,7 @@
 #include "core/os/os.h"
 #include "core/templates/sort_array.h"
 #include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/storage/dynamic_wind_sim.h"
 
 #ifdef REAL_T_IS_DOUBLE
 static_assert(sizeof(RendererVirtualMeshStorage::Record) == 256, "NextGeo instance record must stay 256 bytes under REAL_T_IS_DOUBLE (plan §6.3).");
@@ -375,6 +376,15 @@ uint32_t RendererVirtualMeshStorage::_alloc_palette_bones(uint32_t p_bones) {
 				}
 			}
 		}
+		// Restore active Dynamic Wind palette slices from CPU mirror until GPU dispatch overwrites them.
+		for (uint32_t i = 0; i < dynamic_wind_slots.size(); i++) {
+			const DynamicWindSimSlot &dw = dynamic_wind_slots[i];
+			if (dw.active && dw.palette_bone_offset != UINT32_MAX && dw.bone_count > 0u) {
+				const uint32_t half_bytes = dw.bone_count * 48u;
+				_upload_skin_palette(dw.palette_bone_offset * 48u, reinterpret_cast<const uint8_t *>(dw.cpu_cur_palette), half_bytes);
+				_upload_skin_palette((dw.palette_bone_offset + dw.bone_count) * 48u, reinterpret_cast<const uint8_t *>(dw.cpu_prev_palette), half_bytes);
+			}
+		}
 	}
 	const uint32_t offset = palette_used_bones;
 	palette_used_bones += p_bones;
@@ -418,7 +428,21 @@ void RendererVirtualMeshStorage::_sync_record_skin_info(uint32_t p_record) {
 	SlotState &state = slot_states[p_record];
 	SkinInstanceInfo next_info;
 	bool valid_palette = false;
-	if (state.skeleton.is_valid() && record.virtual_mesh < mesh_order.size()) {
+	// GodotNext: nextgeo_dynamic_wind (#296). Active Dynamic Wind simulation slot takes priority
+	// for wind foliage instances and points directly into #160's palette arena.
+	if (state.dynamic_wind_slot < dynamic_wind_slots.size()) {
+		const DynamicWindSimSlot &dw = dynamic_wind_slots[state.dynamic_wind_slot];
+		if (dw.active && dw.bone_count > 0u && dw.palette_bone_offset != UINT32_MAX) {
+			next_info.current_palette_offset = dw.palette_bone_offset * 3u;
+			next_info.prev_palette_offset = (dw.palette_bone_offset + dw.bone_count) * 3u;
+			next_info.bone_count = dw.bone_count;
+			const float scale = 1.0f;
+			memcpy(&next_info.max_bone_scale_bits, &scale, sizeof(uint32_t));
+			valid_palette = true;
+			skin_instances_active = true;
+		}
+	}
+	if (!valid_palette && state.skeleton.is_valid() && record.virtual_mesh < mesh_order.size()) {
 		const MeshInfo *mesh = meshes.getptr(mesh_order[record.virtual_mesh]);
 		if (mesh != nullptr && (mesh->skin_influences == 4u || mesh->skin_influences == 8u)) {
 			const SkeletonPaletteSlot *sk = skeleton_palettes.getptr(state.skeleton);
@@ -944,10 +968,15 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 			dst.max_sway = MAX(src.max_sway, 0.0f);
 			dst.sway_phase = src.sway_phase;
 			dst.branch_weight = (b == 0u) ? 0.0f : 1.0f;
+			dst.mass = CLAMP((Math::is_finite(src.mass) && src.mass > 0.0f) ? src.mass : 1.0f, 0.05f, 1000.0f);
+			dst.wind_catch = CLAMP((Math::is_finite(src.wind_catch) && src.wind_catch > 0.0f) ? src.wind_catch : 1.0f, 0.01f, 1000.0f);
 			wm.max_sway = MAX(wm.max_sway, dst.max_sway);
 		}
 	}
 	if (index < wind_meshes.size()) {
+		if (wind_meshes[index].bone_count != wm.bone_count || wm.bone_count == 0u) {
+			_dynamic_wind_release_mesh_slots(index);
+		}
 		wind_meshes[index] = wm;
 		wind_mesh_dirty[index] = 1;
 		wind_meshes_dirty = true;
@@ -985,6 +1014,7 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	mesh_record_dirty[*index] = 1;
 	mesh_records_dirty = true;
 	if (*index < wind_meshes.size()) {
+		_dynamic_wind_release_mesh_slots(*index);
 		wind_meshes[*index] = WindMeshGPU();
 		wind_mesh_dirty[*index] = 1;
 		wind_meshes_dirty = true;
@@ -1119,6 +1149,7 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 	state.free_frame = UINT32_MAX;
 	state.bucket_slot = bslot;
 	state.bucket_slot_count = 1u;
+	state.dynamic_wind_slot = UINT32_MAX;
 	live_records++;
 	_record_reused(slot);
 
@@ -1147,7 +1178,8 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
 	}
-	// GodotNext: nextgeo_skinned_runtime (#160). Release skeleton ref and recycle palette bones before freeing slot.
+	// GodotNext: nextgeo_skinned_runtime (#160) & nextgeo_dynamic_wind (#296). Release skeleton / wind slot refs before freeing slot.
+	_dynamic_wind_detach_record(p_record, false);
 	instance_record_set_skeleton(p_record, RID());
 	multimesh_range_detach(p_record);
 	SlotState &state = slot_states[p_record];
@@ -3749,6 +3781,650 @@ void RendererVirtualMeshStorage::set_wind_params(const Vector3 &p_direction, flo
 	}
 }
 
+// ============================================================================
+// Dynamic Wind for Nanite Foliage (#296, plan §21.4)
+// ============================================================================
+
+bool RendererVirtualMeshStorage::is_dynamic_wind_enabled() {
+	if (ProjectSettings::get_singleton() == nullptr) {
+		return false;
+	}
+	return bool(ProjectSettings::get_singleton()->get_setting("rendering/nextgeo/experimental/dynamic_wind", false));
+}
+
+RendererVirtualMeshStorage::DynamicWindMode RendererVirtualMeshStorage::get_dynamic_wind_mode() {
+	if (ProjectSettings::get_singleton() == nullptr) {
+		return DYNAMIC_WIND_MODE_FORCE_BASED;
+	}
+	const int mode = int(ProjectSettings::get_singleton()->get_setting("rendering/nextgeo/experimental/dynamic_wind_mode", 0));
+	return mode == int(DYNAMIC_WIND_MODE_PARAMETRIC) ? DYNAMIC_WIND_MODE_PARAMETRIC : DYNAMIC_WIND_MODE_FORCE_BASED;
+}
+
+bool RendererVirtualMeshStorage::is_dynamic_wind_floor_supported() const {
+	if (dynamic_wind_floor_override) {
+		return dynamic_wind_floor_supported;
+	}
+	return _query_device_dynamic_wind_tier();
+}
+
+void RendererVirtualMeshStorage::set_dynamic_wind_floor_state(bool p_supported, uint32_t p_reason) {
+	dynamic_wind_floor_override = true;
+	dynamic_wind_floor_supported = p_supported;
+	dynamic_wind_floor_reason = p_reason;
+}
+
+void RendererVirtualMeshStorage::clear_dynamic_wind_floor_override() {
+	dynamic_wind_floor_override = false;
+	dynamic_wind_floor_supported = false;
+	dynamic_wind_floor_reason = uint32_t(NextGeoDynamicWindSim::REASON_DISABLED);
+}
+
+bool RendererVirtualMeshStorage::is_dynamic_wind_active() const {
+	return is_dynamic_wind_enabled() && is_dynamic_wind_floor_supported();
+}
+
+bool RendererVirtualMeshStorage::is_dynamic_wind_force_based_active() const {
+	return is_dynamic_wind_active() && get_dynamic_wind_mode() == DYNAMIC_WIND_MODE_FORCE_BASED;
+}
+
+bool RendererVirtualMeshStorage::is_dynamic_wind_parametric_active() const {
+	return is_dynamic_wind_active() && get_dynamic_wind_mode() == DYNAMIC_WIND_MODE_PARAMETRIC;
+}
+
+bool RendererVirtualMeshStorage::is_any_wind_active() const {
+	return is_foliage_wind_enabled() || is_dynamic_wind_active();
+}
+
+static void _set_identity_palette_3x4(float *r_rows, uint32_t p_bones) {
+	for (uint32_t b = 0u; b < p_bones; b++) {
+		float *dst = r_rows + b * 12u;
+		dst[0] = 1.0f;
+		dst[1] = 0.0f;
+		dst[2] = 0.0f;
+		dst[3] = 0.0f;
+		dst[4] = 0.0f;
+		dst[5] = 1.0f;
+		dst[6] = 0.0f;
+		dst[7] = 0.0f;
+		dst[8] = 0.0f;
+		dst[9] = 0.0f;
+		dst[10] = 1.0f;
+		dst[11] = 0.0f;
+	}
+}
+
+uint32_t RendererVirtualMeshStorage::_dynamic_wind_alloc_slot(uint32_t p_mesh_index, bool p_promoted, uint32_t p_shared_variant, uint32_t p_owner_record, int32_t p_warm_start_slot) {
+	if (p_mesh_index >= wind_meshes.size() || wind_meshes[p_mesh_index].bone_count == 0u) {
+		return UINT32_MAX;
+	}
+	const uint32_t bone_count = MIN(wind_meshes[p_mesh_index].bone_count, WIND_MAX_BONES);
+	const uint32_t pal_offset = _alloc_palette_bones(bone_count * 2u);
+	if (pal_offset == UINT32_MAX) {
+		return UINT32_MAX;
+	}
+
+	uint32_t slot_id = UINT32_MAX;
+	if (!dynamic_wind_free_slots.is_empty()) {
+		slot_id = dynamic_wind_free_slots[dynamic_wind_free_slots.size() - 1];
+		dynamic_wind_free_slots.remove_at(dynamic_wind_free_slots.size() - 1);
+	} else {
+		slot_id = dynamic_wind_slots.size();
+		dynamic_wind_slots.push_back(DynamicWindSimSlot());
+	}
+
+	DynamicWindSimSlot &dw = dynamic_wind_slots[slot_id];
+	dw = DynamicWindSimSlot();
+	dw.active = true;
+	dw.is_promoted = p_promoted;
+	dw.mesh_index = p_mesh_index;
+	dw.bone_count = bone_count;
+	dw.palette_bone_offset = pal_offset;
+	dw.owner_record = p_owner_record;
+	dw.shared_variant = p_shared_variant;
+	dw.warm_start_slot = p_warm_start_slot;
+	dw.needs_reset = (p_warm_start_slot < 0);
+	dw.phase_offset = float(p_shared_variant) * (float(Math::TAU) / float(DYNAMIC_WIND_SHARED_SLOTS_PER_MESH));
+	_set_identity_palette_3x4(dw.cpu_cur_palette, bone_count);
+	_set_identity_palette_3x4(dw.cpu_prev_palette, bone_count);
+
+	const uint32_t half_bytes = bone_count * 48u;
+	_upload_skin_palette(pal_offset * 48u, reinterpret_cast<const uint8_t *>(dw.cpu_cur_palette), half_bytes);
+	_upload_skin_palette((pal_offset + bone_count) * 48u, reinterpret_cast<const uint8_t *>(dw.cpu_prev_palette), half_bytes);
+
+	if (p_promoted) {
+		dynamic_wind_promoted_count++;
+	} else {
+		dynamic_wind_shared_count++;
+	}
+	dynamic_wind_palette_bones += bone_count * 2u;
+	return slot_id;
+}
+
+void RendererVirtualMeshStorage::_dynamic_wind_free_slot(uint32_t p_slot_id) {
+	if (p_slot_id >= dynamic_wind_slots.size() || !dynamic_wind_slots[p_slot_id].active) {
+		return;
+	}
+	DynamicWindSimSlot &dw = dynamic_wind_slots[p_slot_id];
+	if (!dw.is_promoted && dw.mesh_index != UINT32_MAX) {
+		const uint64_t key = (uint64_t(dw.mesh_index) << 8u) | uint64_t(dw.shared_variant & 0xFFu);
+		const uint32_t *mapped = dynamic_wind_shared_map.getptr(key);
+		if (mapped != nullptr && *mapped == p_slot_id) {
+			dynamic_wind_shared_map.erase(key);
+		}
+	}
+	if (dw.palette_bone_offset != UINT32_MAX && dw.bone_count > 0u) {
+		const uint32_t total_bones = dw.bone_count * 2u;
+		_free_palette_bones(dw.palette_bone_offset, total_bones);
+		if (dynamic_wind_palette_bones >= total_bones) {
+			dynamic_wind_palette_bones -= total_bones;
+		} else {
+			dynamic_wind_palette_bones = 0u;
+		}
+	}
+	if (dw.is_promoted) {
+		if (dynamic_wind_promoted_count > 0u) {
+			dynamic_wind_promoted_count--;
+		}
+	} else {
+		if (dynamic_wind_shared_count > 0u) {
+			dynamic_wind_shared_count--;
+		}
+	}
+	dw = DynamicWindSimSlot();
+	dynamic_wind_free_slots.push_back(p_slot_id);
+}
+
+uint32_t RendererVirtualMeshStorage::_dynamic_wind_get_or_create_shared_slot(uint32_t p_mesh_index, uint32_t p_variant) {
+	const uint32_t v = p_variant % DYNAMIC_WIND_SHARED_SLOTS_PER_MESH;
+	const uint64_t key = (uint64_t(p_mesh_index) << 8u) | uint64_t(v);
+	const uint32_t *existing = dynamic_wind_shared_map.getptr(key);
+	if (existing != nullptr && *existing < dynamic_wind_slots.size() && dynamic_wind_slots[*existing].active) {
+		return *existing;
+	}
+	const uint32_t slot_id = _dynamic_wind_alloc_slot(p_mesh_index, false, v, UINT32_MAX, -1);
+	if (slot_id != UINT32_MAX) {
+		dynamic_wind_shared_map[key] = slot_id;
+	}
+	return slot_id;
+}
+
+void RendererVirtualMeshStorage::_dynamic_wind_detach_record(uint32_t p_record, bool p_mark_record_dirty) {
+	if (p_record >= slot_states.size()) {
+		return;
+	}
+	SlotState &st = slot_states[p_record];
+	const uint32_t old_slot = st.dynamic_wind_slot;
+	if (old_slot == UINT32_MAX) {
+		return;
+	}
+	st.dynamic_wind_slot = UINT32_MAX;
+	if (old_slot < dynamic_wind_slots.size() && dynamic_wind_slots[old_slot].active) {
+		DynamicWindSimSlot &dw = dynamic_wind_slots[old_slot];
+		if (dw.ref_count > 0u) {
+			dw.ref_count--;
+		}
+		if (dw.ref_count == 0u) {
+			_dynamic_wind_free_slot(old_slot);
+		}
+	}
+	if (p_record < skin_instances.size()) {
+		const SkinInstanceInfo zero_info;
+		if (memcmp(&skin_instances[p_record], &zero_info, sizeof(SkinInstanceInfo)) != 0) {
+			skin_instances[p_record] = zero_info;
+			st.skin_dirty = true;
+		}
+	}
+	if (p_mark_record_dirty && p_record < used_slots && st.allocated && !st.gpu_managed && st.skeleton.is_null()) {
+		if ((records[p_record].flags & RECORD_SKINNED_PALETTE) != 0u) {
+			records[p_record].flags &= ~RECORD_SKINNED_PALETTE;
+			_mark_dirty(p_record);
+		}
+	}
+}
+
+void RendererVirtualMeshStorage::_dynamic_wind_assign_record(uint32_t p_record, uint32_t p_slot_id, bool p_set_record_flag, bool p_defer_free) {
+	if (p_record >= slot_states.size() || p_slot_id >= dynamic_wind_slots.size() || !dynamic_wind_slots[p_slot_id].active) {
+		return;
+	}
+	SlotState &st = slot_states[p_record];
+	if (st.dynamic_wind_slot != p_slot_id) {
+		if (st.dynamic_wind_slot != UINT32_MAX) {
+			const uint32_t prev_slot = st.dynamic_wind_slot;
+			st.dynamic_wind_slot = UINT32_MAX;
+			if (prev_slot < dynamic_wind_slots.size() && dynamic_wind_slots[prev_slot].active) {
+				DynamicWindSimSlot &old_dw = dynamic_wind_slots[prev_slot];
+				if (old_dw.ref_count > 0u) {
+					old_dw.ref_count--;
+				}
+				if (old_dw.ref_count == 0u && !p_defer_free) {
+					_dynamic_wind_free_slot(prev_slot);
+				}
+			}
+		}
+		st.dynamic_wind_slot = p_slot_id;
+		dynamic_wind_slots[p_slot_id].ref_count++;
+	}
+
+	const DynamicWindSimSlot &dw = dynamic_wind_slots[p_slot_id];
+	SkinInstanceInfo next_info;
+	next_info.current_palette_offset = dw.palette_bone_offset * 3u;
+	next_info.prev_palette_offset = (dw.palette_bone_offset + dw.bone_count) * 3u;
+	next_info.bone_count = dw.bone_count;
+	const float scale = 1.0f;
+	memcpy(&next_info.max_bone_scale_bits, &scale, sizeof(uint32_t));
+	skin_instances_active = true;
+	if (memcmp(&skin_instances[p_record], &next_info, sizeof(SkinInstanceInfo)) != 0) {
+		skin_instances[p_record] = next_info;
+		st.skin_dirty = true;
+	}
+	if (p_set_record_flag && p_record < used_slots && !st.gpu_managed) {
+		if ((records[p_record].flags & RECORD_SKINNED_PALETTE) == 0u) {
+			records[p_record].flags |= RECORD_SKINNED_PALETTE;
+			_mark_dirty(p_record);
+		}
+	}
+}
+
+void RendererVirtualMeshStorage::_dynamic_wind_release_mesh_slots(uint32_t p_mesh_index) {
+	if (dynamic_wind_slots.is_empty()) {
+		return;
+	}
+	for (uint32_t slot = 0u; slot < used_slots; slot++) {
+		const uint32_t dw_slot = slot_states[slot].dynamic_wind_slot;
+		if (dw_slot < dynamic_wind_slots.size() && dynamic_wind_slots[dw_slot].active && dynamic_wind_slots[dw_slot].mesh_index == p_mesh_index) {
+			_dynamic_wind_detach_record(slot, true);
+		}
+	}
+	for (uint32_t i = 0u; i < multimesh_expands.size(); i++) {
+		MultiMeshExpandEntry &entry = multimesh_expands[i];
+		if (!entry.active || entry.parent_record >= used_slots) {
+			continue;
+		}
+		if (records[entry.parent_record].virtual_mesh == p_mesh_index && slot_states[entry.parent_record].skeleton.is_null()) {
+			if ((records[entry.parent_record].flags & RECORD_SKINNED_PALETTE) != 0u) {
+				records[entry.parent_record].flags &= ~RECORD_SKINNED_PALETTE;
+				_mark_dirty(entry.parent_record);
+				entry.dirty = true;
+			}
+		}
+	}
+	for (uint32_t s = 0u; s < dynamic_wind_slots.size(); s++) {
+		if (dynamic_wind_slots[s].active && dynamic_wind_slots[s].mesh_index == p_mesh_index) {
+			_dynamic_wind_free_slot(s);
+		}
+	}
+	_dynamic_wind_compact_empty_palette_if_unused();
+}
+
+void RendererVirtualMeshStorage::_dynamic_wind_compact_empty_palette_if_unused() {
+	if (dynamic_wind_shared_count == 0u && dynamic_wind_promoted_count == 0u) {
+		dynamic_wind_slots.clear();
+		dynamic_wind_free_slots.clear();
+		dynamic_wind_shared_map.clear();
+		dynamic_wind_slot_descs_gpu.clear();
+		dynamic_wind_palette_bones = 0u;
+		if (skeleton_palettes.is_empty() && palette_capacity_bones > 0u) {
+			palette_used_bones = 0u;
+			palette_capacity_bones = 0u;
+			palette_free.clear();
+			_reset_skin_palette();
+			skin_instances_active = false;
+			skin_instance_capacity = 0u;
+			_reset_skin_instances();
+		}
+	}
+}
+
+void RendererVirtualMeshStorage::release_all_dynamic_wind_slots() {
+	if (dynamic_wind_slots.is_empty() && dynamic_wind_shared_count == 0u && dynamic_wind_promoted_count == 0u) {
+		dynamic_wind_slot_descs_gpu.clear();
+		dynamic_wind_forces_gpu.clear();
+		return;
+	}
+	for (uint32_t slot = 0u; slot < used_slots; slot++) {
+		if (slot_states[slot].dynamic_wind_slot != UINT32_MAX) {
+			_dynamic_wind_detach_record(slot, true);
+		}
+	}
+	for (uint32_t i = 0u; i < multimesh_expands.size(); i++) {
+		MultiMeshExpandEntry &entry = multimesh_expands[i];
+		if (!entry.active || entry.parent_record >= used_slots) {
+			continue;
+		}
+		if (slot_states[entry.parent_record].skeleton.is_null() && (records[entry.parent_record].flags & RECORD_SKINNED_PALETTE) != 0u) {
+			records[entry.parent_record].flags &= ~RECORD_SKINNED_PALETTE;
+			_mark_dirty(entry.parent_record);
+			entry.dirty = true;
+		}
+	}
+	for (uint32_t s = 0u; s < dynamic_wind_slots.size(); s++) {
+		if (dynamic_wind_slots[s].active) {
+			_dynamic_wind_free_slot(s);
+		}
+	}
+	dynamic_wind_forces_gpu.clear();
+	_dynamic_wind_compact_empty_palette_if_unused();
+}
+
+void RendererVirtualMeshStorage::update_dynamic_wind(
+		const Vector3 &p_direction,
+		float p_strength,
+		float p_gust_frequency,
+		float p_time,
+		float p_dt,
+		const WindForceGPU *p_forces,
+		uint32_t p_force_count,
+		bool p_force_based_active) {
+	if (!p_force_based_active) {
+		release_all_dynamic_wind_slots();
+		return;
+	}
+
+	dynamic_wind_forces_gpu.clear();
+	if (p_forces != nullptr && p_force_count > 0u) {
+		dynamic_wind_forces_gpu.resize(p_force_count);
+		memcpy(dynamic_wind_forces_gpu.ptr(), p_forces, p_force_count * sizeof(WindForceGPU));
+	}
+
+	// Snapshot prior-frame CPU states BEFORE any promotions/demotions so warm-starting slots
+	// always read immutable previous-frame state (matching GPU ping-pong state_in).
+	const uint32_t initial_slot_count = dynamic_wind_slots.size();
+	LocalVector<DynamicWindBoneStateGPU> cpu_in_states;
+	if (initial_slot_count > 0u) {
+		cpu_in_states.resize(initial_slot_count * WIND_MAX_BONES);
+		for (uint32_t s = 0u; s < initial_slot_count; s++) {
+			memcpy(cpu_in_states.ptr() + s * WIND_MAX_BONES, dynamic_wind_slots[s].cpu_state, sizeof(DynamicWindBoneStateGPU) * WIND_MAX_BONES);
+		}
+	}
+
+	auto any_force_overlaps = [&](const Vector3 &p_min, const Vector3 &p_max, float p_margin) -> bool {
+		for (uint32_t f = 0u; f < dynamic_wind_forces_gpu.size(); f++) {
+			if (NextGeoDynamicWindSim::force_overlaps_aabb(dynamic_wind_forces_gpu[f], p_min, p_max, p_margin)) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	auto is_promoted_settled = [&](const DynamicWindSimSlot &p_dw) -> bool {
+		if (p_dw.settle_frames >= DYNAMIC_WIND_SETTLE_MAX_FRAMES) {
+			return true;
+		}
+		if (p_dw.settle_frames < DYNAMIC_WIND_SETTLE_MIN_FRAMES) {
+			return false;
+		}
+		const uint64_t key = (uint64_t(p_dw.mesh_index) << 8u) | uint64_t(p_dw.shared_variant & 0xFFu);
+		const uint32_t *shared_id = dynamic_wind_shared_map.getptr(key);
+		const DynamicWindSimSlot *ref = (shared_id != nullptr && *shared_id < dynamic_wind_slots.size() && dynamic_wind_slots[*shared_id].active) ? &dynamic_wind_slots[*shared_id] : nullptr;
+		float max_ang = 0.0f;
+		float max_vel = 0.0f;
+		for (uint32_t b = 0u; b < p_dw.bone_count; b++) {
+			const float ru = ref != nullptr ? ref->cpu_state[b].sway_u : 0.0f;
+			const float rv = ref != nullptr ? ref->cpu_state[b].sway_v : 0.0f;
+			const float rvu = ref != nullptr ? ref->cpu_state[b].vel_u : 0.0f;
+			const float rvv = ref != nullptr ? ref->cpu_state[b].vel_v : 0.0f;
+			max_ang = MAX(max_ang, Math::abs(p_dw.cpu_state[b].sway_u - ru));
+			max_ang = MAX(max_ang, Math::abs(p_dw.cpu_state[b].sway_v - rv));
+			max_vel = MAX(max_vel, Math::abs(p_dw.cpu_state[b].vel_u - rvu));
+			max_vel = MAX(max_vel, Math::abs(p_dw.cpu_state[b].vel_v - rvv));
+		}
+		return max_ang < 0.025f && max_vel < 0.08f;
+	};
+
+	auto update_instance_slot = [&](uint32_t p_record_slot, uint32_t p_mesh_idx, uint32_t p_variant, const float p_xform[3][4], const Vector3 &p_wmin, const Vector3 &p_wmax, float p_sway_margin, bool p_set_record_flag) {
+		const bool hit = any_force_overlaps(p_wmin, p_wmax, p_sway_margin);
+		SlotState &st = slot_states[p_record_slot];
+		const uint32_t cur_slot = st.dynamic_wind_slot;
+		const bool cur_valid = cur_slot < dynamic_wind_slots.size() && dynamic_wind_slots[cur_slot].active && dynamic_wind_slots[cur_slot].mesh_index == p_mesh_idx;
+
+		if (hit) {
+			if (cur_valid && dynamic_wind_slots[cur_slot].is_promoted) {
+				DynamicWindSimSlot &dw = dynamic_wind_slots[cur_slot];
+				memcpy(dw.transform, p_xform, sizeof(dw.transform));
+				dw.settle_frames = 0u;
+				_dynamic_wind_assign_record(p_record_slot, cur_slot, p_set_record_flag, true);
+			} else {
+				const int32_t warm_src = (cur_valid && cur_slot < initial_slot_count) ? int32_t(cur_slot) : -1;
+				const uint32_t new_slot = _dynamic_wind_alloc_slot(p_mesh_idx, true, p_variant, p_record_slot, warm_src);
+				if (new_slot != UINT32_MAX) {
+					DynamicWindSimSlot &dw = dynamic_wind_slots[new_slot];
+					memcpy(dw.transform, p_xform, sizeof(dw.transform));
+					dw.phase_offset = (warm_src >= 0 && uint32_t(warm_src) < dynamic_wind_slots.size())
+							? dynamic_wind_slots[warm_src].phase_offset
+							: (p_xform[0][3] * 0.17f + p_xform[2][3] * 0.23f);
+					dw.settle_frames = 0u;
+					_dynamic_wind_assign_record(p_record_slot, new_slot, p_set_record_flag, true);
+				}
+			}
+		} else {
+			if (cur_valid && dynamic_wind_slots[cur_slot].is_promoted) {
+				DynamicWindSimSlot &dw = dynamic_wind_slots[cur_slot];
+				memcpy(dw.transform, p_xform, sizeof(dw.transform));
+				dw.settle_frames++;
+				if (is_promoted_settled(dw)) {
+					const uint32_t shared_slot = _dynamic_wind_get_or_create_shared_slot(p_mesh_idx, p_variant);
+					if (shared_slot != UINT32_MAX) {
+						_dynamic_wind_assign_record(p_record_slot, shared_slot, p_set_record_flag, true);
+					}
+				} else {
+					_dynamic_wind_assign_record(p_record_slot, cur_slot, p_set_record_flag, true);
+				}
+			} else if (!cur_valid) {
+				const uint32_t shared_slot = _dynamic_wind_get_or_create_shared_slot(p_mesh_idx, p_variant);
+				if (shared_slot != UINT32_MAX) {
+					_dynamic_wind_assign_record(p_record_slot, shared_slot, p_set_record_flag, true);
+				}
+			} else {
+				// Already on a valid shared slot; ensure record flag / skin info stay in sync.
+				_dynamic_wind_assign_record(p_record_slot, cur_slot, p_set_record_flag, true);
+			}
+		}
+	};
+
+	// Pass 1: Standalone CPU-managed wind records.
+	for (uint32_t slot = 0u; slot < used_slots; slot++) {
+		const SlotState &st = slot_states[slot];
+		if (!st.allocated || st.gpu_managed) {
+			continue;
+		}
+		const Record &rec = records[slot];
+		if ((rec.flags & RECORD_MULTIMESH_PARENT) != 0u) {
+			continue;
+		}
+		const bool eligible = (rec.flags & (RECORD_VALID | RECORD_VISIBLE)) == (RECORD_VALID | RECORD_VISIBLE) &&
+				st.skeleton.is_null() && mesh_index_has_wind(rec.virtual_mesh);
+		if (!eligible) {
+			if (st.dynamic_wind_slot != UINT32_MAX) {
+				_dynamic_wind_detach_record(slot, true);
+			}
+			continue;
+		}
+		const float sway_margin = mesh_index_get_wind_max_sway(rec.virtual_mesh) * Math::abs(rec.world_aabb_min[3]);
+		const Vector3 wmin(rec.world_aabb_min[0], rec.world_aabb_min[1], rec.world_aabb_min[2]);
+		const Vector3 wmax(rec.world_aabb_max[0], rec.world_aabb_max[1], rec.world_aabb_max[2]);
+		const uint32_t variant = slot % DYNAMIC_WIND_SHARED_SLOTS_PER_MESH;
+		update_instance_slot(slot, rec.virtual_mesh, variant, rec.transform, wmin, wmax, sway_margin, true);
+	}
+
+	// Pass 2: GPU-managed MultiMesh ranges carrying wind meshes.
+	for (uint32_t i = 0u; i < multimesh_expands.size(); i++) {
+		MultiMeshExpandEntry &entry = multimesh_expands[i];
+		if (!entry.active || entry.parent_record >= used_slots || !slot_states[entry.parent_record].allocated) {
+			continue;
+		}
+		Record &parent = records[entry.parent_record];
+		const uint32_t mesh_idx = parent.virtual_mesh;
+		const bool eligible = (parent.flags & (RECORD_VALID | RECORD_VISIBLE)) == (RECORD_VALID | RECORD_VISIBLE) &&
+				slot_states[entry.parent_record].skeleton.is_null() && mesh_index_has_wind(mesh_idx);
+		const uint32_t end = MIN(entry.range_base + entry.range_count, used_slots);
+		if (!eligible) {
+			if (slot_states[entry.parent_record].skeleton.is_null() && (parent.flags & RECORD_SKINNED_PALETTE) != 0u) {
+				parent.flags &= ~RECORD_SKINNED_PALETTE;
+				_mark_dirty(entry.parent_record);
+				entry.dirty = true;
+			}
+			for (uint32_t slot = entry.range_base; slot < end; slot++) {
+				if (slot_states[slot].dynamic_wind_slot != UINT32_MAX) {
+					_dynamic_wind_detach_record(slot, false);
+				}
+			}
+			continue;
+		}
+
+		if ((parent.flags & RECORD_SKINNED_PALETTE) == 0u) {
+			parent.flags |= RECORD_SKINNED_PALETTE;
+			_mark_dirty(entry.parent_record);
+			entry.dirty = true;
+		}
+
+		// Only pull MultiMesh CPU transform buffer when local wind forces are active so large forests stay O(1) when calm.
+		bool have_mm_buf = false;
+		RendererMeshStorage::MultiMeshNextGeoInfo mm_info;
+		Vector<float> mm_buf;
+		if (!dynamic_wind_forces_gpu.is_empty() && RSG::mesh_storage != nullptr && entry.multimesh.is_valid()) {
+			if (RSG::mesh_storage->multimesh_get_nextgeo_info(entry.multimesh, mm_info) && mm_info.eligible && mm_info.stride >= 12u) {
+				mm_buf = RSG::mesh_storage->multimesh_get_buffer(entry.multimesh);
+				have_mm_buf = !mm_buf.is_empty();
+			}
+		}
+		const float mesh_sway = mesh_index_get_wind_max_sway(mesh_idx);
+		const InstanceAttributes &parent_attr = instance_attributes[entry.parent_record];
+		for (uint32_t e = 0u; e < entry.range_count && entry.range_base + e < used_slots; e++) {
+			const uint32_t elem_slot = entry.range_base + e;
+			const uint32_t variant = e % DYNAMIC_WIND_SHARED_SLOTS_PER_MESH;
+			if (have_mm_buf && uint64_t(e + 1u) * uint64_t(mm_info.stride) <= uint64_t(mm_buf.size())) {
+				Record elem_rec;
+				InstanceAttributes elem_attr;
+				const float *elem_ptr = mm_buf.ptr() + e * mm_info.stride;
+				build_multimesh_element_record_cpu(parent, parent_attr, entry.parent_record, e, elem_ptr, elem_ptr, mm_info.color_offset, mm_info.custom_offset, mm_info.uses_colors, mm_info.uses_custom_data, e < mm_info.visible_count, mm_info.mesh_local_aabb, elem_rec, elem_attr);
+				const Vector3 wmin(elem_rec.world_aabb_min[0], elem_rec.world_aabb_min[1], elem_rec.world_aabb_min[2]);
+				const Vector3 wmax(elem_rec.world_aabb_max[0], elem_rec.world_aabb_max[1], elem_rec.world_aabb_max[2]);
+				const float sway_margin = mesh_sway * Math::abs(elem_rec.world_aabb_min[3]);
+				update_instance_slot(elem_slot, mesh_idx, variant, elem_rec.transform, wmin, wmax, sway_margin, false);
+			} else {
+				const float identity_xform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+				const uint32_t cur_slot = slot_states[elem_slot].dynamic_wind_slot;
+				if (cur_slot < dynamic_wind_slots.size() && dynamic_wind_slots[cur_slot].active && dynamic_wind_slots[cur_slot].is_promoted) {
+					update_instance_slot(elem_slot, mesh_idx, variant, dynamic_wind_slots[cur_slot].transform, Vector3(), Vector3(), 0.0f, false);
+				} else {
+					update_instance_slot(elem_slot, mesh_idx, variant, identity_xform, Vector3(), Vector3(), 0.0f, false);
+				}
+			}
+		}
+	}
+
+	// Pass 3: Build GPU slot descriptors (preserving one-shot RESET / WARM_START flags) and step CPU mirror.
+	// Slots whose ref_count dropped to 0 this frame are freed right after (Pass 4), keeping their previous
+	// state_in index readable for warm-starting promoted slots while skipping simulation on their freed palette.
+	const uint32_t slot_count = dynamic_wind_slots.size();
+	dynamic_wind_slot_descs_gpu.resize(slot_count);
+	const WindForceGPU *forces_ptr = dynamic_wind_forces_gpu.is_empty() ? nullptr : dynamic_wind_forces_gpu.ptr();
+	const uint32_t force_count = dynamic_wind_forces_gpu.size();
+	for (uint32_t s = 0u; s < slot_count; s++) {
+		DynamicWindSimSlot &dw = dynamic_wind_slots[s];
+		DynamicWindSlotDescGPU desc;
+		if (!dw.active || dw.ref_count == 0u || dw.mesh_index >= wind_meshes.size() || wind_meshes[dw.mesh_index].bone_count == 0u) {
+			dynamic_wind_slot_descs_gpu[s] = desc;
+			continue;
+		}
+		memcpy(desc.transform, dw.transform, sizeof(desc.transform));
+		desc.mesh_index = dw.mesh_index;
+		desc.bone_count = dw.bone_count;
+		desc.palette_bone_offset = dw.palette_bone_offset;
+		desc.flags = DYNAMIC_WIND_SLOT_FLAG_ACTIVE |
+				(dw.is_promoted ? DYNAMIC_WIND_SLOT_FLAG_PROMOTED : 0u) |
+				(dw.needs_reset ? DYNAMIC_WIND_SLOT_FLAG_RESET : 0u) |
+				((!dw.needs_reset && dw.warm_start_slot >= 0) ? DYNAMIC_WIND_SLOT_FLAG_WARM_START : 0u);
+		desc.warm_start_slot = dw.warm_start_slot;
+		desc.phase_offset = dw.phase_offset;
+		dynamic_wind_slot_descs_gpu[s] = desc;
+
+		// Consume one-shot flags so next frame integrates continuously.
+		const bool do_reset = dw.needs_reset;
+		const int32_t warm_src = dw.warm_start_slot;
+		dw.needs_reset = false;
+		dw.warm_start_slot = -1;
+
+		const WindMeshGPU &wmesh = wind_meshes[dw.mesh_index];
+		const uint32_t bcount = MIN(dw.bone_count, wmesh.bone_count);
+		for (uint32_t b = 0u; b < bcount; b++) {
+			DynamicWindBoneStateGPU st;
+			if (do_reset) {
+				st = DynamicWindBoneStateGPU();
+			} else if (warm_src >= 0 && uint32_t(warm_src) < initial_slot_count) {
+				st = cpu_in_states[uint32_t(warm_src) * WIND_MAX_BONES + b];
+			} else if (s < initial_slot_count) {
+				st = cpu_in_states[s * WIND_MAX_BONES + b];
+			}
+			NextGeoDynamicWindSim::step_bone(
+					wmesh.bones[b],
+					desc,
+					p_direction,
+					p_strength,
+					p_gust_frequency,
+					p_time,
+					p_dt,
+					forces_ptr,
+					force_count,
+					st,
+					dw.cpu_cur_palette + b * 12u,
+					dw.cpu_prev_palette + b * 12u);
+			dw.cpu_state[b] = st;
+		}
+	}
+
+	// Pass 4: Free zero-refcount slots deferred from Pass 1-2 and compact palette if all wind slots are gone.
+	for (uint32_t s = 0u; s < dynamic_wind_slots.size(); s++) {
+		if (dynamic_wind_slots[s].active && dynamic_wind_slots[s].ref_count == 0u) {
+			_dynamic_wind_free_slot(s);
+		}
+	}
+	_dynamic_wind_compact_empty_palette_if_unused();
+}
+
+uint32_t RendererVirtualMeshStorage::get_record_dynamic_wind_slot(uint32_t p_record) const {
+	if (p_record >= slot_states.size() || !slot_states[p_record].allocated) {
+		return UINT32_MAX;
+	}
+	return slot_states[p_record].dynamic_wind_slot;
+}
+
+bool RendererVirtualMeshStorage::is_record_dynamic_wind_promoted(uint32_t p_record) const {
+	const uint32_t slot = get_record_dynamic_wind_slot(p_record);
+	return slot < dynamic_wind_slots.size() && dynamic_wind_slots[slot].active && dynamic_wind_slots[slot].is_promoted;
+}
+
+const float *RendererVirtualMeshStorage::get_record_dynamic_wind_palette_data(uint32_t p_record, bool p_previous, uint32_t &r_bone_count) const {
+	const uint32_t slot = get_record_dynamic_wind_slot(p_record);
+	if (slot >= dynamic_wind_slots.size() || !dynamic_wind_slots[slot].active || dynamic_wind_slots[slot].bone_count == 0u) {
+		r_bone_count = 0u;
+		return nullptr;
+	}
+	const DynamicWindSimSlot &dw = dynamic_wind_slots[slot];
+	r_bone_count = dw.bone_count;
+	return p_previous ? dw.cpu_prev_palette : dw.cpu_cur_palette;
+}
+
+RendererVirtualMeshStorage::DynamicWindStats RendererVirtualMeshStorage::get_dynamic_wind_stats() const {
+	DynamicWindStats st;
+	st.setting_enabled = is_dynamic_wind_enabled();
+	st.mode = uint32_t(get_dynamic_wind_mode());
+	st.floor_supported = is_dynamic_wind_floor_supported();
+	if (dynamic_wind_floor_override) {
+		st.floor_reason = dynamic_wind_floor_reason;
+	} else if (!st.setting_enabled) {
+		st.floor_reason = uint32_t(NextGeoDynamicWindSim::REASON_DISABLED);
+	} else {
+		st.floor_reason = st.floor_supported ? uint32_t(NextGeoDynamicWindSim::REASON_NONE) : uint32_t(NextGeoDynamicWindSim::REASON_BELOW_TIER_FLOOR);
+	}
+	st.shared_slots = dynamic_wind_shared_count;
+	st.promoted_instances = dynamic_wind_promoted_count;
+	st.active_slots = dynamic_wind_shared_count + dynamic_wind_promoted_count;
+	st.local_force_count = dynamic_wind_forces_gpu.size();
+	st.palette_bones = dynamic_wind_palette_bones;
+	return st;
+}
+
 bool RendererVirtualMeshStorage::mesh_has_assembly(RID p_mesh) const {
 	const MeshInfo *info = meshes.getptr(p_mesh);
 	return info != nullptr && info->has_assembly;
@@ -4039,6 +4715,7 @@ uint32_t RendererVirtualMeshStorage::multimesh_range_attach(uint32_t p_parent_re
 		st.free_frame = UINT32_MAX;
 		st.bucket_slot = UINT32_MAX;
 		st.bucket_slot_count = 0u;
+		st.dynamic_wind_slot = UINT32_MAX;
 	}
 
 	uint32_t expand_idx = UINT32_MAX;
@@ -4083,6 +4760,7 @@ void RendererVirtualMeshStorage::multimesh_range_detach(uint32_t p_parent_record
 	if (entry.active && entry.range_count > 0u) {
 		const uint32_t end = MIN(entry.range_base + entry.range_count, used_slots);
 		for (uint32_t slot = entry.range_base; slot < end; slot++) {
+			_dynamic_wind_detach_record(slot, false);
 			records[slot].flags = 0u;
 			instance_attributes[slot] = InstanceAttributes();
 			SlotState &st = slot_states[slot];

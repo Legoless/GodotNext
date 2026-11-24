@@ -3917,12 +3917,39 @@
 				Returns why the given 3D scaling mode cannot run on this device, or [constant VIEWPORT_SCALING_3D_REASON_NONE] when it can.
 			</description>
 		</method>
+		<method name="scenario_add_wind_force">
+			<return type="int" />
+			<param index="0" name="scenario" type="RID" />
+			<param index="1" name="position" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<param index="3" name="direction" type="Vector3" />
+			<param index="4" name="strength" type="float" />
+			<param index="5" name="falloff" type="float" default="1.0" />
+			<description>
+				Adds a local spherical wind force to [param scenario] centered at [param position] with reach [param radius], [param strength], and distance attenuation exponent [param falloff]. A non-zero [param direction] applies a directional force; a zero [param direction] applies an outward radial force from [param position]. Returns a positive force ID for use with [method scenario_update_wind_force] and [method scenario_remove_wind_force], or [code]0[/code] if the scenario is invalid. When [member ProjectSettings.rendering/nextgeo/experimental/dynamic_wind] is enabled in Force Based mode, overlapping foliage instances are promoted to dedicated per-instance GPU simulations.
+			</description>
+		</method>
+		<method name="scenario_clear_wind_forces">
+			<return type="void" />
+			<param index="0" name="scenario" type="RID" />
+			<description>
+				Removes all local wind forces from [param scenario]. Promoted dynamic wind foliage instances settle and return to their shared simulation pool.
+			</description>
+		</method>
 		<method name="scenario_create">
 			<return type="RID" />
 			<description>
 				Creates a scenario and adds it to the RenderingServer. It can be accessed with the RID that is returned. This RID will be used in all [code]scenario_*[/code] RenderingServer functions.
 				Once finished with your RID, you will want to free the RID using the RenderingServer's [method free_rid] method.
 				The scenario is the 3D world that all the visual instances exist in.
+			</description>
+		</method>
+		<method name="scenario_remove_wind_force">
+			<return type="void" />
+			<param index="0" name="scenario" type="RID" />
+			<param index="1" name="force_id" type="int" />
+			<description>
+				Removes the local wind force identified by [param force_id] from [param scenario].
 			</description>
 		</method>
 		<method name="scenario_set_camera_attributes">
@@ -3964,7 +3991,20 @@
 			<param index="2" name="strength" type="float" />
 			<param index="3" name="gust_frequency" type="float" />
 			<description>
-				Sets the global wind parameters ([param direction], [param strength], and [param gust_frequency]) for the visual [param scenario]. Used by procedural foliage wind in NextGeo shaders when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled. See also [member World3D.wind_direction], [member World3D.wind_strength], and [member World3D.wind_gust_frequency].
+				Sets the global wind parameters ([param direction], [param strength], and [param gust_frequency]) for the visual [param scenario]. Used by procedural foliage wind in NextGeo shaders when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled, and by GPU dynamic wind when [member ProjectSettings.rendering/nextgeo/experimental/dynamic_wind] is enabled. See also [member World3D.wind_direction], [member World3D.wind_strength], and [member World3D.wind_gust_frequency].
+			</description>
+		</method>
+		<method name="scenario_update_wind_force">
+			<return type="void" />
+			<param index="0" name="scenario" type="RID" />
+			<param index="1" name="force_id" type="int" />
+			<param index="2" name="position" type="Vector3" />
+			<param index="3" name="radius" type="float" />
+			<param index="4" name="direction" type="Vector3" />
+			<param index="5" name="strength" type="float" />
+			<param index="6" name="falloff" type="float" default="1.0" />
+			<description>
+				Updates the parameters of an existing local wind force identified by [param force_id] in [param scenario]. See [method scenario_add_wind_force].
 			</description>
 		</method>
 		<method name="screen_space_roughness_limiter_set_active">

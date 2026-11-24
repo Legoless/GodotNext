@@ -18,14 +18,27 @@
 			<param index="3" name="sway_phase" type="float" default="0.0" />
 			<param index="4" name="max_sway" type="float" default="0.25" />
 			<param index="5" name="lever_length" type="float" default="1.0" />
+			<param index="6" name="mass" type="float" default="1.0" />
+			<param index="7" name="wind_catch" type="float" default="1.0" />
 			<description>
-				Appends a procedural wind bone (up to [constant MAX_BONES]) with its bind-pose pivot [param rest_position], bone [param axis], [param stiffness] in [code][0, 1][/code], phase offset [param sway_phase], local sway amplitude bound [param max_sway], and [param lever_length].
+				Appends a procedural wind bone (up to [constant MAX_BONES]) with its bind-pose pivot [param rest_position], bone [param axis], [param stiffness] in [code][0, 1][/code], phase offset [param sway_phase], local sway amplitude bound [param max_sway], [param lever_length], part [param mass], and aerodynamic [param wind_catch].
 			</description>
 		</method>
 		<method name="clear">
 			<return type="void" />
 			<description>
 				Clears all procedural wind bones and resets [member max_sway] to [code]0.0[/code].
+			</description>
+		</method>
+		<method name="compute_bone_physics_from_geometry">
+			<return type="void" />
+			<param index="0" name="positions" type="PackedVector3Array" />
+			<param index="1" name="indices" type="PackedInt32Array" default="PackedInt32Array()" />
+			<param index="2" name="bones" type="PackedInt32Array" default="PackedInt32Array()" />
+			<param index="3" name="weights" type="PackedFloat32Array" default="PackedFloat32Array()" />
+			<param index="4" name="influences" type="int" default="4" />
+			<description>
+				Computes per-bone [member bone_masses] and [member bone_wind_catches] from bind-pose geometry. When triangle [param indices] are supplied, distributes triangle surface area and lateral wind-catch exposure across bones weighted by [param bones] and [param weights]; otherwise derives a point-cloud estimate from vertex distribution around each bone.
 			</description>
 		</method>
 		<method name="compute_vertex_skinning" qualifiers="const">
@@ -74,6 +87,9 @@
 		<member name="bone_lever_lengths" type="PackedFloat32Array" setter="set_bone_lever_lengths" getter="get_bone_lever_lengths" default="PackedFloat32Array()">
 			Effective lever lengths (distance from each bone's rest pivot to its farthest influenced vertex, clamped to at least [code]0.25[/code]) used to convert sway amplitude into bend angle without exceeding [member max_sway].
 		</member>
+		<member name="bone_masses" type="PackedFloat32Array" setter="set_bone_masses" getter="get_bone_masses" default="PackedFloat32Array()">
+			Per-bone effective part mass derived at import from bind-pose geometry and used by dynamic wind simulation ([member ProjectSettings.rendering/nextgeo/experimental/dynamic_wind]) to scale spring inertia. Defaults to [code]1.0[/code] for entries omitted by older assets.
+		</member>
 		<member name="bone_max_sway" type="PackedFloat32Array" setter="set_bone_max_sway" getter="get_bone_max_sway" default="PackedFloat32Array()">
 			Maximum local-space sway amplitude in meters for each procedural wind bone.
 		</member>
@@ -85,6 +101,9 @@
 		</member>
 		<member name="bone_sway_phases" type="PackedFloat32Array" setter="set_bone_sway_phases" getter="get_bone_sway_phases" default="PackedFloat32Array()">
 			Per-bone oscillation phase offsets in radians to desynchronize branch motion.
+		</member>
+		<member name="bone_wind_catches" type="PackedFloat32Array" setter="set_bone_wind_catches" getter="get_bone_wind_catches" default="PackedFloat32Array()">
+			Per-bone aerodynamic wind-catch (drag/sail area) factor derived at import from bind-pose geometry and used by dynamic wind simulation ([member ProjectSettings.rendering/nextgeo/experimental/dynamic_wind]) to scale slow sway forcing and fast flutter amplitude. Defaults to [code]1.0[/code] for entries omitted by older assets.
 		</member>
 		<member name="max_sway" type="float" setter="set_max_sway" getter="get_max_sway" default="0.0">
 			Conservative local-space sway bound in meters used to inflate CPU and GPU instance, cluster, and virtual shadow map culling bounds when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled.

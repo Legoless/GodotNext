@@ -2500,6 +2500,8 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 			const PackedFloat32Array wb_phase = wind_res->get_bone_sway_phases();
 			const PackedFloat32Array wb_sway = wind_res->get_bone_max_sway();
 			const PackedFloat32Array wb_lever = wind_res->get_bone_lever_lengths();
+			const PackedFloat32Array wb_mass = wind_res->get_bone_masses();
+			const PackedFloat32Array wb_catch = wind_res->get_bone_wind_catches();
 			const float asset_sway = wind_res->get_max_sway();
 			float max_b_sway = asset_sway;
 			desc.wind_bones.resize(wb_count);
@@ -2511,6 +2513,8 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 				bdesc.sway_phase = i < wb_phase.size() ? wb_phase[i] : 0.0f;
 				bdesc.max_sway = i < wb_sway.size() ? wb_sway[i] : asset_sway;
 				bdesc.lever_length = i < wb_lever.size() ? MAX(wb_lever[i], 0.25f) : 1.0f;
+				bdesc.mass = (i < wb_mass.size() && wb_mass[i] > 0.0f) ? wb_mass[i] : 1.0f;
+				bdesc.wind_catch = (i < wb_catch.size() && wb_catch[i] > 0.0f) ? wb_catch[i] : 1.0f;
 				max_b_sway = MAX(max_b_sway, bdesc.max_sway);
 				desc.wind_bones.write[i] = bdesc;
 			}

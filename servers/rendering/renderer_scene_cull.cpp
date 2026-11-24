@@ -567,6 +567,59 @@ void RendererSceneCull::scenario_set_wind(RID p_scenario, const Vector3 &p_direc
 	scenario->wind_gust_frequency = MAX(Math::is_finite(p_gust_frequency) ? p_gust_frequency : 1.0f, 0.0f);
 }
 
+int RendererSceneCull::scenario_add_wind_force(RID p_scenario, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff) {
+	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL_V(scenario, 0);
+	const float radius = (Math::is_finite(p_radius) && p_radius > 0.0f) ? p_radius : 0.0f;
+	ERR_FAIL_COND_V_MSG(!(radius > 0.0f), 0, "Wind force radius must be positive.");
+	Scenario::LocalWindForce f;
+	f.id = scenario->next_wind_force_id++;
+	if (f.id <= 0) {
+		f.id = 1;
+		scenario->next_wind_force_id = 2;
+	}
+	f.position = p_position;
+	f.radius = radius;
+	f.direction = p_direction;
+	f.strength = MAX(Math::is_finite(p_strength) ? p_strength : 0.0f, 0.0f);
+	f.falloff = CLAMP(Math::is_finite(p_falloff) ? p_falloff : 1.0f, 0.05f, 16.0f);
+	scenario->wind_forces.push_back(f);
+	return f.id;
+}
+
+void RendererSceneCull::scenario_update_wind_force(RID p_scenario, int p_force_id, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff) {
+	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL(scenario);
+	for (uint32_t i = 0u; i < scenario->wind_forces.size(); i++) {
+		if (scenario->wind_forces[i].id == p_force_id) {
+			Scenario::LocalWindForce &f = scenario->wind_forces[i];
+			f.position = p_position;
+			f.radius = MAX(Math::is_finite(p_radius) ? p_radius : 0.0f, 0.0f);
+			f.direction = p_direction;
+			f.strength = MAX(Math::is_finite(p_strength) ? p_strength : 0.0f, 0.0f);
+			f.falloff = CLAMP(Math::is_finite(p_falloff) ? p_falloff : 1.0f, 0.05f, 16.0f);
+			return;
+		}
+	}
+}
+
+void RendererSceneCull::scenario_remove_wind_force(RID p_scenario, int p_force_id) {
+	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL(scenario);
+	for (uint32_t i = 0u; i < scenario->wind_forces.size(); i++) {
+		if (scenario->wind_forces[i].id == p_force_id) {
+			scenario->wind_forces.remove_at(i);
+			return;
+		}
+	}
+}
+
+void RendererSceneCull::scenario_clear_wind_forces(RID p_scenario) {
+	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL(scenario);
+	scenario->wind_forces.clear();
+}
+
 void RendererSceneCull::scenario_set_fallback_environment(RID p_scenario, RID p_environment) {
 	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
 	ERR_FAIL_NULL(scenario);
@@ -2193,9 +2246,9 @@ float RendererSceneCull::_instance_vertex_offset_bound(const Instance *p_instanc
 	return max_wpo;
 }
 
-// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 N10).
+// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296, plan §21.4 N10).
 float RendererSceneCull::_instance_wind_bound(const Instance *p_instance) const {
-	if (p_instance == nullptr || RSG::virtual_mesh_storage == nullptr || !RendererVirtualMeshStorage::is_foliage_wind_enabled()) {
+	if (p_instance == nullptr || RSG::virtual_mesh_storage == nullptr || !RSG::virtual_mesh_storage->is_any_wind_active()) {
 		return 0.0f;
 	}
 	RID mesh;
@@ -5077,10 +5130,40 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.vsm_invalidation_count = scenario->vsm_invalidations_published.size();
 			sdfgi_update_data.vsm_invalidation_epoch = scenario->vsm_invalidation_epoch;
 			sdfgi_update_data.vsm_static_mode_invalidations = scenario->vsm_static_mode_invalidations;
-			// GodotNext: nextgeo_foliage_wind (#152). Per-scenario World3D wind state.
+			// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296). Per-scenario World3D wind state & local forces.
 			sdfgi_update_data.wind_direction = scenario->wind_direction;
 			sdfgi_update_data.wind_strength = scenario->wind_strength;
 			sdfgi_update_data.wind_gust_frequency = scenario->wind_gust_frequency;
+			scenario->wind_forces_gpu.clear();
+			for (uint32_t wf_i = 0u; wf_i < scenario->wind_forces.size(); wf_i++) {
+				const Scenario::LocalWindForce &src = scenario->wind_forces[wf_i];
+				if (!(src.radius > 1.0e-4f) || !(src.strength > 0.0f)) {
+					continue;
+				}
+				RendererVirtualMeshStorage::WindForceGPU gpu_f;
+				gpu_f.position_radius[0] = float(src.position.x);
+				gpu_f.position_radius[1] = float(src.position.y);
+				gpu_f.position_radius[2] = float(src.position.z);
+				gpu_f.position_radius[3] = src.radius;
+				const float dlen2 = float(src.direction.length_squared());
+				if (dlen2 > 1.0e-10f) {
+					const Vector3 nd = src.direction / Math::sqrt(dlen2);
+					gpu_f.direction_strength[0] = float(nd.x);
+					gpu_f.direction_strength[1] = float(nd.y);
+					gpu_f.direction_strength[2] = float(nd.z);
+					gpu_f.falloff_flags[1] = 0.0f; // directional
+				} else {
+					gpu_f.direction_strength[0] = 0.0f;
+					gpu_f.direction_strength[1] = 0.0f;
+					gpu_f.direction_strength[2] = 0.0f;
+					gpu_f.falloff_flags[1] = 1.0f; // radial outward
+				}
+				gpu_f.direction_strength[3] = src.strength;
+				gpu_f.falloff_flags[0] = src.falloff;
+				scenario->wind_forces_gpu.push_back(gpu_f);
+			}
+			sdfgi_update_data.wind_forces = scenario->wind_forces_gpu.is_empty() ? nullptr : scenario->wind_forces_gpu.ptr();
+			sdfgi_update_data.wind_force_count = scenario->wind_forces_gpu.size();
 		}
 
 		// GodotNext: nextgi_rt_registry / rt_shadows (#141) / megalights_visibility (#146).
@@ -6357,10 +6440,17 @@ void RendererSceneCull::update() {
 	const bool assemblies_changed = last_assemblies_enabled >= 0 && (current_assemblies_enabled != (last_assemblies_enabled != 0));
 	last_assemblies_enabled = current_assemblies_enabled ? 1 : 0;
 
-	// GodotNext: nextgeo_foliage_wind (#152). Refresh wind instances (AABBs & VSM dynamic layer) when experimental toggle flips.
+	// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296). Refresh wind instances
+	// (AABBs & VSM dynamic layer) when experimental wind toggles or mode flip at runtime.
 	const bool current_foliage_wind_enabled = RendererVirtualMeshStorage::is_foliage_wind_enabled();
-	const bool foliage_wind_changed = last_foliage_wind_enabled >= 0 && (current_foliage_wind_enabled != (last_foliage_wind_enabled != 0));
+	const bool current_dynamic_wind_enabled = RendererVirtualMeshStorage::is_dynamic_wind_enabled();
+	const int8_t current_dynamic_wind_mode = int8_t(RendererVirtualMeshStorage::get_dynamic_wind_mode());
+	const bool foliage_wind_changed = (last_foliage_wind_enabled >= 0 && (current_foliage_wind_enabled != (last_foliage_wind_enabled != 0))) ||
+			(last_dynamic_wind_enabled >= 0 && (current_dynamic_wind_enabled != (last_dynamic_wind_enabled != 0))) ||
+			(last_dynamic_wind_mode >= 0 && (current_dynamic_wind_mode != last_dynamic_wind_mode));
 	last_foliage_wind_enabled = current_foliage_wind_enabled ? 1 : 0;
+	last_dynamic_wind_enabled = current_dynamic_wind_enabled ? 1 : 0;
+	last_dynamic_wind_mode = current_dynamic_wind_mode;
 
 	uint32_t rid_count = scenario_owner.get_rid_count();
 	RID *rids = (RID *)alloca(sizeof(RID) * rid_count);

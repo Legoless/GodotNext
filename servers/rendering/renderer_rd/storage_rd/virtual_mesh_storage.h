@@ -110,6 +110,7 @@ protected:
 	void _upload_wind_params(const WindParamsGPU &p_params) override;
 	void _upload_wind_meshes(uint32_t p_first, uint32_t p_count) override;
 	void _reset_wind() override;
+	bool _query_device_dynamic_wind_tier() const override;
 
 public:
 	VirtualMeshStorage();

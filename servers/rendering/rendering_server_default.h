@@ -1076,6 +1076,11 @@ public:
 	FUNC2(scenario_set_compositor, RID, RID)
 	// GodotNext: nextgeo_foliage_wind (#152)
 	FUNC4(scenario_set_wind, RID, const Vector3 &, float, float)
+	// GodotNext: nextgeo_dynamic_wind (#296)
+	FUNC6R(int, scenario_add_wind_force, RID, const Vector3 &, float, const Vector3 &, float, float)
+	FUNC7(scenario_update_wind_force, RID, int, const Vector3 &, float, const Vector3 &, float, float)
+	FUNC2(scenario_remove_wind_force, RID, int)
+	FUNC1(scenario_clear_wind_forces, RID)
 
 	/* INSTANCING API */
 	FUNCRIDSPLIT(instance)

@@ -830,6 +830,11 @@ public:
 	virtual void scenario_set_compositor(RID p_scenario, RID p_compositor) = 0;
 	// GodotNext: nextgeo_foliage_wind (#152).
 	virtual void scenario_set_wind(RID p_scenario, const Vector3 &p_direction, float p_strength, float p_gust_frequency) = 0;
+	// GodotNext: nextgeo_dynamic_wind (#296). Local sphere wind forces (zero direction = radial outward).
+	virtual int scenario_add_wind_force(RID p_scenario, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff = 1.0f) = 0;
+	virtual void scenario_update_wind_force(RID p_scenario, int p_force_id, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff = 1.0f) = 0;
+	virtual void scenario_remove_wind_force(RID p_scenario, int p_force_id) = 0;
+	virtual void scenario_clear_wind_forces(RID p_scenario) = 0;
 
 	/* INSTANCING API */
 

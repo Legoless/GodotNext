@@ -78,6 +78,12 @@ void VirtualGeometryWind::_clamp_arrays() {
 	if (bone_lever_lengths.size() > MAX_BONES) {
 		bone_lever_lengths.resize(MAX_BONES);
 	}
+	if (bone_masses.size() > MAX_BONES) {
+		bone_masses.resize(MAX_BONES);
+	}
+	if (bone_wind_catches.size() > MAX_BONES) {
+		bone_wind_catches.resize(MAX_BONES);
+	}
 }
 
 void VirtualGeometryWind::clear() {
@@ -87,6 +93,8 @@ void VirtualGeometryWind::clear() {
 	bone_sway_phases.clear();
 	bone_max_sway.clear();
 	bone_lever_lengths.clear();
+	bone_masses.clear();
+	bone_wind_catches.clear();
 	max_sway = 0.0f;
 	trunk_axis = Vector3(0.0f, 1.0f, 0.0f);
 	base_height = 0.0f;
@@ -98,7 +106,7 @@ int VirtualGeometryWind::get_bone_count() const {
 	return MIN(int(bone_rest_positions.size()), MAX_BONES);
 }
 
-Error VirtualGeometryWind::add_bone(const Vector3 &p_rest_position, const Vector3 &p_axis, float p_stiffness, float p_sway_phase, float p_max_sway, float p_lever_length) {
+Error VirtualGeometryWind::add_bone(const Vector3 &p_rest_position, const Vector3 &p_axis, float p_stiffness, float p_sway_phase, float p_max_sway, float p_lever_length, float p_mass, float p_wind_catch) {
 	const int cur = get_bone_count();
 	ERR_FAIL_COND_V_MSG(cur >= MAX_BONES, ERR_CANT_CREATE, vformat("VirtualGeometryWind supports at most %d bones (1 trunk + %d branches).", MAX_BONES, MAX_BRANCH_BONES));
 
@@ -107,6 +115,11 @@ Error VirtualGeometryWind::add_bone(const Vector3 &p_rest_position, const Vector
 	const float phase = std::isfinite(p_sway_phase) ? p_sway_phase : 0.0f;
 	const float sway = MAX(std::isfinite(p_max_sway) ? p_max_sway : 0.0f, 0.0f);
 	const float lever = MAX(std::isfinite(p_lever_length) ? p_lever_length : 1.0f, 0.25f);
+	const float mass = CLAMP((std::isfinite(p_mass) && p_mass > 0.0f) ? p_mass : 1.0f, 0.05f, 1000.0f);
+	const float wind_catch = CLAMP((std::isfinite(p_wind_catch) && p_wind_catch > 0.0f) ? p_wind_catch : 1.0f, 0.01f, 1000.0f);
+
+	const int prev_masses = bone_masses.size();
+	const int prev_catches = bone_wind_catches.size();
 
 	bone_rest_positions.resize(cur + 1);
 	bone_axes.resize(cur + 1);
@@ -114,6 +127,15 @@ Error VirtualGeometryWind::add_bone(const Vector3 &p_rest_position, const Vector
 	bone_sway_phases.resize(cur + 1);
 	bone_max_sway.resize(cur + 1);
 	bone_lever_lengths.resize(cur + 1);
+	bone_masses.resize(cur + 1);
+	bone_wind_catches.resize(cur + 1);
+
+	for (int i = prev_masses; i < cur; i++) {
+		bone_masses.write[i] = 1.0f;
+	}
+	for (int i = prev_catches; i < cur; i++) {
+		bone_wind_catches.write[i] = 1.0f;
+	}
 
 	bone_rest_positions.write[cur] = p_rest_position;
 	bone_axes.write[cur] = axis;
@@ -121,6 +143,8 @@ Error VirtualGeometryWind::add_bone(const Vector3 &p_rest_position, const Vector
 	bone_sway_phases.write[cur] = phase;
 	bone_max_sway.write[cur] = sway;
 	bone_lever_lengths.write[cur] = lever;
+	bone_masses.write[cur] = mass;
+	bone_wind_catches.write[cur] = wind_catch;
 	if (sway > max_sway) {
 		max_sway = sway;
 	}
@@ -186,6 +210,199 @@ void VirtualGeometryWind::set_bone_lever_lengths(const PackedFloat32Array &p_lev
 
 PackedFloat32Array VirtualGeometryWind::get_bone_lever_lengths() const {
 	return bone_lever_lengths;
+}
+
+void VirtualGeometryWind::set_bone_masses(const PackedFloat32Array &p_masses) {
+	bone_masses = p_masses;
+	_clamp_arrays();
+	emit_changed();
+}
+
+PackedFloat32Array VirtualGeometryWind::get_bone_masses() const {
+	return bone_masses;
+}
+
+void VirtualGeometryWind::set_bone_wind_catches(const PackedFloat32Array &p_wind_catches) {
+	bone_wind_catches = p_wind_catches;
+	_clamp_arrays();
+	emit_changed();
+}
+
+PackedFloat32Array VirtualGeometryWind::get_bone_wind_catches() const {
+	return bone_wind_catches;
+}
+
+void VirtualGeometryWind::compute_bone_physics_from_geometry(const PackedVector3Array &p_positions, const PackedInt32Array &p_indices, const PackedInt32Array &p_bones, const PackedFloat32Array &p_weights, int p_influences) {
+	const int bcount = get_bone_count();
+	if (bcount <= 0) {
+		bone_masses.clear();
+		bone_wind_catches.clear();
+		return;
+	}
+
+	bone_masses.resize(bcount);
+	bone_wind_catches.resize(bcount);
+
+	const int vert_count = p_positions.size();
+	if (vert_count <= 0) {
+		for (int b = 0; b < bcount; b++) {
+			bone_masses.write[b] = (b == 0) ? 2.5f : 1.0f;
+			bone_wind_catches.write[b] = 1.0f;
+		}
+		emit_changed();
+		return;
+	}
+
+	const int inf = (p_influences == 8) ? 8 : SKIN_INFLUENCES;
+	PackedInt32Array local_bones;
+	PackedFloat32Array local_weights;
+	const int32_t *b_ptr = nullptr;
+	const float *w_ptr = nullptr;
+	int eff_inf = inf;
+	if (p_bones.size() == vert_count * inf && p_weights.size() == vert_count * inf) {
+		b_ptr = p_bones.ptr();
+		w_ptr = p_weights.ptr();
+	} else {
+		compute_vertex_skinning_arrays(p_positions, local_bones, local_weights);
+		b_ptr = local_bones.ptr();
+		w_ptr = local_weights.ptr();
+		eff_inf = SKIN_INFLUENCES;
+	}
+
+	LocalVector<float> bone_area;
+	LocalVector<float> bone_lateral_catch;
+	LocalVector<float> bone_weight_sum;
+	LocalVector<float> bone_radial_sum;
+	LocalVector<Vector3> bone_bmin;
+	LocalVector<Vector3> bone_bmax;
+	LocalVector<uint8_t> bone_has_vert;
+	bone_area.resize(bcount);
+	bone_lateral_catch.resize(bcount);
+	bone_weight_sum.resize(bcount);
+	bone_radial_sum.resize(bcount);
+	bone_bmin.resize(bcount);
+	bone_bmax.resize(bcount);
+	bone_has_vert.resize(bcount);
+	for (int b = 0; b < bcount; b++) {
+		bone_area[b] = 0.0f;
+		bone_lateral_catch[b] = 0.0f;
+		bone_weight_sum[b] = 0.0f;
+		bone_radial_sum[b] = 0.0f;
+		bone_bmin[b] = Vector3(FLT_MAX, FLT_MAX, FLT_MAX);
+		bone_bmax[b] = Vector3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+		bone_has_vert[b] = 0;
+	}
+
+	Vector3 unit_axes[MAX_BONES];
+	for (int b = 0; b < bcount; b++) {
+		unit_axes[b] = b < bone_axes.size() ? _safe_unit(bone_axes[b], trunk_axis) : _safe_unit(trunk_axis, Vector3(0.0f, 1.0f, 0.0f));
+	}
+
+	// Accumulate vertex distribution and local extents per bone.
+	for (int v = 0; v < vert_count; v++) {
+		const Vector3 &p = p_positions[v];
+		for (int k = 0; k < eff_inf; k++) {
+			const int b = b_ptr[v * eff_inf + k];
+			const float w = w_ptr[v * eff_inf + k];
+			if (b < 0 || b >= bcount || !(w > 1.0e-4f)) {
+				continue;
+			}
+			const Vector3 rel = p - bone_rest_positions[b];
+			const Vector3 perp = rel - unit_axes[b] * rel.dot(unit_axes[b]);
+			bone_weight_sum[b] += w;
+			bone_radial_sum[b] += w * float(perp.length());
+			bone_bmin[b] = bone_bmin[b].min(p);
+			bone_bmax[b] = bone_bmax[b].max(p);
+			bone_has_vert[b] = 1;
+		}
+	}
+
+	// Accumulate exact triangle surface area and lateral aerodynamic wind-catch per bone when triangles are present.
+	bool used_triangles = false;
+	const int tri_count = p_indices.size() / 3;
+	if (tri_count > 0) {
+		for (int t = 0; t < tri_count; t++) {
+			const int i0 = p_indices[t * 3 + 0];
+			const int i1 = p_indices[t * 3 + 1];
+			const int i2 = p_indices[t * 3 + 2];
+			if (i0 < 0 || i0 >= vert_count || i1 < 0 || i1 >= vert_count || i2 < 0 || i2 >= vert_count) {
+				continue;
+			}
+			const Vector3 &p0 = p_positions[i0];
+			const Vector3 &p1 = p_positions[i1];
+			const Vector3 &p2 = p_positions[i2];
+			const Vector3 cr = (p1 - p0).cross(p2 - p0);
+			const float cr_len = float(cr.length());
+			if (!(cr_len > 1.0e-8f)) {
+				continue;
+			}
+			const float tri_area = 0.5f * cr_len;
+			const Vector3 tri_n = cr / real_t(cr_len);
+			const float share = tri_area * (1.0f / 3.0f);
+			const int verts[3] = { i0, i1, i2 };
+			for (int c = 0; c < 3; c++) {
+				const int vi = verts[c];
+				for (int k = 0; k < eff_inf; k++) {
+					const int b = b_ptr[vi * eff_inf + k];
+					const float w = w_ptr[vi * eff_inf + k];
+					if (b < 0 || b >= bcount || !(w > 1.0e-4f)) {
+						continue;
+					}
+					const float nd = CLAMP(Math::abs(float(tri_n.dot(unit_axes[b]))), 0.0f, 1.0f);
+					const float lateral = std::sqrt(MAX(1.0f - nd * nd, 0.0f));
+					const float exposure = 0.35f + 0.65f * lateral;
+					const float wa = share * w;
+					bone_area[b] += wa;
+					bone_lateral_catch[b] += wa * exposure;
+				}
+			}
+			used_triangles = true;
+		}
+	}
+
+	LocalVector<float> raw_areas;
+	LocalVector<float> raw_catches;
+	raw_areas.resize(bcount);
+	raw_catches.resize(bcount);
+	float total_area = 0.0f;
+	for (int b = 0; b < bcount; b++) {
+		const float lever = b < bone_lever_lengths.size() ? MAX(bone_lever_lengths[b], 0.25f) : 1.0f;
+		float area = bone_area[b];
+		float lateral_catch = bone_lateral_catch[b];
+		if (used_triangles && area > 1.0e-5f) {
+			// Already accumulated from bind-pose triangles.
+		} else if (bone_has_vert[b] && bone_weight_sum[b] > 1.0e-4f) {
+			const Vector3 ext = bone_bmax[b] - bone_bmin[b];
+			const float box_surface = 2.0f * (float(ext.x * ext.y) + float(ext.y * ext.z) + float(ext.z * ext.x));
+			const float mean_radius = MAX(bone_radial_sum[b] / bone_weight_sum[b], 0.08f);
+			area = MAX(box_surface * 0.35f, float(Math::PI) * mean_radius * lever * 0.5f);
+			lateral_catch = area * (b == 0 ? 0.55f : 0.78f);
+		} else {
+			area = 0.5f * lever;
+			lateral_catch = 0.35f * lever;
+		}
+		raw_areas[b] = area;
+		raw_catches[b] = lateral_catch;
+		total_area += area;
+	}
+
+	const float ref_area = MAX(total_area / float(MAX(bcount, 1)), 0.25f);
+	for (int b = 0; b < bcount; b++) {
+		const float lever = b < bone_lever_lengths.size() ? MAX(bone_lever_lengths[b], 0.25f) : 1.0f;
+		const float rel_area = raw_areas[b] / ref_area;
+		const float rel_catch = raw_catches[b] / ref_area;
+		// Sublinear scale inertia keeps taller trees heavier than small shrubs while keeping spring frequencies
+		// in a physically responsive band (~1.5-5 rad/s). Trunk bone (0) is denser than leafy branch boughs.
+		const float size_inertia = CLAMP(std::sqrt(lever / 2.0f), 0.5f, 2.2f);
+		const float density_weight = (b == 0) ? 1.65f : 0.72f;
+		const float mass = CLAMP(density_weight * size_inertia * (0.35f + 0.65f * rel_area), 0.2f, 6.0f);
+		const float catch_weight = (b == 0) ? 0.65f : 1.25f;
+		const float wind_catch = CLAMP(catch_weight * (0.20f + 0.95f * rel_catch), 0.1f, 6.0f);
+
+		bone_masses.write[b] = mass;
+		bone_wind_catches.write[b] = wind_catch;
+	}
+	emit_changed();
 }
 
 void VirtualGeometryWind::set_max_sway(float p_max_sway) {
@@ -354,6 +571,7 @@ Error VirtualGeometryWind::generate_from_geometry(const PackedVector3Array &p_po
 	for (int b = 0; b < bcount; b++) {
 		bone_lever_lengths.write[b] = max_lever[b];
 	}
+	compute_bone_physics_from_geometry(p_positions, PackedInt32Array(), tmp_bones, tmp_weights, SKIN_INFLUENCES);
 
 	emit_changed();
 	return OK;
@@ -696,9 +914,9 @@ Error VirtualGeometryWind::generate_from_skeleton(const PackedVector3Array &p_bo
 	for (int b = 0; b < wind_bone_count; b++) {
 		max_lever[b] = 0.25f;
 	}
+	PackedInt32Array remapped_b;
+	PackedFloat32Array remapped_w;
 	if (has_src_skin) {
-		PackedInt32Array remapped_b;
-		PackedFloat32Array remapped_w;
 		remap_vertex_skinning(p_src_bones, p_src_weights, inf, r_remap_table, wind_bone_count, remapped_b, remapped_w);
 		for (int v = 0; v < vert_count; v++) {
 			const Vector3 &p = p_positions[v];
@@ -720,6 +938,7 @@ Error VirtualGeometryWind::generate_from_skeleton(const PackedVector3Array &p_bo
 	for (int b = 0; b < wind_bone_count; b++) {
 		bone_lever_lengths.write[b] = max_lever[b];
 	}
+	compute_bone_physics_from_geometry(p_positions, PackedInt32Array(), remapped_b, remapped_w, SKIN_INFLUENCES);
 
 	emit_changed();
 	return OK;
@@ -796,6 +1015,8 @@ void VirtualGeometryWind::reset_state() {
 	bone_sway_phases.clear();
 	bone_max_sway.clear();
 	bone_lever_lengths.clear();
+	bone_masses.clear();
+	bone_wind_catches.clear();
 	max_sway = 0.0f;
 	trunk_axis = Vector3(0.0f, 1.0f, 0.0f);
 	base_height = 0.0f;
@@ -809,7 +1030,7 @@ void VirtualGeometryWind::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("clear"), &VirtualGeometryWind::clear);
 	ClassDB::bind_method(D_METHOD("get_bone_count"), &VirtualGeometryWind::get_bone_count);
-	ClassDB::bind_method(D_METHOD("add_bone", "rest_position", "axis", "stiffness", "sway_phase", "max_sway", "lever_length"), &VirtualGeometryWind::add_bone, DEFVAL(0.5f), DEFVAL(0.0f), DEFVAL(0.25f), DEFVAL(1.0f));
+	ClassDB::bind_method(D_METHOD("add_bone", "rest_position", "axis", "stiffness", "sway_phase", "max_sway", "lever_length", "mass", "wind_catch"), &VirtualGeometryWind::add_bone, DEFVAL(0.5f), DEFVAL(0.0f), DEFVAL(0.25f), DEFVAL(1.0f), DEFVAL(1.0f), DEFVAL(1.0f));
 
 	ClassDB::bind_method(D_METHOD("set_bone_rest_positions", "positions"), &VirtualGeometryWind::set_bone_rest_positions);
 	ClassDB::bind_method(D_METHOD("get_bone_rest_positions"), &VirtualGeometryWind::get_bone_rest_positions);
@@ -823,6 +1044,11 @@ void VirtualGeometryWind::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bone_max_sway"), &VirtualGeometryWind::get_bone_max_sway);
 	ClassDB::bind_method(D_METHOD("set_bone_lever_lengths", "lever_lengths"), &VirtualGeometryWind::set_bone_lever_lengths);
 	ClassDB::bind_method(D_METHOD("get_bone_lever_lengths"), &VirtualGeometryWind::get_bone_lever_lengths);
+	ClassDB::bind_method(D_METHOD("set_bone_masses", "masses"), &VirtualGeometryWind::set_bone_masses);
+	ClassDB::bind_method(D_METHOD("get_bone_masses"), &VirtualGeometryWind::get_bone_masses);
+	ClassDB::bind_method(D_METHOD("set_bone_wind_catches", "wind_catches"), &VirtualGeometryWind::set_bone_wind_catches);
+	ClassDB::bind_method(D_METHOD("get_bone_wind_catches"), &VirtualGeometryWind::get_bone_wind_catches);
+	ClassDB::bind_method(D_METHOD("compute_bone_physics_from_geometry", "positions", "indices", "bones", "weights", "influences"), &VirtualGeometryWind::compute_bone_physics_from_geometry, DEFVAL(PackedInt32Array()), DEFVAL(PackedInt32Array()), DEFVAL(PackedFloat32Array()), DEFVAL(SKIN_INFLUENCES));
 
 	ClassDB::bind_method(D_METHOD("set_max_sway", "max_sway"), &VirtualGeometryWind::set_max_sway);
 	ClassDB::bind_method(D_METHOD("get_max_sway"), &VirtualGeometryWind::get_max_sway);
@@ -843,6 +1069,8 @@ void VirtualGeometryWind::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "bone_sway_phases"), "set_bone_sway_phases", "get_bone_sway_phases");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "bone_max_sway"), "set_bone_max_sway", "get_bone_max_sway");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "bone_lever_lengths"), "set_bone_lever_lengths", "get_bone_lever_lengths");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "bone_masses"), "set_bone_masses", "get_bone_masses");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "bone_wind_catches"), "set_bone_wind_catches", "get_bone_wind_catches");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_sway", PROPERTY_HINT_RANGE, "0,10,0.01,or_greater"), "set_max_sway", "get_max_sway");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "trunk_axis"), "set_trunk_axis", "get_trunk_axis");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "base_height"), "set_base_height", "get_base_height");

@@ -126,9 +126,9 @@ struct NextGeoAssemblyPart {
 	uint pad0;
 }; // 96 B
 
-// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
-// Shared std430 structs matching RendererVirtualMeshStorage::WindBoneGPU (48 B)
-// and WindMeshGPU (448 B). Evaluated procedurally in shader with 0 per-instance palette bytes.
+// GodotNext: nextgeo_foliage_wind (#152) & nextgeo_dynamic_wind (#296, plan §21.4 contract N10).
+// Shared std430 structs matching RendererVirtualMeshStorage::WindBoneGPU (64 B)
+// and WindMeshGPU (592 B).
 const uint NEXTGEO_WIND_MAX_BONES = 9u;
 const uint NEXTGEO_WIND_PARAM_FLAG_ENABLED = 1u << 0;
 
@@ -136,12 +136,13 @@ struct NextGeoWindBone {
 	vec4 rest_pos_lever; // xyz = rest pivot (local), w = lever_length (>= 0.25)
 	vec4 axis_stiffness; // xyz = normalized rest axis (local), w = stiffness [0..1]
 	vec4 sway_phase_branch; // x = max_sway, y = sway_phase (rad), z = branch_weight (0=trunk, 1=branch), w = pad
-}; // 48 B
+	vec4 physics; // x = mass (> 0), y = wind_catch (> 0), zw = pad
+}; // 64 B
 
 struct NextGeoWindMesh {
 	uvec4 header; // x = bone_count (0..9), y = floatBitsToUint(max_sway), z = base_height, w = top_height
 	NextGeoWindBone bones[9];
-}; // 448 B
+}; // 592 B
 
 // NextGeoInstanceRecord::gi_flags.
 const uint NEXTGEO_GI_MODE_MASK = 3u << 0;

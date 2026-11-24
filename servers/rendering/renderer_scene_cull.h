@@ -372,6 +372,18 @@ public:
 		Vector3 wind_direction = Vector3(1.0f, 0.0f, 0.0f);
 		float wind_strength = 0.0f;
 		float wind_gust_frequency = 1.0f;
+		// GodotNext: nextgeo_dynamic_wind (#296). Per-scenario local wind force spheres.
+		struct LocalWindForce {
+			int32_t id = 0;
+			Vector3 position;
+			float radius = 0.0f;
+			Vector3 direction;
+			float strength = 0.0f;
+			float falloff = 1.0f;
+		};
+		int32_t next_wind_force_id = 1;
+		LocalVector<LocalWindForce> wind_forces;
+		LocalVector<RendererVirtualMeshStorage::WindForceGPU> wind_forces_gpu;
 		RID reflection_probe_shadow_atlas;
 		RID reflection_atlas;
 		uint64_t used_viewport_visibility_bits;
@@ -464,6 +476,9 @@ public:
 	int8_t last_assemblies_enabled = -1;
 	// GodotNext: nextgeo_foliage_wind (#152). Tracks rendering/nextgeo/experimental/foliage_wind transitions.
 	int8_t last_foliage_wind_enabled = -1;
+	// GodotNext: nextgeo_dynamic_wind (#296). Tracks rendering/nextgeo/experimental/dynamic_wind{,_mode} transitions.
+	int8_t last_dynamic_wind_enabled = -1;
+	int8_t last_dynamic_wind_mode = -1;
 	void _process_nextgeo_residency_shadow_dirty();
 	uint64_t last_nextgeo_residency_epoch = 0;
 
@@ -476,6 +491,11 @@ public:
 	virtual void scenario_set_compositor(RID p_scenario, RID p_compositor);
 	// GodotNext: nextgeo_foliage_wind (#152)
 	virtual void scenario_set_wind(RID p_scenario, const Vector3 &p_direction, float p_strength, float p_gust_frequency);
+	// GodotNext: nextgeo_dynamic_wind (#296)
+	virtual int scenario_add_wind_force(RID p_scenario, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff = 1.0f);
+	virtual void scenario_update_wind_force(RID p_scenario, int p_force_id, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff = 1.0f);
+	virtual void scenario_remove_wind_force(RID p_scenario, int p_force_id);
+	virtual void scenario_clear_wind_forces(RID p_scenario);
 	virtual void scenario_set_reflection_atlas_size(RID p_scenario, int p_reflection_size, int p_reflection_count);
 	virtual bool is_scenario(RID p_scenario) const;
 	virtual RID scenario_get_environment(RID p_scenario);

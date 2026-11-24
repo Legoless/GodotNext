@@ -199,6 +199,31 @@ float World3D::get_wind_gust_frequency() const {
 	return wind_gust_frequency;
 }
 
+int World3D::add_wind_force(const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff) {
+	if (scenario.is_valid() && RS::get_singleton() != nullptr) {
+		return RS::get_singleton()->scenario_add_wind_force(scenario, p_position, p_radius, p_direction, p_strength, p_falloff);
+	}
+	return 0;
+}
+
+void World3D::update_wind_force(int p_force_id, const Vector3 &p_position, float p_radius, const Vector3 &p_direction, float p_strength, float p_falloff) {
+	if (scenario.is_valid() && RS::get_singleton() != nullptr) {
+		RS::get_singleton()->scenario_update_wind_force(scenario, p_force_id, p_position, p_radius, p_direction, p_strength, p_falloff);
+	}
+}
+
+void World3D::remove_wind_force(int p_force_id) {
+	if (scenario.is_valid() && RS::get_singleton() != nullptr) {
+		RS::get_singleton()->scenario_remove_wind_force(scenario, p_force_id);
+	}
+}
+
+void World3D::clear_wind_forces() {
+	if (scenario.is_valid() && RS::get_singleton() != nullptr) {
+		RS::get_singleton()->scenario_clear_wind_forces(scenario);
+	}
+}
+
 #ifndef PHYSICS_3D_DISABLED
 PhysicsDirectSpaceState3D *World3D::get_direct_space_state() {
 	return PhysicsServer3D::get_singleton()->space_get_direct_state(get_space());
@@ -224,6 +249,11 @@ void World3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_wind_strength"), &World3D::get_wind_strength);
 	ClassDB::bind_method(D_METHOD("set_wind_gust_frequency", "frequency"), &World3D::set_wind_gust_frequency);
 	ClassDB::bind_method(D_METHOD("get_wind_gust_frequency"), &World3D::get_wind_gust_frequency);
+	// GodotNext: nextgeo_dynamic_wind (#296)
+	ClassDB::bind_method(D_METHOD("add_wind_force", "position", "radius", "direction", "strength", "falloff"), &World3D::add_wind_force, DEFVAL(Vector3()), DEFVAL(1.0f), DEFVAL(1.0f));
+	ClassDB::bind_method(D_METHOD("update_wind_force", "force_id", "position", "radius", "direction", "strength", "falloff"), &World3D::update_wind_force, DEFVAL(Vector3()), DEFVAL(1.0f), DEFVAL(1.0f));
+	ClassDB::bind_method(D_METHOD("remove_wind_force", "force_id"), &World3D::remove_wind_force);
+	ClassDB::bind_method(D_METHOD("clear_wind_forces"), &World3D::clear_wind_forces);
 #ifndef PHYSICS_3D_DISABLED
 	ClassDB::bind_method(D_METHOD("get_direct_space_state"), &World3D::get_direct_space_state);
 #endif // PHYSICS_3D_DISABLED

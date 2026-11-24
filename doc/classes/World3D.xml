@@ -9,6 +9,44 @@
 	<tutorials>
 		<link title="Ray-casting">$DOCS_URL/tutorials/physics/ray-casting.html</link>
 	</tutorials>
+	<methods>
+		<method name="add_wind_force">
+			<return type="int" />
+			<param index="0" name="position" type="Vector3" />
+			<param index="1" name="radius" type="float" />
+			<param index="2" name="direction" type="Vector3" default="Vector3(0, 0, 0)" />
+			<param index="3" name="strength" type="float" default="1.0" />
+			<param index="4" name="falloff" type="float" default="1.0" />
+			<description>
+				Adds a local spherical wind force to this world's scenario via [method RenderingServer.scenario_add_wind_force]. A zero [param direction] produces an outward radial force; a non-zero [param direction] produces a directional wind gust. Returns the new force ID.
+			</description>
+		</method>
+		<method name="clear_wind_forces">
+			<return type="void" />
+			<description>
+				Removes all local wind forces from this world's scenario via [method RenderingServer.scenario_clear_wind_forces].
+			</description>
+		</method>
+		<method name="remove_wind_force">
+			<return type="void" />
+			<param index="0" name="force_id" type="int" />
+			<description>
+				Removes the local wind force identified by [param force_id] from this world's scenario via [method RenderingServer.scenario_remove_wind_force].
+			</description>
+		</method>
+		<method name="update_wind_force">
+			<return type="void" />
+			<param index="0" name="force_id" type="int" />
+			<param index="1" name="position" type="Vector3" />
+			<param index="2" name="radius" type="float" />
+			<param index="3" name="direction" type="Vector3" default="Vector3(0, 0, 0)" />
+			<param index="4" name="strength" type="float" default="1.0" />
+			<param index="5" name="falloff" type="float" default="1.0" />
+			<description>
+				Updates an existing local wind force identified by [param force_id] in this world's scenario via [method RenderingServer.scenario_update_wind_force].
+			</description>
+		</method>
+	</methods>
 	<members>
 		<member name="camera_attributes" type="CameraAttributes" setter="set_camera_attributes" getter="get_camera_attributes">
 			The default [CameraAttributes] resource to use if none set on the [Camera3D].
