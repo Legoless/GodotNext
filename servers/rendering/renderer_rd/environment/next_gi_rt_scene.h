@@ -153,6 +153,13 @@ _FORCE_INLINE_ bool nextgi_device_has_ray_query(bool p_device_ray_query, bool p_
 	return p_device_ray_query && !p_deny_ray_query;
 }
 
+// GodotNext: nextgi_skinned_alpha_shadows (#302). Both static RT-arena surfaces and skinned surfaces
+// (whose posed vertices live in per-instance slots, #59) keep a #130 attribute stream when streams are
+// enabled, reusing the mesh's static UVs and attributes where skinning deforms positions/normals.
+_FORCE_INLINE_ bool nextgi_rt_surface_wants_hit_attributes(bool p_rt_eligible, bool p_rt_skinned) {
+	return p_rt_eligible || p_rt_skinned;
+}
+
 // GodotNext: nextgi_as_slots
 // An instance enters the TLAS only once its BLAS exists (plan §8.2). In the frame block
 // "AS updates" (line 1a) runs before "AS builds" (line 1b), so the TLAS phase admits only
@@ -564,10 +571,13 @@ private:
 	// GodotNext: nextgi_skinned_actors (#59). Per-instance posed BLASes keyed by (instance, surface).
 	struct SkinnedPart {
 		RID blas;
+		RID chunk_buffer; // Arena chunk buffer the BLAS depends on; RD cascade-frees the BLAS if the chunk goes away.
+		uint32_t chunk = UINT32_MAX;
 		uint32_t triangles = 0;
 		uint64_t last_frame = 0;
 	};
 	HashMap<uint64_t, SkinnedPart> skinned_parts;
+	bool _skinned_part_blas_alive(const SkinnedPart &p_part) const;
 	LocalVector<PendingCompact> pending_compactions;
 	HashMap<RID, uint64_t> mesh_last_tlas_frame;
 	bool as_memory_exceeded = false;
@@ -630,7 +640,8 @@ private:
 	uint32_t _shadow_texture_slot(RID p_rd_texture);
 	void _release_shadow_texture_slots();
 	// p_retrace: the instance has hit records, so shader-code alpha can go to the retrace (not a GPU-written one).
-	void _fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry);
+	// p_index_chunk != UINT32_MAX overrides the surface's static index location (used by posed skinned slots, #302).
+	void _fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry, uint32_t p_index_chunk = UINT32_MAX, uint32_t p_index_offset = 0);
 	void _update_shadow_allocation(const ::RenderDataRD *p_render_data);
 	// One shadow instance word per TLAS instance, in TLAS order. p_alpha_base is the first alpha table entry of a
 	// non-opaque instance, or UINT32_MAX.
@@ -641,6 +652,8 @@ private:
 	// The word of a part's TLAS instance, and its alpha table entries when a geometry is alpha-tested. Returns the
 	// first entry, or UINT32_MAX for an opaque instance.
 	uint32_t _push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers);
+	// GodotNext: nextgi_skinned_alpha_shadows (#302). Shadow word and optional alpha entry for a posed skinned slot.
+	uint32_t _push_shadow_skinned(RenderGeometryInstance *p_instance, RID p_mesh, uint32_t p_surface, uint32_t p_slot_chunk, uint32_t p_slot_index_offset, uint32_t p_layers);
 	void _push_shadow_check_source(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, const Transform3D &p_transform, uint32_t p_layers);
 	void _upload_shadow_buffers();
 

@@ -886,6 +886,14 @@ void NextGIRTScene::init() {
 	}
 }
 
+bool NextGIRTScene::_skinned_part_blas_alive(const SkinnedPart &p_part) const {
+	if (!p_part.blas.is_valid() || !p_part.chunk_buffer.is_valid()) {
+		return false;
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	return mesh_storage != nullptr && p_part.chunk < mesh_storage->mesh_nextgi_rt_get_chunk_count() && mesh_storage->mesh_nextgi_rt_get_chunk_buffer(p_part.chunk) == p_part.chunk_buffer;
+}
+
 void NextGIRTScene::free_far_field() {
 	if (far_field != nullptr) {
 		far_field->free();
@@ -929,7 +937,7 @@ void NextGIRTScene::free() {
 	gpu_instance_capacity = 0;
 	// GodotNext: nextgi_skinned_actors (#59).
 	for (const KeyValue<uint64_t, SkinnedPart> &entry : skinned_parts) {
-		if (entry.value.blas.is_valid()) {
+		if (_skinned_part_blas_alive(entry.value)) {
 			RD::get_singleton()->free_rid(entry.value.blas);
 		}
 	}
@@ -1074,6 +1082,23 @@ uint32_t NextGIRTScene::_push_shadow_part(RenderGeometryInstance *p_instance, RI
 	return base;
 }
 
+// GodotNext: nextgi_skinned_alpha_shadows (#302). Shadow word and optional alpha entry for a posed skinned slot.
+uint32_t NextGIRTScene::_push_shadow_skinned(RenderGeometryInstance *p_instance, RID p_mesh, uint32_t p_surface, uint32_t p_slot_chunk, uint32_t p_slot_index_offset, uint32_t p_layers) {
+	const RenderGeometryInstanceBase *instance = static_cast<const RenderGeometryInstanceBase *>(p_instance);
+	const RID material = _nextgi_shadow_effective_material(instance, p_mesh, p_surface);
+	const NextGIShadowClass shadow_class = _nextgi_shadow_class(material);
+	uint32_t alpha_base = UINT32_MAX;
+	if (shadow_class == NEXTGI_SHADOW_CLASS_ALPHA_TESTED && (p_layers & NEXTGI_SHADOW_LAYER_MASK) != 0) {
+		NextGIShadowAlphaEntry entry;
+		entry.flags = shadow_class;
+		_fill_shadow_alpha_entry(material, p_mesh, p_surface, 0, p_slot_chunk < NEXTGI_HIT_ARENA_CHUNKS, entry, p_slot_chunk, p_slot_index_offset);
+		alpha_base = shadow_alpha.size();
+		shadow_alpha.push_back(entry);
+	}
+	_push_shadow_word(p_layers, alpha_base);
+	return alpha_base;
+}
+
 void NextGIRTScene::_push_shadow_check_source(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, const Transform3D &p_transform, uint32_t p_layers) {
 	const RenderGeometryInstanceBase *instance = static_cast<const RenderGeometryInstanceBase *>(p_instance);
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
@@ -1177,7 +1202,7 @@ void NextGIRTScene::_release_shadow_texture_slots() {
 }
 
 // The bindless-texture path for BaseMaterial3D's alpha; any other alpha-tested material is left to the retrace.
-void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry) {
+void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry, uint32_t p_index_chunk, uint32_t p_index_offset) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (material_storage == nullptr || mesh_storage == nullptr || p_material.is_null()) {
@@ -1260,7 +1285,11 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 		stats.shadow_opaque_alpha_entries++;
 		return; // Opaque until the surface has its stream.
 	}
-	if (info.attribute_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS || info.chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS) {
+	// GodotNext: nextgi_skinned_alpha_shadows (#302). Posed skinned slots hold their indices in the slot chunk while
+	// reusing the mesh surface's static attribute stream.
+	const uint32_t index_chunk = p_index_chunk != UINT32_MAX ? p_index_chunk : info.chunk;
+	const uint32_t index_offset = p_index_chunk != UINT32_MAX ? p_index_offset : info.index_offset + p_first_triangle * 3 * sizeof(uint32_t);
+	if (info.attribute_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS || index_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS) {
 		stats.shadow_opaque_alpha_entries++;
 		return; // The shaders bind the first chunks only: opaque.
 	}
@@ -1275,8 +1304,8 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 	r_entry.texture_slot = slot;
 	r_entry.attribute_chunk = info.attribute_chunk;
 	r_entry.attribute_offset = info.attribute_offset;
-	r_entry.index_chunk = info.chunk;
-	r_entry.index_offset = info.index_offset + p_first_triangle * 3 * sizeof(uint32_t);
+	r_entry.index_chunk = index_chunk;
+	r_entry.index_offset = index_offset;
 	stats.shadow_texture_entries++;
 }
 
@@ -1887,6 +1916,21 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		bool multimesh_element = false;
 	};
 	LocalVector<DeferredShadowParts> deferred_shadow_parts;
+	// GodotNext: nextgi_skinned_alpha_shadows (#302). Shadow-only skinned surfaces (mesh material alpha-tested or
+	// blended, excluded from GI per D17) join after every GI record, alongside deferred_shadow_parts.
+	struct DeferredSkinnedShadowPart {
+		RenderGeometryInstanceBase *instance = nullptr;
+		RID mesh;
+		uint32_t surface = 0;
+		Transform3D transform;
+		uint32_t layers = 0;
+		float max_scale = 1.0f;
+		float eps = 0.0f;
+		MeshStorage::NextGIRTSlotInfo slot;
+		RID blas;
+		bool multimesh_element = false;
+	};
+	LocalVector<DeferredSkinnedShadowPart> deferred_skinned_shadow_parts;
 	const Vector3 camera_origin = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
 	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 
@@ -1923,23 +1967,53 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		// GodotNext: nextgi_skinned_actors (#59). A skinned instance enters through its posed
 		// slots; its bind-pose parts never enter the TLAS. Each slot holds the posed vertices
 		// followed by the coarsest-LOD index copy, so one chunk serves the BLAS and the hit fetch.
+		// GodotNext: nextgi_skinned_alpha_shadows (#302). Alpha-tested and translucent skinned
+		// surfaces follow D17 / #145: shadow-only when excluded from GI by their mesh material,
+		// non-opaque with alpha table entries and #130 hit groups when alpha-tested.
 		const RID skinned_instance = geometry_instance->mesh_instance;
 		if (skinned_instance.is_valid()) {
-			LocalVector<uint32_t> slot_surfaces;
-			LocalVector<MeshStorage::NextGIRTSlotInfo> slots;
+			struct SkinnedSlotEntry {
+				uint32_t surface = 0;
+				MeshStorage::NextGIRTSlotInfo slot;
+				MeshStorage::NextGIRTSurfaceInfo info;
+				NextGISkinnedShadowPolicy policy;
+			};
+			LocalVector<SkinnedSlotEntry> active_slots;
 			uint32_t skinned_triangles = 0;
+			uint32_t skinned_alpha_excluded = 0;
 			const uint32_t skinned_surface_count = mesh_storage->mesh_get_surface_count(mesh);
 			for (uint32_t surface_index = 0; surface_index < skinned_surface_count; surface_index++) {
 				MeshStorage::NextGIRTSlotInfo slot;
 				if (!mesh_storage->mesh_instance_get_rt_slot(skinned_instance, surface_index, slot)) {
 					continue;
 				}
-				slot_surfaces.push_back(surface_index);
-				slots.push_back(slot);
+				MeshStorage::NextGIRTSurfaceInfo info;
+				if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, surface_index, info)) {
+					continue;
+				}
+				const RID effective_material = _nextgi_shadow_effective_material(geometry_instance, mesh, surface_index);
+				const NextGISkinnedShadowPolicy policy = nextgi_shadow_skinned_policy(_nextgi_rt_material_is_alpha(info.material), _nextgi_shadow_class(effective_material), fed.shadow_layers);
+				if (!policy.gi_visible) {
+					skinned_alpha_excluded++;
+				}
+				if (policy.skip) {
+					continue;
+				}
+				SkinnedSlotEntry entry;
+				entry.surface = surface_index;
+				entry.slot = slot;
+				entry.info = info;
+				entry.policy = policy;
+				active_slots.push_back(entry);
 				skinned_triangles += slot.index_count / 3;
 			}
-			if (slots.is_empty()) {
-				stats.coverage.dynamic_excluded++;
+			if (skinned_alpha_excluded > 0) {
+				stats.coverage.alpha_excluded += skinned_alpha_excluded;
+			}
+			if (active_slots.is_empty()) {
+				if (skinned_alpha_excluded == 0) {
+					stats.coverage.dynamic_excluded++;
+				}
 				continue;
 			}
 			const Transform3D instance_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
@@ -1951,16 +2025,19 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			const NextGISkinnedBuild build = within_range ? nextgi_rt_skinned_build(uint32_t(skinned_instance.get_id()), uint32_t(frame), skinned_triangles, stats.skinned_refit_triangles + stats.skinned_build_triangles, skinned_budget) : NEXTGI_SKINNED_SKIP;
 			const uint32_t skinned_card_set = NextGISRC::get_instance_card_set(geometry_instance) != UINT32_MAX ? NextGISRC::get_instance_card_set(geometry_instance) : NextGISRC::get_mesh_card_set(mesh);
 			const uint32_t first_record = instance_records.size();
-			bool skinned_entered = false;
+			bool skinned_gi_entered = false;
+			bool skinned_shadow_entered = false;
 			if (build != NEXTGI_SKINNED_SKIP) {
-				for (uint32_t k = 0; k < slots.size(); k++) {
-					MeshStorage::NextGIRTSurfaceInfo info;
-					if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, slot_surfaces[k], info)) {
-						continue;
-					}
-					const MeshStorage::NextGIRTSlotInfo &slot = slots[k];
-					const uint64_t key = (uint64_t(skinned_instance.get_id()) << 32) | slot_surfaces[k];
+				for (uint32_t k = 0; k < active_slots.size(); k++) {
+					const SkinnedSlotEntry &slot_entry = active_slots[k];
+					const MeshStorage::NextGIRTSlotInfo &slot = slot_entry.slot;
+					const MeshStorage::NextGIRTSurfaceInfo &info = slot_entry.info;
+					const uint64_t key = (uint64_t(skinned_instance.get_id()) << 32) | slot_entry.surface;
 					SkinnedPart *part = skinned_parts.getptr(key);
+					if (part != nullptr && !_skinned_part_blas_alive(*part)) {
+						skinned_parts.erase(key);
+						part = nullptr;
+					}
 					if (part == nullptr) {
 						const RID chunk_buffer = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(slot.chunk);
 						if (chunk_buffer.is_null()) {
@@ -1986,6 +2063,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 						stats.skinned_build_triangles += slot.index_count / 3;
 						SkinnedPart created;
 						created.blas = blas;
+						created.chunk_buffer = chunk_buffer;
+						created.chunk = slot.chunk;
 						created.triangles = slot.index_count / 3;
 						created.last_frame = frame;
 						skinned_parts.insert(key, created);
@@ -2001,6 +2080,25 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					}
 					if (part == nullptr || !part->blas.is_valid()) {
 						continue;
+					}
+					if (slot_entry.policy.shadow_only) {
+						DeferredSkinnedShadowPart deferred;
+						deferred.instance = geometry_instance;
+						deferred.mesh = mesh;
+						deferred.surface = slot_entry.surface;
+						deferred.transform = instance_transform;
+						deferred.layers = fed.shadow_layers;
+						deferred.max_scale = max_scale;
+						deferred.eps = info.eps;
+						deferred.slot = slot;
+						deferred.blas = part->blas;
+						deferred.multimesh_element = fed.element_index != UINT32_MAX;
+						deferred_skinned_shadow_parts.push_back(deferred);
+						skinned_shadow_entered = true;
+						continue;
+					}
+					if (instance_records.size() >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
+						break;
 					}
 					NextGIInstanceRecord record;
 					for (int row = 0; row < 3; row++) {
@@ -2033,20 +2131,29 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					surface_records.push_back(surface_record);
 					// GodotNext: path_tracer (#167)
 					if (surface_sources_wanted) {
-						surface_sources.push_back({ geometry_instance, mesh, slot_surfaces[k] });
-					}
-					// GodotNext: nextgi_hit_groups (#130). A posed slot has no attribute stream: the fallback group.
-					if (hit_records) {
-						hit_materials->add_fallback_surfaces(1);
+						surface_sources.push_back({ geometry_instance, mesh, slot_entry.surface });
 					}
 					instance_records.push_back(record);
+					// GodotNext: nextgi_skinned_alpha_shadows (#302). GI sees the posed slot as before (with forced
+					// opacity on GI rays); shadow rays follow the effective material (alpha-tested instance overrides
+					// become FORCE_NO_OPAQUE with alpha entries and #130 hit groups, while opaque slots stay untouched).
+					const uint32_t shadow_alpha_base = _push_shadow_skinned(geometry_instance, mesh, slot_entry.surface, slot.chunk, slot.index_offset, fed.shadow_layers);
+					if (hit_records) {
+						if (shadow_alpha_base != UINT32_MAX) {
+							hit_materials->add_geometry(geometry_instance, mesh, slot_entry.surface, slot.chunk, slot.attribute_chunk != UINT32_MAX, slot.attribute_chunk, slot.attribute_offset, fed.element_index != UINT32_MAX);
+						} else {
+							hit_materials->add_fallback_surfaces(1);
+						}
+					}
 					RD::AccelerationStructureInstance tlas_instance;
 					tlas_instance.transform = instance_transform;
 					tlas_instance.id = record.tlas_index;
-					// GodotNext: nextgi_shadow_policy (#145). A posed slot shadows as opaque.
 					tlas_instance.mask = nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
 					stats.shadow_unallocated_instances += (tlas_instance.mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
-					_push_shadow_word(fed.shadow_layers, UINT32_MAX);
+					if (shadow_alpha_base != UINT32_MAX) {
+						shadow_alpha_bits |= tlas_instance.mask;
+						stats.shadow_alpha_instances++;
+					}
 					if (shadow_check_sources_enabled) {
 						ShadowCheckSource check;
 						check.transform = instance_transform;
@@ -2057,19 +2164,21 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 						shadow_check_sources.push_back(check);
 					}
 					tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record.tlas_index, UINT32_MAX, false) : 0;
-					tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+					tlas_instance.flags = shadow_alpha_base != UINT32_MAX ? RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT : RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 					tlas_instance.blas = part->blas;
 					_check_shadow_word(tlas_instance.id + 1); // GodotNext: nextgi_shadow_policy (#145)
 					tlas_instances.push_back(tlas_instance);
-					skinned_entered = true;
+					skinned_gi_entered = true;
 				}
 			}
-			if (skinned_entered) {
+			if (skinned_gi_entered) {
 				stats.skinned_instances++;
 				stats.coverage.numerator++;
 				if (geometry_instance->nextgi_record_index == UINT32_MAX && first_record < instance_records.size()) {
 					geometry_instance->nextgi_record_index = first_record;
 				}
+			} else if (skinned_shadow_entered) {
+				stats.skinned_instances++;
 			} else {
 				stats.coverage.dynamic_excluded++;
 			}
@@ -2505,6 +2614,75 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		}
 	}
 
+	// GodotNext: nextgi_skinned_alpha_shadows (#302). Shadow-only posed skinned slots (alpha-tested or translucent
+	// mesh materials, excluded from GI per D17). They share the post-GI shadow-only budget so they never displace GI.
+	for (const DeferredSkinnedShadowPart &deferred : deferred_skinned_shadow_parts) {
+		const uint32_t mask = nextgi_shadow_instance_mask(shadow_allocation, deferred.layers, false);
+		if (mask == 0 || !deferred.blas.is_valid() || instance_records.size() + gpu_reserved >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
+			continue;
+		}
+		const uint32_t record_index = instance_records.size();
+		NextGIInstanceRecord record;
+		for (int row = 0; row < 3; row++) {
+			record.object_to_world[row * 4 + 0] = deferred.transform.basis.rows[row][0];
+			record.object_to_world[row * 4 + 1] = deferred.transform.basis.rows[row][1];
+			record.object_to_world[row * 4 + 2] = deferred.transform.basis.rows[row][2];
+		}
+		record.object_to_world[3] = deferred.transform.origin.x;
+		record.object_to_world[7] = deferred.transform.origin.y;
+		record.object_to_world[11] = deferred.transform.origin.z;
+		record.surface_base = surface_records.size();
+		record.surface_count = 1;
+		record.rt_flags = NEXTGI_RT_FLAG_SKINNED;
+		record.tlas_index = record_index;
+		record.arena_chunk = deferred.slot.chunk;
+		record.origin_offset = nextgi_rt_origin_offset(deferred.eps, deferred.max_scale);
+		// No card set and no relight pages: GI never hits it.
+		NextGISurfaceRecord surface_record;
+		surface_record.vertex_offset = deferred.slot.vertex_offset;
+		surface_record.index_offset = deferred.slot.index_offset;
+		surface_record.triangle_count = deferred.slot.index_count / 3;
+		surface_record.flags = NEXTGI_RT_SURFACE_FLAG_SKINNED | NEXTGI_RT_SURFACE_FLAG_NO_CARDS | ((deferred.slot.bind_vertex_offset / NEXTGI_RT_ALIGNMENT) << 8);
+		surface_records.push_back(surface_record);
+		// GodotNext: path_tracer (#167). The path tracer never reaches a shadow-only surface (no GI bit).
+		if (surface_sources_wanted) {
+			surface_sources.push_back(SurfaceSource());
+		}
+		instance_records.push_back(record);
+		const uint32_t shadow_alpha_base = _push_shadow_skinned(deferred.instance, deferred.mesh, deferred.surface, deferred.slot.chunk, deferred.slot.index_offset, deferred.layers);
+		if (hit_records) {
+			if (shadow_alpha_base != UINT32_MAX) {
+				hit_materials->add_geometry(deferred.instance, deferred.mesh, deferred.surface, deferred.slot.chunk, deferred.slot.attribute_chunk != UINT32_MAX, deferred.slot.attribute_chunk, deferred.slot.attribute_offset, deferred.multimesh_element);
+			} else {
+				hit_materials->add_fallback_surfaces(1);
+			}
+		}
+		RD::AccelerationStructureInstance tlas_instance;
+		tlas_instance.transform = deferred.transform;
+		tlas_instance.id = record_index;
+		tlas_instance.mask = mask;
+		tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record_index, UINT32_MAX, false) : 0;
+		tlas_instance.flags = shadow_alpha_base != UINT32_MAX ? RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT : RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+		tlas_instance.blas = deferred.blas;
+		_check_shadow_word(tlas_instance.id + 1);
+		tlas_instances.push_back(tlas_instance);
+		stats.shadow_only_instances++;
+		stats.shadow_unallocated_instances += (mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
+		if (shadow_alpha_base != UINT32_MAX) {
+			shadow_alpha_bits |= mask;
+			stats.shadow_alpha_instances++;
+		}
+		if (shadow_check_sources_enabled) {
+			ShadowCheckSource check;
+			check.transform = deferred.transform;
+			check.world_bounds = deferred.instance->transformed_aabb;
+			check.layers = deferred.layers;
+			check.opaque_caster = false;
+			check.has_geometry = false;
+			shadow_check_sources.push_back(check);
+		}
+	}
+
 	// GodotNext: nextgi_skinned_actors (#59). Counts refits and rebuilds of this frame's
 	// skinned BLAS work; the marker sits inside the "AS updates" slot (line 1a).
 	if (stats.skinned_refit_triangles > 0 || stats.skinned_build_triangles > 0) {
@@ -2520,7 +2698,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		}
 		for (uint64_t key : stale) {
 			SkinnedPart *part = skinned_parts.getptr(key);
-			if (part != nullptr && part->blas.is_valid()) {
+			if (part != nullptr && _skinned_part_blas_alive(*part)) {
 				RD::get_singleton()->free_rid(part->blas);
 			}
 			skinned_parts.erase(key);

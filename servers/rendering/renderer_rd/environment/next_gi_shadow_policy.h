@@ -261,6 +261,21 @@ uint32_t nextgi_shadow_instance_mask(const NextGIShadowMaskAllocator::Allocation
 // non-opaque (alpha-tested) instances: an allocated light without one of them takes the opaque fast path.
 uint32_t nextgi_shadow_light_mode(const NextGIShadowMaskAllocator::Allocation &p_allocation, uint32_t p_caster_mask, uint32_t p_alpha_bits);
 
+// GodotNext: nextgi_skinned_alpha_shadows (#302). How a posed skinned surface enters the TLAS:
+// - gi_visible: true unless the mesh surface's own material is alpha-tested or blended (#61 / D17).
+// - shadow_only: !gi_visible and casts_shadow (deferred after GI instances, no GI mask bit).
+// - skip: !gi_visible and !casts_shadow (neither GI nor shadow rays can see it).
+// - alpha_tested / force_no_opaque: casts_shadow and the effective material is alpha-tested.
+struct NextGISkinnedShadowPolicy {
+	bool gi_visible = false;
+	bool shadow_only = false;
+	bool skip = false;
+	bool alpha_tested = false;
+	bool force_no_opaque = false;
+};
+
+NextGISkinnedShadowPolicy nextgi_shadow_skinned_policy(bool p_mesh_material_is_alpha, NextGIShadowClass p_effective_shadow_class, uint32_t p_shadow_layers);
+
 // A CPU model of trace_shadow() for the doctests. One entry per triangle the ray crosses inside its interval,
 // in the order traversal reports them.
 struct NextGIShadowModelHit {

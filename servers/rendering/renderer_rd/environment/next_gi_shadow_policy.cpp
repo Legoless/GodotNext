@@ -226,6 +226,18 @@ uint32_t nextgi_shadow_light_mode(const NextGIShadowMaskAllocator::Allocation &p
 	return uint32_t(NEXTGI_SHADOW_MASK_CASTERS) | NEXTGI_SHADOW_MODE_LOOP | NEXTGI_SHADOW_MODE_FALLBACK;
 }
 
+// GodotNext: nextgi_skinned_alpha_shadows (#302)
+NextGISkinnedShadowPolicy nextgi_shadow_skinned_policy(bool p_mesh_material_is_alpha, NextGIShadowClass p_effective_shadow_class, uint32_t p_shadow_layers) {
+	NextGISkinnedShadowPolicy policy;
+	const bool casts_shadow = (p_shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0u;
+	policy.gi_visible = !p_mesh_material_is_alpha;
+	policy.shadow_only = !policy.gi_visible && casts_shadow;
+	policy.skip = !policy.gi_visible && !casts_shadow;
+	policy.alpha_tested = casts_shadow && p_effective_shadow_class == NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+	policy.force_no_opaque = policy.alpha_tested;
+	return policy;
+}
+
 NextGIShadowModelResult nextgi_shadow_model_trace(uint32_t p_mode, uint32_t p_caster_mask, const NextGIShadowModelHit *p_hits, uint32_t p_count, bool p_retrace) {
 	NextGIShadowModelResult result;
 	const uint32_t cull = p_mode & NEXTGI_SHADOW_MODE_CULL_MASK;

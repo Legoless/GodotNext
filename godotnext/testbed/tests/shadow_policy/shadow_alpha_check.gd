@@ -18,6 +18,13 @@ extends Node3D
 ## fragment() discards, so the retrace leaves its hole lit, and its ground card's mask is checked the same way. An
 ## eighth plate, off the ground, discards in a helper function: the hit groups still refuse such a shader (#130), so it
 ## must shadow as opaque and leave no retrace entry once its verdict is known.
+## GodotNext: nextgi_skinned_alpha_shadows (#302). Three posed 2-bone skinned casters on a ground of their own to the
+## left of the main ground (each mesh's bind pose sits 3 m away in -Z and Bone 1 poses it directly over its target):
+##   skinned_texture_hole  BaseMaterial3D alpha scissor with the hole albedo texture as the mesh's surface material
+##                         (shadow-only posed slot per D17, bindless inline alpha path)
+##   skinned_shader_hole   ShaderMaterial alpha scissor as an instance override (GI-visible + FORCE_NO_OPAQUE, Full
+##                         HWRT material retrace; shadows as opaque without the retrace or on the fallback sun)
+##   skinned_opaque        opaque skinned control (unaffected, solid shadow)
 ## With rendering/global_illumination/nextgi/debug/read_shadow_mask on, the ground card's shadow mask must match the
 ## expected footprint of every caster, away from the footprint and hole edges (one mask texel: every ground texel is
 ## traced straight up from the texel the mask records), in the holes and in the rings around them, for every
@@ -64,6 +71,11 @@ const REFUSED_POSITION := Vector3(0.0, 1.5, -16.0) ## Off the ground: it shadows
 const MAIN_GROUND_HALF := 10.0
 const DISCARD_GROUND_CENTER := Vector2(15.5, 3.0)
 const DISCARD_GROUND_SIZE := 9.0
+## GodotNext: nextgi_skinned_alpha_shadows (#302). The skinned casters' ground (left of the main ground) and bind-pose
+## offset: Bone 1 translates each skinned plate by -SKINNED_BIND_OFFSET so only the posed slot covers its footprint.
+const SKINNED_GROUND_CENTER := Vector2(-17.5, 3.0)
+const SKINNED_GROUND_SIZE := 14.0
+const SKINNED_BIND_OFFSET := Vector3(0.0, 0.0, -3.0)
 const GPU_WRITTEN_ELEMENTS := 10 ## --gpu-written: five single-plate MultiMeshes and the five-plate stack.
 const SETTLE_FRAMES := 120 ## Without the retrace: frames the mask gets once the alpha paths are ready.
 
@@ -81,8 +93,14 @@ const CASTERS := [
 const DISCARD_CASTERS := [
 	["discard_hole", Vector2(15.5, 3.0), "hole"],
 ]
+## GodotNext: nextgi_skinned_alpha_shadows (#302). The posed skinned casters on the skinned ground.
+const SKINNED_CASTERS := [
+	["skinned_texture_hole", Vector2(-14.2, 6.2), "hole"],
+	["skinned_shader_hole", Vector2(-20.8, 6.2), "hole"],
+	["skinned_opaque", Vector2(-14.2, -0.2), "shadow"],
+]
 ## Casters whose alpha comes from shader code: without the retrace they shadow as opaque.
-const SHADER_ALPHA_HOLES := ["shader_hole", "discard_hole"]
+const SHADER_ALPHA_HOLES := ["shader_hole", "discard_hole", "skinned_shader_hole"]
 
 var _failures := PackedStringArray()
 var _result := {}
@@ -219,6 +237,18 @@ void fragment() {
 		refused_plate.position = REFUSED_POSITION
 		add_child(refused_plate, true)
 
+		# GodotNext: nextgi_skinned_alpha_shadows (#302). Posed skinned ground + cutout and opaque control casters.
+		var skinned_ground := MeshInstance3D.new()
+		skinned_ground.name = "skinned_ground"
+		var skinned_ground_mesh := BoxMesh.new()
+		skinned_ground_mesh.size = Vector3(SKINNED_GROUND_SIZE, 0.2, SKINNED_GROUND_SIZE)
+		skinned_ground.mesh = skinned_ground_mesh
+		skinned_ground.position = Vector3(SKINNED_GROUND_CENTER.x, -0.1, SKINNED_GROUND_CENTER.y)
+		add_child(skinned_ground, true)
+		_add_skinned_plate("skinned_texture_hole", texture_material, false)
+		_add_skinned_plate("skinned_shader_hole", shader_material, true)
+		_add_skinned_plate("skinned_opaque", StandardMaterial3D.new(), false)
+
 	for i in _suns:
 		var sun := DirectionalLight3D.new()
 		sun.name = "sun_%d" % i
@@ -284,6 +314,83 @@ func _add_plate(p_name: String, p_material: Material, p_override: bool, p_height
 			_plates[p_name] = plate
 
 
+## GodotNext: nextgi_skinned_alpha_shadows (#302). A 2-bone skinned plate whose bind pose sits SKINNED_BIND_OFFSET
+## away from its target center and whose Bone 1 poses it directly over the target footprint.
+func _add_skinned_plate(p_name: String, p_material: Material, p_override: bool) -> void:
+	var center := Vector2.ZERO
+	for caster in SKINNED_CASTERS:
+		if caster[0] == p_name:
+			center = caster[1]
+	var skeleton := Skeleton3D.new()
+	skeleton.name = p_name + "_skeleton"
+	skeleton.add_bone("Root")
+	skeleton.set_bone_rest(0, Transform3D())
+	skeleton.add_bone("Mover")
+	skeleton.set_bone_parent(1, 0)
+	skeleton.set_bone_rest(1, Transform3D())
+	skeleton.reset_bone_poses()
+	skeleton.set_bone_pose_position(1, -SKINNED_BIND_OFFSET)
+	skeleton.position = Vector3(center.x, PLATE_Y, center.y)
+	add_child(skeleton, true)
+
+	var skin := Skin.new()
+	skin.add_bind(0, Transform3D())
+	skin.add_bind(1, Transform3D())
+
+	var half := PLATE * 0.5
+	var verts := PackedVector3Array([
+		Vector3(-half, 0.0, -half) + SKINNED_BIND_OFFSET,
+		Vector3(half, 0.0, -half) + SKINNED_BIND_OFFSET,
+		Vector3(half, 0.0, half) + SKINNED_BIND_OFFSET,
+		Vector3(-half, 0.0, half) + SKINNED_BIND_OFFSET,
+	])
+	var norms := PackedVector3Array([Vector3.UP, Vector3.UP, Vector3.UP, Vector3.UP])
+	var uvs := PackedVector2Array([
+		Vector2(0.0, 0.0),
+		Vector2(1.0, 0.0),
+		Vector2(1.0, 1.0),
+		Vector2(0.0, 1.0),
+	])
+	var bones := PackedInt32Array([
+		1, 0, 0, 0,
+		1, 0, 0, 0,
+		1, 0, 0, 0,
+		1, 0, 0, 0,
+	])
+	var weights := PackedFloat32Array([
+		1.0, 0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+	])
+	var indices := PackedInt32Array([0, 1, 2, 0, 2, 3])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_BONES] = bones
+	arrays[Mesh.ARRAY_WEIGHTS] = weights
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if not p_override:
+		mesh.surface_set_material(0, p_material)
+
+	var mi := MeshInstance3D.new()
+	mi.name = p_name
+	mi.mesh = mesh
+	mi.skin = skin
+	mi.skeleton = NodePath("..")
+	mi.extra_cull_margin = 4.0
+	mi.gi_mode = GeometryInstance3D.GI_MODE_STATIC
+	if p_override:
+		mi.material_override = p_material
+	skeleton.add_child(mi, true)
+	_plates[p_name] = mi
+
+
 ## One updated element per frame keeps a MultiMesh in the RT dynamic class, so the GPU writes its TLAS instances
 ## (as tests/nextgi_dynamic_rt does).
 func _process(_delta: float) -> void:
@@ -302,16 +409,19 @@ func _run() -> void:
 	_check(_result["hardware_ray_tracing_mode"] == _expect_mode, "the Hardware Ray Tracing Mode is %s (%s)" % [_expect_mode, _result["hardware_ray_tracing_mode"]])
 	for key in ["shadow_alpha_instances", "shadow_only_instances", "shadow_texture_entries", "shadow_cut_entries", "shadow_retrace_entries", "shadow_opaque_alpha_entries", "shadow_word_misaligned", "shadow_allocation", "rt_gpu_written_instances", "hit_groups_linked", "hit_groups_pending", "hit_fallback_geometries", "hit_shadow_retrace_dispatches", "hit_materials_created"]:
 		_result[key] = counters.get(key, -1)
-	for key in ["src_shadow_alpha_variant", "src_shadow_relight_variant", "src_shadow_retrace_capacity", "src_shadow_retrace_frames", "src_shadow_retrace_appended", "src_shadow_retrace_occluded", "src_shadow_retrace_clear", "src_shadow_rays", "src_max_shadowed_lights"]:
+	for key in ["src_shadow_alpha_variant", "src_shadow_relight_variant", "src_shadow_retrace_capacity", "src_shadow_retrace_frames", "src_shadow_retrace_appended", "src_shadow_retrace_occluded", "src_shadow_retrace_clear", "src_shadow_rays", "src_max_shadowed_lights", "rt_skinned_instances"]:
 		_result[key] = info.get(key, -1)
 	_check(int(counters.get("shadow_alpha_instances", 0)) > 0, "non-opaque (alpha-tested) TLAS instances")
 	_check(int(counters.get("shadow_only_instances", 0)) > 0, "shadow-only TLAS instances (surfaces GI does not see)")
-	# Exactly the fixture's alpha entries: the texture hole is sampled (a detector that missed BaseMaterial3D's
-	# texture alpha would send it to the retrace), the constant cut and the five stack plates are constants (the
-	# stack's GPU-written elements share their MultiMesh's one entry).
+	# Exactly the fixture's alpha entries: the texture hole and skinned texture hole are sampled (a detector that
+	# missed BaseMaterial3D's texture alpha would send them to the retrace), the constant cut and the five stack
+	# plates are constants (the stack's GPU-written elements share their MultiMesh's one entry).
+	var texture_entries := 1 if _gpu_written else 2
 	var cut_entries := 2 if _gpu_written else 6
-	_check(int(counters.get("shadow_texture_entries", 0)) == 1, "one sampled-texture alpha entry, the texture hole (%d)" % int(counters.get("shadow_texture_entries", 0)))
+	_check(int(counters.get("shadow_texture_entries", 0)) == texture_entries, "%d sampled-texture alpha entries (%d)" % [texture_entries, int(counters.get("shadow_texture_entries", 0))])
 	_check(int(counters.get("shadow_cut_entries", 0)) == cut_entries, "%d constant-alpha entries, the constant cut and the stack (%d)" % [cut_entries, int(counters.get("shadow_cut_entries", 0))])
+	if not _gpu_written:
+		_check(int(info.get("rt_skinned_instances", 0)) == SKINNED_CASTERS.size(), "%d posed skinned casters in the RT scene (%d)" % [SKINNED_CASTERS.size(), int(info.get("rt_skinned_instances", 0))])
 	if _gpu_written:
 		_check(int(counters.get("rt_gpu_written_instances", 0)) == GPU_WRITTEN_ELEMENTS, "the GPU wrote the casters' %d TLAS instances (%d)" % [GPU_WRITTEN_ELEMENTS, int(counters.get("rt_gpu_written_instances", 0))])
 		# No hit record: the shader hole cannot be retraced and shadows as opaque.
@@ -323,21 +433,20 @@ func _run() -> void:
 	if _gpu_written:
 		pass
 	elif _expect_retrace:
-		# The shader hole and the discard hole go to the retrace (#304: the any-hit stage ignores what fragment()
-		# discards); the refused plate's shader is refused by the hit groups, so once its verdict is known it shadows
-		# as opaque and asks for nothing.
-		_check(int(counters.get("shadow_retrace_entries", 0)) == 2, "two retrace entries, the shader hole and the discard hole (%d)" % int(counters.get("shadow_retrace_entries", 0)))
+		# The shader hole, the discard hole (#304) and the skinned shader hole (#302) go to the retrace; the refused
+		# plate's shader is refused by the hit groups, so once its verdict is known it shadows as opaque.
+		_check(int(counters.get("shadow_retrace_entries", 0)) == 3, "three retrace entries, the shader hole, the discard hole and the skinned shader hole (%d)" % int(counters.get("shadow_retrace_entries", 0)))
 		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 1, "one opaque alpha entry, the refused plate (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
 		_check(int(info.get("src_shadow_retrace_appended", 0)) > 0, "the relight appended retrace records")
 		_check(int(info.get("src_shadow_retrace_occluded", 0)) > 0, "the retrace found occluded rays")
 		_check(int(info.get("src_shadow_retrace_clear", 0)) > 0, "the retrace found clear rays")
 	elif _expect_mode != "FULL":
 		# GodotNext: nextgi_hwrt_mode (#286). No material hit group exists in this mode: the shader hole, the discard
-		# hole and the refused plate are opaque entries, the material retrace reports the mode and the relight leaves
-		# it nothing.
+		# hole, the refused plate and the skinned shader hole are opaque entries, the material retrace reports the mode
+		# and the relight leaves it nothing.
 		_check(_result["material_retrace"] == "HWRT_MODE_" + _expect_mode, "the material retrace reports HWRT_MODE_%s (%s)" % [_expect_mode, _result["material_retrace"]])
 		_check(int(counters.get("shadow_retrace_entries", -1)) == 0, "no retrace entry in %s (%d)" % [_expect_mode, int(counters.get("shadow_retrace_entries", -1))])
-		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 3, "three opaque alpha entries, the shader hole, the discard hole and the refused plate (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
+		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 4, "four opaque alpha entries, the shader hole, the discard hole, the refused plate and the skinned shader hole (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
 		_check(int(info.get("src_shadow_retrace_capacity", -1)) == 0, "the relight leaves the retrace no record (capacity %d)" % int(info.get("src_shadow_retrace_capacity", -1)))
 		_check(not bool(counters.get("shadow_wants_retrace", true)), "nothing asks for the retrace")
 	else:
@@ -347,6 +456,7 @@ func _run() -> void:
 	_check_mask(info, "")
 	if not _gpu_written:
 		_check_mask(info, "", "discard")
+		_check_mask(info, "", "skinned")
 	if _suns == 1 and _expect_retrace and not _gpu_written:
 		await _check_hold()
 	_finish()
@@ -416,7 +526,7 @@ func _find_fallback_slot(p_counters: Dictionary) -> void:
 
 
 func _set_holes_visible(p_visible: bool) -> void:
-	for plate_name in ["texture_hole", "shader_hole", "discard_hole"]:
+	for plate_name in ["texture_hole", "shader_hole", "discard_hole", "skinned_texture_hole", "skinned_shader_hole"]:
 		if _plates.has(plate_name):
 			(_plates[plate_name] as Node3D).visible = p_visible
 
@@ -464,10 +574,11 @@ func _check_hold() -> void:
 	_result["shown_created"] = int(counters.get("hit_materials_created", -1))
 	_check(int(counters.get("hit_materials_created", -1)) == created + 1, "showing the holes again makes the hit groups once more (%d after %d)" % [int(counters.get("hit_materials_created", -1)), created])
 	_check(int(info.get("src_shadow_relight_variant", -1)) == 1, "the relight runs its alpha variant again (%d)" % int(info.get("src_shadow_relight_variant", -1)))
-	_check(int(counters.get("shadow_retrace_entries", 0)) == 2 and int(counters.get("shadow_texture_entries", 0)) == 1, "the alpha entries are back (retrace %d, texture %d)" % [int(counters.get("shadow_retrace_entries", 0)), int(counters.get("shadow_texture_entries", 0))])
+	_check(int(counters.get("shadow_retrace_entries", 0)) == 3 and int(counters.get("shadow_texture_entries", 0)) == 2, "the alpha entries are back (retrace %d, texture %d)" % [int(counters.get("shadow_retrace_entries", 0)), int(counters.get("shadow_texture_entries", 0))])
 	_check(int(counters.get("shadow_word_misaligned", -1)) == 0, "the shadow instance words stay in step (%d)" % int(counters.get("shadow_word_misaligned", -1)))
 	_check_mask(info, "shown again: ")
 	_check_mask(info, "shown again: ", "discard")
+	_check_mask(info, "shown again: ", "skinned")
 
 
 func _expected_lit(p_world: Vector3, p_margin: float, p_slot: int, p_casters: Array = CASTERS) -> int:
@@ -498,15 +609,26 @@ func _expected_lit(p_world: Vector3, p_margin: float, p_slot: int, p_casters: Ar
 
 
 ## Every shadowed light's bit of the ground card's mask against the expected footprints. p_prefix labels the pass.
-## GodotNext: nextgi_hit_discard (#304). p_ground "discard" checks the discard hole's ground (its own card, casters and
-## result keys) instead of the main ground.
+## GodotNext: nextgi_hit_discard (#304). p_ground "discard" checks the discard hole's ground; "skinned" checks the
+## posed skinned casters' ground (#302).
 func _check_mask(p_info: Dictionary, p_prefix: String, p_ground := "") -> void:
-	var on_discard_ground := p_ground == "discard"
-	var ground_center := DISCARD_GROUND_CENTER if on_discard_ground else Vector2.ZERO
-	var ground_half := DISCARD_GROUND_SIZE * 0.5 if on_discard_ground else MAIN_GROUND_HALF
-	var casters: Array = DISCARD_CASTERS if on_discard_ground else CASTERS
-	var key := "discard_" if on_discard_ground else ""
-	var prefix := p_prefix + ("discard ground: " if on_discard_ground else "")
+	var ground_center := Vector2.ZERO
+	var ground_half := MAIN_GROUND_HALF
+	var casters: Array = CASTERS
+	var key := ""
+	var prefix := p_prefix
+	if p_ground == "discard":
+		ground_center = DISCARD_GROUND_CENTER
+		ground_half = DISCARD_GROUND_SIZE * 0.5
+		casters = DISCARD_CASTERS
+		key = "discard_"
+		prefix = p_prefix + "discard ground: "
+	elif p_ground == "skinned":
+		ground_center = SKINNED_GROUND_CENTER
+		ground_half = SKINNED_GROUND_SIZE * 0.5
+		casters = SKINNED_CASTERS
+		key = "skinned_"
+		prefix = p_prefix + "skinned ground: "
 	var pages: Array = p_info.get("src_mask_pages", [])
 	_check(not pages.is_empty(), prefix + "shadow mask readback")
 	var page: Dictionary = {}

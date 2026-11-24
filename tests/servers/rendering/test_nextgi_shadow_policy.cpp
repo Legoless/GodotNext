@@ -36,7 +36,9 @@
 
 TEST_FORCE_LINK(test_nextgi_shadow_policy)
 
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 
 using namespace RendererRD;
@@ -618,6 +620,204 @@ TEST_CASE("[NextGIShadow] The alpha path follows the albedo texture's filter and
 	CHECK_EQ(nextgi_shadow_code_albedo_sampler_flags(_base_material_code("\tALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;\n")), 0u);
 	// The flags fit the alpha table entry's flag word next to the class and the path bits.
 	CHECK_EQ((uint32_t(NEXTGI_SHADOW_ALPHA_NEAREST | NEXTGI_SHADOW_ALPHA_CLAMP) & (NEXTGI_SHADOW_ALPHA_CLASS_MASK | NEXTGI_SHADOW_ALPHA_TEXTURE | NEXTGI_SHADOW_ALPHA_RETRACE | NEXTGI_SHADOW_ALPHA_HASH | NEXTGI_SHADOW_ALPHA_CUT)), 0u);
+}
+
+// GodotNext: nextgi_skinned_alpha_shadows (#302).
+TEST_CASE("[NextGIShadow][Skinned] Attribute stream eligibility and static-UV reuse on posed slots") {
+	// Static arena surfaces and bone-driven skinned surfaces both carry #130 attribute streams when enabled;
+	// surfaces in neither set (e.g. non-skinned blend-shape-only or virtual-only) do not.
+	CHECK_FALSE(nextgi_rt_surface_wants_hit_attributes(false, false));
+	CHECK(nextgi_rt_surface_wants_hit_attributes(true, false));
+	CHECK(nextgi_rt_surface_wants_hit_attributes(false, true));
+	CHECK(nextgi_rt_surface_wants_hit_attributes(true, true));
+
+	// Pack a 4-vertex skinned surface's static UVs, normals and vertex colors into the RT arena in #130 layout
+	// (reused by posed skinned slots where skinning only deforms positions and normals).
+	Array arrays;
+	arrays.resize(RSE::ARRAY_MAX);
+	PackedVector3Array normals = { Vector3(0, 1, 0), Vector3(0, 1, 0), Vector3(0, 1, 0), Vector3(0, 1, 0) };
+	PackedVector2Array uvs = { Vector2(0.0f, 0.0f), Vector2(1.0f, 0.0f), Vector2(1.0f, 1.0f), Vector2(0.0f, 1.0f) };
+	PackedColorArray colors = { Color(1, 1, 1, 1), Color(1, 0.5f, 0.25f, 1), Color(0, 1, 0, 1), Color(0, 0, 1, 1) };
+	arrays[RSE::ARRAY_NORMAL] = normals;
+	arrays[RSE::ARRAY_TEX_UV] = uvs;
+	arrays[RSE::ARRAY_COLOR] = colors;
+
+	NextGIArenaAllocator allocator(4096);
+	uint64_t attr_bytes = 0;
+	uint32_t chunk = UINT32_MAX;
+	uint32_t offset = 0;
+	uint32_t size = 0;
+	Vector<uint8_t> cpu;
+	REQUIRE(nextgi_hit_allocate_surface_stream(arrays, 4, allocator, attr_bytes, chunk, offset, size, cpu));
+	CHECK_EQ(chunk, 0u);
+	CHECK_EQ(offset, 0u);
+	CHECK_EQ(size, ((nextgi_hit_stream_size(4) + NEXTGI_RT_ALIGNMENT - 1u) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1u)));
+	CHECK_EQ(attr_bytes, uint64_t(size));
+	REQUIRE_EQ(uint32_t(cpu.size()), nextgi_hit_stream_size(4));
+
+	const NextGIHitStreamHeader &header = *reinterpret_cast<const NextGIHitStreamHeader *>(cpu.ptr());
+	const NextGIHitAttributes *verts = reinterpret_cast<const NextGIHitAttributes *>(cpu.ptr() + NEXTGI_HIT_ATTRIBUTE_HEADER);
+	for (int i = 0; i < 4; i++) {
+		const Vector2 unpacked = nextgi_hit_unpack_uv0(header, verts[i]);
+		CHECK(Math::is_equal_approx(unpacked.x, uvs[i].x, 1e-4f));
+		CHECK(Math::is_equal_approx(unpacked.y, uvs[i].y, 1e-4f));
+	}
+
+	// Patching an attribute-buffer UV region on the skinned mesh updates its shared stream in place.
+	const uint64_t format = RSE::ARRAY_FORMAT_VERTEX | RSE::ARRAY_FORMAT_NORMAL | RSE::ARRAY_FORMAT_COLOR | RSE::ARRAY_FORMAT_TEX_UV | RSE::ARRAY_FORMAT_BONES | RSE::ARRAY_FORMAT_WEIGHTS;
+	const NextGIHitSourceLayout layout = nextgi_hit_source_layout(format, 4);
+	REQUIRE(layout.valid);
+	REQUIRE_GE(layout.uv_offset, 0);
+	const float new_uv[2] = { 0.25f, 0.75f };
+	uint32_t begin = 0;
+	uint32_t end = 0;
+	REQUIRE(nextgi_hit_patch_stream(layout, 4, true, uint32_t(layout.attribute_stride * 2 + layout.uv_offset), reinterpret_cast<const uint8_t *>(new_uv), sizeof(new_uv), cpu.ptrw(), begin, end));
+	const Vector2 patched = nextgi_hit_unpack_uv0(header, verts[2]);
+	CHECK(Math::is_equal_approx(patched.x, 0.25f, 1e-4f));
+	CHECK(Math::is_equal_approx(patched.y, 0.75f, 1e-4f));
+
+	nextgi_hit_free_surface_stream(allocator, attr_bytes, chunk, offset, size, cpu);
+	CHECK_EQ(chunk, UINT32_MAX);
+	CHECK_EQ(attr_bytes, 0u);
+	CHECK_EQ(allocator.release_trailing_free_chunks(), 0u);
+}
+
+TEST_CASE("[NextGIShadow][Skinned] Policy routes alpha-tested and translucent skinned surfaces per D17 while keeping opaque slots unaffected") {
+	// 1. Opaque mesh material + opaque effective material: GI-visible, opaque TLAS instance, unaffected.
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(false, NEXTGI_SHADOW_CLASS_OPAQUE, 1u);
+		CHECK(p.gi_visible);
+		CHECK_FALSE(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK_FALSE(p.alpha_tested);
+		CHECK_FALSE(p.force_no_opaque);
+	}
+	// 2. Opaque mesh material + cast_shadows off: still GI-visible, not skipped, opaque.
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(false, NEXTGI_SHADOW_CLASS_OPAQUE, 0u);
+		CHECK(p.gi_visible);
+		CHECK_FALSE(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK_FALSE(p.alpha_tested);
+		CHECK_FALSE(p.force_no_opaque);
+	}
+	// 3. Opaque mesh material + alpha-tested instance override: stays GI-visible (GI forces opacity),
+	//    but shadow rays see FORCE_NO_OPAQUE + alpha table entry.
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(false, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 1u);
+		CHECK(p.gi_visible);
+		CHECK_FALSE(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK(p.alpha_tested);
+		CHECK(p.force_no_opaque);
+	}
+	// 4. Opaque mesh material + alpha-tested override + cast_shadows off: GI-visible, no alpha entry needed.
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(false, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 0u);
+		CHECK(p.gi_visible);
+		CHECK_FALSE(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK_FALSE(p.alpha_tested);
+		CHECK_FALSE(p.force_no_opaque);
+	}
+	// 5. Alpha-tested mesh material + casts shadows: excluded from GI (D17), shadow-only + FORCE_NO_OPAQUE.
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(true, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 1u);
+		CHECK_FALSE(p.gi_visible);
+		CHECK(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK(p.alpha_tested);
+		CHECK(p.force_no_opaque);
+	}
+	// 6. Alpha-tested mesh material + cast_shadows off (or layers above 20): neither GI nor shadow rays see it.
+	{
+		const NextGISkinnedShadowPolicy p0 = nextgi_shadow_skinned_policy(true, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 0u);
+		CHECK_FALSE(p0.gi_visible);
+		CHECK_FALSE(p0.shadow_only);
+		CHECK(p0.skip);
+		CHECK_FALSE(p0.alpha_tested);
+		CHECK_FALSE(p0.force_no_opaque);
+
+		const NextGISkinnedShadowPolicy p_hi = nextgi_shadow_skinned_policy(true, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 1u << 20);
+		CHECK(p_hi.skip);
+	}
+	// 7. Translucent (alpha-blended) mesh material + casts shadows: shadow-only (D17), opaque shadow (LQ6).
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(true, NEXTGI_SHADOW_CLASS_TRANSLUCENT, 1u);
+		CHECK_FALSE(p.gi_visible);
+		CHECK(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK_FALSE(p.alpha_tested);
+		CHECK_FALSE(p.force_no_opaque);
+	}
+	// 8. Alpha mesh material overridden with opaque instance material: stays shadow-only (D17), opaque shadow.
+	{
+		const NextGISkinnedShadowPolicy p = nextgi_shadow_skinned_policy(true, NEXTGI_SHADOW_CLASS_OPAQUE, 1u);
+		CHECK_FALSE(p.gi_visible);
+		CHECK(p.shadow_only);
+		CHECK_FALSE(p.skip);
+		CHECK_FALSE(p.alpha_tested);
+		CHECK_FALSE(p.force_no_opaque);
+	}
+
+	// Verify TLAS mask GI isolation and shadow trace agreement across cutout, retrace and opaque skinned casters.
+	const uint32_t light_masks[2] = { 0xFFFFFu, 1u << 2 };
+	const Allocation allocation = _allocation(light_masks, 2);
+	const NextGISkinnedShadowPolicy shadow_only_alpha = nextgi_shadow_skinned_policy(true, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 1u << 2);
+	const NextGISkinnedShadowPolicy gi_override_alpha = nextgi_shadow_skinned_policy(false, NEXTGI_SHADOW_CLASS_ALPHA_TESTED, 1u << 2);
+	const NextGISkinnedShadowPolicy opaque_skinned = nextgi_shadow_skinned_policy(false, NEXTGI_SHADOW_CLASS_OPAQUE, 1u << 2);
+
+	const uint32_t mask_shadow_only = nextgi_shadow_instance_mask(allocation, 1u << 2, shadow_only_alpha.gi_visible);
+	const uint32_t mask_gi_override = nextgi_shadow_instance_mask(allocation, 1u << 2, gi_override_alpha.gi_visible);
+	const uint32_t mask_opaque = nextgi_shadow_instance_mask(allocation, 1u << 2, opaque_skinned.gi_visible);
+	CHECK_EQ(mask_shadow_only & NEXTGI_SHADOW_MASK_GI, 0u);
+	CHECK_NE(mask_gi_override & NEXTGI_SHADOW_MASK_GI, 0u);
+	CHECK_NE(mask_opaque & NEXTGI_SHADOW_MASK_GI, 0u);
+
+	const uint32_t alpha_bits = mask_shadow_only | mask_gi_override;
+	const uint32_t mode = nextgi_shadow_light_mode(allocation, 1u << 2, alpha_bits);
+	REQUIRE((mode & NEXTGI_SHADOW_MODE_LOOP) != 0u);
+	REQUIRE((mode & NEXTGI_SHADOW_MODE_FALLBACK) == 0u);
+
+	// Cutout texel on shadow-only skinned texture caster passes; solid ring occludes.
+	NextGIShadowModelHit skinned_tex;
+	skinned_tex.mask = mask_shadow_only;
+	skinned_tex.layers = 1u << 2;
+	skinned_tex.opaque_instance = !shadow_only_alpha.force_no_opaque;
+	skinned_tex.geometry_class = NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+	skinned_tex.alpha_kept = false;
+	CHECK_FALSE(nextgi_shadow_model_occluded(mode, 1u << 2, &skinned_tex, 1));
+	CHECK_EQ(nextgi_shadow_model_occluded(mode, 1u << 2, &skinned_tex, 1), nextgi_shadow_reference_occluded(1u << 2, &skinned_tex, 1));
+	skinned_tex.alpha_kept = true;
+	CHECK(nextgi_shadow_model_occluded(mode, 1u << 2, &skinned_tex, 1));
+	CHECK_EQ(nextgi_shadow_model_occluded(mode, 1u << 2, &skinned_tex, 1), nextgi_shadow_reference_occluded(1u << 2, &skinned_tex, 1));
+
+	// Shader-alpha skinned override defers to Full HWRT retrace and agrees on both cut and kept texels.
+	NextGIShadowModelHit skinned_shader;
+	skinned_shader.mask = mask_gi_override;
+	skinned_shader.layers = 1u << 2;
+	skinned_shader.opaque_instance = !gi_override_alpha.force_no_opaque;
+	skinned_shader.geometry_class = NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+	skinned_shader.retrace = true;
+	skinned_shader.alpha_kept = false;
+	NextGIShadowModelResult retrace_cut = nextgi_shadow_model_trace(mode, 1u << 2, &skinned_shader, 1, true);
+	CHECK_FALSE(retrace_cut.occluded);
+	CHECK(retrace_cut.deferred);
+	CHECK_FALSE(retrace_cut.retraced_occluded);
+	skinned_shader.alpha_kept = true;
+	NextGIShadowModelResult retrace_solid = nextgi_shadow_model_trace(mode, 1u << 2, &skinned_shader, 1, true);
+	CHECK(retrace_solid.deferred);
+	CHECK(retrace_solid.retraced_occluded);
+
+	// Opaque skinned control behind a cutout skinned surface still commits immediately.
+	NextGIShadowModelHit skinned_solid;
+	skinned_solid.mask = mask_opaque;
+	skinned_solid.layers = 1u << 2;
+	skinned_solid.opaque_instance = !opaque_skinned.force_no_opaque;
+	skinned_solid.geometry_class = NEXTGI_SHADOW_CLASS_OPAQUE;
+	skinned_tex.alpha_kept = false;
+	const NextGIShadowModelHit combined[2] = { skinned_tex, skinned_solid };
+	CHECK(nextgi_shadow_model_occluded(mode, 1u << 2, combined, 2));
 }
 
 } // namespace TestNextGIShadowPolicy

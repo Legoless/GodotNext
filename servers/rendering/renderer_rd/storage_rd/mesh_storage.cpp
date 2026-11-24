@@ -805,7 +805,16 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface
 	if (!arena_eligible) {
 		// GodotNext: nextgi_skinned_actors (#59). Deforming surfaces stay out of the static
 		// arena; the bind-pose CPU copy serves the cards and the per-instance posed slots.
+		// GodotNext: nextgi_skinned_alpha_shadows (#302). Bone-driven surfaces still carry a #130
+		// attribute stream when streams are enabled, reusing their static-mesh UVs and attributes.
 		p_surface->rt_eligible = false;
+		p_surface->rt_skinned = (p_surface_data.format & RSE::ARRAY_FORMAT_BONES) != 0 && p_surface_data.vertex_count > 0;
+		if (p_surface->rt_skinned) {
+			p_surface->rt_vertex_count = p_surface_data.vertex_count;
+			if (nextgi_hit_attributes_enabled) {
+				_mesh_nextgi_hit_add_attributes(p_surface, p_surface_data);
+			}
+		}
 		return;
 	}
 	// If the mesh already has a VGD attached (surface outside eligible_surface_mask), keep the P1a
@@ -853,11 +862,11 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface
 // GodotNext: nextgi_hit_groups (#130). The stream is decoded through RenderingServer, so compressed and
 // uncompressed surfaces give the same attributes, and placed in its own arena range.
 void MeshStorage::_mesh_nextgi_hit_add_attributes(Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data) {
-	if (!p_surface->rt_eligible || p_surface->rt_attr_chunk != UINT32_MAX || p_surface->rt_vertex_count == 0 || RenderingServer::get_singleton() == nullptr) {
+	if (!nextgi_rt_surface_wants_hit_attributes(p_surface->rt_eligible, p_surface->rt_skinned) || p_surface->rt_attr_chunk != UINT32_MAX || p_surface->rt_vertex_count == 0 || RenderingServer::get_singleton() == nullptr) {
 		return;
 	}
 	RenderingServerTypes::SurfaceData data;
-	// Only the vertex attributes: no indices, and arena surfaces have no skin.
+	// Only the vertex attributes: no indices or skin arrays (skinned surfaces reuse static-mesh UVs/attributes, #302).
 	data.format = p_surface_data.format & ~uint64_t(RSE::ARRAY_FORMAT_INDEX | RSE::ARRAY_FORMAT_BONES | RSE::ARRAY_FORMAT_WEIGHTS);
 	data.primitive = p_surface_data.primitive;
 	data.vertex_data = p_surface_data.vertex_data;
@@ -917,7 +926,7 @@ void MeshStorage::mesh_nextgi_set_hit_attributes(bool p_enabled) {
 				_mesh_nextgi_hit_free_attributes(surface);
 				continue;
 			}
-			if (!surface->rt_eligible || surface->rt_attr_chunk != UINT32_MAX) {
+			if (!nextgi_rt_surface_wants_hit_attributes(surface->rt_eligible, surface->rt_skinned) || surface->rt_attr_chunk != UINT32_MAX) {
 				continue;
 			}
 			// A surface added before the stream was needed: read its buffers back once (mesh_get_surface()).
@@ -1164,6 +1173,7 @@ void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
 			}
 			if (is_virtual) {
 				surface->rt_eligible = false;
+				surface->rt_skinned = false;
 				surface->rt_cpu_positions.clear();
 				surface->rt_cpu_indices.clear();
 			} else {
@@ -1923,6 +1933,14 @@ bool MeshStorage::mesh_instance_get_rt_slot(RID p_instance, uint32_t p_surface, 
 	r_slot.vertex_count = surface.rt_arena_vertex_count;
 	r_slot.index_offset = surface.rt_arena_index_offset;
 	r_slot.index_count = surface.rt_arena_index_count;
+	// GodotNext: nextgi_skinned_alpha_shadows (#302).
+	if (mi->mesh != nullptr && p_surface < mi->mesh->surface_count && mi->mesh->surfaces[p_surface] != nullptr) {
+		r_slot.attribute_chunk = mi->mesh->surfaces[p_surface]->rt_attr_chunk;
+		r_slot.attribute_offset = mi->mesh->surfaces[p_surface]->rt_attr_offset;
+	} else {
+		r_slot.attribute_chunk = UINT32_MAX;
+		r_slot.attribute_offset = 0;
+	}
 	return true;
 }
 
@@ -2642,11 +2660,18 @@ void MeshStorage::_mesh_instance_add_surface_buffer(MeshInstance *mi, Mesh *mesh
 void MeshStorage::_mesh_instance_remove_surface(MeshInstance *mi, int p_surface) {
 	MeshInstance::Surface &surface = mi->surfaces[p_surface];
 
-	// GodotNext: nextgi_skinned_actors (#59).
+	// GodotNext: nextgi_skinned_actors (#59). Free the uniform set before any chunk release, and check
+	// validity in case a chunk buffer release already cascade-freed it in RenderingDevice.
+	if (surface.rt_arena_uniform_set.is_valid()) {
+		if (RD::get_singleton()->uniform_set_is_valid(surface.rt_arena_uniform_set)) {
+			RD::get_singleton()->free_rid(surface.rt_arena_uniform_set);
+		}
+		surface.rt_arena_uniform_set = RID();
+	}
 	if (surface.rt_arena_chunk != UINT32_MAX) {
 		NextGIArenaAllocator::Allocation allocation;
 		allocation.chunk = surface.rt_arena_chunk;
-		allocation.offset = surface.rt_arena_offset;
+		allocation.offset = surface.rt_arena_bind_offset;
 		allocation.size = surface.rt_arena_size;
 		nextgi_rt_allocator.free_range(allocation);
 		surface.rt_arena_chunk = UINT32_MAX;
@@ -2656,10 +2681,7 @@ void MeshStorage::_mesh_instance_remove_surface(MeshInstance *mi, int p_surface)
 		surface.rt_arena_vertex_count = 0;
 		surface.rt_arena_index_count = 0;
 		surface.rt_arena_size = 0;
-	}
-	if (surface.rt_arena_uniform_set.is_valid()) {
-		RD::get_singleton()->free_rid(surface.rt_arena_uniform_set);
-		surface.rt_arena_uniform_set = RID();
+		_mesh_nextgi_release_empty_chunks();
 	}
 
 	if (surface.versions) {
@@ -2785,7 +2807,7 @@ void MeshStorage::update_mesh_instances() {
 				// GodotNext: nextgi_skinned_actors (#59). The skeleton shader always
 				// declares set 3: bind the posed slot's chunk, or the default buffer
 				// while NextGI is off.
-				if (mi->surfaces[i].rt_arena_uniform_set.is_null()) {
+				if (mi->surfaces[i].rt_arena_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(mi->surfaces[i].rt_arena_uniform_set)) {
 					RD::Uniform arena_uniform;
 					arena_uniform.binding = 0;
 					arena_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;

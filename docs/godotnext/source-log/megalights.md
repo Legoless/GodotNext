@@ -47,6 +47,15 @@ review with GM-4):
 - The far field (merged per-cell proxies) traces every proxy as an opaque caster of every light: caster masks
   and cast shadow off apply to near-field instances only.
 
+### Skinned alpha-tested RT shadows (#302), 2026-11-23
+
+Written from the plan (§21.3 M4, D17), issue #302 and GodotNext's own #59 posed skinned slots, #130 attribute
+streams / material hit groups and #145 RT shadow visibility policy. No outside paper, article or code was
+consulted. Posed skinned surfaces reuse their mesh surface's static #130 attribute stream for UVs/attributes,
+register their posed slot indices in the shared shadow alpha table, mark alpha-tested skinned TLAS entries
+`FORCE_NO_OPAQUE` (deferred as shadow-only without the GI bit when the mesh material excludes them per D17),
+and bind #130 hit groups on alpha-tested skinned slots so Full HWRT material retrace evaluates shader-code alpha.
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

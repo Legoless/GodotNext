@@ -203,6 +203,9 @@ private:
 			float rt_eps = 0.0f;
 			float rt_edge_length = 0.0f; // 0 = base indices.
 			bool rt_eligible = false;
+			// GodotNext: nextgi_skinned_alpha_shadows (#302). True when the surface uses per-instance
+			// posed slots (#59) instead of the static arena, so it still gets a #130 attribute stream.
+			bool rt_skinned = false;
 			// CPU copies, kept until mesh_nextgi_release_cpu_geometry() (the SRC card work).
 			Vector<float> rt_cpu_positions;
 			Vector<uint32_t> rt_cpu_indices;
@@ -653,6 +656,10 @@ public:
 		uint32_t vertex_count = 0;
 		uint32_t index_offset = 0; // Bytes in chunk.
 		uint32_t index_count = 0;
+		// GodotNext: nextgi_skinned_alpha_shadows (#302). The mesh surface's #130 attribute stream
+		// (UINT32_MAX when streams are off or unavailable); skinning leaves UVs unchanged.
+		uint32_t attribute_chunk = UINT32_MAX;
+		uint32_t attribute_offset = 0;
 	};
 	bool mesh_instance_get_rt_slot(RID p_instance, uint32_t p_surface, NextGIRTSlotInfo &r_slot) const;
 
