@@ -141,6 +141,15 @@ class NextGIWRC {
 	RID translucency_history_r;
 	RID translucency_history_g;
 	RID translucency_history_b;
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	// D17 direct-light SH-L1 channel, allocated ONLY while MegaLights is enabled (0 bytes when off).
+	RID translucency_direct_r[2];
+	RID translucency_direct_g[2];
+	RID translucency_direct_b[2];
+	Vector3i translucency_direct_size;
+	uint32_t translucency_direct_slot = 0;
+	bool translucency_direct_history_valid = false;
+	uint64_t translucency_direct_bytes = 0;
 	RID translucency_radiance;
 	RID translucency_mip4;
 	RID translucency_mip2;
@@ -261,6 +270,26 @@ public:
 	RID get_translucency_g() const { return translucency_g; }
 	RID get_translucency_b() const { return translucency_b; }
 	Vector3i get_translucency_size() const { return translucency_size; }
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	// D17 direct-light SH-L1 channel (allocated only while MegaLights is enabled).
+	bool ensure_translucency_direct_volume(const Size2i &p_screen_size);
+	void free_translucency_direct_volume();
+	bool has_translucency_direct_volume() const { return translucency_direct_r[0].is_valid(); }
+	RID get_translucency_direct_r() const { return translucency_direct_r[translucency_direct_slot]; }
+	RID get_translucency_direct_g() const { return translucency_direct_g[translucency_direct_slot]; }
+	RID get_translucency_direct_b() const { return translucency_direct_b[translucency_direct_slot]; }
+	RID get_translucency_direct_write_r() const { return translucency_direct_r[1u - translucency_direct_slot]; }
+	RID get_translucency_direct_write_g() const { return translucency_direct_g[1u - translucency_direct_slot]; }
+	RID get_translucency_direct_write_b() const { return translucency_direct_b[1u - translucency_direct_slot]; }
+	void advance_translucency_direct_slot(bool p_history_valid = true) {
+		translucency_direct_slot = 1u - translucency_direct_slot;
+		translucency_direct_history_valid = p_history_valid;
+	}
+	void invalidate_translucency_direct_history() { translucency_direct_history_valid = false; }
+	bool is_translucency_direct_history_valid() const { return translucency_direct_history_valid; }
+	Vector3i get_translucency_direct_size() const { return translucency_direct_size; }
+	uint64_t get_translucency_direct_bytes() const { return translucency_direct_bytes; }
+	static uint64_t get_total_translucency_direct_bytes();
 	RID get_counter_buffer() const { return counter_buffer; }
 	bool is_ready() const { return radiance.is_valid(); }
 	RID get_translucency_mark_target(const Size2i &p_size);

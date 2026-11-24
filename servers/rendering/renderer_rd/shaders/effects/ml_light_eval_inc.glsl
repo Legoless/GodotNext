@@ -148,11 +148,46 @@ struct MLSurface {
 struct MLLightEval {
 	vec3 diffuse;
 	vec3 specular;
+	vec3 transmission; // GodotNext: megalights_fog_translucency (#137). Unattenuated SSS back-face transmission lobe.
 	float attenuation;
 	vec3 ray_dir_ws;
 	float ray_dist;
 	bool valid;
 };
+
+// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+// SSS back-face transmission helpers (zero bias for non-SSS pixels).
+#define ML_SSS_TRANSMIT_BOOST 0.2
+#define ML_SSS_EXTINCTION_DEFAULT 4.0
+
+float ml_sss_transmission_lobe(float p_ndotl) {
+	return clamp(ML_SSS_TRANSMIT_BOOST - p_ndotl, 0.0, 1.0) * (1.0 / M_PI);
+}
+
+float ml_sss_transmission_attenuation(float p_hit_dist, float p_visibility) {
+	if (p_visibility > 0.5) {
+		return 1.0;
+	}
+	if (p_hit_dist >= 0.0 && p_hit_dist < ML_HIT_DIST_MISS * 0.99) {
+		return exp(-p_hit_dist * ML_SSS_EXTINCTION_DEFAULT);
+	}
+	return 0.0;
+}
+
+bool ml_surface_has_sss_transmission(MLSurface p_s) {
+	return p_s.shading_model == ML_MODEL_SSS || (p_s.model_flags & ML_FLAG_TRANSMISSION) != 0u;
+}
+
+vec3 ml_eval_sss_transmission(MLSurface p_s, vec3 p_L, vec3 p_light_color, float p_attenuation) {
+	if (!ml_surface_has_sss_transmission(p_s) || !(p_attenuation > 0.0)) {
+		return vec3(0.0);
+	}
+	float lobe = ml_sss_transmission_lobe(dot(p_s.normal, p_L));
+	if (!(lobe > 0.0)) {
+		return vec3(0.0);
+	}
+	return p_s.diffuse_albedo * p_light_color * (lobe * p_attenuation * p_s.direct_ao);
+}
 
 float ml_luminance(vec3 p_c) {
 	return dot(p_c, vec3(0.2126, 0.7152, 0.0722));
@@ -487,6 +522,7 @@ MLLightEval ml_invalid_eval() {
 	MLLightEval ev;
 	ev.diffuse = vec3(0.0);
 	ev.specular = vec3(0.0);
+	ev.transmission = vec3(0.0);
 	ev.attenuation = 0.0;
 	ev.ray_dir_ws = vec3(0.0, 1.0, 0.0);
 	ev.ray_dist = 0.0;
@@ -541,6 +577,7 @@ MLLightEval ml_eval_omni(LightData p_light, MLSurface p_s, float p_falloff_thres
 	}
 
 	ml_eval_brdf(p_s, L, size_A, color, att, p_light.specular_amount, ev.diffuse, ev.specular);
+	ev.transmission = ml_eval_sss_transmission(p_s, L, color, att);
 	ev.attenuation = att;
 	ev.valid = true;
 
@@ -602,6 +639,7 @@ MLLightEval ml_eval_spot(LightData p_light, MLSurface p_s, float p_falloff_thres
 	}
 
 	ml_eval_brdf(p_s, L, size_A, color, att, p_light.specular_amount, ev.diffuse, ev.specular);
+	ev.transmission = ml_eval_sss_transmission(p_s, L, color, att);
 	ev.attenuation = att;
 	ev.valid = true;
 
@@ -711,6 +749,12 @@ MLLightEval ml_eval_rect(LightData p_light, MLSurface p_s, float p_falloff_thres
 
 	ev.diffuse = p_s.diffuse_albedo * color * (ltc_diffuse * att_ltc * p_s.direct_ao);
 	ev.specular = color * fresnel_color * (ltc_specular * p_light.specular_amount * att_ltc * p_s.direct_ao);
+	if (ml_surface_has_sss_transmission(p_s)) {
+		float ltc_trans = 0.0;
+		vec3 ltc_trans_tex = vec3(1.0);
+		ltc_evaluate(-p_s.normal, p_s.view_dir, mat3(1.0), points, vec4(0.0), 0.0, ml_area_light_atlas_tex, ml_sampler_linear_mips_clamp, ltc_trans, ltc_trans_tex);
+		ev.transmission = p_s.diffuse_albedo * color * (ltc_trans * att_ltc * p_s.direct_ao);
+	}
 	ev.attenuation = att_raw;
 	ev.valid = true;
 
@@ -757,6 +801,12 @@ MLLightEval ml_eval_textured_rect(LightData p_light, MLSurface p_s, float p_fall
 
 	ev.diffuse = p_s.diffuse_albedo * ltc_diffuse_tex * color * (ltc_diffuse * att_ltc * p_s.direct_ao);
 	ev.specular = ltc_specular_tex * color * fresnel_color * (ltc_specular * p_light.specular_amount * att_ltc * p_s.direct_ao);
+	if (ml_surface_has_sss_transmission(p_s)) {
+		float ltc_trans = 0.0;
+		vec3 ltc_trans_tex = vec3(1.0);
+		ltc_evaluate(-p_s.normal, p_s.view_dir, mat3(1.0), points, tex_rect, max_mipmap, ml_area_light_atlas_tex, ml_sampler_linear_mips_clamp, ltc_trans, ltc_trans_tex);
+		ev.transmission = p_s.diffuse_albedo * ltc_trans_tex * color * (ltc_trans * att_ltc * p_s.direct_ao);
+	}
 	ev.attenuation = att_raw;
 	ev.valid = true;
 
@@ -789,6 +839,7 @@ MLLightEval ml_eval_directional(DirectionalLightData p_light, MLSurface p_s, boo
 
 	float size_A = p_soft_shadows ? p_light.size : 0.0;
 	ml_eval_brdf(p_s, p_light.direction, size_A, color, 1.0, p_light.specular, ev.diffuse, ev.specular);
+	ev.transmission = ml_eval_sss_transmission(p_s, p_light.direction, color, 1.0);
 	ev.attenuation = 1.0;
 	ev.valid = true;
 

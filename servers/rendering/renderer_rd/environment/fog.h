@@ -194,7 +194,9 @@ private:
 			uint32_t vsm_table_maps;
 			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Active per-view LightFunctionEntry count (0 when off).
 			uint32_t light_function_count;
-			uint32_t lf_pad[3];
+			// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Non-zero when MegaLights froxel light volume is bound.
+			uint32_t ml_froxel_active;
+			uint32_t lf_pad[2];
 		};
 		static_assert(sizeof(ParamsUBO) % 16 == 0, "VolumetricFogShader::ParamsUBO must stay 16-byte aligned for std140.");
 
@@ -364,6 +366,8 @@ public:
 		RID bound_light_function_buffer;
 		// GodotNext: light_source_parity (#140).
 		RID bound_ies_profile_atlas;
+		// GodotNext: megalights_fog_translucency (#137). Last bound MegaLights froxel lighting volume RID.
+		RID bound_ml_froxel_light_tex;
 
 		int last_shadow_filter = -1;
 
@@ -426,6 +430,9 @@ public:
 		uint32_t light_function_count = 0;
 		// GodotNext: light_source_parity (#140). IES profile atlas for volumetric fog light evaluation.
 		RID ies_profile_atlas;
+		// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Shared MegaLights froxel light volume.
+		RID ml_froxel_light_tex;
+		bool ml_froxel_active = false;
 	};
 	void volumetric_fog_update(const VolumetricFogSettings &p_settings, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes);
 };

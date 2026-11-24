@@ -153,7 +153,7 @@ void main() {
 				continue;
 			}
 
-			float w_base = ml_luminance(abs(ev.diffuse + ev.specular));
+			float w_base = ml_luminance(abs(ev.diffuse + ev.specular + ev.transmission));
 			if (!(w_base > 0.0)) {
 				continue;
 			}
@@ -188,7 +188,7 @@ void main() {
 			if (!ev.valid) {
 				continue;
 			}
-			float w_base = ml_luminance(abs(ev.diffuse + ev.specular));
+			float w_base = ml_luminance(abs(ev.diffuse + ev.specular + ev.transmission));
 			if (!(w_base > 0.0)) {
 				continue;
 			}

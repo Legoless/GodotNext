@@ -3637,6 +3637,9 @@
 		<member name="rendering/megalights/far_field" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], MegaLights shadow rays that exit the near-field hardware ray-tracing scene radius continue against the NextGI far-field TLAS (opaque per-cell proxies) when the far field is available. Off by default.
 		</member>
+		<member name="rendering/megalights/front_layer_translucency" type="bool" setter="" getter="" default="false">
+			If [code]true[/code] and [member rendering/megalights/enabled] is [code]true[/code], runs a high-quality per-pixel MegaLights direct-lighting, shadow, and denoise pass with a separate temporal history on the frontmost transparent layer from the transparent prepass. Transparent layers behind the frontmost layer continue to use the shared D17 translucency volume's direct SH-L1 channel. Off by default ([code]false[/code]), allocating zero front-layer MegaLights buffers while disabled.
+		</member>
 		<member name="rendering/megalights/reference_mode" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables MegaLights exhaustive reference mode: instead of stochastic light sampling, every pixel evaluates all influencing lights with stochastic ray-traced visibility ([code]trace_shadow()[/code]) and accumulates an unbiased running mean across frames for ground-truth verification.
 		</member>

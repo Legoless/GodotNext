@@ -3235,16 +3235,21 @@ void fragment_shader(in SceneData scene_data) {
 // LIGHTING
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
-	// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6, GM-9).
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6, GM-9) & megalights_fog_translucency (#137, M7).
 	// Non-fallback opaque pixels composite denoised MegaLights direct radiance and skip lights
-	// carrying LIGHT_FLAG_MEGALIGHTS in the Forward+ loops. Fallback materials (#136 model 3 or
-	// MEGALIGHTS_FALLBACK) bypass the composite and shade every light through Forward+.
+	// carrying LIGHT_FLAG_MEGALIGHTS in the Forward+ loops. Transparent pixels with MegaLights
+	// active sample the D17 direct SH-L1 volume (or front-layer targets when depth matches).
+	// Fallback materials (#136 model 3 or MEGALIGHTS_FALLBACK) bypass MegaLights and shade in Forward+.
 	bool ml_pixel_active = false;
+	bool ml_translucent_active = false;
 #if !defined(MEGALIGHTS_FALLBACK) && !defined(USE_VERTEX_LIGHTING) && !defined(MODE_RENDER_SDF) && !defined(MODE_VSM)
 	if (sc_use_megalights()) {
 		vec4 ml_mat_px = texelFetch(sampler2D(megalights_material, SAMPLER_NEAREST_CLAMP), ivec2(NEXTGEO_FRAG_COORD.xy), 0);
 		uint ml_model_px = uint(clamp(round(ml_mat_px.b * 255.0), 0.0, 255.0)) & 3u;
 		ml_pixel_active = (ml_model_px != 3u);
+	} else if (sc_use_megalights_translucent()) {
+		ml_pixel_active = true;
+		ml_translucent_active = true;
 	}
 #endif
 
@@ -4266,28 +4271,58 @@ void fragment_shader(in SceneData scene_data) {
 	diffuse_light *= 1.0 - metallic;
 	ambient_light *= 1.0 - metallic;
 
-	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
-	// Composite denoised demodulated direct diffuse & specular radiance on non-fallback opaque pixels,
-	// matching #135's exact demodulation factors (0.01 floor) and applying SSAO direct occlusion once.
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6) & megalights_fog_translucency (#137, M7).
+	// Opaque pixels composite denoised demodulated direct diffuse & specular radiance.
+	// Transparent pixels composite high-quality per-pixel front-layer MegaLights when front-layer
+	// depth matches, or fall back to the shared D17 translucency volume direct SH-L1 channel.
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && !defined(MEGALIGHTS_FALLBACK) && !defined(USE_VERTEX_LIGHTING) && !defined(MODE_RENDER_SDF) && !defined(MODE_VSM)
 	if (ml_pixel_active) {
-		ivec2 ml_px = ivec2(NEXTGEO_FRAG_COORD.xy);
-		vec3 ml_diff_demod = max(texelFetch(sampler2D(megalights_diffuse, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
-		vec3 ml_spec_demod = max(texelFetch(sampler2D(megalights_specular, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
-		vec3 ml_diff_factor = max(albedo * (1.0 - metallic), vec3(0.01));
 		float ml_nov = clamp(dot(normal, view), 0.0001, 1.0);
 		vec2 ml_dfg = prefiltered_dfg(roughness, ml_nov);
 		vec3 ml_energy_comp = 1.0 + f0 * (1.0 / max(ml_dfg.y, 1e-4) - 1.0);
 		float ml_f90 = clamp(dot(f0, vec3(50.0 * 0.33)), 0.0, 1.0);
 		vec3 ml_spec_env_brdf = max(ml_energy_comp * ((vec3(ml_f90) - f0) * ml_dfg.x + f0 * ml_dfg.y), vec3(0.0));
-		vec3 ml_spec_factor = max(ml_spec_env_brdf, vec3(0.01));
+		if (ml_translucent_active) {
+			bool ml_used_front_layer = false;
+			if (sc_use_megalights_front_layer()) {
+				float ml_fl_depth = texelFetch(nextgi_front_layer_depth, ivec2(NEXTGEO_FRAG_COORD.xy), 0).r;
+				if (ml_fl_depth > 0.0) {
+					vec2 ml_fl_ndc = NEXTGEO_FRAG_COORD.xy / scene_data.viewport_size * 2.0 - 1.0;
+					vec4 ml_fl_view = inv_projection_matrix * vec4(ml_fl_ndc, ml_fl_depth, 1.0);
+					float ml_fl_view_z = ml_fl_view.z / ml_fl_view.w;
+					if (abs(vertex_interp.z - ml_fl_view_z) <= max(0.001, abs(vertex_interp.z) * 0.001)) {
+						ivec2 ml_px = ivec2(NEXTGEO_FRAG_COORD.xy);
+						vec3 ml_fl_diff = max(texelFetch(sampler2D(megalights_front_layer_diffuse, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
+						vec3 ml_fl_spec = max(texelFetch(sampler2D(megalights_front_layer_specular, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
+						diffuse_light += ml_fl_diff * albedo * (1.0 - metallic) * ao;
+						direct_specular_light += ml_fl_spec * ml_spec_env_brdf * ao;
+						ml_used_front_layer = true;
+					}
+				}
+			}
+			if (!ml_used_front_layer) {
+				vec3 ml_world_n = mat3(inv_view_matrix) * normal;
+				vec3 ml_world_ref = mat3(inv_view_matrix) * reflect(-view, normal);
+				vec3 ml_d17_diff;
+				vec3 ml_d17_spec;
+				megalights_translucency_volume(screen_uv, -vertex_interp.z, ml_world_n, ml_world_ref, roughness, ml_d17_diff, ml_d17_spec);
+				diffuse_light += ml_d17_diff * albedo * (1.0 - metallic) * ao;
+				direct_specular_light += ml_d17_spec * ml_spec_env_brdf * ao;
+			}
+		} else {
+			ivec2 ml_px = ivec2(NEXTGEO_FRAG_COORD.xy);
+			vec3 ml_diff_demod = max(texelFetch(sampler2D(megalights_diffuse, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
+			vec3 ml_spec_demod = max(texelFetch(sampler2D(megalights_specular, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
+			vec3 ml_diff_factor = max(albedo * (1.0 - metallic), vec3(0.01));
+			vec3 ml_spec_factor = max(ml_spec_env_brdf, vec3(0.01));
 #ifndef AMBIENT_LIGHT_DISABLED
-		float ml_direct_ssao = ml_ssao_direct_scale;
+			float ml_direct_ssao = ml_ssao_direct_scale;
 #else
-		float ml_direct_ssao = 1.0;
+			float ml_direct_ssao = 1.0;
 #endif
-		diffuse_light += ml_diff_demod * ml_diff_factor * ml_direct_ssao;
-		direct_specular_light += ml_spec_demod * ml_spec_factor * ml_direct_ssao;
+			diffuse_light += ml_diff_demod * ml_diff_factor * ml_direct_ssao;
+			direct_specular_light += ml_spec_demod * ml_spec_factor * ml_direct_ssao;
+		}
 	}
 #endif
 

@@ -61,9 +61,12 @@ TEST_FORCE_LINK(test_nextgi)
 #include "servers/rendering/renderer_rd/environment/next_gi_bake_shaders.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
-// GodotNext: megalights_visibility (#146) / megalights_denoiser (#135)
+// GodotNext: megalights_visibility (#146) / megalights_denoiser (#135) / megalights_fog_translucency (#137)
 #include "servers/rendering/renderer_rd/shaders/effects/ml_denoise_spatial.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_denoise_temporal.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_front_layer.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_froxel.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_froxel_compute.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_screen_trace.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_shade_samples.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays.glsl.gen.h"
@@ -290,32 +293,38 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 	CHECK_FALSE(MlShadeSamplesShaderRD().requires_ray_query());
 	CHECK_FALSE(MlDenoiseTemporalShaderRD().requires_ray_query());
 	CHECK_FALSE(MlDenoiseSpatialShaderRD().requires_ray_query());
+	// GodotNext: megalights_fog_translucency (#137)
+	CHECK(MlFroxelShaderRD().requires_ray_query());
+	CHECK_FALSE(MlFroxelComputeShaderRD().requires_ray_query());
+	CHECK_FALSE(MlFrontLayerShaderRD().requires_ray_query());
 }
 
 // GodotNext: nextgi_vulkan (#50)
 TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141), path_tracer_lights_camera (#169), megalights_visibility (#146), megalights_denoiser (#135).
-	REQUIRE(versions.size() == 23);
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141), path_tracer_lights_camera (#169), megalights_visibility (#146), megalights_denoiser (#135), megalights_fog_translucency (#137).
+	REQUIRE(versions.size() == 26);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	const char *expected[23] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+	const char *expected[26] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
 		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD",
 		"PathTracerShaderRD", "PathTracerDenoiseShaderRD", "NextgiRtShadowAllocShaderRD", "NextgiRtShadowsShaderRD", "NextgiDenoiseShadowShaderRD", "PathTracerSkyCdfShaderRD",
 		"MlScreenTraceShaderRD", "MlTraceRaysShaderRD", "MlTraceRaysSwrtShaderRD", "MlTraceVsmShaderRD",
-		"MlShadeSamplesShaderRD", "MlDenoiseTemporalShaderRD", "MlDenoiseSpatialShaderRD" };
-	for (int i = 0; i < 23; i++) {
+		"MlShadeSamplesShaderRD", "MlDenoiseTemporalShaderRD", "MlDenoiseSpatialShaderRD",
+		"MlFroxelShaderRD", "MlFroxelComputeShaderRD", "MlFrontLayerShaderRD" };
+	for (int i = 0; i < 26; i++) {
 		CHECK_EQ(names[i], String(expected[i]));
 	}
-	// The hardware instances and the self-test need ray query; the software siblings, path-tracer denoiser,
-	// RT-shadow alloc/denoise passes, sky CDF builder, MegaLights screen/SWRT/VSM passes, and MegaLights
-	// shade/denoiser passes bake everywhere (#261, #168, #141, #169, #146, #135).
-	for (int i = 0; i < 23; i++) {
-		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14 || i == 15 || i == 16 || i == 18 || i == 19 || i >= 20;
+	// The hardware instances, self-test, and MlFroxelShaderRD need ray query; the software siblings,
+	// path-tracer denoiser, RT-shadow alloc/denoise passes, sky CDF builder, MegaLights screen/SWRT/VSM
+	// passes, MegaLights shade/denoiser passes, MlFroxelComputeShaderRD, and MlFrontLayerShaderRD bake
+	// everywhere (#261, #168, #141, #169, #146, #135, #137).
+	for (int i = 0; i < 26; i++) {
+		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14 || i == 15 || i == 16 || i == 18 || i == 19 || (i >= 20 && i <= 22) || i == 24 || i == 25;
 		CHECK_EQ(versions[i].first->requires_ray_query(), !no_ray_query);
 	}
 

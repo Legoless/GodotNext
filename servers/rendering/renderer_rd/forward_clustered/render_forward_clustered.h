@@ -87,12 +87,23 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	RendererRD::NextGeoDebug nextgeo_debug;
 	bool nextgeo_virtual_active = false;
 	bool nextgeo_visibility_only_active = false;
-	// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135) / megalights_frame (#143).
+	// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135) / megalights_frame (#143) / megalights_fog_translucency (#137).
 	bool megalights_inputs_active = false;
 	bool megalights_composite_active = false;
+	bool megalights_froxel_fog_active = false;
+	bool megalights_translucent_active = false;
+	bool megalights_front_layer_active = false;
+	bool megalights_pending_compact = false;
 	RID ml_bind_diffuse;
 	RID ml_bind_specular;
 	RID ml_bind_material;
+	RID ml_bind_froxel_fog;
+	RID ml_bind_d17_r;
+	RID ml_bind_d17_g;
+	RID ml_bind_d17_b;
+	RID ml_bind_front_layer_diffuse;
+	RID ml_bind_front_layer_specular;
+	RendererRD::MegaLights::FrameInputs ml_last_frame_inputs;
 	bool view_reset_temporal_history = false;
 	// GodotNext: light_grid (#139, plan §21.3 contract M2). True only when this view builds and shades from the packed light grid.
 	bool packed_light_grid_active = false;
@@ -655,7 +666,7 @@ private:
 	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 	RendererRD::NextGIFrontLayer front_layer;
-	void _render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
+	void _render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_use_nextgi);
 	void _render_nextgi_translucency_mark(RenderDataRD *p_render_data);
 	// GodotNext: avboit (#295, plan §21.2.1). AVBOIT, the order-independent transparent pass.
 	RendererRD::AVBOIT avboit;

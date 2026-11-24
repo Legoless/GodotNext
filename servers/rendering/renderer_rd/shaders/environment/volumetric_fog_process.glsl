@@ -226,9 +226,9 @@ layout(set = 0, binding = 15, std140) uniform Params {
 	// GodotNext: vsm_fog_translucency (#215). World-space camera origin for VSM coarse lookups and table capacity (0 when off).
 	vec3 vsm_cam_origin;
 	uint vsm_table_maps;
-	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8) & megalights_fog_translucency (#137, contract M7).
 	uint light_function_count;
-	uint lf_pad0;
+	uint ml_froxel_active;
 	uint lf_pad1;
 	uint lf_pad2;
 }
@@ -294,6 +294,8 @@ layout(set = 0, binding = 28, std430) buffer restrict readonly LightFunctionBuff
 	LightFunctionEntry data[];
 }
 light_function_data;
+// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Shared MegaLights froxel lighting volume.
+layout(set = 0, binding = 30) uniform texture3D ml_froxel_light_tex;
 #endif
 
 float get_depth_at_pos(float cell_depth_size, int z) {
@@ -475,6 +477,9 @@ void main() {
 		vec3 froxel_world_pos = mat3(params.cam_rotation) * view_pos + params.vsm_cam_origin;
 
 		for (uint i = 0; i < params.directional_light_count; i++) {
+			if (params.ml_froxel_active != 0u && (directional_lights.data[i].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+				continue; // Handled by MegaLights shared froxel volume (#137).
+			}
 			if (directional_lights.data[i].volumetric_fog_energy > 0.001) {
 				vec3 shadow_attenuation = vec3(1.0);
 
@@ -576,6 +581,9 @@ void main() {
 					merged_mask &= ~(1 << bit);
 
 					uint light_index = 32 * i + bit;
+					if (params.ml_froxel_active != 0u && (omni_lights.data[light_index].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+						continue; // Handled by MegaLights shared froxel volume (#137).
+					}
 
 					//if (!bool(omni_omni_lights.data[light_index].mask & draw_call.layer_mask)) {
 					//	continue; //not masked
@@ -668,6 +676,9 @@ void main() {
 					//}
 
 					uint light_index = 32 * i + bit;
+					if (params.ml_froxel_active != 0u && (spot_lights.data[light_index].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+						continue; // Handled by MegaLights shared froxel volume (#137).
+					}
 
 					vec3 light_pos = spot_lights.data[light_index].position;
 					vec3 light_rel_vec = spot_lights.data[light_index].position - view_pos;
@@ -750,6 +761,9 @@ void main() {
 					merged_mask &= ~(1 << bit);
 
 					uint light_index = 32 * i + bit;
+					if (params.ml_froxel_active != 0u && (area_lights.data[light_index].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+						continue; // Handled by MegaLights shared froxel volume (#137).
+					}
 					float shadow_attenuation = 1.0;
 
 					vec3 area_width = area_lights.data[light_index].area_width;
@@ -859,6 +873,12 @@ void main() {
 					}
 				}
 			}
+		}
+
+		// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+		// Add direct volumetric in-scattering from the shared MegaLights froxel lighting volume.
+		if (params.ml_froxel_active != 0u) {
+			total_light += max(texelFetch(sampler3D(ml_froxel_light_tex, linear_sampler), pos, 0).rgb, vec3(0.0));
 		}
 
 		vec3 world_pos = mat3(params.cam_rotation) * view_pos;

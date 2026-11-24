@@ -805,6 +805,10 @@ public:
 	// frame's first view, so the other views come from the previous frame.
 	void get_page_cameras(LocalVector<Vector3> &r_cameras) const;
 	NextGIWRC *ensure_wrc(RenderSceneBuffersRD *p_render_buffers);
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	// Allocate/free the D17 direct-light SH-L1 channel strictly while MegaLights is enabled (0 bytes when off).
+	NextGIWRC *ensure_megalights_translucency_direct(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_screen_size);
+	void free_megalights_translucency_direct(RenderSceneBuffersRD *p_render_buffers);
 	// GodotNext: nextgi_wrc_per_view (#253). The frame block's slots a scenario runs once per frame
 	// (AS and SRC work); every other slot, the WRC update included, runs for each view.
 	static bool nextgi_is_scenario_slot(int p_slot) { return p_slot == PASS_SLOT_AS_UPDATES || p_slot == PASS_SLOT_AS_BUILDS || p_slot == PASS_SLOT_SRC_CAPTURE || p_slot == PASS_SLOT_SRC_RELIGHT; }

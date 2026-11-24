@@ -339,6 +339,62 @@ Contract decisions for M1 & M6:
   card shadows while rotating `<= 2` shadowed lights per texel per frame, and enforces the R2 cap
   (`NEXTGI_SRC_RELIGHT_MEGALIGHTS_HIGH_RAY_CAP = 256000`) at High quality (`src_relight_rays <= 256000`).
 
+### MegaLights fog, translucency, front-layer pass & SSS transmission (#137, contract M7, GM-6, budget M-8), 2026-11-24
+
+- Standard published volumetric lighting, spherical-harmonic irradiance, and subsurface Beer-Lambert textbook
+  algorithms implemented from first principles:
+  - Order-1 zonal-harmonic clamped-cosine projection (`L0 = 0.25/pi * E`, `L1 = 0.5/pi * E * L_ws`, matching
+    exact hemisphere energy conservation and GodotNext's #61 D17 translucency volume layout `L0 + dot(N, L1)`).
+  - Henyey-Greenstein phase function matching Godot's `volumetric_fog_process.glsl` sign convention.
+  - Beer-Lambert exponential thickness attenuation (`exp(-thickness * extinction)`) with wrapped back-face
+    transmission lobe (`clamp(boost - NdotL, 0, 1) / pi`) for SSS back-face transmission.
+- Everything else — `ml_froxel_inc.glsl`, `ml_froxel.glsl`, `ml_froxel_compute.glsl`, `ml_front_layer.glsl`,
+  `MegaLights::render_froxel()` / `render_front_layer()`, `NextGIWRC` conditional D17 direct SH-L1 channel,
+  `Fog` / `volumetric_fog_process.glsl` MegaLights froxel integration, Forward+ transparent composite, and
+  SSS per-sample transmission in `ml_shade_samples.glsl` / `ml_reference.glsl` — was written from plan §21.3
+  contract M7 (GM-6, budget M-8), issue #137, and GodotNext's own subsystems (#61 D17 translucency volume and
+  front-layer prepass, #138 Light Function Atlas, #139 packed froxel light grid, #140 IES profiles & area barn
+  doors, #143 `LIGHT_FLAG_MEGALIGHTS`, #145 `trace_shadow()`, #146 `hit_distance_texture`, and #215 VSM coarse
+  pages). No Unreal Engine source or shaders, UE plugins, NvRTX, or third-party implementations were consulted.
+
+Contract decisions for M7:
+- **Shared froxel lighting volume (`ml_froxel.glsl`, `ml_froxel_compute.glsl`, GM-6):** One stochastic MegaLights
+  dispatch per frame (default `1` sample/froxel/frame on Low/Medium/High, `2` on Epic) evaluates all eligible
+  `LIGHT_FLAG_MEGALIGHTS` lights with IES profiles (#140) and Light Function Atlas (#138), traces visibility ONCE
+  via #145 `trace_shadow()` (or #215 `vsm_fog_shadow_coarse_*()` for `VIRTUAL` lights and non-RT fallback),
+  temporally reprojects and accumulates volumetric in-scattering radiance into `ml_froxel_fog`, and projects the
+  exact same sample set into SH-L1. When both volumetric fog and transparents are active (`shared_fog_d17`),
+  `MODE_RESAMPLE_D17` projects the shared fog-grid SH-L1 into the D17 volume via a single trilinear lookup with
+  zero additional light loops or rays; when volumetric fog is disabled (`d17_only`), Pass 1 dispatches directly
+  on the D17 grid with zero fog froxel allocations.
+- **Volumetric fog integration (`fog.{h,cpp}`, `volumetric_fog_process.glsl`):** Binds the accumulated MegaLights
+  froxel 3D texture at Set 0 binding `30` (`MODE_DENSITY` only, defaulting to `DEFAULT_RD_TEXTURE_3D_BLACK` when
+  inactive) and uses the first spare padding word of `VolumetricFogShader::ParamsUBO` for `ml_froxel_active`.
+  In `volumetric_fog_process.glsl`, directional, omni, spot, and area light loops skip `LIGHT_FLAG_MEGALIGHTS`
+  lights and add `ml_froxel_light_tex` once per froxel, preserving #215 VSM coarse-page bindings cleanly.
+- **Conditional D17 direct SH-L1 channel (`next_gi_wrc.{h,cpp}`, `next_gi.{h,cpp}`):** Adds ping-pong `RGBA16F`
+  direct-light SH-L1 volumes (`1/16 screen x 32` log slices, `near = 0.05`, `far = 64.0`) allocated strictly while
+  MegaLights is enabled and freed immediately when MegaLights turns off (`d17_direct_memory_bytes == 0`). Works
+  independently of whether NextGI GI itself is enabled (allocating only the direct channel, never the WRC).
+- **High-quality front-layer translucency (`rendering/megalights/front_layer_translucency = false`, `ml_front_layer.glsl`):**
+  Off by default (allocating zero front-layer MegaLights buffers). When enabled with transparent meshes present,
+  reuses #61's front-layer depth and normal-roughness prepass (`NextGIFrontLayer`), synthesizes neutral demodulated
+  M1 guides via `ml_front_layer.glsl`, and runs the full MegaLights sampling, visibility (with opaque Hi-Z screen
+  traces disabled), guiding, shading, and spatio-temporal denoising pipeline on a separate per-view `MegaLightsViewData`
+  history (`megalights_front_layer`). Forward+ Set 1 binds D17 direct SH-L1 at `72..74`, front-layer denoised
+  diffuse/specular at `75..76`, and `ShaderSpecialization::packed_1` bits `17` (`use_megalights_translucent`) and
+  `18` (`use_megalights_front_layer`): pixels matching front-layer depth use the high-quality per-pixel pass while
+  deeper layers automatically fall back to the D17 direct SH-L1 volume.
+- **SSS back-face transmission (`ml_light_eval_inc.glsl`, `ml_generate_samples.glsl`, `ml_trace_rays.glsl`,
+  `ml_shade_samples.glsl`, `ml_reference.glsl`):** For SSS/transmission surfaces (`ML_MODEL_SSS` or `ML_FLAG_TRANSMISSION`),
+  backlit lights receive non-zero WRS weight via the wrapped transmission lobe, back-facing shadow rays offset
+  inward along `-world_normal` so rays measure local occluder thickness without front-face self-intersection, and
+  `ml_shade_samples.glsl` / `ml_reference.glsl` accumulate `exp(-thickness * extinction)` transmitted radiance from
+  `hit_distance_texture` directly into diffuse output, with zero bias on non-SSS pixels.
+- **Zero-allocation OFF invariant:** When `rendering/megalights/enabled = false`, opaque, froxel, D17 direct-channel,
+  and front-layer MegaLights allocations are all strictly `0` bytes (`memory_bytes == 0`) and rendered frames remain
+  byte-identical to baseline.
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

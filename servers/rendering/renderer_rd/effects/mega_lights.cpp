@@ -46,7 +46,11 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_front_layer.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_froxel.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_froxel_compute.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_generate_samples.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_guiding.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_reference.glsl.gen.h"
@@ -150,6 +154,31 @@ static uint32_t ml_xorshift32_from_u64(uint64_t &r_state) {
 }
 
 static SafeNumeric<uint64_t> ml_total_allocated_bytes;
+static SafeNumeric<uint64_t> ml_froxel_allocated_bytes;
+static SafeNumeric<uint64_t> ml_front_layer_allocated_bytes;
+static SafeNumeric<uint32_t> ml_last_froxel_dispatch_mode; // 0=off, 1=shared_fog_d17, 2=fog_only, 3=d17_only
+static SafeNumeric<uint32_t> ml_last_froxel_samples_per_cell;
+static SafeNumeric<uint32_t> ml_last_froxel_dispatched_cells;
+
+static RID ml_create_rgba16f_3d_texture(RD *p_rd, const Vector3i &p_size, const char *p_name) {
+	RD::TextureFormat tf;
+	tf.texture_type = RD::TEXTURE_TYPE_3D;
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	tf.width = uint32_t(MAX(p_size.x, 1));
+	tf.height = uint32_t(MAX(p_size.y, 1));
+	tf.depth = uint32_t(MAX(p_size.z, 1));
+	tf.array_layers = 1;
+	tf.mipmaps = 1;
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	RID tex = p_rd->texture_create(tf, RD::TextureView());
+	if (tex.is_valid()) {
+		if (p_name != nullptr) {
+			p_rd->set_resource_name(tex, p_name);
+		}
+		p_rd->texture_clear(tex, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+	return tex;
+}
 
 static void ml_free_rid(RD *p_rd, RID &r_rid) {
 	if (p_rd != nullptr && r_rid.is_valid()) {
@@ -207,13 +236,28 @@ MegaLightsViewData::MegaLightsViewData() {
 }
 
 void MegaLightsViewData::_update_memory_accounting() {
-	const uint64_t next_total = sampling_bytes + visibility_bytes + retrace_bytes + shade_bytes + denoise_bytes + denoise_debug_bytes + reference_bytes + verify_bytes + transient_bytes;
+	const uint64_t next_total = sampling_bytes + visibility_bytes + retrace_bytes + shade_bytes + denoise_bytes + denoise_debug_bytes + reference_bytes + verify_bytes + transient_bytes + froxel_bytes + front_layer_guide_bytes;
 	if (next_total >= tracked_total_bytes) {
 		ml_total_allocated_bytes.add(next_total - tracked_total_bytes);
 	} else {
 		ml_total_allocated_bytes.sub(tracked_total_bytes - next_total);
 	}
 	tracked_total_bytes = next_total;
+
+	if (froxel_bytes >= tracked_froxel_bytes) {
+		ml_froxel_allocated_bytes.add(froxel_bytes - tracked_froxel_bytes);
+	} else {
+		ml_froxel_allocated_bytes.sub(tracked_froxel_bytes - froxel_bytes);
+	}
+	tracked_froxel_bytes = froxel_bytes;
+
+	const uint64_t next_fl = is_front_layer_view ? next_total : front_layer_guide_bytes;
+	if (next_fl >= tracked_front_layer_bytes) {
+		ml_front_layer_allocated_bytes.add(next_fl - tracked_front_layer_bytes);
+	} else {
+		ml_front_layer_allocated_bytes.sub(tracked_front_layer_bytes - next_fl);
+	}
+	tracked_front_layer_bytes = next_fl;
 }
 
 void MegaLightsViewData::_free_sampling_buffers() {
@@ -328,6 +372,156 @@ void MegaLightsViewData::_free_transient_buffers() {
 	_update_memory_accounting();
 }
 
+void MegaLightsViewData::_free_froxel_buffers() {
+	RD *rd = RD::get_singleton();
+	for (uint32_t i = 0; i < 2; i++) {
+		ml_free_rid(rd, froxel_fog_tex[i]);
+		ml_free_rid(rd, froxel_sh_r[i]);
+		ml_free_rid(rd, froxel_sh_g[i]);
+		ml_free_rid(rd, froxel_sh_b[i]);
+	}
+	ml_free_rid(rd, froxel_params_ubo);
+	froxel_fog_size = Vector3i();
+	froxel_slot = 0;
+	froxel_history_valid = false;
+	froxel_history_frames = 0;
+	froxel_has_prev_cam = false;
+	froxel_bytes = 0;
+	_update_memory_accounting();
+}
+
+void MegaLightsViewData::_free_front_layer_guide_textures() {
+	RD *rd = RD::get_singleton();
+	ml_free_rid(rd, front_layer_albedo_tex);
+	ml_free_rid(rd, front_layer_material_tex);
+	front_layer_guide_size = Size2i();
+	front_layer_guide_bytes = 0;
+	_update_memory_accounting();
+}
+
+void MegaLightsViewData::set_is_front_layer_view(bool p_is_front_layer) {
+	if (is_front_layer_view != p_is_front_layer) {
+		is_front_layer_view = p_is_front_layer;
+		_update_memory_accounting();
+	}
+}
+
+void MegaLightsViewData::free_froxel_buffers() {
+	_free_froxel_buffers();
+}
+
+void MegaLightsViewData::free_front_layer_guide_textures() {
+	_free_front_layer_guide_textures();
+}
+
+bool MegaLightsViewData::ensure_froxel_buffers(bool p_fog_active, const Vector3i &p_fog_size, bool p_need_fog_sh) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (!froxel_params_ubo.is_valid()) {
+		froxel_params_ubo = rd->uniform_buffer_create(sizeof(MegaLights::FroxelParamsUBO));
+		ERR_FAIL_COND_V(!froxel_params_ubo.is_valid(), false);
+	}
+
+	uint64_t next_bytes = sizeof(MegaLights::FroxelParamsUBO);
+	if (!p_fog_active || p_fog_size.x <= 0 || p_fog_size.y <= 0 || p_fog_size.z <= 0) {
+		for (uint32_t i = 0; i < 2; i++) {
+			ml_free_rid(rd, froxel_fog_tex[i]);
+			ml_free_rid(rd, froxel_sh_r[i]);
+			ml_free_rid(rd, froxel_sh_g[i]);
+			ml_free_rid(rd, froxel_sh_b[i]);
+		}
+		froxel_fog_size = Vector3i();
+		froxel_bytes = next_bytes;
+		_update_memory_accounting();
+		return true;
+	}
+
+	const bool size_changed = (froxel_fog_size != p_fog_size);
+	if (size_changed || !froxel_fog_tex[0].is_valid()) {
+		for (uint32_t i = 0; i < 2; i++) {
+			ml_free_rid(rd, froxel_fog_tex[i]);
+			ml_free_rid(rd, froxel_sh_r[i]);
+			ml_free_rid(rd, froxel_sh_g[i]);
+			ml_free_rid(rd, froxel_sh_b[i]);
+		}
+		froxel_fog_tex[0] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel Fog 0");
+		froxel_fog_tex[1] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel Fog 1");
+		if (!froxel_fog_tex[0].is_valid() || !froxel_fog_tex[1].is_valid()) {
+			_free_froxel_buffers();
+			return false;
+		}
+		froxel_fog_size = p_fog_size;
+		froxel_slot = 0;
+		froxel_history_valid = false;
+		froxel_history_frames = 0;
+	}
+	const uint64_t tex_bytes = uint64_t(p_fog_size.x) * uint64_t(p_fog_size.y) * uint64_t(p_fog_size.z) * 8ULL;
+	next_bytes += tex_bytes * 2ULL;
+
+	if (p_need_fog_sh) {
+		if (!froxel_sh_r[0].is_valid()) {
+			froxel_sh_r[0] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel SH R0");
+			froxel_sh_r[1] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel SH R1");
+			froxel_sh_g[0] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel SH G0");
+			froxel_sh_g[1] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel SH G1");
+			froxel_sh_b[0] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel SH B0");
+			froxel_sh_b[1] = ml_create_rgba16f_3d_texture(rd, p_fog_size, "MegaLights Froxel SH B1");
+			if (!froxel_sh_r[0].is_valid() || !froxel_sh_r[1].is_valid() ||
+					!froxel_sh_g[0].is_valid() || !froxel_sh_g[1].is_valid() ||
+					!froxel_sh_b[0].is_valid() || !froxel_sh_b[1].is_valid()) {
+				_free_froxel_buffers();
+				return false;
+			}
+			froxel_history_valid = false;
+			froxel_history_frames = 0;
+		}
+		next_bytes += tex_bytes * 6ULL;
+	} else {
+		for (uint32_t i = 0; i < 2; i++) {
+			ml_free_rid(rd, froxel_sh_r[i]);
+			ml_free_rid(rd, froxel_sh_g[i]);
+			ml_free_rid(rd, froxel_sh_b[i]);
+		}
+	}
+
+	froxel_bytes = next_bytes;
+	_update_memory_accounting();
+	return true;
+}
+
+bool MegaLightsViewData::ensure_front_layer_guide_textures(const Size2i &p_size) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (p_size.x <= 0 || p_size.y <= 0) {
+		return false;
+	}
+	if (front_layer_albedo_tex.is_valid() && front_layer_material_tex.is_valid() && front_layer_guide_size == p_size) {
+		return true;
+	}
+	_free_front_layer_guide_textures();
+	RD::TextureFormat tf;
+	tf.texture_type = RD::TEXTURE_TYPE_2D;
+	tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+	tf.width = uint32_t(p_size.x);
+	tf.height = uint32_t(p_size.y);
+	tf.depth = 1;
+	tf.array_layers = 1;
+	tf.mipmaps = 1;
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	front_layer_albedo_tex = rd->texture_create(tf, RD::TextureView());
+	front_layer_material_tex = rd->texture_create(tf, RD::TextureView());
+	if (!front_layer_albedo_tex.is_valid() || !front_layer_material_tex.is_valid()) {
+		_free_front_layer_guide_textures();
+		return false;
+	}
+	rd->set_resource_name(front_layer_albedo_tex, "MegaLights Front-Layer Albedo");
+	rd->set_resource_name(front_layer_material_tex, "MegaLights Front-Layer Material");
+	front_layer_guide_size = p_size;
+	front_layer_guide_bytes = uint64_t(p_size.x) * uint64_t(p_size.y) * 8ULL;
+	_update_memory_accounting();
+	return true;
+}
+
 void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
 	if (p_render_buffers == nullptr) {
 		free_data();
@@ -342,6 +536,8 @@ void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
 		_free_denoise_debug_texture();
 		_free_reference_buffers();
 		_free_verify_buffers();
+		_free_froxel_buffers();
+		_free_front_layer_guide_textures();
 		internal_size = new_size;
 		frame_index = 0;
 	}
@@ -356,6 +552,8 @@ void MegaLightsViewData::free_data() {
 	_free_reference_buffers();
 	_free_verify_buffers();
 	_free_transient_buffers();
+	_free_froxel_buffers();
+	_free_front_layer_guide_textures();
 	internal_size = Size2i();
 	frame_index = 0;
 	last_denoise_stats = DenoiseStats();
@@ -823,6 +1021,14 @@ bool MegaLights::is_enabled() {
 	return ps != nullptr && ps->has_setting(SETTING_ENABLED) && bool(ps->get_setting(SETTING_ENABLED));
 }
 
+bool MegaLights::is_front_layer_enabled() {
+	if (!is_enabled()) {
+		return false;
+	}
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	return ps != nullptr && ps->has_setting(SETTING_FRONT_LAYER_TRANSLUCENCY) && bool(ps->get_setting(SETTING_FRONT_LAYER_TRANSLUCENCY));
+}
+
 bool MegaLights::effective_directional_lights() {
 	ProjectSettings *ps = ProjectSettings::get_singleton();
 	const bool setting_on = ps != nullptr && ps->has_setting(SETTING_DIRECTIONAL_LIGHTS) && bool(ps->get_setting(SETTING_DIRECTIONAL_LIGHTS));
@@ -867,8 +1073,20 @@ bool MegaLights::light_uses_megalights(bool p_megalights_active, RSE::LightMegaL
 	return true;
 }
 
+uint64_t MegaLights::get_froxel_allocated_bytes() {
+	return ml_froxel_allocated_bytes.get();
+}
+
+uint64_t MegaLights::get_front_layer_allocated_bytes() {
+	return ml_front_layer_allocated_bytes.get();
+}
+
+uint64_t MegaLights::get_d17_direct_allocated_bytes() {
+	return NextGIWRC::get_total_translucency_direct_bytes();
+}
+
 uint64_t MegaLights::get_total_allocated_bytes() {
-	return ml_total_allocated_bytes.get();
+	return ml_total_allocated_bytes.get() + NextGIWRC::get_total_translucency_direct_bytes();
 }
 
 MegaLights::DownsampleMode MegaLights::parse_downsample_variant(const Variant &p_value) {
@@ -978,6 +1196,9 @@ MegaLights::Settings MegaLights::read_settings() {
 	if (ps->has_setting(SETTING_DENOISER)) {
 		s.denoiser = parse_denoiser_variant(ps->get_setting(SETTING_DENOISER));
 	}
+	if (ps->has_setting(SETTING_FRONT_LAYER_TRANSLUCENCY)) {
+		s.front_layer_translucency = bool(ps->get_setting(SETTING_FRONT_LAYER_TRANSLUCENCY));
+	}
 	return validate_settings(s);
 }
 
@@ -990,6 +1211,68 @@ uint32_t MegaLights::samples_for_quality_preset(int p_quality_level) {
 		return 4u;
 	}
 	return 8u;
+}
+
+uint32_t MegaLights::froxel_samples_for_quality_preset(int p_quality_level) {
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	// Default 1 sample per froxel per frame on Low/Medium/High, 2 on Epic.
+	return p_quality_level >= 3 ? 2u : 1u;
+}
+
+void MegaLights::sh_l1_project_directional(const Vector3 &p_dir_ws, const Color &p_radiance, Vector4 &r_sh_r, Vector4 &r_sh_g, Vector4 &r_sh_b) {
+	const Vector3 d = p_dir_ws.length_squared() > 1e-12f ? p_dir_ws.normalized() : Vector3(0.0f, 1.0f, 0.0f);
+	constexpr float c0 = 0.25f / float(Math::PI);
+	constexpr float c1 = 0.5f / float(Math::PI);
+	r_sh_r += Vector4(p_radiance.r * c0, p_radiance.r * c1 * float(d.x), p_radiance.r * c1 * float(d.y), p_radiance.r * c1 * float(d.z));
+	r_sh_g += Vector4(p_radiance.g * c0, p_radiance.g * c1 * float(d.x), p_radiance.g * c1 * float(d.y), p_radiance.g * c1 * float(d.z));
+	r_sh_b += Vector4(p_radiance.b * c0, p_radiance.b * c1 * float(d.x), p_radiance.b * c1 * float(d.y), p_radiance.b * c1 * float(d.z));
+}
+
+Color MegaLights::sh_l1_evaluate(const Vector4 &p_sh_r, const Vector4 &p_sh_g, const Vector4 &p_sh_b, const Vector3 &p_normal_ws) {
+	const Vector3 n = p_normal_ws.length_squared() > 1e-12f ? p_normal_ws.normalized() : Vector3(0.0f, 1.0f, 0.0f);
+	const float r = MAX(float(p_sh_r.x) + float(n.x) * float(p_sh_r.y) + float(n.y) * float(p_sh_r.z) + float(n.z) * float(p_sh_r.w), 0.0f);
+	const float g = MAX(float(p_sh_g.x) + float(n.x) * float(p_sh_g.y) + float(n.y) * float(p_sh_g.z) + float(n.z) * float(p_sh_g.w), 0.0f);
+	const float b = MAX(float(p_sh_b.x) + float(n.x) * float(p_sh_b.y) + float(n.y) * float(p_sh_b.z) + float(n.z) * float(p_sh_b.w), 0.0f);
+	return Color(r, g, b, 1.0f);
+}
+
+float MegaLights::sss_transmission_lobe(float p_ndotl, float p_boost) {
+	return CLAMP(p_boost - p_ndotl, 0.0f, 1.0f) / float(Math::PI);
+}
+
+float MegaLights::sss_transmission_attenuation(float p_hit_dist, float p_visibility, float p_extinction) {
+	if (p_visibility > 0.5f) {
+		return 1.0f;
+	}
+	if (Math::is_finite(p_hit_dist) && p_hit_dist >= 0.0f && p_hit_dist < HIT_DISTANCE_MISS * 0.99f) {
+		return std::exp(-p_hit_dist * MAX(p_extinction, 0.0f));
+	}
+	return 0.0f;
+}
+
+uint64_t MegaLights::estimate_d17_direct_bytes(bool p_megalights_enabled, const Size2i &p_screen_size) {
+	if (!p_megalights_enabled || p_screen_size.x <= 0 || p_screen_size.y <= 0) {
+		return 0ULL;
+	}
+	const uint64_t w = uint64_t(MAX((p_screen_size.x + 15) / 16, 1));
+	const uint64_t h = uint64_t(MAX((p_screen_size.y + 15) / 16, 1));
+	// 3 channels (R,G,B) x 2 ping-pong history slots x RGBA16F (8 bytes/texel) x 32 slices.
+	return w * h * uint64_t(D17_VOLUME_SLICES) * 6ULL * 8ULL;
+}
+
+uint64_t MegaLights::estimate_front_layer_bytes(bool p_megalights_enabled, bool p_front_layer_enabled, const Size2i &p_screen_size, uint32_t p_spp, DownsampleMode p_downsample) {
+	if (!p_megalights_enabled || !p_front_layer_enabled || p_screen_size.x <= 0 || p_screen_size.y <= 0) {
+		return 0ULL;
+	}
+	const uint64_t full_px = uint64_t(p_screen_size.x) * uint64_t(p_screen_size.y);
+	const Size2i sample_sz = compute_sample_grid_size(p_screen_size, p_downsample);
+	const uint64_t sample_px = uint64_t(sample_sz.x) * uint64_t(sample_sz.y);
+	const uint64_t spp = CLAMP(p_spp, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
+	// Front-layer M1 neutral guides (2x RGBA8) + sample/vis/hit + denoise history (diffuse/specular/moments/history_len/prev_dn).
+	const uint64_t guide_bytes = full_px * 8ULL;
+	const uint64_t sample_bytes = sample_px * spp * (16ULL + 4ULL + 2ULL);
+	const uint64_t denoise_bytes = full_px * (6ULL * 8ULL + 2ULL * 4ULL + 2ULL * 2ULL + 8ULL);
+	return guide_bytes + sample_bytes + denoise_bytes;
 }
 
 Vector2i MegaLights::downsample_offset(uint32_t p_frame_index) {
@@ -1461,6 +1744,14 @@ Dictionary MegaLights::get_tier_info() {
 	info["downsample"] = (s.downsample == DOWNSAMPLE_FULL) ? String("full") : String("half");
 	info["screen_trace_steps"] = int(s.screen_trace_steps);
 	info["memory_bytes"] = int64_t(get_total_allocated_bytes());
+	info["froxel_memory_bytes"] = int64_t(get_froxel_allocated_bytes());
+	info["d17_direct_memory_bytes"] = int64_t(get_d17_direct_allocated_bytes());
+	info["front_layer_memory_bytes"] = int64_t(get_front_layer_allocated_bytes());
+	info["front_layer_translucency"] = s.front_layer_translucency;
+	const uint32_t fmode = s.enabled ? ml_last_froxel_dispatch_mode.get() : 0u;
+	info["froxel_dispatch_mode"] = fmode == 1u ? String("shared_fog_d17") : (fmode == 2u ? String("fog_only") : (fmode == 3u ? String("d17_only") : String("off")));
+	info["froxel_samples_per_cell"] = s.enabled ? int(ml_last_froxel_samples_per_cell.get()) : 0;
+	info["froxel_dispatched_cells"] = s.enabled ? int64_t(ml_last_froxel_dispatched_cells.get()) : int64_t(0);
 	info["denoiser"] = (s.denoiser == DENOISER_RR_BYPASS) ? String("rr_bypass") : String("builtin");
 	info["rr_bypass"] = (s.denoiser == DENOISER_RR_BYPASS);
 	info["reason"] = String(st.reason);
@@ -1620,6 +1911,26 @@ Vector<String> MegaLights::get_shade_samples_shader_variant_defines() {
 	return modes;
 }
 
+Vector<String> MegaLights::get_froxel_shader_variant_defines() {
+	Vector<String> variants;
+	variants.push_back("");
+	variants.push_back("\n#define NEXTGI_SHADOW_ALPHA_TEXTURES\n");
+	return variants;
+}
+
+Vector<String> MegaLights::get_froxel_compute_shader_variant_defines() {
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_SAMPLE_NO_RT\n");
+	modes.push_back("\n#define MODE_RESAMPLE_D17\n");
+	return modes;
+}
+
+Vector<String> MegaLights::get_front_layer_shader_variant_defines() {
+	Vector<String> variants;
+	variants.push_back("");
+	return variants;
+}
+
 const uint8_t *MegaLights::get_stbn_data() {
 	return megalights_stbn_data;
 }
@@ -1644,6 +1955,39 @@ Ref<MegaLightsViewData> MegaLights::ensure_view_data(RenderSceneBuffersRD *p_rb)
 		p_rb->set_custom_data(RB_SCOPE_MEGALIGHTS, data);
 	}
 	return data;
+}
+
+Ref<MegaLightsViewData> MegaLights::get_front_layer_view_data(RenderSceneBuffersRD *p_rb) {
+	const StringName scope = SNAME("megalights_front_layer");
+	if (p_rb == nullptr || !p_rb->has_custom_data(scope)) {
+		return Ref<MegaLightsViewData>();
+	}
+	return p_rb->get_custom_data(scope);
+}
+
+Ref<MegaLightsViewData> MegaLights::ensure_front_layer_view_data(RenderSceneBuffersRD *p_rb) {
+	ERR_FAIL_NULL_V(p_rb, Ref<MegaLightsViewData>());
+	const StringName scope = SNAME("megalights_front_layer");
+	Ref<MegaLightsViewData> data = get_front_layer_view_data(p_rb);
+	if (data.is_null()) {
+		data.instantiate();
+		data->set_is_front_layer_view(true);
+		data->configure(p_rb);
+		p_rb->set_custom_data(scope, data);
+	}
+	return data;
+}
+
+void MegaLights::free_front_layer_view_data(RenderSceneBuffersRD *p_rb) {
+	const StringName scope = SNAME("megalights_front_layer");
+	if (p_rb == nullptr || !p_rb->has_custom_data(scope)) {
+		return;
+	}
+	Ref<MegaLightsViewData> data = p_rb->get_custom_data(scope);
+	if (data.is_valid()) {
+		data->free_data();
+	}
+	p_rb->set_custom_data(scope, Ref<RenderBufferCustomDataRD>());
 }
 
 void MegaLights::request_check(const Dictionary &p_options) {
@@ -1775,6 +2119,33 @@ struct MegaLights::GPUState {
 
 	RID stbn_texture;
 	RID dummy_storage_buffer;
+	RID dummy_3d_storage_tex;
+
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	MlFroxelShaderRD froxel_rt_shader;
+	RID froxel_rt_version;
+	RID froxel_rt_pipelines[2];
+	RID froxel_shadow_texture_set;
+	RID froxel_shadow_texture_set_table;
+	bool froxel_rt_initialized = false;
+	bool froxel_rt_failed = false;
+
+	enum FroxelComputeMode : uint32_t {
+		FROXEL_COMPUTE_SAMPLE_NO_RT = 0,
+		FROXEL_COMPUTE_RESAMPLE_D17 = 1,
+		FROXEL_COMPUTE_MODE_MAX = 2,
+	};
+	MlFroxelComputeShaderRD froxel_compute_shader;
+	RID froxel_compute_version;
+	RID froxel_compute_pipelines[FROXEL_COMPUTE_MODE_MAX];
+	bool froxel_compute_initialized = false;
+	bool froxel_compute_failed = false;
+
+	MlFrontLayerShaderRD front_layer_shader;
+	RID front_layer_version;
+	RID front_layer_pipeline;
+	bool front_layer_initialized = false;
+	bool front_layer_failed = false;
 
 	bool common_initialized = false;
 	bool common_failed = false;
@@ -1879,8 +2250,38 @@ void MegaLights::free_resources() {
 			gpu->shade_version = RID();
 		}
 
+		// GodotNext: megalights_fog_translucency (#137).
+		if (gpu->froxel_shadow_texture_set.is_valid() && rd->uniform_set_is_valid(gpu->froxel_shadow_texture_set)) {
+			rd->free_rid(gpu->froxel_shadow_texture_set);
+		}
+		gpu->froxel_shadow_texture_set = RID();
+		gpu->froxel_shadow_texture_set_table = RID();
+
+		for (uint32_t i = 0; i < 2u; i++) {
+			ml_free_rid(rd, gpu->froxel_rt_pipelines[i]);
+		}
+		if (gpu->froxel_rt_version.is_valid()) {
+			gpu->froxel_rt_shader.version_free(gpu->froxel_rt_version);
+			gpu->froxel_rt_version = RID();
+		}
+
+		for (uint32_t i = 0; i < GPUState::FROXEL_COMPUTE_MODE_MAX; i++) {
+			ml_free_rid(rd, gpu->froxel_compute_pipelines[i]);
+		}
+		if (gpu->froxel_compute_version.is_valid()) {
+			gpu->froxel_compute_shader.version_free(gpu->froxel_compute_version);
+			gpu->froxel_compute_version = RID();
+		}
+
+		ml_free_rid(rd, gpu->front_layer_pipeline);
+		if (gpu->front_layer_version.is_valid()) {
+			gpu->front_layer_shader.version_free(gpu->front_layer_version);
+			gpu->front_layer_version = RID();
+		}
+
 		ml_free_rid(rd, gpu->stbn_texture);
 		ml_free_rid(rd, gpu->dummy_storage_buffer);
+		ml_free_rid(rd, gpu->dummy_3d_storage_tex);
 	}
 	if (gpu->denoiser != nullptr) {
 		memdelete(gpu->denoiser);
@@ -1902,6 +2303,12 @@ void MegaLights::free_resources() {
 	gpu->vis_trace_vsm_failed = false;
 	gpu->shade_initialized = false;
 	gpu->shade_failed = false;
+	gpu->froxel_rt_initialized = false;
+	gpu->froxel_rt_failed = false;
+	gpu->froxel_compute_initialized = false;
+	gpu->froxel_compute_failed = false;
+	gpu->front_layer_initialized = false;
+	gpu->front_layer_failed = false;
 }
 
 void MegaLights::_ensure_stbn_texture() {
@@ -2195,6 +2602,103 @@ NextGIDenoise *MegaLights::_ensure_denoiser() {
 		gpu->denoiser = memnew(NextGIDenoise(false));
 	}
 	return gpu->denoiser;
+}
+
+bool MegaLights::_ensure_froxel_rt_shader(NextGI *p_next_gi) {
+	if (gpu->froxel_rt_initialized) {
+		return true;
+	}
+	if (gpu->froxel_rt_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	if (rd == nullptr || light_storage == nullptr || !rd->has_feature(RD::SUPPORTS_RAY_QUERY)) {
+		return false;
+	}
+	if (p_next_gi != nullptr && !p_next_gi->can_initialize_ray_query_shaders()) {
+		return false;
+	}
+	const String defines = RendererVirtualShadowMapStorage::get_glsl_defines() +
+			"\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(light_storage->get_max_directional_lights()) + "\n";
+	gpu->froxel_rt_shader.initialize(get_froxel_shader_variant_defines(), defines);
+	gpu->froxel_rt_version = gpu->froxel_rt_shader.version_create(false);
+	if (!gpu->froxel_rt_version.is_valid()) {
+		gpu->froxel_rt_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_froxel.glsl failed to compile.");
+	}
+	if (p_next_gi != nullptr) {
+		p_next_gi->notify_ray_query_shader_initialized();
+	}
+	for (uint32_t i = 0; i < 2u; i++) {
+		gpu->froxel_rt_pipelines[i] = rd->compute_pipeline_create(gpu->froxel_rt_shader.version_get_shader(gpu->froxel_rt_version, int(i)));
+		if (!gpu->froxel_rt_pipelines[i].is_valid()) {
+			gpu->froxel_rt_failed = true;
+			return false;
+		}
+	}
+	if (!gpu->dummy_3d_storage_tex.is_valid()) {
+		gpu->dummy_3d_storage_tex = ml_create_rgba16f_3d_texture(rd, Vector3i(1, 1, 1), "MegaLights Dummy 3D Storage");
+	}
+	gpu->froxel_rt_initialized = true;
+	return true;
+}
+
+bool MegaLights::_ensure_froxel_compute_shaders() {
+	if (gpu->froxel_compute_initialized) {
+		return true;
+	}
+	if (gpu->froxel_compute_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	ERR_FAIL_NULL_V(light_storage, false);
+	const String defines = RendererVirtualShadowMapStorage::get_glsl_defines() +
+			"\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(light_storage->get_max_directional_lights()) + "\n";
+	gpu->froxel_compute_shader.initialize(get_froxel_compute_shader_variant_defines(), defines);
+	gpu->froxel_compute_version = gpu->froxel_compute_shader.version_create(false);
+	if (!gpu->froxel_compute_version.is_valid()) {
+		gpu->froxel_compute_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_froxel_compute.glsl failed to compile.");
+	}
+	for (uint32_t i = 0; i < GPUState::FROXEL_COMPUTE_MODE_MAX; i++) {
+		gpu->froxel_compute_pipelines[i] = rd->compute_pipeline_create(gpu->froxel_compute_shader.version_get_shader(gpu->froxel_compute_version, int(i)));
+		if (!gpu->froxel_compute_pipelines[i].is_valid()) {
+			gpu->froxel_compute_failed = true;
+			return false;
+		}
+	}
+	if (!gpu->dummy_3d_storage_tex.is_valid()) {
+		gpu->dummy_3d_storage_tex = ml_create_rgba16f_3d_texture(rd, Vector3i(1, 1, 1), "MegaLights Dummy 3D Storage");
+	}
+	gpu->froxel_compute_initialized = true;
+	return true;
+}
+
+bool MegaLights::_ensure_front_layer_shader() {
+	if (gpu->front_layer_initialized) {
+		return true;
+	}
+	if (gpu->front_layer_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	gpu->front_layer_shader.initialize(get_front_layer_shader_variant_defines());
+	gpu->front_layer_version = gpu->front_layer_shader.version_create(false);
+	if (!gpu->front_layer_version.is_valid()) {
+		gpu->front_layer_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_front_layer.glsl failed to compile.");
+	}
+	gpu->front_layer_pipeline = rd->compute_pipeline_create(gpu->front_layer_shader.version_get_shader(gpu->front_layer_version, 0));
+	if (!gpu->front_layer_pipeline.is_valid()) {
+		gpu->front_layer_failed = true;
+		return false;
+	}
+	gpu->front_layer_initialized = true;
+	return true;
 }
 
 void MegaLights::_fill_params_ubo(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_frame_index, bool p_has_guiding, bool p_force_visible_one, float p_falloff_override, ParamsUBO &r_ubo) const {
@@ -4358,4 +4862,456 @@ void MegaLights::render_sampling(const FrameInputs &p_inputs, Ref<RenderSceneBuf
 	shade_samples(p_inputs, p_rb);
 	denoise_samples(p_inputs, p_rb);
 	view->advance_frame_index();
+}
+
+MegaLights::FroxelResult MegaLights::render_froxel(const FroxelInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb) {
+	FroxelResult result;
+	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr || p_rb.is_null() || (!p_inputs.fog_active && !p_inputs.translucency_active)) {
+		if (p_rb.is_valid()) {
+			Ref<MegaLightsViewData> existing = get_view_data(p_rb.ptr());
+			if (existing.is_valid()) {
+				existing->free_froxel_buffers();
+			}
+			if (p_inputs.next_gi != nullptr) {
+				p_inputs.next_gi->free_megalights_translucency_direct(p_rb.ptr());
+			}
+		}
+		ml_last_froxel_dispatch_mode.set(0u);
+		ml_last_froxel_samples_per_cell.set(0u);
+		ml_last_froxel_dispatched_cells.set(0u);
+		return result;
+	}
+
+	if (!_ensure_common_shaders() || !_ensure_froxel_compute_shaders()) {
+		return result;
+	}
+	_ensure_stbn_texture();
+
+	RD *rd = RD::get_singleton();
+	UniformSetCacheRD *usc = UniformSetCacheRD::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL_V(rd, result);
+	ERR_FAIL_NULL_V(usc, result);
+	ERR_FAIL_NULL_V(light_storage, result);
+	ERR_FAIL_NULL_V(texture_storage, result);
+	ERR_FAIL_NULL_V(material_storage, result);
+
+	Ref<MegaLightsViewData> view = ensure_view_data(p_rb.ptr());
+	if (view.is_null()) {
+		return result;
+	}
+
+	const Size2i full_size = p_rb->get_internal_size();
+	NextGIWRC *wrc = nullptr;
+	bool d17_active = false;
+	if (p_inputs.translucency_active && p_inputs.next_gi != nullptr) {
+		wrc = p_inputs.next_gi->ensure_megalights_translucency_direct(p_rb.ptr(), full_size);
+		d17_active = (wrc != nullptr && wrc->has_translucency_direct_volume());
+	} else if (p_inputs.next_gi != nullptr) {
+		p_inputs.next_gi->free_megalights_translucency_direct(p_rb.ptr());
+	}
+
+	const bool fog_active = p_inputs.fog_active && p_inputs.fog_size.x > 0 && p_inputs.fog_size.y > 0 && p_inputs.fog_size.z > 0;
+	if (!fog_active && !d17_active) {
+		view->free_froxel_buffers();
+		ml_last_froxel_dispatch_mode.set(0u);
+		ml_last_froxel_samples_per_cell.set(0u);
+		ml_last_froxel_dispatched_cells.set(0u);
+		return result;
+	}
+
+	const bool shared_fog_d17 = fog_active && d17_active;
+	if (!view->ensure_froxel_buffers(fog_active, p_inputs.fog_size, shared_fog_d17)) {
+		return result;
+	}
+
+	// Ensure per-light shadow policy buffer includes all local + directional lights for froxel visibility.
+	FrameInputs policy_inputs;
+	policy_inputs.render_data = p_inputs.render_data;
+	policy_inputs.next_gi = p_inputs.next_gi;
+	_upload_light_shadow_policies(policy_inputs, view, true, p_inputs.vsm_sample_view);
+
+	const RenderDataRD *rd_data = p_inputs.render_data;
+	const RenderSceneDataRD &sd = *rd_data->scene_data;
+	const Settings settings = read_settings();
+	const NextGIWRC::ViewParams wrc_view = NextGIWRC::view_params(sd);
+
+	const bool cam_cut = p_inputs.reset_temporal_history || !view->has_froxel_prev_cam() || is_camera_cut(view->get_froxel_prev_cam(), sd.cam_transform);
+	const bool history_valid = !cam_cut && (fog_active ? view->is_froxel_history_valid() : wrc->is_translucency_direct_history_valid());
+	const uint32_t hist_frames = history_valid ? view->get_froxel_history_frames() : 0u;
+	const float history_blend = history_valid ? MIN(float(hist_frames) / float(hist_frames + 1u), 0.88f) : 0.0f;
+
+	const Vector3i d17_size = d17_active ? wrc->get_translucency_direct_size() : Vector3i(1, 1, D17_VOLUME_SLICES);
+	const Vector3i dispatch_size = fog_active ? p_inputs.fog_size : d17_size;
+	const uint32_t spp = froxel_samples_for_quality_preset(p_inputs.quality_level);
+
+	// Compute fog frustum extents matching Fog::volumetric_fog_update() exactly.
+	const Vector2 frustum_near_size = sd.cam_projection.get_viewport_half_extents();
+	const Vector2 frustum_far_size = sd.cam_projection.get_far_plane_half_extents();
+	const float z_near = sd.cam_projection.get_z_near();
+	const float z_far = sd.cam_projection.get_z_far();
+	const float fog_end = MAX(p_inputs.fog_end, 0.1f);
+	const Vector2 fog_far_size = frustum_near_size.lerp(frustum_far_size, (fog_end - z_near) / MAX(z_far - z_near, 1e-4f));
+	const Vector2 fog_near_size = sd.cam_projection.is_orthogonal() ? fog_far_size : frustum_near_size.maxf(0.001f);
+
+	const Transform3D to_prev_view = view->has_froxel_prev_cam() ? (view->get_froxel_prev_cam().affine_inverse() * sd.cam_transform) : Transform3D();
+	const Projection prev_vp = view->has_froxel_prev_cam() ? view->get_froxel_prev_view_proj() : wrc_view.view_proj;
+
+	// VSM coarse-page bindings (defaults when VSM is off).
+	VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+	const bool vsm_ready = p_inputs.vsm_sample_view && vsm != nullptr && vsm->is_active() &&
+			vsm->get_table_capacity() > 0u && vsm->get_map_buffers_capacity() == vsm->get_table_capacity() &&
+			vsm->get_pool_texture().is_valid() && vsm->get_page_table_buffer().is_valid() &&
+			vsm->get_map_data_buffer().is_valid() && vsm->get_coarse_miss_buffer().is_valid();
+
+	const bool use_lf = p_inputs.light_function_atlas != nullptr && p_inputs.light_function_atlas->has_baked_atlas() && p_inputs.light_function_atlas->get_view_entry_count() > 0u;
+	const bool use_packed_grid = (rd_data->packed_light_grid_flags & 1u) != 0u && rd_data->packed_light_grid_headers_buffer.is_valid() && rd_data->packed_light_grid_index_buffer.is_valid();
+
+	uint32_t flags = 0u;
+	if (fog_active) {
+		flags |= FROXEL_FLAG_FOG_ACTIVE;
+	} else {
+		flags |= FROXEL_FLAG_D17_DIRECT_WRITE;
+	}
+	if (d17_active) {
+		flags |= FROXEL_FLAG_WRITE_SH;
+	}
+	if (history_valid) {
+		flags |= FROXEL_FLAG_HISTORY_VALID;
+	}
+	if (use_lf) {
+		flags |= FROXEL_FLAG_USE_LIGHT_FUNCTION;
+	}
+	if (vsm_ready) {
+		flags |= FROXEL_FLAG_USE_VSM;
+	}
+	if (settings.directional_lights) {
+		flags |= FROXEL_FLAG_DIRECTIONAL_LIGHTS;
+	}
+	if (sd.cam_orthogonal) {
+		flags |= FROXEL_FLAG_ORTHOGONAL;
+	}
+
+	FroxelParamsUBO ubo;
+	MaterialStorage::store_transform_transposed_3x4(sd.cam_transform, ubo.inv_view_rows);
+	MaterialStorage::store_transform_transposed_3x4(to_prev_view, ubo.to_prev_view_rows);
+	MaterialStorage::store_camera(wrc_view.inv_view_proj, ubo.inv_view_proj);
+	MaterialStorage::store_camera(prev_vp, ubo.prev_view_proj);
+	ubo.depth_coeffs[0] = float(wrc_view.depth_coefficients.x);
+	ubo.depth_coeffs[1] = float(wrc_view.depth_coefficients.y);
+	ubo.depth_coeffs[2] = float(wrc_view.depth_coefficients.z);
+	ubo.depth_coeffs[3] = float(wrc_view.depth_coefficients.w);
+	ubo.fog_frustum_size[0] = fog_near_size.x;
+	ubo.fog_frustum_size[1] = fog_near_size.y;
+	ubo.fog_frustum_size[2] = fog_far_size.x;
+	ubo.fog_frustum_size[3] = fog_far_size.y;
+	ubo.fog_z_params[0] = fog_end;
+	ubo.fog_z_params[1] = MAX(p_inputs.fog_detail_spread, 0.1f);
+	ubo.fog_z_params[2] = CLAMP(p_inputs.fog_phase_g, -0.95f, 0.95f);
+	ubo.fog_z_params[3] = 10.0f; // INV_FOG_FADE matching volumetric_fog_process.glsl
+	ubo.d17_params[0] = D17_VOLUME_NEAR;
+	ubo.d17_params[1] = D17_VOLUME_FAR;
+	ubo.d17_params[2] = history_blend;
+	ubo.d17_params[3] = settings.falloff_cull_threshold;
+	ubo.grid_dims[0] = uint32_t(dispatch_size.x);
+	ubo.grid_dims[1] = uint32_t(dispatch_size.y);
+	ubo.grid_dims[2] = uint32_t(dispatch_size.z);
+	ubo.grid_dims[3] = flags;
+	ubo.d17_dims[0] = uint32_t(d17_size.x);
+	ubo.d17_dims[1] = uint32_t(d17_size.y);
+	ubo.d17_dims[2] = uint32_t(d17_size.z);
+	ubo.d17_dims[3] = spp;
+	ubo.fog_dims_pad[0] = uint32_t(MAX(p_inputs.fog_size.x, 1));
+	ubo.fog_dims_pad[1] = uint32_t(MAX(p_inputs.fog_size.y, 1));
+	ubo.fog_dims_pad[2] = uint32_t(MAX(p_inputs.fog_size.z, 1));
+	ubo.fog_dims_pad[3] = use_packed_grid ? 1u : 0u;
+	ubo.light_counts[0] = light_storage->get_omni_light_count();
+	ubo.light_counts[1] = light_storage->get_spot_light_count();
+	ubo.light_counts[2] = light_storage->get_area_light_count();
+	ubo.light_counts[3] = rd_data->directional_light_count;
+	ubo.light_grid_dims[0] = uint32_t(MAX(rd_data->packed_light_grid_dims.x, 1));
+	ubo.light_grid_dims[1] = uint32_t(MAX(rd_data->packed_light_grid_dims.y, 1));
+	ubo.light_grid_dims[2] = uint32_t(MAX(rd_data->packed_light_grid_dims.z, 1));
+	ubo.light_grid_dims[3] = rd_data->packed_light_grid_flags;
+	ubo.light_grid_z_params[0] = rd_data->packed_light_grid_z_near;
+	ubo.light_grid_z_params[1] = rd_data->packed_light_grid_z_far;
+	ubo.light_grid_z_params[2] = rd_data->packed_light_grid_z_scale;
+	ubo.light_grid_z_params[3] = rd_data->packed_light_grid_z_bias;
+	ubo.screen_frame_vsm[0] = uint32_t(MAX(full_size.x, 1));
+	ubo.screen_frame_vsm[1] = uint32_t(MAX(full_size.y, 1));
+	ubo.screen_frame_vsm[2] = view->get_frame_index();
+	ubo.screen_frame_vsm[3] = vsm_ready ? vsm->get_table_capacity() : 0u;
+
+	rd->buffer_update(view->get_froxel_params_ubo(), 0, sizeof(ubo), &ubo);
+
+	const RID default_white = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+	const RID default_black_3d = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
+	const RID default_array_white = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+	const RID sampler_nearest = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	const RID sampler_linear = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	const RID sampler_linear_mips = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RID ies_atlas = light_storage->get_ies_atlas_texture();
+	if (!ies_atlas.is_valid()) {
+		ies_atlas = default_array_white;
+	}
+	RID area_atlas = texture_storage->area_light_atlas_get_texture();
+	if (!area_atlas.is_valid()) {
+		area_atlas = default_white;
+	}
+	RID lf_atlas = p_inputs.light_function_atlas != nullptr ? p_inputs.light_function_atlas->get_atlas_texture_or_default() : default_white;
+	RID lf_entries = p_inputs.light_function_atlas != nullptr ? p_inputs.light_function_atlas->get_view_entry_buffer_or_default() : gpu->dummy_storage_buffer;
+
+	const RID lg_headers = use_packed_grid ? rd_data->packed_light_grid_headers_buffer : gpu->dummy_storage_buffer;
+	const RID lg_indices = use_packed_grid ? rd_data->packed_light_grid_index_buffer : gpu->dummy_storage_buffer;
+	const RID vsm_pool = vsm_ready ? vsm->get_pool_texture() : p_inputs.vsm_default_pool;
+	const RID vsm_pt = vsm_ready ? vsm->get_page_table_buffer() : (p_inputs.vsm_default_buffer.is_valid() ? p_inputs.vsm_default_buffer : gpu->dummy_storage_buffer);
+	const RID vsm_maps_buf = vsm_ready ? vsm->get_map_data_buffer() : (p_inputs.vsm_default_buffer.is_valid() ? p_inputs.vsm_default_buffer : gpu->dummy_storage_buffer);
+	const RID vsm_miss = vsm_ready ? vsm->get_coarse_miss_buffer() : (p_inputs.vsm_default_miss_buffer.is_valid() ? p_inputs.vsm_default_miss_buffer : gpu->dummy_storage_buffer);
+
+	// Select ping-pong input/output 3D targets (zero write aliasing via dummy_3d_storage_tex when unused).
+	const RID fog_prev = fog_active ? view->get_froxel_fog_texture() : default_black_3d;
+	const RID fog_out = fog_active ? view->get_froxel_fog_write_texture() : gpu->dummy_3d_storage_tex;
+	RID sh_r_prev = default_black_3d;
+	RID sh_g_prev = default_black_3d;
+	RID sh_b_prev = default_black_3d;
+	RID sh_r_out = gpu->dummy_3d_storage_tex;
+	RID sh_g_out = gpu->dummy_3d_storage_tex;
+	RID sh_b_out = gpu->dummy_3d_storage_tex;
+	if (shared_fog_d17) {
+		sh_r_prev = view->get_froxel_sh_r();
+		sh_g_prev = view->get_froxel_sh_g();
+		sh_b_prev = view->get_froxel_sh_b();
+		sh_r_out = view->get_froxel_sh_write_r();
+		sh_g_out = view->get_froxel_sh_write_g();
+		sh_b_out = view->get_froxel_sh_write_b();
+	} else if (d17_active) {
+		sh_r_prev = wrc->get_translucency_direct_r();
+		sh_g_prev = wrc->get_translucency_direct_g();
+		sh_b_prev = wrc->get_translucency_direct_b();
+		sh_r_out = wrc->get_translucency_direct_write_r();
+		sh_g_out = wrc->get_translucency_direct_write_g();
+		sh_b_out = wrc->get_translucency_direct_write_b();
+	}
+
+	LocalVector<RD::Uniform> u;
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, view->get_froxel_params_ubo()));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, light_storage->get_omni_light_buffer()));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, light_storage->get_spot_light_buffer()));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, light_storage->get_area_light_buffer()));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, light_storage->get_directional_light_buffer()));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, lg_headers));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, lg_indices));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 7, gpu->stbn_texture));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 8, ies_atlas));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, lf_atlas));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, lf_entries));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 11, area_atlas));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 12, sampler_nearest));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 13, sampler_linear));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 14, sampler_linear_mips));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, view->get_light_shadow_policy_buffer()));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 16, vsm_pool));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_pt));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, vsm_maps_buf));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, vsm_miss));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 20, fog_prev));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 21, sh_r_prev));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 22, sh_g_prev));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23, sh_b_prev));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 24, fog_out));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 25, sh_r_out));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 26, sh_g_out));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 27, sh_b_out));
+
+	NextGIRTScene *rt_scene = p_inputs.next_gi != nullptr ? p_inputs.next_gi->get_rt_scene() : nullptr;
+	const bool hwrt_ready = rt_scene != nullptr && rt_scene->is_tlas_traceable() && rt_scene->get_tlas().is_valid() &&
+			rt_scene->get_shadow_instance_buffer().is_valid() && rt_scene->get_shadow_alpha_buffer().is_valid() &&
+			_ensure_froxel_rt_shader(p_inputs.next_gi);
+
+	rd->draw_command_begin_label("MegaLights Shared Froxel Volume");
+
+	// Pass 1: Single shared stochastic sample & visibility pass over the active froxel grid.
+	if (hwrt_ready) {
+		const bool use_alpha = rt_scene->wants_shadow_alpha_variant() && rd->has_feature(RD::SUPPORTS_BINDLESS) && rt_scene->ensure_shadow_texture_table().is_valid();
+		const int variant = use_alpha ? 1 : 0;
+		const RID shader_rid = gpu->froxel_rt_shader.version_get_shader(gpu->froxel_rt_version, variant);
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 28, rt_scene->get_tlas()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, rt_scene->get_shadow_instance_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, rt_scene->get_shadow_alpha_buffer()));
+		if (use_alpha) {
+			LocalVector<RD::Uniform> alpha_uniforms;
+			rt_scene->append_shadow_alpha_uniforms(31, 35, alpha_uniforms);
+			for (uint32_t i = 0; i < alpha_uniforms.size(); i++) {
+				u.push_back(alpha_uniforms[i]);
+			}
+			const RID table = rt_scene->ensure_shadow_texture_table();
+			if (gpu->froxel_shadow_texture_set.is_null() || gpu->froxel_shadow_texture_set_table != table || !rd->uniform_set_is_valid(gpu->froxel_shadow_texture_set)) {
+				if (gpu->froxel_shadow_texture_set.is_valid() && rd->uniform_set_is_valid(gpu->froxel_shadow_texture_set)) {
+					rd->free_rid(gpu->froxel_shadow_texture_set);
+				}
+				RD::Uniform table_uniform(RD::UNIFORM_TYPE_BINDLESS_TABLE, 0, table);
+				gpu->froxel_shadow_texture_set = rd->uniform_set_create(table_uniform, shader_rid, 1);
+				gpu->froxel_shadow_texture_set_table = table;
+			}
+		}
+		const RID set0 = usc->get_cache_vec(shader_rid, 0, u);
+		if (set0.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->froxel_rt_pipelines[variant]);
+			rd->compute_list_bind_uniform_set(cl, set0, 0);
+			if (use_alpha && gpu->froxel_shadow_texture_set.is_valid()) {
+				rd->compute_list_bind_uniform_set(cl, gpu->froxel_shadow_texture_set, 1);
+			}
+			rd->compute_list_dispatch(cl, (uint32_t(dispatch_size.x) + 3u) / 4u, (uint32_t(dispatch_size.y) + 3u) / 4u, (uint32_t(dispatch_size.z) + 3u) / 4u);
+			rd->compute_list_end();
+		}
+	} else {
+		const RID shader_rid = gpu->froxel_compute_shader.version_get_shader(gpu->froxel_compute_version, GPUState::FROXEL_COMPUTE_SAMPLE_NO_RT);
+		const RID set0 = usc->get_cache_vec(shader_rid, 0, u);
+		if (set0.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->froxel_compute_pipelines[GPUState::FROXEL_COMPUTE_SAMPLE_NO_RT]);
+			rd->compute_list_bind_uniform_set(cl, set0, 0);
+			rd->compute_list_dispatch(cl, (uint32_t(dispatch_size.x) + 3u) / 4u, (uint32_t(dispatch_size.y) + 3u) / 4u, (uint32_t(dispatch_size.z) + 3u) / 4u);
+			rd->compute_list_end();
+		}
+	}
+
+	// Pass 2 (only when BOTH fog and D17 are active): zero-ray trilinear resample from the shared
+	// fog-grid SH-L1 volume into the D17 translucency direct-light SH-L1 channel.
+	if (shared_fog_d17) {
+		const RID resample_shader = gpu->froxel_compute_shader.version_get_shader(gpu->froxel_compute_version, GPUState::FROXEL_COMPUTE_RESAMPLE_D17);
+		LocalVector<RD::Uniform> ru;
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, view->get_froxel_params_ubo()));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, view->get_froxel_sh_write_r()));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, view->get_froxel_sh_write_g()));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, view->get_froxel_sh_write_b()));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4, sampler_linear));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, wrc->get_translucency_direct_write_r()));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, wrc->get_translucency_direct_write_g()));
+		ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, wrc->get_translucency_direct_write_b()));
+		const RID rset = usc->get_cache_vec(resample_shader, 0, ru);
+		if (rset.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->froxel_compute_pipelines[GPUState::FROXEL_COMPUTE_RESAMPLE_D17]);
+			rd->compute_list_bind_uniform_set(cl, rset, 0);
+			rd->compute_list_dispatch(cl, (uint32_t(d17_size.x) + 3u) / 4u, (uint32_t(d17_size.y) + 3u) / 4u, (uint32_t(d17_size.z) + 3u) / 4u);
+			rd->compute_list_end();
+		}
+	}
+
+	rd->draw_command_end_label();
+
+	view->advance_froxel_history(sd.cam_transform, wrc_view.view_proj, cam_cut);
+	if (d17_active) {
+		wrc->advance_translucency_direct_slot(true);
+		result.d17_direct_r = wrc->get_translucency_direct_r();
+		result.d17_direct_g = wrc->get_translucency_direct_g();
+		result.d17_direct_b = wrc->get_translucency_direct_b();
+		result.d17_active = true;
+	}
+	if (fog_active) {
+		result.fog_light_texture = view->get_froxel_fog_texture();
+		result.fog_active = result.fog_light_texture.is_valid();
+	}
+
+	ml_last_froxel_dispatch_mode.set(shared_fog_d17 ? 1u : (fog_active ? 2u : 3u));
+	ml_last_froxel_samples_per_cell.set(spp);
+	ml_last_froxel_dispatched_cells.set(uint32_t(dispatch_size.x) * uint32_t(dispatch_size.y) * uint32_t(dispatch_size.z));
+	return result;
+}
+
+MegaLights::FrontLayerResult MegaLights::render_front_layer(const FrameInputs &p_inputs, RID p_front_layer_depth, RID p_front_layer_normal_roughness, Ref<RenderSceneBuffersRD> p_rb) {
+	FrontLayerResult result;
+	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr || p_rb.is_null() ||
+			!p_front_layer_depth.is_valid() || !p_front_layer_normal_roughness.is_valid()) {
+		return result;
+	}
+	if (!_ensure_common_shaders() || !_ensure_front_layer_shader()) {
+		return result;
+	}
+
+	RD *rd = RD::get_singleton();
+	UniformSetCacheRD *usc = UniformSetCacheRD::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL_V(rd, result);
+	ERR_FAIL_NULL_V(usc, result);
+	ERR_FAIL_NULL_V(material_storage, result);
+
+	const Size2i full_size = p_rb->get_internal_size();
+	Ref<MegaLightsViewData> fl_view = ensure_front_layer_view_data(p_rb.ptr());
+	if (fl_view.is_null() || !fl_view->ensure_front_layer_guide_textures(full_size)) {
+		return result;
+	}
+
+	rd->draw_command_begin_label("MegaLights Front-Layer Translucency");
+
+	// Step 1: Synthesize neutral demodulated M1 albedo + material guides from front-layer depth/normal.
+	{
+		const RID sampler_nearest = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+		const RID shader_rid = gpu->front_layer_shader.version_get_shader(gpu->front_layer_version, 0);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_front_layer_depth));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_front_layer_normal_roughness));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 2, sampler_nearest));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, fl_view->get_front_layer_albedo_texture()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, fl_view->get_front_layer_material_texture()));
+		const RID uset = usc->get_cache_vec(shader_rid, 0, u);
+		if (uset.is_valid()) {
+			FrontLayerPushConstant pc;
+			pc.size[0] = uint32_t(full_size.x);
+			pc.size[1] = uint32_t(full_size.y);
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->front_layer_pipeline);
+			rd->compute_list_bind_uniform_set(cl, uset, 0);
+			rd->compute_list_set_push_constant(cl, &pc, sizeof(pc));
+			rd->compute_list_dispatch(cl, (uint32_t(full_size.x) + 7u) / 8u, (uint32_t(full_size.y) + 7u) / 8u, 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	// Step 2: Reuse the opaque sampling, visibility, guiding, shading, and denoise kernels with
+	// a completely separate front-layer view history (and screen_traces disabled since Hi-Z is opaque).
+	FrameInputs fl_inputs = p_inputs;
+	fl_inputs.depth_texture = p_front_layer_depth;
+	fl_inputs.normal_roughness_texture = p_front_layer_normal_roughness;
+	fl_inputs.ml_albedo_texture = fl_view->get_front_layer_albedo_texture();
+	fl_inputs.ml_material_texture = fl_view->get_front_layer_material_texture();
+	fl_inputs.hiz_texture = RID();
+	fl_inputs.hiz_mip_count = 1u;
+	fl_inputs.velocity_enabled = false;
+	fl_inputs.velocity_texture = RID();
+	fl_inputs.debug_draw = RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
+
+	const Settings settings = read_settings();
+	if (!fl_view->ensure_sampling_buffers(full_size, settings.samples_per_pixel, uint32_t(settings.downsample))) {
+		rd->draw_command_end_label();
+		return result;
+	}
+	_upload_layer_group_masks(fl_view);
+	_dispatch_generate(fl_inputs, fl_view, settings, fl_view->get_frame_index(), fl_view->has_guiding_history(), -1.0f);
+
+	VisibilityOptions vis_opts;
+	vis_opts.override_screen_traces = true;
+	vis_opts.screen_traces = false;
+	_dispatch_visibility_chain(fl_inputs, fl_view, settings, vis_opts);
+
+	_dispatch_guiding(fl_view, fl_view->get_visibility_buffer(), fl_view->get_frame_index(), false);
+	fl_view->advance_guiding_history();
+
+	_dispatch_shade(fl_inputs, fl_view, settings, fl_view->get_frame_index(), false, -1.0f);
+
+	const bool rr_bypass = (settings.denoiser == DENOISER_RR_BYPASS);
+	_dispatch_denoise(fl_inputs, fl_view, fl_view->get_frame_index(), rr_bypass, -1, fl_inputs.reset_temporal_history, fl_inputs.dirty_reset_regions, false, false);
+	fl_view->advance_frame_index();
+
+	rd->draw_command_end_label();
+
+	result.diffuse_texture = fl_view->get_denoised_diffuse_texture();
+	result.specular_texture = fl_view->get_denoised_specular_texture();
+	result.active = result.diffuse_texture.is_valid() && result.specular_texture.is_valid();
+	return result;
 }

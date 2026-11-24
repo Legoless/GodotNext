@@ -1025,6 +1025,26 @@ NextGIWRC *NextGI::get_wrc(RenderSceneBuffersRD *p_render_buffers) const {
 	return NextGIWRC::get_view_wrc(p_render_buffers);
 }
 
+// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+// Allocates the extra D17 direct-light SH-L1 channel only while MegaLights is on (0 bytes when off).
+NextGIWRC *NextGI::ensure_megalights_translucency_direct(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_screen_size) {
+	if (p_render_buffers == nullptr) {
+		return nullptr;
+	}
+	NextGIWRC *wrc = ensure_wrc(p_render_buffers);
+	if (wrc == nullptr || !wrc->ensure_translucency_direct_volume(p_screen_size)) {
+		return nullptr;
+	}
+	return wrc;
+}
+
+void NextGI::free_megalights_translucency_direct(RenderSceneBuffersRD *p_render_buffers) {
+	NextGIWRC *wrc = get_wrc(p_render_buffers);
+	if (wrc != nullptr) {
+		wrc->free_translucency_direct_volume();
+	}
+}
+
 Dictionary NextGI::get_status() const {
 	Dictionary status;
 	status["mode"] = get_mode_name(nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))));

@@ -470,6 +470,8 @@ bool Fog::VolumetricFog::sync_gi_dependent_sets_validity(bool p_ensure_freed) {
 		bound_directional_shadow_depth = RID();
 		bound_light_function_atlas = RID();
 		bound_light_function_buffer = RID();
+		bound_ies_profile_atlas = RID();
+		bound_ml_froxel_light_tex = RID();
 		valid = false;
 	}
 
@@ -818,10 +820,11 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 		RD::get_singleton()->compute_list_end();
 	}
 
-	// GodotNext: vsm_fog_translucency (#215) & light_function_atlas (#138). Rebuild density sets when VSM,
-	// shadow-atlas, or Light Function Atlas resources change.
+	// GodotNext: vsm_fog_translucency (#215), light_function_atlas (#138), & megalights_fog_translucency (#137).
+	// Rebuild density sets when VSM, shadow-atlas, Light Function Atlas, or MegaLights froxel resources change.
 	const RID lf_atlas = p_settings.light_function_atlas.is_valid() ? p_settings.light_function_atlas : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
 	const RID lf_buffer = p_settings.light_function_buffer.is_valid() ? p_settings.light_function_buffer : p_settings.omni_light_buffer;
+	const RID ml_froxel_tex = (p_settings.ml_froxel_active && p_settings.ml_froxel_light_tex.is_valid()) ? p_settings.ml_froxel_light_tex : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
 	const bool shadow_bindings_changed = fog->bound_vsm_pool_tex != p_settings.vsm_pool_tex ||
 			fog->bound_vsm_page_table != p_settings.vsm_page_table ||
 			fog->bound_vsm_map_data != p_settings.vsm_map_data ||
@@ -830,7 +833,8 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 			fog->bound_directional_shadow_depth != p_settings.directional_shadow_depth ||
 			fog->bound_light_function_atlas != lf_atlas ||
 			fog->bound_light_function_buffer != lf_buffer ||
-			fog->bound_ies_profile_atlas != p_settings.ies_profile_atlas;
+			fog->bound_ies_profile_atlas != p_settings.ies_profile_atlas ||
+			fog->bound_ml_froxel_light_tex != ml_froxel_tex;
 	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity(shadow_bindings_changed);
 	if (!fog->copy_uniform_set.is_null() && !RD::get_singleton()->uniform_set_is_valid(fog->copy_uniform_set)) {
 		fog->copy_uniform_set = RID();
@@ -1127,6 +1131,14 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 				}
 				uniforms.push_back(u);
 			}
+			// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Accumulated MegaLights froxel light 3D texture at Set 0 binding 30 (MODE_DENSITY only).
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 30;
+				u.append_id(ml_froxel_tex);
+				uniforms.push_back(u);
+			}
 			fog->bound_vsm_pool_tex = p_settings.vsm_pool_tex;
 			fog->bound_vsm_page_table = p_settings.vsm_page_table;
 			fog->bound_vsm_map_data = p_settings.vsm_map_data;
@@ -1136,6 +1148,7 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 			fog->bound_light_function_atlas = lf_atlas;
 			fog->bound_light_function_buffer = lf_buffer;
 			fog->bound_ies_profile_atlas = p_settings.ies_profile_atlas;
+			fog->bound_ml_froxel_light_tex = ml_froxel_tex;
 			fog->gi_dependent_sets.process_uniform_set_density = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY)), 0);
 			if (fog->nextgi_density_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(fog->nextgi_density_uniform_set)) {
 				RD::get_singleton()->free_rid(fog->nextgi_density_uniform_set);
@@ -1317,11 +1330,11 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 	params.vsm_cam_origin[1] = float(p_cam_transform.origin.y);
 	params.vsm_cam_origin[2] = float(p_cam_transform.origin.z);
 	params.vsm_table_maps = p_settings.vsm_table_maps;
-	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8) & megalights_fog_translucency (#137, contract M7).
 	params.light_function_count = p_settings.light_function_count;
+	params.ml_froxel_active = (p_settings.ml_froxel_active && p_settings.ml_froxel_light_tex.is_valid()) ? 1u : 0u;
 	params.lf_pad[0] = 0;
 	params.lf_pad[1] = 0;
-	params.lf_pad[2] = 0;
 
 	RD::get_singleton()->draw_command_begin_label("Render Volumetric Fog");
 

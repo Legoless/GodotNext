@@ -185,8 +185,11 @@ void main() {
 	vec3 world_normal = normalize(ml_ray_view_to_world_dir(normal_vs));
 
 	// Exact same origin bias as ml_reference.glsl so visibility matches brute-force trace_shadow().
-	vec3 ray_origin = world_pos + world_normal * max(0.002, length(view_pos) * 0.001);
+	// Back-facing rays (emitted only for #137 SSS back-face transmission) offset inward along -normal
+	// so the ray measures local occluder thickness without self-intersecting the front face.
 	vec3 ray_dir_ws = ml_ray_unpack_oct(samp.z);
+	float origin_side = dot(world_normal, ray_dir_ws) < 0.0 ? -1.0 : 1.0;
+	vec3 ray_origin = world_pos + world_normal * (origin_side * max(0.002, length(view_pos) * 0.001));
 	uint ltype = (samp.x >> ML_SAMPLE_TYPE_SHIFT) & ML_SAMPLE_TYPE_MASK;
 	float raw_max_dist = uintBitsToFloat(samp.w);
 	float total_tmax = (ltype == ML_LIGHT_TYPE_DIRECTIONAL) ? raw_max_dist : max(raw_max_dist - 0.005, 0.0);

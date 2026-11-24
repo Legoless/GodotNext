@@ -426,6 +426,79 @@ void NextGIWRC::free_resources() {
 	translucency_marked = 0;
 	translucency_rays = 0;
 	translucency_hits = 0;
+	free_translucency_direct_volume();
+}
+
+bool NextGIWRC::ensure_translucency_direct_volume(const Size2i &p_screen_size) {
+	ERR_FAIL_COND_V(p_screen_size.x <= 0 || p_screen_size.y <= 0, false);
+	const Vector3i volume_size(MAX((p_screen_size.width + 15) / 16, 1), MAX((p_screen_size.height + 15) / 16, 1), 32);
+	if (translucency_direct_r[0].is_valid() && translucency_direct_size == volume_size) {
+		return true;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	free_translucency_direct_volume();
+
+	RD::TextureFormat volume_format;
+	volume_format.texture_type = RD::TEXTURE_TYPE_3D;
+	volume_format.width = volume_size.x;
+	volume_format.height = volume_size.y;
+	volume_format.depth = volume_size.z;
+	volume_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	volume_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+
+	RID *textures[6] = {
+		&translucency_direct_r[0], &translucency_direct_r[1],
+		&translucency_direct_g[0], &translucency_direct_g[1],
+		&translucency_direct_b[0], &translucency_direct_b[1]
+	};
+	for (RID *texture : textures) {
+		*texture = rd->texture_create(volume_format, RD::TextureView());
+		if (texture->is_null()) {
+			free_translucency_direct_volume();
+			return false;
+		}
+		rd->texture_clear(*texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+	rd->set_resource_name(translucency_direct_r[0], "MegaLights D17 Direct SH R0");
+	rd->set_resource_name(translucency_direct_r[1], "MegaLights D17 Direct SH R1");
+	rd->set_resource_name(translucency_direct_g[0], "MegaLights D17 Direct SH G0");
+	rd->set_resource_name(translucency_direct_g[1], "MegaLights D17 Direct SH G1");
+	rd->set_resource_name(translucency_direct_b[0], "MegaLights D17 Direct SH B0");
+	rd->set_resource_name(translucency_direct_b[1], "MegaLights D17 Direct SH B1");
+
+	translucency_direct_size = volume_size;
+	translucency_direct_slot = 0;
+	translucency_direct_history_valid = false;
+	translucency_direct_bytes = uint64_t(volume_size.x) * uint64_t(volume_size.y) * uint64_t(volume_size.z) * 6ULL * 8ULL;
+	return true;
+}
+
+void NextGIWRC::free_translucency_direct_volume() {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	RID *textures[6] = {
+		&translucency_direct_r[0], &translucency_direct_r[1],
+		&translucency_direct_g[0], &translucency_direct_g[1],
+		&translucency_direct_b[0], &translucency_direct_b[1]
+	};
+	for (RID *texture : textures) {
+		if (rd != nullptr && texture->is_valid()) {
+			rd->free_rid(*texture);
+		}
+		*texture = RID();
+	}
+	translucency_direct_size = Vector3i();
+	translucency_direct_slot = 0;
+	translucency_direct_history_valid = false;
+	translucency_direct_bytes = 0;
+}
+
+uint64_t NextGIWRC::get_total_translucency_direct_bytes() {
+	uint64_t total = 0;
+	for (const NextGIWRC *wrc : nextgi_wrc_live) {
+		total += wrc->translucency_direct_bytes;
+	}
+	return total;
 }
 
 RID NextGIWRC::get_translucency_mark_target(const Size2i &p_size) {
@@ -1264,6 +1337,7 @@ void NextGIWRC::fill_info(Dictionary &r_info) const {
 	r_info["wrc_fog_samples"] = int64_t(fog_samples);
 	r_info["wrc_fog_ambient_bits"] = int64_t(fog_ambient_bits);
 	r_info["translucency_volume_bytes"] = int64_t(translucency_size.x) * int64_t(translucency_size.y) * 32 * 6 * 8;
+	r_info["translucency_direct_bytes"] = int64_t(translucency_direct_bytes);
 	r_info["translucency_marked_probes"] = int64_t(translucency_marked);
 	r_info["translucency_probe_rays"] = int64_t(translucency_rays);
 	r_info["translucency_probe_hits"] = int64_t(translucency_hits);

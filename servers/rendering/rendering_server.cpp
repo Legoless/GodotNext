@@ -4351,6 +4351,9 @@ void RenderingServer::init() {
 	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5, GM-1, GM-7, budget M-5).
 	// Builtin demodulated spatio-temporal denoiser (default) or RR Bypass handoff for DLSS-RR (PU+).
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/denoiser", PROPERTY_HINT_ENUM, "Builtin,RR Bypass"), 0);
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7, GM-6, budget M-8).
+	// Optional high-quality per-pixel MegaLights pass for the frontmost transparent layer (off by default).
+	GLOBAL_DEF("rendering/megalights/front_layer_translucency", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);

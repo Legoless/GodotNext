@@ -157,8 +157,9 @@ void main() {
 	float raw_max_dist = uintBitsToFloat(samp.w);
 	float total_tmax = (ltype == ML_LIGHT_TYPE_DIRECTIONAL) ? min(raw_max_dist, params.rt_params.y) : max(raw_max_dist - 0.12, 0.0);
 
-	// Self-intersection offset of 1.5 voxels of the global SDF level at the receiver.
-	vec3 base_origin = swrt_offset_origin(world_pos, world_normal);
+	// Self-intersection offset of 1.5 voxels of the global SDF level at the receiver (inward for backlit SSS).
+	float origin_side = dot(world_normal, ray_dir_ws) < 0.0 ? -1.0 : 1.0;
+	vec3 base_origin = swrt_offset_origin(world_pos, world_normal * origin_side);
 	float start_t = (t_resume > 0.05 && t_resume < total_tmax) ? t_resume : 0.0;
 	vec3 trace_origin = base_origin + ray_dir_ws * start_t;
 	float trace_tmax = max(total_tmax - start_t, 0.0);

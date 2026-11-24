@@ -100,11 +100,16 @@ void main() {
 			continue;
 		}
 
-		// Extensibility point for #137 (M7 SSS back-face transmission per sample):
-		// surf.shading_model == ML_MODEL_SSS && (surf.model_flags & ML_FLAG_TRANSMISSION) != 0u
-		// can evaluate thin/thick back-face transmission here from hit_dist and vis_rgb.
+		// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+		// SSS back-face transmission evaluated per MegaLights sample using local occluder thickness
+		// derived from hit_distance_texture (exp(-thickness * extinction)); zero bias for non-SSS pixels.
+		vec3 sample_diff = ev.diffuse * vis_rgb;
+		if (ml_surface_has_sss_transmission(surf)) {
+			float trans_att = ml_sss_transmission_attenuation(hit_dist, vis_rgb.r);
+			sample_diff += ev.transmission * trans_att;
+		}
 
-		diffuse_sum += ev.diffuse * vis_rgb * inv_pdf;
+		diffuse_sum += sample_diff * inv_pdf;
 		specular_sum += ev.specular * vis_rgb * inv_pdf;
 
 		float occ = clamp(1.0 - ml_luminance(vis_rgb), 0.0, 1.0);

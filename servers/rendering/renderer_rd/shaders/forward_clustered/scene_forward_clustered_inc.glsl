@@ -257,6 +257,16 @@ bool sc_use_megalights() {
 	return ((sc_packed_1() >> 16) & 1U) != 0;
 }
 
+// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Transparent pass samples
+// D17 direct SH-L1 volume (bit 17) and optional per-pixel front-layer MegaLights targets (bit 18).
+bool sc_use_megalights_translucent() {
+	return ((sc_packed_1() >> 17) & 1U) != 0;
+}
+
+bool sc_use_megalights_front_layer() {
+	return ((sc_packed_1() >> 18) & 1U) != 0;
+}
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
@@ -739,6 +749,14 @@ layout(set = 1, binding = 67) uniform texture2D rt_shadow_hit_dist;
 layout(set = 1, binding = 69) uniform texture2D megalights_diffuse;
 layout(set = 1, binding = 70) uniform texture2D megalights_specular;
 layout(set = 1, binding = 71) uniform texture2D megalights_material;
+// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Set 1 bindings 72..76:
+// D17 translucency volume direct SH-L1 channel (72..74) and optional front-layer denoised diffuse
+// & specular targets (75..76). Black defaults when inactive.
+layout(set = 1, binding = 72) uniform texture3D megalights_translucency_r;
+layout(set = 1, binding = 73) uniform texture3D megalights_translucency_g;
+layout(set = 1, binding = 74) uniform texture3D megalights_translucency_b;
+layout(set = 1, binding = 75) uniform texture2D megalights_front_layer_diffuse;
+layout(set = 1, binding = 76) uniform texture2D megalights_front_layer_specular;
 
 #define FORWARD_CLUSTERED_LIGHT_GRID
 
@@ -925,6 +943,36 @@ vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth, vec3 p_w
 	irradiance += direction.z * vec3(red.a, green.a, blue.a);
 	return max(irradiance, vec3(0.0));
 }
+
+#if !defined(MODE_RENDER_SDF) && !defined(MODE_VSM)
+// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+// Evaluates the D17 translucency volume's direct-light SH-L1 channel for LIGHT_FLAG_MEGALIGHTS lights.
+void megalights_translucency_volume(vec2 p_screen_uv, float p_linear_depth, vec3 p_world_normal, vec3 p_world_ref_vec, float p_roughness, out vec3 r_diffuse, out vec3 r_specular) {
+	const float near = 0.05;
+	const float far = 64.0;
+	float slice = clamp(log(max(p_linear_depth, near) / near) / log(far / near), 0.0, 1.0);
+	vec3 coord = vec3(p_screen_uv, slice);
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec4 red = textureLod(sampler3D(megalights_translucency_r, SAMPLER_LINEAR_CLAMP), coord, 0.0);
+	vec4 green = textureLod(sampler3D(megalights_translucency_g, SAMPLER_LINEAR_CLAMP), coord, 0.0);
+	vec4 blue = textureLod(sampler3D(megalights_translucency_b, SAMPLER_LINEAR_CLAMP), coord, 0.0);
+#else
+	vec4 red = texture(sampler3D(megalights_translucency_r, SAMPLER_LINEAR_CLAMP), coord);
+	vec4 green = texture(sampler3D(megalights_translucency_g, SAMPLER_LINEAR_CLAMP), coord);
+	vec4 blue = texture(sampler3D(megalights_translucency_b, SAMPLER_LINEAR_CLAMP), coord);
+#endif
+	vec3 n = normalize(p_world_normal);
+	vec3 l0 = vec3(red.r, green.r, blue.r);
+	vec3 l1x = vec3(red.g, green.g, blue.g);
+	vec3 l1y = vec3(red.b, green.b, blue.b);
+	vec3 l1z = vec3(red.a, green.a, blue.a);
+	r_diffuse = max(l0 + n.x * l1x + n.y * l1y + n.z * l1z, vec3(0.0));
+	vec3 ref_dir = normalize(p_world_ref_vec);
+	vec3 ref_rad = max(l0 + ref_dir.x * l1x + ref_dir.y * l1y + ref_dir.z * l1z, vec3(0.0));
+	float spec_focus = mix(1.0, 0.25, clamp(p_roughness, 0.0, 1.0));
+	r_specular = ref_rad * spec_focus;
+}
+#endif
 
 vec3 nextgi_wrc_translucency_sh(vec3 p_world) {
 	float distance = length(p_world - nextgi_wrc_fwd.camera.xyz);

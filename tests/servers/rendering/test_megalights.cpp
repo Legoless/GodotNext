@@ -1117,3 +1117,116 @@ TEST_CASE("[Renderer][MegaLights] Status labels (Production, Experimental, Unava
 	CHECK(NextGIEditorPlugin::format_megalights_status(mob_dict).contains("Mobile"));
 #endif
 }
+
+TEST_CASE("[Renderer][MegaLights] Front-layer setting, D17 conditional allocation, SH-L1 projection, and SSS transmission (#137)") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+
+	// 1. rendering/megalights/front_layer_translucency defaults to false and requires enabled=true to activate.
+	CHECK(ps->has_setting(ML::SETTING_FRONT_LAYER_TRANSLUCENCY));
+	const Variant orig_enabled = ps->get_setting(ML::SETTING_ENABLED);
+	const Variant orig_fl = ps->get_setting(ML::SETTING_FRONT_LAYER_TRANSLUCENCY);
+	CHECK_FALSE(bool(orig_fl));
+
+	ps->set_setting(ML::SETTING_ENABLED, false);
+	ps->set_setting(ML::SETTING_FRONT_LAYER_TRANSLUCENCY, false);
+	CHECK_FALSE(ML::is_front_layer_enabled());
+	CHECK_FALSE(ML::read_settings().front_layer_translucency);
+
+	// Enabling front_layer_translucency while MegaLights is disabled must keep is_front_layer_enabled() false.
+	ps->set_setting(ML::SETTING_FRONT_LAYER_TRANSLUCENCY, true);
+	CHECK_FALSE(ML::is_front_layer_enabled());
+	CHECK(ML::read_settings().front_layer_translucency);
+
+	ps->set_setting(ML::SETTING_ENABLED, true);
+	CHECK(ML::is_front_layer_enabled());
+
+	ps->set_setting(ML::SETTING_ENABLED, orig_enabled);
+	ps->set_setting(ML::SETTING_FRONT_LAYER_TRANSLUCENCY, orig_fl);
+
+	// 2. D17 direct SH-L1 channel & front-layer conditional byte estimates: strictly 0 when disabled.
+	CHECK_EQ(ML::estimate_d17_direct_bytes(false, Size2i(1920, 1080)), uint64_t(0));
+	CHECK_EQ(ML::estimate_d17_direct_bytes(true, Size2i(0, 0)), uint64_t(0));
+	// 1920x1080 -> ceil(1920/16)=120, ceil(1080/16)=68, 32 slices, 6 RGBA16F textures (3 RGB x 2 ping-pong) x 8 B.
+	CHECK_EQ(ML::estimate_d17_direct_bytes(true, Size2i(1920, 1080)), uint64_t(120) * 68ULL * 32ULL * 6ULL * 8ULL);
+
+	CHECK_EQ(ML::estimate_front_layer_bytes(false, true, Size2i(1920, 1080), 4u, ML::DOWNSAMPLE_HALF), uint64_t(0));
+	CHECK_EQ(ML::estimate_front_layer_bytes(true, false, Size2i(1920, 1080), 4u, ML::DOWNSAMPLE_HALF), uint64_t(0));
+	CHECK(ML::estimate_front_layer_bytes(true, true, Size2i(1920, 1080), 4u, ML::DOWNSAMPLE_HALF) > 0ULL);
+
+	// 3. Shared froxel sample count per quality preset (1 default on Low/Med/High, 2 on Epic).
+	CHECK_EQ(ML::froxel_samples_for_quality_preset(0), 1u);
+	CHECK_EQ(ML::froxel_samples_for_quality_preset(1), 1u);
+	CHECK_EQ(ML::froxel_samples_for_quality_preset(2), 1u);
+	CHECK_EQ(ML::froxel_samples_for_quality_preset(3), 2u);
+
+	// 4. SH-L1 direct-light projection & hemisphere evaluation math.
+	Vector4 sh_r(0, 0, 0, 0), sh_g(0, 0, 0, 0), sh_b(0, 0, 0, 0);
+	const Color rad(2.0f, 1.0f, 0.5f, 1.0f);
+	ML::sh_l1_project_directional(Vector3(0.0f, 1.0f, 0.0f), rad, sh_r, sh_g, sh_b);
+
+	// Aligned normal (N == L): (0.25 + 0.5) / PI * E = 0.75 / PI * E.
+	const Color eval_front = ML::sh_l1_evaluate(sh_r, sh_g, sh_b, Vector3(0.0f, 1.0f, 0.0f));
+	CHECK(eval_front.r == doctest::Approx(2.0f * 0.75f / float(Math::PI)).epsilon(1e-4));
+	CHECK(eval_front.g == doctest::Approx(1.0f * 0.75f / float(Math::PI)).epsilon(1e-4));
+	CHECK(eval_front.b == doctest::Approx(0.5f * 0.75f / float(Math::PI)).epsilon(1e-4));
+
+	// Grazing normal (N perp L): 0.25 / PI * E.
+	const Color eval_grazing = ML::sh_l1_evaluate(sh_r, sh_g, sh_b, Vector3(1.0f, 0.0f, 0.0f));
+	CHECK(eval_grazing.r == doctest::Approx(2.0f * 0.25f / float(Math::PI)).epsilon(1e-4));
+
+	// Back-facing normal (N == -L): 0.25 - 0.5 < 0 -> clamped to 0.
+	const Color eval_back = ML::sh_l1_evaluate(sh_r, sh_g, sh_b, Vector3(0.0f, -1.0f, 0.0f));
+	CHECK_EQ(eval_back.r, 0.0f);
+	CHECK_EQ(eval_back.g, 0.0f);
+	CHECK_EQ(eval_back.b, 0.0f);
+
+	// Linear superposition of two opposite lights restores symmetric L0 energy.
+	ML::sh_l1_project_directional(Vector3(0.0f, -1.0f, 0.0f), rad, sh_r, sh_g, sh_b);
+	const Color eval_sym_up = ML::sh_l1_evaluate(sh_r, sh_g, sh_b, Vector3(0.0f, 1.0f, 0.0f));
+	const Color eval_sym_dn = ML::sh_l1_evaluate(sh_r, sh_g, sh_b, Vector3(0.0f, -1.0f, 0.0f));
+	CHECK(eval_sym_up.r == doctest::Approx(eval_sym_dn.r).epsilon(1e-4));
+	CHECK(eval_sym_up.r == doctest::Approx(2.0f * 0.5f / float(Math::PI)).epsilon(1e-4));
+
+	// 5. SSS back-face transmission lobe & Beer-Lambert thickness attenuation from hit distance.
+	// Front-lit (ndotl >= boost=0.2) produces 0 back-face transmission; backlit (ndotl = -1) peaks at 1/PI.
+	CHECK_EQ(ML::sss_transmission_lobe(1.0f), 0.0f);
+	CHECK_EQ(ML::sss_transmission_lobe(0.25f), 0.0f);
+	CHECK(ML::sss_transmission_lobe(0.0f) == doctest::Approx(0.2f / float(Math::PI)).epsilon(1e-5));
+	CHECK(ML::sss_transmission_lobe(-1.0f) == doctest::Approx(1.0f / float(Math::PI)).epsilon(1e-5));
+
+	// Unoccluded thin leaf (vis = 1) -> full transmission (1.0).
+	CHECK_EQ(ML::sss_transmission_attenuation(ML::HIT_DISTANCE_MISS, 1.0f), 1.0f);
+	// Thin slab (0.05 m) transmits far more than thick slab (0.80 m) via exp(-thickness * extinction).
+	const float att_thin = ML::sss_transmission_attenuation(0.05f, 0.0f, 4.0f);
+	const float att_thick = ML::sss_transmission_attenuation(0.80f, 0.0f, 4.0f);
+	CHECK(att_thin == doctest::Approx(std::exp(-0.2f)).epsilon(1e-5));
+	CHECK(att_thick == doctest::Approx(std::exp(-3.2f)).epsilon(1e-5));
+	CHECK(att_thin > att_thick * 10.0f);
+	// Fully blocked without finite hit distance -> 0.0.
+	CHECK_EQ(ML::sss_transmission_attenuation(ML::HIT_DISTANCE_MISS, 0.0f), 0.0f);
+	CHECK_EQ(ML::sss_transmission_attenuation(-1.0f, 0.0f), 0.0f);
+
+	// 6. Forward+ ShaderSpecialization::packed_1 bits 17 & 18 are distinct and non-overlapping with bit 16.
+	RendererSceneRenderImplementation::SceneShaderForwardClustered::ShaderSpecialization spec = {};
+	spec.packed_1 = 0u;
+	spec.use_megalights_translucent = 1u;
+	CHECK_EQ(spec.packed_1, 1u << 17u);
+	spec.packed_1 = 0u;
+	spec.use_megalights_front_layer = 1u;
+	CHECK_EQ(spec.packed_1, 1u << 18u);
+
+	// 7. get_tier_info() exposes #137 telemetry keys and keeps all memory zero when disabled.
+	const Dictionary info = RenderingServer::get_singleton()->megalights_get_tier_info();
+	CHECK(info.has("front_layer_translucency"));
+	CHECK(info.has("froxel_memory_bytes"));
+	CHECK(info.has("d17_direct_memory_bytes"));
+	CHECK(info.has("front_layer_memory_bytes"));
+	CHECK(info.has("froxel_dispatch_mode"));
+	CHECK(info.has("froxel_samples_per_cell"));
+	CHECK(info.has("froxel_dispatched_cells"));
+	CHECK_EQ(int64_t(info["froxel_memory_bytes"]), int64_t(0));
+	CHECK_EQ(int64_t(info["d17_direct_memory_bytes"]), int64_t(0));
+	CHECK_EQ(int64_t(info["front_layer_memory_bytes"]), int64_t(0));
+	CHECK_EQ(String(info["froxel_dispatch_mode"]), String("off"));
+}

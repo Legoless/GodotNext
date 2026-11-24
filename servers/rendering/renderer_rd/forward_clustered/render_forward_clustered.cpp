@@ -2127,6 +2127,10 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.light_function_buffer = light_function_atlas.get_view_entry_buffer_or_default();
 		settings.light_function_count = light_function_atlas.has_baked_atlas() ? light_function_atlas.get_view_entry_count() : 0u;
 
+		// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+		settings.ml_froxel_active = megalights_froxel_fog_active && ml_bind_froxel_fog.is_valid();
+		settings.ml_froxel_light_tex = settings.ml_froxel_active ? ml_bind_froxel_fog : RID();
+
 		RendererRD::Fog::get_singleton()->volumetric_fog_update(settings, p_cam_projection, p_cam_transform, p_prev_cam_inv_transform, p_shadow_atlas, p_directional_light_count, p_use_directional_shadows, p_positional_light_count, p_voxel_gi_count, p_fog_volumes);
 	}
 }
@@ -2790,7 +2794,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 				hiz_depth_tex = rb->get_depth_texture(0);
 			}
 			RID hiz_sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
-			const bool cull_front_of_min = render_list[RENDER_LIST_ALPHA].elements.is_empty();
+			// GodotNext: megalights_fog_translucency (#137). Keep lights in front of opaque depth in the
+			// packed light grid when volumetric fog + MegaLights are active so ml_froxel.glsl sees them.
+			const bool volumetric_fog_enabled = p_render_data->environment.is_valid() && environment_get_volumetric_fog_enabled(p_render_data->environment);
+			const bool cull_front_of_min = render_list[RENDER_LIST_ALPHA].elements.is_empty() && !(megalights_view && volumetric_fog_enabled);
 			current_cluster_builder->bake_packed_light_grid(hiz_depth_tex, hiz_sampler, cull_front_of_min);
 
 			const RendererRD::LightGrid::ZParams zp = current_cluster_builder->get_packed_z_params();
@@ -2890,13 +2897,24 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		}
 	}
 
-	// GodotNext: megalights_sampling (#142, M3) / megalights_visibility (#146, M4) / megalights_frame (#143, M6).
+	// GodotNext: megalights_sampling (#142, M3) / megalights_visibility (#146, M4) / megalights_frame (#143, M6) / megalights_fog_translucency (#137, M7).
 	// Runs after prepass, packed light grid, VSM raster/projection, and TLAS preparation, and before
-	// next_gi.compact_after_traces() and the Forward+ color pass composite.
+	// next_gi.compact_after_traces(), volumetric fog update, and Forward+ opaque/transparent color passes.
 	megalights_composite_active = false;
+	megalights_froxel_fog_active = false;
+	megalights_translucent_active = false;
+	megalights_front_layer_active = false;
+	megalights_pending_compact = false;
 	ml_bind_diffuse = RID();
 	ml_bind_specular = RID();
 	ml_bind_material = RID();
+	ml_bind_froxel_fog = RID();
+	ml_bind_d17_r = RID();
+	ml_bind_d17_g = RID();
+	ml_bind_d17_b = RID();
+	ml_bind_front_layer_diffuse = RID();
+	ml_bind_front_layer_specular = RID();
+	ml_last_frame_inputs = RendererRD::MegaLights::FrameInputs();
 	if (megalights_view) {
 		const RID ml_depth = rb->get_depth_texture(0);
 		const RID ml_normal_roughness = (p_normal_roughness_slices != nullptr && p_normal_roughness_slices[0].is_valid()) ? p_normal_roughness_slices[0] : rb_data->get_normal_roughness(0);
@@ -2978,15 +2996,63 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 						ml_bind_diffuse = diff_tex;
 						ml_bind_specular = spec_tex;
 						ml_bind_material = ml_material;
+						ml_last_frame_inputs = ml_inputs;
 					}
 				}
+				// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7, GM-6).
+				// Dispatch ONE shared stochastic froxel volume pass feeding volumetric fog AND/OR
+				// the D17 translucency direct SH-L1 channel before _update_volumetric_fog().
+				const bool ml_fog_active = p_render_data->environment.is_valid() && environment_get_volumetric_fog_enabled(p_render_data->environment);
+				const bool ml_trans_active = !render_list[RENDER_LIST_ALPHA].elements.is_empty();
+				if (ml_fog_active || ml_trans_active) {
+					_ensure_vsm_projection_resources();
+					RendererRD::MegaLights::FroxelInputs fi;
+					fi.render_data = p_render_data;
+					fi.next_gi = &next_gi;
+					fi.light_function_atlas = &light_function_atlas;
+					fi.fog_active = ml_fog_active;
+					fi.translucency_active = ml_trans_active;
+					if (ml_fog_active) {
+						const Size2i sz = rb->get_internal_size();
+						const float ratio = float(sz.x) / float((sz.x + sz.y) / 2);
+						fi.fog_size = Vector3i(MAX(int(float(get_volumetric_fog_size()) * ratio), 1), MAX(int(float(get_volumetric_fog_size()) / ratio), 1), MAX(int(get_volumetric_fog_depth()), 1));
+						fi.fog_end = environment_get_volumetric_fog_length(p_render_data->environment);
+						fi.fog_detail_spread = environment_get_volumetric_fog_detail_spread(p_render_data->environment);
+						fi.fog_phase_g = environment_get_volumetric_fog_anisotropy(p_render_data->environment);
+					}
+					fi.flip_y = p_render_data->scene_data->flip_y;
+					fi.vsm_sample_view = vsm_sample_view;
+					fi.vsm_default_pool = vsm_projection_default_pool;
+					fi.vsm_default_buffer = vsm_projection_default_buffer;
+					fi.vsm_default_miss_buffer = vsm_projection_default_miss_buffer;
+					fi.quality_level = ml_inputs.quality_level;
+					fi.reset_temporal_history = view_reset_temporal_history;
+					const RendererRD::MegaLights::FroxelResult fr = mega_lights->render_froxel(fi, rb);
+					megalights_froxel_fog_active = fr.fog_active;
+					ml_bind_froxel_fog = fr.fog_light_texture;
+					megalights_translucent_active = fr.d17_active;
+					ml_bind_d17_r = fr.d17_direct_r;
+					ml_bind_d17_g = fr.d17_direct_g;
+					ml_bind_d17_b = fr.d17_direct_b;
+				} else {
+					if (ml_view_data.is_valid()) {
+						ml_view_data->free_froxel_buffers();
+					}
+					next_gi.free_megalights_translucency_direct(rb.ptr());
+				}
+			} else {
+				Ref<RendererRD::MegaLightsViewData> ml_view_data = RendererRD::MegaLights::get_view_data(rb.ptr());
+				if (ml_view_data.is_valid()) {
+					ml_view_data->free_froxel_buffers();
+				}
+				next_gi.free_megalights_translucency_direct(rb.ptr());
 			}
 		}
 	}
 
-	if (rt_shadows_view || megalights_uses_rt) {
-		next_gi.compact_after_traces();
-	}
+	// Defer compact_after_traces() until after _render_nextgi_front_layer() so front-layer
+	// reflection & MegaLights front-layer ray traces see a valid TLAS (#137).
+	megalights_pending_compact = rt_shadows_view || megalights_uses_rt;
 
 	if (rb_data.is_valid()) {
 		RENDER_TIMESTAMP("Update Volumetric Fog");
@@ -6456,17 +6522,30 @@ bool RenderForwardClustered::_render_avboit(RenderDataRD *p_render_data, RID p_a
 	return true;
 }
 
-void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {
-	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow")) || p_render_data->environment.is_null() || !environment_get_nextgi_translucency_front_layer_reflections(p_render_data->environment) || next_gi.get_tier_result().tier != RendererRD::NextGI::TIER_HWRT) {
+void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_use_nextgi) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	const bool want_nextgi_fl = p_use_nextgi && bool(GLOBAL_GET("rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow")) && p_render_data->environment.is_valid() && environment_get_nextgi_translucency_front_layer_reflections(p_render_data->environment) && next_gi.get_tier_result().tier == RendererRD::NextGI::TIER_HWRT;
+	const bool want_ml_fl = megalights_composite_active && RendererRD::MegaLights::is_front_layer_enabled() && mega_lights != nullptr;
+	if (!want_ml_fl) {
+		megalights_front_layer_active = false;
+		ml_bind_front_layer_diffuse = RID();
+		ml_bind_front_layer_specular = RID();
+		if (rb.is_valid()) {
+			RendererRD::MegaLights::free_front_layer_view_data(rb.ptr());
+		}
+	}
+	if (!want_nextgi_fl && !want_ml_fl) {
+		if (front_layer.get_framebuffer().is_valid()) {
+			front_layer.free_resources();
+		}
 		return;
 	}
-	if (p_render_data->scene_data->view_count != 1 || render_list[RENDER_LIST_ALPHA].elements.is_empty()) {
+	if (p_render_data->scene_data->view_count != 1 || render_list[RENDER_LIST_ALPHA].elements.is_empty() || rb.is_null()) {
 		return;
 	}
 	if (!front_layer.ensure_targets(p_screen_size)) {
 		return;
 	}
-	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	const RSE::ViewportMSAA msaa = rb->get_msaa_3d();
 	if (msaa != RSE::VIEWPORT_MSAA_DISABLED) {
 		resolve_effects->resolve_depth(rb->get_depth_msaa(0), rb->get_depth_texture(0), p_screen_size, 1 << int(msaa));
@@ -6478,14 +6557,26 @@ void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_d
 	RENDER_TIMESTAMP("NextGI Front Layer");
 	RD::get_singleton()->draw_command_begin_label("NextGI Front Layer");
 	p_render_data->scene_data->nextgi_front_layer = true;
+	SceneShaderForwardClustered::ShaderSpecialization fl_spec = p_base_specialization;
+	fl_spec.use_megalights = false;
+	fl_spec.use_megalights_translucent = false;
+	fl_spec.use_megalights_front_layer = false;
 	const uint32_t uniform_buffer_index = _setup_environment(p_render_data, false, p_screen_size, p_screen_size, Color(), false);
 	const RID uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, p_radiance_texture, p_samplers, uniform_buffer_index, true, true);
-	RenderListParameters params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), p_reverse_cull, PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER, 0, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization, false);
+	RenderListParameters params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), p_reverse_cull, PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER, 0, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, 1, 0, fl_spec, false);
 	Vector<Color> clear;
 	clear.push_back(Color(0, 0, 0, 0));
 	_render_list_with_draw_list(&params, front_layer.get_framebuffer(), RD::DRAW_CLEAR_ALL, clear, 0.0f, 0u, p_render_data->render_region);
 	p_render_data->scene_data->nextgi_front_layer = false;
-	front_layer.trace(p_render_data);
+	if (want_nextgi_fl) {
+		front_layer.trace(p_render_data);
+	}
+	if (want_ml_fl) {
+		const RendererRD::MegaLights::FrontLayerResult flr = mega_lights->render_front_layer(ml_last_frame_inputs, front_layer.get_depth(), front_layer.get_normal_roughness(), rb);
+		megalights_front_layer_active = flr.active;
+		ml_bind_front_layer_diffuse = flr.diffuse_texture;
+		ml_bind_front_layer_specular = flr.specular_texture;
+	}
 	RD::get_singleton()->draw_command_end_label();
 }
 
@@ -7013,11 +7104,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			rb->ensure_megalights_inputs();
 		} else {
 			rb->free_megalights_inputs();
-			// GodotNext: megalights_frame (#143, GM-9). Free all MegaLights view buffers when disabled so memory_bytes == 0.
+			// GodotNext: megalights_frame (#143, GM-9) & megalights_fog_translucency (#137, M7).
+			// Free all MegaLights view, froxel, D17 direct, and front-layer buffers when disabled so memory_bytes == 0.
 			Ref<RendererRD::MegaLightsViewData> ml_view_data = RendererRD::MegaLights::get_view_data(rb.ptr());
 			if (ml_view_data.is_valid()) {
 				ml_view_data->free_data();
 			}
+			RendererRD::MegaLights::free_front_layer_view_data(rb.ptr());
+			next_gi.free_megalights_translucency_direct(rb.ptr());
 		}
 	} else {
 		megalights_inputs_active = false;
@@ -7638,8 +7732,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Enable Forward+ direct-light composite only when
 	// MegaLights ran and produced valid denoised diffuse and specular targets for this view.
 	base_specialization.use_megalights = megalights_composite_active;
-	if (using_nextgi) {
-		_render_nextgi_front_layer(p_render_data, reverse_cull, screen_size, radiance_texture, samplers, base_specialization);
+	base_specialization.use_megalights_translucent = false;
+	base_specialization.use_megalights_front_layer = false;
+	_render_nextgi_front_layer(p_render_data, reverse_cull, screen_size, radiance_texture, samplers, base_specialization, using_nextgi);
+	if (megalights_pending_compact) {
+		next_gi.compact_after_traces();
+		megalights_pending_compact = false;
 	}
 
 	if (current_cluster_builder) {
@@ -8138,8 +8236,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// GodotNext: light_function_atlas (#138). Forward transparents ignore the Light Function Atlas
 		// by default unless rendering/lights_and_shadows/light_function_atlas/translucent is enabled.
 		transparent_specialization.use_light_function = base_specialization.use_light_function && RendererRD::LightFunctionAtlas::read_translucent_enabled();
-		// GodotNext: megalights_frame (#143). Forward transparents keep full clustered shading (translucent MegaLights is #137).
+		// GodotNext: megalights_frame (#143) & megalights_fog_translucency (#137, plan §21.3 contract M7).
+		// Forward transparents sample the D17 direct SH-L1 volume (and high-quality per-pixel front-layer
+		// MegaLights targets when front_layer_translucency is enabled and depth matches).
 		transparent_specialization.use_megalights = false;
+		transparent_specialization.use_megalights_translucent = !is_reflection_probe && megalights_translucent_active && ml_bind_d17_r.is_valid() && ml_bind_d17_g.is_valid() && ml_bind_d17_b.is_valid();
+		transparent_specialization.use_megalights_front_layer = transparent_specialization.use_megalights_translucent && megalights_front_layer_active && ml_bind_front_layer_diffuse.is_valid() && ml_bind_front_layer_specular.is_valid() && front_layer.get_depth().is_valid();
 		// GodotNext: avboit (#295, plan §21.2.1) & rd_readonly_depth (#301). With AVBOIT the alpha
 		// list is drawn in any order. Keep the depth attachment read-only when no transparent
 		// surface writes depth or stencil so TSR level 2 overlaps the transparent pass.
@@ -10165,9 +10267,19 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		// radiance and M1 shading-model/fallback material texture (bindings 69..71; defaults when off or in depth prepass).
 		const bool bind_ml = p_render_data != nullptr && megalights_composite_active && ml_bind_diffuse.is_valid() && ml_bind_specular.is_valid() && ml_bind_material.is_valid();
 		const RID default_ml_black = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		const RID default_ml_black_3d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 69, bind_ml ? ml_bind_diffuse : default_ml_black));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 70, bind_ml ? ml_bind_specular : default_ml_black));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 71, bind_ml ? ml_bind_material : default_ml_black));
+		// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). D17 direct SH-L1 volume
+		// (bindings 72..74) and high-quality front-layer denoised direct diffuse/specular (bindings 75..76).
+		const bool bind_ml_d17 = p_render_data != nullptr && !p_front_layer_pass && megalights_translucent_active && ml_bind_d17_r.is_valid() && ml_bind_d17_g.is_valid() && ml_bind_d17_b.is_valid();
+		const bool bind_ml_fl = p_render_data != nullptr && !p_front_layer_pass && megalights_front_layer_active && ml_bind_front_layer_diffuse.is_valid() && ml_bind_front_layer_specular.is_valid();
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 72, bind_ml_d17 ? ml_bind_d17_r : default_ml_black_3d));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 73, bind_ml_d17 ? ml_bind_d17_g : default_ml_black_3d));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 74, bind_ml_d17 ? ml_bind_d17_b : default_ml_black_3d));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 75, bind_ml_fl ? ml_bind_front_layer_diffuse : default_ml_black));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 76, bind_ml_fl ? ml_bind_front_layer_specular : default_ml_black));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)

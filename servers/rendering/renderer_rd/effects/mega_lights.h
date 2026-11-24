@@ -52,6 +52,7 @@
 #include "core/math/vector2i.h"
 #include "core/math/vector3.h"
 #include "core/math/vector3i.h"
+#include "core/math/vector4.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/templates/safe_refcount.h"
@@ -152,7 +153,28 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 
 	uint32_t frame_index = 0;
 
-	// GodotNext: megalights_frame (#143, GM-9). Exact per-view allocated GPU byte accounting.
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7, GM-6).
+	// Shared volumetric-fog froxel light & SH-L1 buffers (allocated only when fog+MegaLights active)
+	// and front-layer M1 neutral guide textures (allocated only when front_layer_translucency is on).
+	bool is_front_layer_view = false;
+	Vector3i froxel_fog_size;
+	RID froxel_fog_tex[2];
+	RID froxel_sh_r[2];
+	RID froxel_sh_g[2];
+	RID froxel_sh_b[2];
+	RID froxel_params_ubo;
+	uint32_t froxel_slot = 0;
+	bool froxel_history_valid = false;
+	uint32_t froxel_history_frames = 0;
+	Transform3D froxel_prev_cam;
+	Projection froxel_prev_view_proj;
+	bool froxel_has_prev_cam = false;
+
+	Size2i front_layer_guide_size;
+	RID front_layer_albedo_tex;
+	RID front_layer_material_tex;
+
+	// GodotNext: megalights_frame (#143, GM-9) & #137 (M7). Exact per-view allocated GPU byte accounting.
 	uint64_t sampling_bytes = 0;
 	uint64_t visibility_bytes = 0;
 	uint64_t retrace_bytes = 0;
@@ -162,7 +184,11 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 	uint64_t reference_bytes = 0;
 	uint64_t verify_bytes = 0;
 	uint64_t transient_bytes = 0;
+	uint64_t froxel_bytes = 0;
+	uint64_t front_layer_guide_bytes = 0;
 	uint64_t tracked_total_bytes = 0;
+	uint64_t tracked_froxel_bytes = 0;
+	uint64_t tracked_front_layer_bytes = 0;
 
 	void _update_memory_accounting();
 
@@ -174,6 +200,8 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 	void _free_reference_buffers();
 	void _free_verify_buffers();
 	void _free_transient_buffers();
+	void _free_froxel_buffers();
+	void _free_front_layer_guide_textures();
 
 public:
 	struct DenoiseStats {
@@ -214,6 +242,45 @@ public:
 	bool ensure_verify_buffers(const Size2i &p_internal_size);
 	bool ensure_layer_group_buffer(uint32_t p_count);
 	bool ensure_light_shadow_policy_buffer(uint32_t p_count);
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	void set_is_front_layer_view(bool p_is_front_layer);
+	bool ensure_froxel_buffers(bool p_fog_active, const Vector3i &p_fog_size, bool p_need_fog_sh);
+	void free_froxel_buffers();
+	bool ensure_front_layer_guide_textures(const Size2i &p_size);
+	void free_front_layer_guide_textures();
+
+	RID get_froxel_params_ubo() const { return froxel_params_ubo; }
+	RID get_froxel_fog_texture() const { return froxel_fog_tex[froxel_slot]; }
+	RID get_froxel_fog_write_texture() const { return froxel_fog_tex[1u - froxel_slot]; }
+	RID get_froxel_sh_r() const { return froxel_sh_r[froxel_slot]; }
+	RID get_froxel_sh_g() const { return froxel_sh_g[froxel_slot]; }
+	RID get_froxel_sh_b() const { return froxel_sh_b[froxel_slot]; }
+	RID get_froxel_sh_write_r() const { return froxel_sh_r[1u - froxel_slot]; }
+	RID get_froxel_sh_write_g() const { return froxel_sh_g[1u - froxel_slot]; }
+	RID get_froxel_sh_write_b() const { return froxel_sh_b[1u - froxel_slot]; }
+	Vector3i get_froxel_fog_size() const { return froxel_fog_size; }
+	bool is_froxel_history_valid() const { return froxel_history_valid; }
+	uint32_t get_froxel_history_frames() const { return froxel_history_frames; }
+	bool has_froxel_prev_cam() const { return froxel_has_prev_cam; }
+	const Transform3D &get_froxel_prev_cam() const { return froxel_prev_cam; }
+	const Projection &get_froxel_prev_view_proj() const { return froxel_prev_view_proj; }
+	void advance_froxel_history(const Transform3D &p_cam, const Projection &p_view_proj, bool p_reset_frames) {
+		froxel_slot = 1u - froxel_slot;
+		froxel_prev_cam = p_cam;
+		froxel_prev_view_proj = p_view_proj;
+		froxel_has_prev_cam = true;
+		froxel_history_valid = true;
+		froxel_history_frames = p_reset_frames ? 1u : MIN(froxel_history_frames + 1u, 16u);
+	}
+	void invalidate_froxel_history() {
+		froxel_history_valid = false;
+		froxel_history_frames = 0;
+		froxel_has_prev_cam = false;
+	}
+
+	RID get_front_layer_albedo_texture() const { return front_layer_albedo_tex; }
+	RID get_front_layer_material_texture() const { return front_layer_material_tex; }
+	uint64_t get_froxel_allocated_bytes() const { return froxel_bytes; }
 
 	void reset_guiding();
 	void reset_denoise_history();
@@ -321,6 +388,8 @@ public:
 	static constexpr const char *SETTING_SWRT_CONTINUATION = "rendering/megalights/swrt_continuation";
 	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
 	static constexpr const char *SETTING_DENOISER = "rendering/megalights/denoiser";
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7, GM-6, budget M-8).
+	static constexpr const char *SETTING_FRONT_LAYER_TRANSLUCENCY = "rendering/megalights/front_layer_translucency";
 
 	enum DownsampleMode : uint32_t {
 		DOWNSAMPLE_FULL = 0,
@@ -364,6 +433,12 @@ public:
 	static constexpr bool DEFAULT_FAR_FIELD = false;
 	static constexpr bool DEFAULT_SWRT_CONTINUATION = false;
 	static constexpr DenoiserMode DEFAULT_DENOISER = DENOISER_BUILTIN;
+	static constexpr bool DEFAULT_FRONT_LAYER_TRANSLUCENCY = false;
+	static constexpr float SSS_TRANSMIT_BOOST = 0.2f;
+	static constexpr float SSS_EXTINCTION_DEFAULT = 4.0f;
+	static constexpr float D17_VOLUME_NEAR = 0.05f;
+	static constexpr float D17_VOLUME_FAR = 64.0f;
+	static constexpr uint32_t D17_VOLUME_SLICES = 32u;
 	static constexpr float DEMOD_ALBEDO_FLOOR = 0.01f;
 	static constexpr float DEMOD_SPECULAR_FLOOR = 0.01f;
 	static constexpr uint32_t DENOISE_RESET_TILE_SIZE = 16u;
@@ -442,6 +517,82 @@ public:
 		bool far_field = DEFAULT_FAR_FIELD;
 		bool swrt_continuation = DEFAULT_SWRT_CONTINUATION;
 		DenoiserMode denoiser = DEFAULT_DENOISER;
+		bool front_layer_translucency = DEFAULT_FRONT_LAYER_TRANSLUCENCY;
+	};
+
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7).
+	enum FroxelFlags : uint32_t {
+		FROXEL_FLAG_FOG_ACTIVE = 1u << 0u,
+		FROXEL_FLAG_D17_DIRECT_WRITE = 1u << 1u,
+		FROXEL_FLAG_WRITE_SH = 1u << 2u,
+		FROXEL_FLAG_HISTORY_VALID = 1u << 3u,
+		FROXEL_FLAG_USE_LIGHT_FUNCTION = 1u << 4u,
+		FROXEL_FLAG_USE_VSM = 1u << 5u,
+		FROXEL_FLAG_DIRECTIONAL_LIGHTS = 1u << 6u,
+		FROXEL_FLAG_ORTHOGONAL = 1u << 7u,
+		FROXEL_FLAG_FORCE_VISIBLE_ONE = 1u << 8u,
+	};
+
+	// std140, 400 bytes. Must match MLFroxelParams in ml_froxel_inc.glsl.
+	struct FroxelParamsUBO {
+		float inv_view_rows[12] = {};
+		float to_prev_view_rows[12] = {};
+		float inv_view_proj[16] = {};
+		float prev_view_proj[16] = {};
+		float depth_coeffs[4] = {};
+		float fog_frustum_size[4] = {};
+		float fog_z_params[4] = {};
+		float d17_params[4] = {};
+		uint32_t grid_dims[4] = {};
+		uint32_t d17_dims[4] = {};
+		uint32_t fog_dims_pad[4] = {};
+		uint32_t light_counts[4] = {};
+		uint32_t light_grid_dims[4] = {};
+		float light_grid_z_params[4] = {};
+		uint32_t screen_frame_vsm[4] = {};
+	};
+	static_assert(sizeof(FroxelParamsUBO) == 400, "MegaLights::FroxelParamsUBO must match MLFroxelParams (400 bytes).");
+	static_assert(sizeof(FroxelParamsUBO) % 16 == 0, "MegaLights::FroxelParamsUBO must stay 16-byte aligned.");
+
+	struct FrontLayerPushConstant {
+		uint32_t size[2] = {};
+		uint32_t pad0 = 0;
+		uint32_t pad1 = 0;
+	};
+	static_assert(sizeof(FrontLayerPushConstant) == 16, "MegaLights::FrontLayerPushConstant must match ml_front_layer.glsl.");
+
+	struct FroxelInputs {
+		RenderDataRD *render_data = nullptr;
+		NextGI *next_gi = nullptr;
+		LightFunctionAtlas *light_function_atlas = nullptr;
+		bool fog_active = false;
+		bool translucency_active = false;
+		Vector3i fog_size;
+		float fog_end = 64.0f;
+		float fog_detail_spread = 2.0f;
+		float fog_phase_g = 0.0f;
+		bool flip_y = true;
+		bool vsm_sample_view = false;
+		RID vsm_default_pool;
+		RID vsm_default_buffer;
+		RID vsm_default_miss_buffer;
+		int quality_level = 2;
+		bool reset_temporal_history = false;
+	};
+
+	struct FroxelResult {
+		RID fog_light_texture;
+		RID d17_direct_r;
+		RID d17_direct_g;
+		RID d17_direct_b;
+		bool fog_active = false;
+		bool d17_active = false;
+	};
+
+	struct FrontLayerResult {
+		RID diffuse_texture;
+		RID specular_texture;
+		bool active = false;
 	};
 
 	// std140, 272 bytes. Must match MLVisParams in ml_screen_trace.glsl / ml_trace_*.glsl.
@@ -605,16 +756,28 @@ public:
 	// --- Pure, device-free helpers (tested by CPU doctests) ---
 
 	static bool is_enabled();
+	static bool is_front_layer_enabled();
 	static bool effective_directional_lights();
 	static int read_nextgi_quality_level();
 	static QualityPreset quality_preset_for_level(int p_quality_level);
 	static DownsampleMode downsample_for_quality_preset(int p_quality_level);
 	static bool light_uses_megalights(bool p_megalights_active, RSE::LightMegaLightsMode p_mode, RSE::LightType p_type, bool p_directional_lights_enabled);
 	static uint64_t get_total_allocated_bytes();
+	static uint64_t get_froxel_allocated_bytes();
+	static uint64_t get_front_layer_allocated_bytes();
+	static uint64_t get_d17_direct_allocated_bytes();
 	static Settings read_settings();
 	static Settings validate_settings(const Settings &p_settings);
 	// Provisional sample count per quality preset (Low=2, Medium=2, High=4, Epic=8; tuned in PQ).
 	static uint32_t samples_for_quality_preset(int p_quality_level);
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7). Shared froxel samples per cell (Low/Med/High=1, Epic=2).
+	static uint32_t froxel_samples_for_quality_preset(int p_quality_level);
+	static void sh_l1_project_directional(const Vector3 &p_dir_ws, const Color &p_radiance, Vector4 &r_sh_r, Vector4 &r_sh_g, Vector4 &r_sh_b);
+	static Color sh_l1_evaluate(const Vector4 &p_sh_r, const Vector4 &p_sh_g, const Vector4 &p_sh_b, const Vector3 &p_normal_ws);
+	static float sss_transmission_lobe(float p_ndotl, float p_boost = SSS_TRANSMIT_BOOST);
+	static float sss_transmission_attenuation(float p_hit_dist, float p_visibility, float p_extinction = SSS_EXTINCTION_DEFAULT);
+	static uint64_t estimate_d17_direct_bytes(bool p_megalights_enabled, const Size2i &p_screen_size);
+	static uint64_t estimate_front_layer_bytes(bool p_megalights_enabled, bool p_front_layer_enabled, const Size2i &p_screen_size, uint32_t p_spp, DownsampleMode p_downsample);
 	static DownsampleMode parse_downsample_variant(const Variant &p_value);
 	static DenoiserMode parse_denoiser_variant(const Variant &p_value);
 	static int debug_vis_mode_from_viewport(RSE::ViewportDebugDraw p_mode);
@@ -686,14 +849,20 @@ public:
 	static Vector<String> get_trace_rays_swrt_shader_variant_defines();
 	static Vector<String> get_trace_vsm_shader_variant_defines();
 	static Vector<String> get_shade_samples_shader_variant_defines();
+	static Vector<String> get_froxel_shader_variant_defines();
+	static Vector<String> get_froxel_compute_shader_variant_defines();
+	static Vector<String> get_front_layer_shader_variant_defines();
 
 	// Spatio-temporal blue-noise table accessors (64x64x32 RG8 committed data).
 	static const uint8_t *get_stbn_data();
 	static uint32_t get_stbn_byte_size();
 
-	// Per-view state accessors (owned by RenderSceneBuffersRD under RB_SCOPE_MEGALIGHTS).
+	// Per-view state accessors (owned by RenderSceneBuffersRD under RB_SCOPE_MEGALIGHTS / RB_SCOPE_MEGALIGHTS_FRONT_LAYER).
 	static Ref<MegaLightsViewData> get_view_data(RenderSceneBuffersRD *p_rb);
 	static Ref<MegaLightsViewData> ensure_view_data(RenderSceneBuffersRD *p_rb);
+	static Ref<MegaLightsViewData> get_front_layer_view_data(RenderSceneBuffersRD *p_rb);
+	static Ref<MegaLightsViewData> ensure_front_layer_view_data(RenderSceneBuffersRD *p_rb);
+	static void free_front_layer_view_data(RenderSceneBuffersRD *p_rb);
 
 	// GPU verification check hook (matching LightGrid / VSM check pattern).
 	static void request_check(const Dictionary &p_options = Dictionary());
@@ -714,6 +883,9 @@ private:
 	bool _ensure_trace_rays_swrt_shader();
 	bool _ensure_trace_vsm_shader();
 	bool _ensure_shade_shaders();
+	bool _ensure_froxel_rt_shader(NextGI *p_next_gi);
+	bool _ensure_froxel_compute_shaders();
+	bool _ensure_front_layer_shader();
 	NextGIDenoise *_ensure_denoiser();
 	void _ensure_stbn_texture();
 	void _fill_params_ubo(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_frame_index, bool p_has_guiding, bool p_force_visible_one, float p_falloff_override, ParamsUBO &r_ubo) const;
@@ -752,6 +924,12 @@ public:
 	// Per-frame entry point invoked by RenderForwardClustered after prepass & packed light grid build.
 	void render(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
 	void render_sampling(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
+
+	// GodotNext: megalights_fog_translucency (#137, plan §21.3 contract M7, GM-6, budget M-8).
+	// Shared stochastic froxel lighting volume feeding BOTH volumetric fog and D17 translucency direct SH-L1.
+	FroxelResult render_froxel(const FroxelInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
+	// High-quality per-pixel MegaLights pass for the frontmost transparent layer with separate temporal history.
+	FrontLayerResult render_front_layer(const FrameInputs &p_inputs, RID p_front_layer_depth, RID p_front_layer_normal_roughness, Ref<RenderSceneBuffersRD> p_rb);
 
 	void free_resources();
 

@@ -156,10 +156,6 @@ void NextGIFrontLayer::free_resources() {
 	reflection = RID();
 	opaque_depth = RID();
 	size = Size2i();
-	if (owner != nullptr && NextGI::get_singleton() == owner) {
-		owner->set_front_layer(nullptr);
-	}
-	owner = nullptr;
 }
 
 void NextGIFrontLayer::fill_info(Dictionary &r_info) const {
@@ -191,4 +187,8 @@ void NextGIFrontLayer::fill_info(Dictionary &r_info) const {
 
 NextGIFrontLayer::~NextGIFrontLayer() {
 	free_resources();
+	if (owner != nullptr && NextGI::get_singleton() == owner) {
+		owner->set_front_layer(nullptr);
+	}
+	owner = nullptr;
 }

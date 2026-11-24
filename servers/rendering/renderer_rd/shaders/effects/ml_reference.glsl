@@ -69,17 +69,23 @@ layout(set = 0, binding = 25, std430) restrict readonly buffer MLLightShadowPoli
 }
 ml_light_shadow_policies;
 
-float ml_reference_visibility(vec3 p_origin_ws, vec3 p_dir_ws, float p_tmax, uint p_policy_idx, bool p_force_visible) {
+float ml_reference_visibility(vec3 p_origin_ws, vec3 p_dir_ws, float p_tmax, uint p_policy_idx, bool p_force_visible, out float r_hit_dist) {
+	r_hit_dist = ML_HIT_DIST_MISS;
 	if (p_force_visible) {
 		return 1.0;
 	}
 	uvec4 policy = ml_light_shadow_policies.data[p_policy_idx];
-	return trace_shadow(p_origin_ws, p_dir_ws, p_tmax, policy.x, policy.y);
+	float vis = trace_shadow(p_origin_ws, p_dir_ws, p_tmax, policy.x, policy.y);
+	if (vis < 0.5 && nextgi_shadow_hit_t >= 0.0) {
+		r_hit_dist = min(nextgi_shadow_hit_t, ML_HIT_DIST_MISS);
+	}
+	return vis;
 }
 
 #else
 
-float ml_reference_visibility(vec3 p_origin_ws, vec3 p_dir_ws, float p_tmax, uint p_policy_idx, bool p_force_visible) {
+float ml_reference_visibility(vec3 p_origin_ws, vec3 p_dir_ws, float p_tmax, uint p_policy_idx, bool p_force_visible, out float r_hit_dist) {
+	r_hit_dist = ML_HIT_DIST_MISS;
 	return 1.0;
 }
 
@@ -138,7 +144,7 @@ void main() {
 		float inv_pdf = uintBitsToFloat(s.y);
 		MLLightEval ev = ml_eval_packed_light(s.x, surf, falloff_threshold, use_soft_shadows, use_lf, vec2(0.5), false);
 		if (ev.valid) {
-			est += (ev.diffuse + ev.specular) * inv_pdf;
+			est += (ev.diffuse + ev.specular + ev.transmission) * inv_pdf;
 		}
 	}
 	est /= float(spp);
@@ -165,7 +171,8 @@ void main() {
 #else
 	bool need_ray = false;
 #endif
-	vec3 ray_origin = surf.world_pos + surf.world_normal * max(0.002, length(surf.view_pos) * 0.001);
+	float origin_bias = max(0.002, length(surf.view_pos) * 0.001);
+	bool has_sss_trans = ml_surface_has_sss_transmission(surf);
 
 	vec3 total_radiance = vec3(0.0);
 	uint omni_count = params.light_counts.x;
@@ -183,8 +190,10 @@ void main() {
 		if (!ev.valid) {
 			continue;
 		}
-		float vis = ml_reference_visibility(ray_origin, ev.ray_dir_ws, max(ev.ray_dist - 0.005, 0.0), i, force_visible);
-		total_radiance += (ev.diffuse + ev.specular) * vis;
+		float side = dot(surf.world_normal, ev.ray_dir_ws) < 0.0 ? -1.0 : 1.0;
+		float hit_dist;
+		float vis = ml_reference_visibility(surf.world_pos + surf.world_normal * (side * origin_bias), ev.ray_dir_ws, max(ev.ray_dist - 0.005, 0.0), i, force_visible, hit_dist);
+		total_radiance += (ev.diffuse + ev.specular) * vis + (has_sss_trans ? ev.transmission * ml_sss_transmission_attenuation(hit_dist, vis) : vec3(0.0));
 	}
 
 	uint spot_policy_base = omni_count;
@@ -198,8 +207,10 @@ void main() {
 		if (!ev.valid) {
 			continue;
 		}
-		float vis = ml_reference_visibility(ray_origin, ev.ray_dir_ws, max(ev.ray_dist - 0.005, 0.0), spot_policy_base + i, force_visible);
-		total_radiance += (ev.diffuse + ev.specular) * vis;
+		float side = dot(surf.world_normal, ev.ray_dir_ws) < 0.0 ? -1.0 : 1.0;
+		float hit_dist;
+		float vis = ml_reference_visibility(surf.world_pos + surf.world_normal * (side * origin_bias), ev.ray_dir_ws, max(ev.ray_dist - 0.005, 0.0), spot_policy_base + i, force_visible, hit_dist);
+		total_radiance += (ev.diffuse + ev.specular) * vis + (has_sss_trans ? ev.transmission * ml_sss_transmission_attenuation(hit_dist, vis) : vec3(0.0));
 	}
 
 	uint area_policy_base = omni_count + spot_count;
@@ -213,8 +224,10 @@ void main() {
 		if (!ev.valid) {
 			continue;
 		}
-		float vis = ml_reference_visibility(ray_origin, ev.ray_dir_ws, max(ev.ray_dist - 0.005, 0.0), area_policy_base + i, force_visible);
-		total_radiance += (ev.diffuse + ev.specular) * vis;
+		float side = dot(surf.world_normal, ev.ray_dir_ws) < 0.0 ? -1.0 : 1.0;
+		float hit_dist;
+		float vis = ml_reference_visibility(surf.world_pos + surf.world_normal * (side * origin_bias), ev.ray_dir_ws, max(ev.ray_dist - 0.005, 0.0), area_policy_base + i, force_visible, hit_dist);
+		total_radiance += (ev.diffuse + ev.specular) * vis + (has_sss_trans ? ev.transmission * ml_sss_transmission_attenuation(hit_dist, vis) : vec3(0.0));
 	}
 
 	uint dir_policy_base = omni_count + spot_count + area_count;
@@ -230,8 +243,10 @@ void main() {
 		if (!ev.valid) {
 			continue;
 		}
-		float vis = ml_reference_visibility(ray_origin, ev.ray_dir_ws, ev.ray_dist, dir_policy_base + i, force_visible);
-		total_radiance += (ev.diffuse + ev.specular) * vis;
+		float side = dot(surf.world_normal, ev.ray_dir_ws) < 0.0 ? -1.0 : 1.0;
+		float hit_dist;
+		float vis = ml_reference_visibility(surf.world_pos + surf.world_normal * (side * origin_bias), ev.ray_dir_ws, ev.ray_dist, dir_policy_base + i, force_visible, hit_dist);
+		total_radiance += (ev.diffuse + ev.specular) * vis + (has_sss_trans ? ev.transmission * ml_sss_transmission_attenuation(hit_dist, vis) : vec3(0.0));
 	}
 
 	ml_welford_accumulate(ivec2(fpx), total_radiance, n);

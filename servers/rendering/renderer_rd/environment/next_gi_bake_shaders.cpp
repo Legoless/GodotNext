@@ -36,12 +36,15 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
-// GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169), rt_shadows (#141), megalights_visibility (#146), megalights_denoiser (#135)
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169), rt_shadows (#141), megalights_visibility (#146), megalights_denoiser (#135), megalights_fog_translucency (#137)
 #include "servers/rendering/renderer_rd/effects/denoise.h"
 #include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/effects/path_tracer.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_denoise_spatial.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_denoise_temporal.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_front_layer.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_froxel.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_froxel_compute.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_screen_trace.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_shade_samples.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays.glsl.gen.h"
@@ -97,6 +100,10 @@ struct NextGIBakeShaders::Instances {
 	MlShadeSamplesShaderRD ml_shade_samples;
 	MlDenoiseTemporalShaderRD ml_denoise_temporal;
 	MlDenoiseSpatialShaderRD ml_denoise_spatial;
+	// GodotNext: megalights_fog_translucency (#137). Shared froxel & D17 volume (HWRT + compute sibling) and front-layer guide prep.
+	MlFroxelShaderRD ml_froxel;
+	MlFroxelComputeShaderRD ml_froxel_compute;
+	MlFrontLayerShaderRD ml_front_layer;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
@@ -140,6 +147,12 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->ml_shade_samples, MegaLights::get_shade_samples_shader_variant_defines());
 	_add(instances->ml_denoise_temporal, NextGIDenoise::get_megalights_temporal_shader_variant_defines());
 	_add(instances->ml_denoise_spatial, NextGIDenoise::get_megalights_spatial_shader_variant_defines());
+	// GodotNext: megalights_fog_translucency (#137).
+	instances->ml_froxel.initialize(MegaLights::get_froxel_shader_variant_defines(), RendererVirtualShadowMapStorage::get_glsl_defines());
+	_add_initialized(instances->ml_froxel);
+	instances->ml_froxel_compute.initialize(MegaLights::get_froxel_compute_shader_variant_defines(), RendererVirtualShadowMapStorage::get_glsl_defines());
+	_add_initialized(instances->ml_froxel_compute);
+	_add(instances->ml_front_layer, MegaLights::get_front_layer_shader_variant_defines());
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {
