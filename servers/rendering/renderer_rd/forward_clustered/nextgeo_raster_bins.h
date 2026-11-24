@@ -54,7 +54,7 @@ struct NextGeoRasterFacts {
 	bool alpha_hash = false; // ALPHA_HASH_SCALE
 	bool discard = false;
 	bool writes_vertex = false; // VERTEX written in vertex()
-	bool depth_offset = false; // DEPTH_OFFSET (#149 adds the built-in)
+	bool depth_offset = false; // DEPTH_OFFSET (#149)
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). True when Material.displacement_magnitude > 0.
 	bool displaced = false;
 	RSE::CullMode cull_mode = RSE::CULL_MODE_BACK;
@@ -144,17 +144,20 @@ struct NextGeoMaterialFallbackFacts {
 	bool transparent = false;
 	bool screen_reads = false; // The screen, depth or normal-roughness texture (uses_alpha_pass()'s other term).
 	bool masked = false; // RASTER_FEATURE_MASKED
+	bool depth_offset = false; // RASTER_FEATURE_DEPTH_OFFSET (#149)
 	bool writes_vertex = false; // RASTER_FEATURE_VERTEX_OFFSET
 	// POSITION, MODELVIEW_MATRIX or PROJECTION_MATRIX writes, skip_vertex_transform, Z_CLIP_SCALE,
 	// POINT_SIZE, particle trails, wireframe, the absolute DEPTH.
 	bool other_custom_vertex = false;
 	bool unsupported_derivative = false;
 	uint32_t raster_rejects = 0u; // nextgeo_raster_rejects()
-	// GodotNext: nextgeo_masked_two_sided (#153). Admits masked materials (alpha scissor, alpha hash,
-	// fragment discard) into programmable raster bins on the Nanite device tier by default.
+	// GodotNext: nextgeo_masked_two_sided (#153) & depth_offset (#149). Admits pixel-programmable
+	// materials (masked: alpha scissor, alpha hash, discard; depth offset: DEPTH_OFFSET) into
+	// programmable raster bins on the Nanite device tier by default.
 	bool admit_masked = false;
-	// rendering/nextgeo/debug_programmable_raster: admits masked and vertex-offset materials into
-	// programmable raster bins (vertex offset stays behind this gate until #164).
+	bool admit_depth_offset = false;
+	// rendering/nextgeo/debug_programmable_raster: admits masked, depth-offset and vertex-offset
+	// materials into programmable raster bins (vertex offset stays behind this gate until #164).
 	bool admit_programmable = false;
 };
 
@@ -174,7 +177,7 @@ inline NextGeoFallback nextgeo_material_fallback(const NextGeoMaterialFallbackFa
 	if (p_facts.screen_reads || (p_facts.masked && !(p_facts.admit_masked || p_facts.admit_programmable))) {
 		return NEXTGEO_FALLBACK_ALPHA;
 	}
-	if (p_facts.other_custom_vertex || (p_facts.writes_vertex && !p_facts.admit_programmable)) {
+	if (p_facts.other_custom_vertex || (p_facts.depth_offset && !(p_facts.admit_depth_offset || p_facts.admit_programmable)) || (p_facts.writes_vertex && !p_facts.admit_programmable)) {
 		return NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER;
 	}
 	if (p_facts.unsupported_derivative) {

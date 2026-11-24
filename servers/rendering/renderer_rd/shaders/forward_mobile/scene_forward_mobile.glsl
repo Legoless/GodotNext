@@ -865,12 +865,19 @@ void main() {
 #define TEXTURE_STREAMING_NO_DEPTH_WRITE
 #endif
 
-#if !defined(DEPTH_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
+#if !defined(DEPTH_USED) && !defined(DEPTH_OFFSET_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
 layout(early_fragment_tests) in;
 #define EARLY_Z_ON
 #endif // early fragment tests are safe
 
 #endif // TEXTURE_STREAMING
+
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Conservative depth (depth_less in reversed-Z:
+// pushing away from camera makes depth smaller) preserves early-Z on Forward Mobile.
+#if defined(DEPTH_OFFSET_USED) && !defined(DEPTH_USED) && !defined(MODE_RENDER_MOTION_VECTORS)
+#define DEPTH_OFFSET_WRITE_FRAG_DEPTH
+layout(depth_less) out float gl_FragDepth;
+#endif
 
 // All interpolators are intentionally kept at full precision as storageInputOutput16 is not
 // checked for support. Devices with Adreno GPUs don't usually support this capability.
@@ -1241,9 +1248,17 @@ void main() {
 #endif
 #endif
 
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset = 0.0;
+#endif
+
 	{
 #CODE : FRAGMENT
 	}
+
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset_clamped = (depth_offset > 0.0) ? min(depth_offset, 1e15) : 0.0;
+#endif
 
 	// Store variables in half precision after user shader code is run.
 	hvec3 view = hvec3(view_highp);
@@ -2465,5 +2480,20 @@ void main() {
 	vec3 prev_ndc = prev_screen_position.xyz / prev_screen_position.w;
 	prev_ndc.y = -prev_ndc.y;
 	frag_color = vec4(ndc - prev_ndc, 0.0);
+#endif
+
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Conservative depth write in reversed-Z.
+#ifdef DEPTH_OFFSET_WRITE_FRAG_DEPTH
+	if (depth_offset_clamped > 0.0) {
+#ifdef MODE_DUAL_PARABOLOID
+		float pdo_depth = gl_FragCoord.z - depth_offset_clamped / max(scene_data.z_far, 1e-5);
+#else
+		vec4 pdo_clip = projection_matrix * vec4(vertex_interp.xy, vertex_interp.z - depth_offset_clamped, 1.0);
+		float pdo_depth = (abs(pdo_clip.w) > 1e-20) ? (pdo_clip.z / pdo_clip.w) : 0.0;
+#endif
+		gl_FragDepth = (pdo_depth > 0.0) ? min(pdo_depth, gl_FragCoord.z) : 0.0;
+	} else {
+		gl_FragDepth = gl_FragCoord.z;
+	}
 #endif
 }

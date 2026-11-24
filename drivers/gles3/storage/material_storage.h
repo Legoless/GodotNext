@@ -350,6 +350,8 @@ struct SceneShaderData : public ShaderData {
 	bool uses_custom3;
 	bool uses_bones;
 	bool uses_weights;
+	// GodotNext: depth_offset (#149, plan §21.4 contract N6).
+	bool uses_depth_offset = false;
 
 	uint64_t vertex_input_mask;
 

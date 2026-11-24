@@ -144,6 +144,7 @@ vec4 custom_radiance;
 vec4 custom_irradiance;
 vec3 light_vertex;
 float streaming_lod;
+float depth_offset;
 vec3 energy_compensation;
 
 #ifdef DISCARD_USED
@@ -418,6 +419,7 @@ void main() {
 	transmittance_color = vec4(0.0, 0.0, 0.0, 1.0);
 	transmittance_depth = 0.0;
 	transmittance_boost = 0.0;
+	depth_offset = 0.0;
 	backlight = vec3(0.0);
 	ao = 1.0;
 	ao_light_affect = 0.0;

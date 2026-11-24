@@ -140,6 +140,21 @@ variant `vsm_raster_nextgeo_mesh.glsl`), indirect-count task dispatch per bin, a
 driver in PQ) — is an original implementation built directly on GodotNext's #178 RHI mesh shaders, #162
 hybrid visibility raster, #155 programmable raster bins, and #217 VSM x Nanite pass. Copied files: none.
 
+## Pixel depth offset (#149)
+
+No outside input beyond the public graphics API specifications for conservative fragment depth:
+GLSL 4.50 (`layout(depth_less) out float gl_FragDepth`), SPIR-V (`ExecutionMode DepthLess`),
+Metal Shading Language (`[[depth(less)]]`, emitted automatically by vendored SPIRV-Cross from
+`ExecutionModeDepthLess`), and Direct3D 12 / DXIL (`SV_DepthLessEqual`, emitted by Mesa's
+`spirv_to_nir` / `nir_to_dxil` from `ExecutionModeDepthLess`). The `DEPTH_OFFSET` spatial fragment
+built-in (view-space meters clamped `>= 0.0`, mutually exclusive with absolute `DEPTH`), its
+conservative-depth epilogue across Forward+ and Forward Mobile, plain `gl_FragDepth` epilogue in
+Compatibility (GLES3), NextGeo programmable raster-bin integration (`RASTER_FEATURE_DEPTH_OFFSET`
+in SW compute, HW vertex-pulling, and HW mesh-shader rasterizers), and VSM light-view-space offset
+(both NextGeo VSM programmable bins and Forward+ non-Nanite `MODE_VSM`, with `#212` dynamic-layer
+classification) are original implementations built on GodotNext's #155, #153, #154, #217, and #218
+infrastructure. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

@@ -189,7 +189,7 @@ public:
 		{ RASTER_FEATURE_MASKED, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_MASKED" },
 		{ RASTER_FEATURE_VERTEX_OFFSET, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "VERTEX_OFFSET" },
 		{ RASTER_FEATURE_VERTEX_OFFSET, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_VERTEX_OFFSET" },
-		// DEPTH_OFFSET arrives with #149's built-in; the bin evaluates it once the classifier sets the bit.
+		// GodotNext: depth_offset (#149, plan §21.4 contract N6). Pixel depth offset (DEPTH_OFFSET) in visibility and VSM bins.
 		{ RASTER_FEATURE_DEPTH_OFFSET, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "DEPTH_OFFSET" },
 		{ RASTER_FEATURE_DEPTH_OFFSET, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_DEPTH_OFFSET" },
 		// GodotNext: nextgeo_displacement (#150). Displaced surfaces route through programmable raster bins (#163 adds dicing).

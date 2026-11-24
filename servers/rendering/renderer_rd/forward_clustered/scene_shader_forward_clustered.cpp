@@ -115,6 +115,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_vertex_lighting = false;
 	uses_skip_vertex_transform = false;
 	writes_depth = false;
+	uses_depth_offset = false;
 	uses_unsupported_derivative = false;
 	nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	raster_features = 0;
@@ -207,6 +208,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.write_flag_pointers["BINORMAL"] = &writes_tangent;
 	actions.write_flag_pointers["Z_CLIP_SCALE"] = &uses_z_clip_scale;
 	actions.write_flag_pointers["DEPTH"] = &writes_depth;
+	actions.write_flag_pointers["DEPTH_OFFSET"] = &uses_depth_offset;
 
 	actions.visibility_resolve = true;
 	// GodotNext: nextgeo_raster_bins (#155). The material raster target of the programmable raster bins.
@@ -370,6 +372,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	raster_facts.alpha_hash = uses_alpha_hash;
 	raster_facts.discard = uses_discard;
 	raster_facts.writes_vertex = uses_vertex;
+	raster_facts.depth_offset = uses_depth_offset;
 	raster_facts.cull_mode = cull_mode;
 	raster_features = RendererRD::nextgeo_raster_features(raster_facts);
 	raster_uses = gen_code.raster_uses | (writes_depth ? uint32_t(ShaderCompiler::RASTER_WRITES_DEPTH) : 0u);
@@ -383,13 +386,16 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	fallback_facts.transparent = has_base_alpha || uses_blend_alpha || depth_draw == DEPTH_DRAW_DISABLED || depth_test != DEPTH_TEST_ENABLED || uses_alpha_antialiasing || alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF;
 	fallback_facts.screen_reads = uses_screen_texture || uses_depth_texture || uses_normal_texture;
 	fallback_facts.masked = (raster_features & RendererVirtualMeshStorage::RASTER_FEATURE_MASKED) != 0u;
+	fallback_facts.depth_offset = uses_depth_offset;
 	fallback_facts.writes_vertex = uses_vertex;
 	fallback_facts.other_custom_vertex = uses_position || writes_modelview_or_projection || uses_skip_vertex_transform || uses_z_clip_scale || uses_point_size || uses_particle_trails || wireframe || writes_depth;
 	fallback_facts.unsupported_derivative = uses_unsupported_derivative;
 	fallback_facts.raster_rejects = raster_rejects;
 	nextgeo_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
-	// GodotNext: nextgeo_masked_two_sided (#153). Default routing on the Nanite tier admits masked materials.
+	// GodotNext: nextgeo_masked_two_sided (#153) & depth_offset (#149). Default routing on the Nanite tier
+	// admits pixel-programmable materials (masked + DEPTH_OFFSET); vertex offset stays behind debug_programmable_raster.
 	fallback_facts.admit_masked = true;
+	fallback_facts.admit_depth_offset = true;
 	nextgeo_masked_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
 	fallback_facts.admit_programmable = true;
 	nextgeo_programmable_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
@@ -1504,6 +1510,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.renames["INSTANCE_CUSTOM"] = "instance_custom";
 		actions.renames["SCREEN_UV"] = "screen_uv";
 		actions.renames["DEPTH"] = "gl_FragDepth";
+		actions.renames["DEPTH_OFFSET"] = "depth_offset";
 		actions.renames["FOG"] = "fog";
 		actions.renames["RADIANCE"] = "custom_radiance";
 		actions.renames["IRRADIANCE"] = "custom_irradiance";
@@ -1593,6 +1600,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 		actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
 		actions.usage_defines["DEPTH"] = "#define DEPTH_USED\n";
+		actions.usage_defines["DEPTH_OFFSET"] = "#define DEPTH_OFFSET_USED\n";
 
 		actions.usage_defines["STREAMING_LOD"] = "#define STREAMING_LOD_USED\n";
 

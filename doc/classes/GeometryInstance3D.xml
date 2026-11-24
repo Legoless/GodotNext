@@ -116,7 +116,7 @@
 			In other words, the actual mesh will not be visible, only the shadows casted from the mesh will be.
 		</constant>
 		<constant name="SHADOW_CACHE_INVALIDATION_AUTO" value="0" enum="ShadowCacheInvalidation">
-			Automatically chooses between the static and dynamic virtual shadow map layers. The instance uses the cached static layer unless it moved within the last 8 frames, uses a skeleton, blend shapes, particles, a dynamic [MultiMesh], or a material that writes [code]VERTEX[/code], uses [code]TIME[/code] in [code]vertex()[/code], writes [code]DEPTH[/code], is animated, or reads [code]MAIN_CAM_INV_VIEW_MATRIX[/code].
+			Automatically chooses between the static and dynamic virtual shadow map layers. The instance uses the cached static layer unless it moved within the last 8 frames, uses a skeleton, blend shapes, particles, a dynamic [MultiMesh], or a material that writes [code]VERTEX[/code], uses [code]TIME[/code] in [code]vertex()[/code], writes [code]DEPTH[/code] or [code]DEPTH_OFFSET[/code], is animated, or reads [code]MAIN_CAM_INV_VIEW_MATRIX[/code].
 		</constant>
 		<constant name="SHADOW_CACHE_INVALIDATION_ALWAYS" value="1" enum="ShadowCacheInvalidation">
 			Always renders the instance into the dynamic virtual shadow map layer and never invalidates or draws into the cached static layer. Use for continuously animated geometry such as wind-driven foliage or characters.

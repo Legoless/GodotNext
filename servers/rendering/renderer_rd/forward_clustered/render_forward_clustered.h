@@ -1067,7 +1067,7 @@ private:
 		VSM_DYNAMIC_ANIMATED = 1u << 6, // The material animates with TIME (ShaderData::is_animated()).
 		VSM_DYNAMIC_MAIN_CAMERA = 1u << 7, // The material reads the main camera (camera-facing billboards).
 		VSM_DYNAMIC_VERTEX_TIME = 1u << 8, // The material reads TIME in vertex() (#212).
-		VSM_DYNAMIC_DEPTH = 1u << 9, // The material writes DEPTH (#212; DEPTH_OFFSET joins in #149).
+		VSM_DYNAMIC_DEPTH = 1u << 9, // The material writes DEPTH (#212) or DEPTH_OFFSET (#149).
 		VSM_DYNAMIC_MODE_ALWAYS = 1u << 10, // shadow_cache_invalidation == ALWAYS (#212).
 	};
 

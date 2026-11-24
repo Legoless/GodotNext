@@ -1,8 +1,8 @@
 // GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). The material raster target: what
 // raster_material_sw.glsl (the software form, compute) and raster_material_hw.glsl (the hardware form,
 // vertex and pixel) share. A programmable raster bin runs its material's vertex() at the three corners
-// of each triangle with barycentric varyings, then the fragment() subset that decides coverage: ALPHA,
-// the alpha scissor and hash built-ins and discard (DEPTH_OFFSET joins with #149). The code comes from
+// of each triangle with barycentric varyings, then the fragment() subset that decides coverage and
+// depth offset: ALPHA, the alpha scissor and hash built-ins, discard and DEPTH_OFFSET (#149). The code comes from
 // ShaderCompiler's visibility-resolve output (#80): RESOLVE_VERTEX, RESOLVE_VERTEX_STORE and
 // RESOLVE_INTERPOLATE, with implicit-LOD sampling already rewritten to textureGrad with analytic
 // derivatives, and RASTER_FRAGMENT, the fragment body whose discard is _NG_RASTER_DISCARD. The setup,
@@ -278,6 +278,8 @@ float _ng_vsm_depth_interp = 0.0;
 
 // Cleared by _NG_RASTER_DISCARD and by the alpha tests.
 bool _ng_raster_covered = true;
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Clamped view-space meters (>= 0.0) written by fragment().
+float _ng_depth_offset = 0.0;
 
 // The raster target's discard: a compute stage has none, and a pixel stage must still reach its
 // atomic or skip it.
@@ -936,6 +938,7 @@ void _ng_raster_interpolate(vec2 p_frag_xy) {
 // its alpha scissor and hash tests. Leaves _ng_raster_covered false when the sample is not covered.
 void _ng_raster_fragment(in SceneData scene_data) {
 	_ng_raster_covered = true;
+	_ng_depth_offset = 0.0;
 	uint instance_index = instance_index_interp;
 
 #ifdef PREMUL_ALPHA_USED
@@ -1066,6 +1069,10 @@ void _ng_raster_fragment(in SceneData scene_data) {
 	vec2 point_coord = vec2(0.5);
 #endif
 
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset = 0.0;
+#endif
+
 	{
 #CODE : RASTER_FRAGMENT
 	}
@@ -1092,6 +1099,27 @@ void _ng_raster_fragment(in SceneData scene_data) {
 	}
 #endif
 #endif
+
+#ifdef DEPTH_OFFSET_USED
+	_ng_depth_offset = (depth_offset > 0.0) ? min(depth_offset, 1e15) : 0.0;
+#endif
+}
+
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Applies the clamped view-space offset
+// (>= 0.0 meters) in main-view reversed-Z clip depth or VSM linear light-space depth.
+float _ng_apply_depth_offset(in SceneData scene_data, float p_base_depth) {
+#ifdef DEPTH_OFFSET_USED
+	if (_ng_depth_offset > 0.0) {
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+		return p_base_depth + _ng_depth_offset;
+#else
+		vec4 pdo_clip = projection_matrix * vec4(vertex_interp.xy, vertex_interp.z - _ng_depth_offset, 1.0);
+		float pdo_depth = (abs(pdo_clip.w) > 1e-20) ? (pdo_clip.z / pdo_clip.w) : 0.0;
+		return (pdo_depth > 0.0) ? min(pdo_depth, p_base_depth) : 0.0;
+#endif
+	}
+#endif
+	return p_base_depth;
 }
 
 #ifdef NEXTGEO_RASTER_DEPTH_ONLY

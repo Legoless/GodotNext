@@ -83,6 +83,7 @@ void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	writes_modelview_or_projection = false;
 	uses_world_coordinates = false;
 	uses_particle_trails = false;
+	uses_depth_offset = false;
 
 	int depth_drawi = DEPTH_DRAW_OPAQUE;
 
@@ -152,6 +153,7 @@ void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	actions.write_flag_pointers["VERTEX"] = &uses_vertex;
 	actions.write_flag_pointers["TANGENT"] = &writes_tangent;
 	actions.write_flag_pointers["BINORMAL"] = &writes_tangent;
+	actions.write_flag_pointers["DEPTH_OFFSET"] = &uses_depth_offset;
 
 	actions.stencil_mode_values["read"] = Pair<int *, int>(&stencil_readi, STENCIL_FLAG_READ);
 	actions.stencil_mode_values["write"] = Pair<int *, int>(&stencil_writei, STENCIL_FLAG_WRITE);
@@ -711,6 +713,7 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 		actions.renames["INSTANCE_CUSTOM"] = "instance_custom";
 		actions.renames["SCREEN_UV"] = "screen_uv";
 		actions.renames["DEPTH"] = "gl_FragDepth";
+		actions.renames["DEPTH_OFFSET"] = "depth_offset";
 		actions.renames["FOG"] = "fog_highp";
 		actions.renames["RADIANCE"] = "custom_radiance_highp";
 		actions.renames["IRRADIANCE"] = "custom_irradiance_highp";
@@ -800,6 +803,7 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 
 		actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
 		actions.usage_defines["DEPTH"] = "#define DEPTH_USED\n";
+		actions.usage_defines["DEPTH_OFFSET"] = "#define DEPTH_OFFSET_USED\n";
 
 		actions.usage_defines["STREAMING_LOD"] = "#define STREAMING_LOD_USED\n";
 

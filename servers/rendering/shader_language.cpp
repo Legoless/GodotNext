@@ -11225,6 +11225,151 @@ Error ShaderLanguage::_parse_shader(const HashMap<StringName, FunctionInfo> &p_f
 		varying_index += kv.value.get_size();
 	}
 
+	// GodotNext: depth_offset (#149, plan §21.4 contract N6). Reject writing both absolute DEPTH
+	// and relative DEPTH_OFFSET in the same spatial shader (direct assignment, compound ops,
+	// increment/decrement, or passing as an out/inout argument).
+	if (p_functions.has(SNAME("fragment")) && p_functions[SNAME("fragment")].built_ins.has(SNAME("DEPTH")) && p_functions[SNAME("fragment")].built_ins.has(SNAME("DEPTH_OFFSET"))) {
+		const FunctionNode *fragment_func = nullptr;
+		for (int i = 0; i < shader->vfunctions.size(); i++) {
+			if (!shader->vfunctions[i].callable && shader->vfunctions[i].name == SNAME("fragment")) {
+				fragment_func = shader->vfunctions[i].function;
+				break;
+			}
+		}
+		if (fragment_func != nullptr && fragment_func->body != nullptr) {
+			bool writes_depth = false;
+			bool writes_depth_offset = false;
+			auto mark_builtin_write = [&](const Node *p_lhs) {
+				const Node *lhs = p_lhs;
+				while (lhs != nullptr && lhs->type == Node::NODE_TYPE_MEMBER) {
+					lhs = static_cast<const MemberNode *>(lhs)->owner;
+				}
+				if (lhs != nullptr && lhs->type == Node::NODE_TYPE_VARIABLE) {
+					const VariableNode *vnode = static_cast<const VariableNode *>(lhs);
+					if (!vnode->is_local) {
+						if (vnode->name == SNAME("DEPTH")) {
+							writes_depth = true;
+						} else if (vnode->name == SNAME("DEPTH_OFFSET")) {
+							writes_depth_offset = true;
+						}
+					}
+				}
+			};
+			auto walk_writes = [&](auto &self, const Node *p_node) -> void {
+				if (p_node == nullptr) {
+					return;
+				}
+				switch (p_node->type) {
+					case Node::NODE_TYPE_BLOCK: {
+						const BlockNode *bnode = static_cast<const BlockNode *>(p_node);
+						for (const Node *stmt : bnode->statements) {
+							self(self, stmt);
+						}
+					} break;
+					case Node::NODE_TYPE_VARIABLE_DECLARATION: {
+						const VariableDeclarationNode *vdnode = static_cast<const VariableDeclarationNode *>(p_node);
+						for (const VariableDeclarationNode::Declaration &decl : vdnode->declarations) {
+							for (const Node *init : decl.initializer) {
+								self(self, init);
+							}
+						}
+					} break;
+					case Node::NODE_TYPE_OPERATOR: {
+						const OperatorNode *onode = static_cast<const OperatorNode *>(p_node);
+						switch (onode->op) {
+							case OP_ASSIGN:
+							case OP_ASSIGN_ADD:
+							case OP_ASSIGN_SUB:
+							case OP_ASSIGN_MUL:
+							case OP_ASSIGN_DIV:
+							case OP_ASSIGN_SHIFT_LEFT:
+							case OP_ASSIGN_SHIFT_RIGHT:
+							case OP_ASSIGN_MOD:
+							case OP_ASSIGN_BIT_AND:
+							case OP_ASSIGN_BIT_OR:
+							case OP_ASSIGN_BIT_XOR:
+							case OP_INCREMENT:
+							case OP_DECREMENT:
+							case OP_POST_INCREMENT:
+							case OP_POST_DECREMENT: {
+								if (!onode->arguments.is_empty()) {
+									mark_builtin_write(onode->arguments[0]);
+								}
+							} break;
+							case OP_CALL: {
+								if (onode->arguments.size() > 1 && onode->arguments[0] != nullptr && onode->arguments[0]->type == Node::NODE_TYPE_VARIABLE) {
+									const StringName fn_name = static_cast<const VariableNode *>(onode->arguments[0])->name;
+									const FunctionNode *callee = nullptr;
+									for (int fi = 0; fi < shader->vfunctions.size(); fi++) {
+										if (shader->vfunctions[fi].name == fn_name) {
+											callee = shader->vfunctions[fi].function;
+											break;
+										}
+									}
+									for (int ai = 1; ai < onode->arguments.size(); ai++) {
+										bool is_out = false;
+										if (callee != nullptr && (ai - 1) < callee->arguments.size()) {
+											const ArgumentQualifier q = callee->arguments[ai - 1].qualifier;
+											is_out = (q == ARGUMENT_QUALIFIER_OUT || q == ARGUMENT_QUALIFIER_INOUT);
+										} else if (callee == nullptr) {
+											is_out = is_builtin_func_out_parameter(fn_name, ai - 1);
+										}
+										if (is_out) {
+											mark_builtin_write(onode->arguments[ai]);
+										}
+									}
+								}
+							} break;
+							default:
+								break;
+						}
+						for (const Node *arg : onode->arguments) {
+							self(self, arg);
+						}
+					} break;
+					case Node::NODE_TYPE_CONTROL_FLOW: {
+						const ControlFlowNode *cfnode = static_cast<const ControlFlowNode *>(p_node);
+						for (const Node *expr : cfnode->expressions) {
+							self(self, expr);
+						}
+						for (const BlockNode *blk : cfnode->blocks) {
+							self(self, blk);
+						}
+					} break;
+					case Node::NODE_TYPE_MEMBER: {
+						const MemberNode *mnode = static_cast<const MemberNode *>(p_node);
+						if (mnode->assign_expression != nullptr) {
+							mark_builtin_write(mnode->owner);
+							self(self, mnode->assign_expression);
+						}
+						self(self, mnode->owner);
+						self(self, mnode->index_expression);
+						self(self, mnode->call_expression);
+					} break;
+					case Node::NODE_TYPE_ARRAY: {
+						const ArrayNode *anode = static_cast<const ArrayNode *>(p_node);
+						self(self, anode->assign_expression);
+						self(self, anode->index_expression);
+						self(self, anode->call_expression);
+					} break;
+					case Node::NODE_TYPE_ARRAY_CONSTRUCT: {
+						const ArrayConstructNode *acnode = static_cast<const ArrayConstructNode *>(p_node);
+						for (const Node *init : acnode->initializer) {
+							self(self, init);
+						}
+					} break;
+					default:
+						break;
+				}
+			};
+			walk_writes(walk_writes, fragment_func->body);
+			if (writes_depth && writes_depth_offset) {
+				_set_error(RTR("Cannot write to both 'DEPTH' and 'DEPTH_OFFSET' in the same shader."));
+				return ERR_PARSE_ERROR;
+			}
+		}
+	}
+
 #ifdef DEBUG_ENABLED
 	if (check_device_limit_warnings && uniform_buffer_exceeded_line != -1) {
 		_add_warning(ShaderWarning::DEVICE_LIMIT_EXCEEDED, uniform_buffer_exceeded_line, RTR("uniform buffer"), { uniform_buffer_size, max_uniform_buffer_size });

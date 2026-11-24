@@ -1272,9 +1272,7 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					break;
 				case SL::OP_BIT_INVERT:
 				case SL::OP_NEGATE:
-				case SL::OP_NOT:
-				case SL::OP_DECREMENT:
-				case SL::OP_INCREMENT: {
+				case SL::OP_NOT: {
 					const String node_code = _dump_node_code(onode->arguments[0], p_level, r_gen_code, p_actions, p_default_actions, p_assigning);
 
 					if (onode->op == SL::OP_NEGATE && node_code.begins_with("-")) { // To prevent writing unary minus twice.
@@ -1284,9 +1282,13 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					}
 
 				} break;
+				case SL::OP_DECREMENT:
+				case SL::OP_INCREMENT:
+					code = _opstr(onode->op) + _dump_node_code(onode->arguments[0], p_level, r_gen_code, p_actions, p_default_actions, true);
+					break;
 				case SL::OP_POST_DECREMENT:
 				case SL::OP_POST_INCREMENT:
-					code = _dump_node_code(onode->arguments[0], p_level, r_gen_code, p_actions, p_default_actions, p_assigning) + _opstr(onode->op);
+					code = _dump_node_code(onode->arguments[0], p_level, r_gen_code, p_actions, p_default_actions, true) + _opstr(onode->op);
 					break;
 				case SL::OP_CALL:
 				case SL::OP_STRUCT:

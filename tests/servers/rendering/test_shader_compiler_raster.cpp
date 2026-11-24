@@ -77,6 +77,7 @@ struct RasterCompileResult {
 	bool writes_vertex = false;
 	bool writes_position = false;
 	bool writes_depth = false;
+	bool writes_depth_offset = false;
 	int cull_mode = RSE::CULL_MODE_BACK;
 
 	// SceneShaderForwardClustered::ShaderData::set_code()'s classification, for an opaque material.
@@ -85,6 +86,7 @@ struct RasterCompileResult {
 		facts.alpha_scissor = alpha_clip;
 		facts.discard = discard;
 		facts.writes_vertex = writes_vertex;
+		facts.depth_offset = writes_depth_offset;
 		facts.cull_mode = RSE::CullMode(cull_mode);
 		return nextgeo_raster_features(facts);
 	}
@@ -94,14 +96,16 @@ struct RasterCompileResult {
 		return nextgeo_raster_rejects(uses, features());
 	}
 
-	NextGeoFallback fallback(bool p_admit_programmable) const {
+	NextGeoFallback fallback(bool p_admit_programmable, bool p_admit_depth_offset = false) const {
 		NextGeoMaterialFallbackFacts facts;
 		facts.transparent = alpha && !alpha_clip;
 		facts.screen_reads = gen.uses_screen_texture || gen.uses_depth_texture || gen.uses_normal_roughness_texture;
 		facts.masked = (features() & RendererVirtualMeshStorage::RASTER_FEATURE_MASKED) != 0u;
+		facts.depth_offset = writes_depth_offset;
 		facts.writes_vertex = writes_vertex;
 		facts.other_custom_vertex = writes_position || writes_depth;
 		facts.raster_rejects = rejects();
+		facts.admit_depth_offset = p_admit_depth_offset;
 		facts.admit_programmable = p_admit_programmable;
 		return nextgeo_material_fallback(facts);
 	}
@@ -129,6 +133,7 @@ void init_spatial_raster_compiler(ShaderCompiler &r_compiler) {
 	actions.renames["ALPHA_SCISSOR_THRESHOLD"] = "alpha_scissor_threshold";
 	actions.renames["ALPHA_HASH_SCALE"] = "alpha_hash_scale";
 	actions.renames["DEPTH"] = "gl_FragDepth";
+	actions.renames["DEPTH_OFFSET"] = "depth_offset";
 	actions.renames["VERTEX_ID"] = "VERTEX_INDEX";
 	actions.renames["LIGHT_COLOR"] = "light_color_highp";
 	actions.renames["ATTENUATION"] = "attenuation_highp";
@@ -137,6 +142,7 @@ void init_spatial_raster_compiler(ShaderCompiler &r_compiler) {
 	actions.usage_defines["ALPHA_SCISSOR_THRESHOLD"] = "#define ALPHA_SCISSOR_USED\n";
 	actions.usage_defines["ALPHA_HASH_SCALE"] = "#define ALPHA_HASH_USED\n";
 	actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
+	actions.usage_defines["DEPTH_OFFSET"] = "#define DEPTH_OFFSET_USED\n";
 	actions.usage_defines["UV"] = "#define UV_USED\n";
 	actions.usage_defines["NORMAL"] = "#define NORMAL_USED\n";
 
@@ -181,6 +187,7 @@ RasterCompileResult compile_spatial_raster(const String &p_code) {
 	ia.write_flag_pointers["VERTEX"] = &res.writes_vertex;
 	ia.write_flag_pointers["POSITION"] = &res.writes_position;
 	ia.write_flag_pointers["DEPTH"] = &res.writes_depth;
+	ia.write_flag_pointers["DEPTH_OFFSET"] = &res.writes_depth_offset;
 	ia.render_mode_values["cull_disabled"] = Pair<int *, int>(&res.cull_mode, RSE::CULL_MODE_DISABLED);
 	ia.render_mode_values["cull_front"] = Pair<int *, int>(&res.cull_mode, RSE::CULL_MODE_FRONT);
 	ia.uniforms = &res.uniforms;

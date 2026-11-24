@@ -156,6 +156,7 @@ HashMap<String, String> TextShaderPreview::canvas_assignments = {
 HashMap<String, String> TextShaderPreview::builtin_spatial_types = {
 	{ "NORMAL_MAP_DEPTH", "float" },
 	{ "DEPTH", "float" },
+	{ "DEPTH_OFFSET", "float" },
 	{ "ALPHA", "float" },
 	{ "ALPHA_SCISSOR_THRESHOLD", "float" },
 	{ "ALPHA_HASH_SCALE", "float" },

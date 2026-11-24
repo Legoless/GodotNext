@@ -460,6 +460,8 @@ public:
 		bool uses_vertex_lighting = false;
 		bool uses_skip_vertex_transform = false;
 		bool writes_depth = false;
+		// GodotNext: depth_offset (#149, plan §21.4 contract N6). Relative view-space depth push (>= 0.0).
+		bool uses_depth_offset = false;
 		bool uses_unsupported_derivative = false;
 		RendererRD::NextGeoFallback nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). The material's raster features, what its
@@ -538,7 +540,7 @@ public:
 
 		_FORCE_INLINE_ bool uses_shared_shadow_material() const {
 			bool backface_culling = cull_mode == RSE::CULL_MODE_BACK;
-			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !wireframe && !uses_z_clip_scale && !stencil_enabled;
+			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !wireframe && !uses_z_clip_scale && !stencil_enabled && !uses_depth_offset;
 		}
 
 		virtual void set_code(const String &p_Code) override;

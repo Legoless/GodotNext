@@ -147,12 +147,16 @@ void ShaderGLES3::_setup(const char *p_vertex_code, const char *p_fragment_code,
 	tohash.append(p_fragment_code ? String::utf8(p_fragment_code) : "");
 
 	tohash.append("[gl_implementation]");
-	const String &vendor = String::utf8((const char *)glGetString(GL_VENDOR));
-	tohash.append(vendor.is_empty() ? "unknown" : vendor);
-	const String &renderer = String::utf8((const char *)glGetString(GL_RENDERER));
-	tohash.append(renderer.is_empty() ? "unknown" : renderer);
-	const String &version = String::utf8((const char *)glGetString(GL_VERSION));
-	tohash.append(version.is_empty() ? "unknown" : version);
+	if (GLES3::Config::get_singleton() != nullptr) {
+		const String &vendor = String::utf8((const char *)glGetString(GL_VENDOR));
+		tohash.append(vendor.is_empty() ? "unknown" : vendor);
+		const String &renderer = String::utf8((const char *)glGetString(GL_RENDERER));
+		tohash.append(renderer.is_empty() ? "unknown" : renderer);
+		const String &version = String::utf8((const char *)glGetString(GL_VERSION));
+		tohash.append(version.is_empty() ? "unknown" : version);
+	} else {
+		tohash.append("unknownunknownunknown");
+	}
 
 	base_sha256 = tohash.as_string().sha256_text();
 }
@@ -173,7 +177,8 @@ void ShaderGLES3::_build_variant_code(StringBuilder &builder, uint32_t p_variant
 		builder.append("#version 300 es\n");
 	}
 
-	if (GLES3::Config::get_singleton()->polyfill_half2float) {
+	GLES3::Config *config = GLES3::Config::get_singleton();
+	if (config && config->polyfill_half2float) {
 		builder.append("#define USE_HALF2FLOAT\n");
 	}
 
@@ -199,7 +204,7 @@ void ShaderGLES3::_build_variant_code(StringBuilder &builder, uint32_t p_variant
 	builder.append("\n"); //make sure defines begin at newline
 
 	// Optional support for external textures.
-	if (GLES3::Config::get_singleton()->external_texture_supported) {
+	if (config && config->external_texture_supported) {
 		builder.append("#extension GL_OES_EGL_image_external : enable\n");
 		builder.append("#extension GL_OES_EGL_image_external_essl3 : enable\n");
 	} else {
@@ -209,7 +214,7 @@ void ShaderGLES3::_build_variant_code(StringBuilder &builder, uint32_t p_variant
 	// Insert multiview extension loading, because it needs to appear before
 	// any non-preprocessor code (like the "precision highp..." lines below).
 	builder.append("#ifdef USE_MULTIVIEW\n");
-	if (GLES3::Config::get_singleton()->multiview_supported) {
+	if (config && config->multiview_supported) {
 		builder.append("#if defined(GL_OVR_multiview2)\n");
 		builder.append("#extension GL_OVR_multiview2 : require\n");
 		builder.append("#elif defined(GL_OVR_multiview)\n");

@@ -194,8 +194,12 @@ void main() {
 		return;
 	}
 #ifdef NEXTGEO_RASTER_DEPTH_ONLY
-	_ng_raster_write(ivec2(gl_FragCoord.xy), _ng_vsm_depth_interp, vis_id_in);
+	_ng_raster_write(ivec2(gl_FragCoord.xy), _ng_apply_depth_offset(scene_data_block.data, _ng_vsm_depth_interp), vis_id_in);
 #else
-	_ng_raster_write(ivec2(gl_FragCoord.xy), gl_FragCoord.z, vis_id_in);
+	float _ng_depth = _ng_apply_depth_offset(scene_data_block.data, gl_FragCoord.z);
+	if (!(_ng_depth > 0.0)) {
+		return;
+	}
+	_ng_raster_write(ivec2(gl_FragCoord.xy), _ng_depth, vis_id_in);
 #endif
 }

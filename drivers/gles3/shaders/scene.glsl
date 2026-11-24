@@ -2367,9 +2367,17 @@ void main() {
 		model_normal_matrix = mat3(model_matrix);
 	}
 
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset = 0.0;
+#endif
+
 	{
 #CODE : FRAGMENT
 	}
+
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset_clamped = (depth_offset > 0.0) ? min(depth_offset, 1e15) : 0.0;
+#endif
 
 	// Keep albedo values in positive number range as negative values "wraparound" into positive numbers resulting in wrong colors
 	albedo = max(albedo, vec3(0.0));
@@ -2952,7 +2960,11 @@ void main() {
 #ifdef MODE_RENDER_DEPTH
 #ifdef RENDER_SHADOWS_LINEAR
 	// Linearize the depth buffer if rendering cubemap shadows.
+#if defined(DEPTH_OFFSET_USED) && !defined(DEPTH_USED)
+	gl_FragDepth = clamp((scene_data_block.data.z_far - (length(vertex_interp) + depth_offset_clamped + scene_data_block.data.shadow_bias)) / scene_data_block.data.z_far, 0.0, 1.0);
+#else
 	gl_FragDepth = (scene_data_block.data.z_far - (length(vertex) + scene_data_block.data.shadow_bias)) / scene_data_block.data.z_far;
+#endif
 #endif
 
 // Nothing happens, so a tree-ssa optimizer will result in no fragment shader :)
@@ -3292,6 +3304,18 @@ void main() {
 #ifdef PREMUL_ALPHA_USED
 	frag_color.rgb *= premul_alpha;
 #endif // PREMUL_ALPHA_USED
+
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Compatibility (GLES3) plain gl_FragDepth write
+// in standard OpenGL [0, 1] depth (pushing away from camera increases depth).
+#if defined(DEPTH_OFFSET_USED) && !defined(DEPTH_USED) && !defined(RENDER_SHADOWS_LINEAR) && !defined(RENDER_MATERIAL)
+	if (depth_offset_clamped > 0.0) {
+		vec4 pdo_clip = projection_matrix * vec4(vertex_interp.xy, vertex_interp.z - depth_offset_clamped, 1.0);
+		float pdo_depth = (abs(pdo_clip.w) > 1e-20) ? ((pdo_clip.z / pdo_clip.w) * 0.5 + 0.5) : 1.0;
+		gl_FragDepth = (pdo_depth < 1.0) ? max(pdo_depth, gl_FragCoord.z) : 1.0;
+	} else {
+		gl_FragDepth = gl_FragCoord.z;
+	}
+#endif
 #endif // !RENDER_MOTION_VECTORS
 
 #if defined(RENDER_MOTION_VECTORS)

@@ -1338,6 +1338,7 @@ MaterialStorage::MaterialStorage() {
 		actions.renames["INSTANCE_CUSTOM"] = "instance_custom";
 		actions.renames["SCREEN_UV"] = "screen_uv";
 		actions.renames["DEPTH"] = "gl_FragDepth";
+		actions.renames["DEPTH_OFFSET"] = "depth_offset";
 		actions.renames["FOG"] = "fog";
 		actions.renames["RADIANCE"] = "custom_radiance";
 		actions.renames["IRRADIANCE"] = "custom_irradiance";
@@ -1420,6 +1421,8 @@ MaterialStorage::MaterialStorage() {
 		actions.usage_defines["FOG"] = "#define CUSTOM_FOG_USED\n";
 		actions.usage_defines["RADIANCE"] = "#define CUSTOM_RADIANCE_USED\n";
 		actions.usage_defines["IRRADIANCE"] = "#define CUSTOM_IRRADIANCE_USED\n";
+		actions.usage_defines["DEPTH"] = "#define DEPTH_USED\n";
+		actions.usage_defines["DEPTH_OFFSET"] = "#define DEPTH_OFFSET_USED\n";
 
 		actions.render_mode_defines["skip_vertex_transform"] = "#define SKIP_TRANSFORM_USED\n";
 		actions.render_mode_defines["world_vertex_coords"] = "#define VERTEX_WORLD_COORDS_USED\n";
@@ -3050,6 +3053,7 @@ void SceneShaderData::set_code(const String &p_code) {
 	uses_custom3 = false;
 	uses_bones = false;
 	uses_weights = false;
+	uses_depth_offset = false;
 
 	if (code.is_empty()) {
 		return; // Just invalid, but no error.
@@ -3127,6 +3131,7 @@ void SceneShaderData::set_code(const String &p_code) {
 	actions.write_flag_pointers["POSITION"] = &uses_position;
 	actions.write_flag_pointers["TANGENT"] = &writes_tangent;
 	actions.write_flag_pointers["BINORMAL"] = &writes_tangent;
+	actions.write_flag_pointers["DEPTH_OFFSET"] = &uses_depth_offset;
 
 	actions.usage_flag_pointers["TANGENT"] = &uses_tangent;
 	actions.usage_flag_pointers["BINORMAL"] = &uses_tangent;

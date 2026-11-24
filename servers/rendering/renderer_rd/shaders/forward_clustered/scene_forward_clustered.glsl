@@ -1050,10 +1050,18 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #define TEXTURE_STREAMING_NO_DEPTH_WRITE
 #endif
 
-#if !defined(MODE_VISIBILITY_RESOLVE) && !defined(DEPTH_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
+#if !defined(MODE_VISIBILITY_RESOLVE) && !defined(DEPTH_USED) && !defined(DEPTH_OFFSET_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
 layout(early_fragment_tests) in;
 #endif
 #endif // TEXTURE_STREAMING
+
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Conservative depth (depth_less in reversed-Z:
+// pushing away from camera makes depth smaller) preserves early-Z on Vulkan, Metal (depth(less)), and
+// D3D12 (SV_DepthLessEqual) while honoring DEPTH_OFFSET >= 0.0.
+#if defined(DEPTH_OFFSET_USED) && !defined(DEPTH_USED) && !defined(MODE_VISIBILITY_RESOLVE) && !defined(MODE_VSM) && !defined(MODE_AVBOIT_BOUNDS) && !defined(MODE_AVBOIT_OCCLUSION) && !defined(MODE_RENDER_NEXTGI_TRANSLUCENCY_MARK)
+#define DEPTH_OFFSET_WRITE_FRAG_DEPTH
+layout(depth_less) out float gl_FragDepth;
+#endif
 
 #include "../scene_forward_streaming_inc.glsl"
 
@@ -1879,9 +1887,17 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 #endif
 
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset = 0.0;
+#endif
+
 	{
 #CODE : FRAGMENT
 	}
+
+#ifdef DEPTH_OFFSET_USED
+	float depth_offset_clamped = (depth_offset > 0.0) ? min(depth_offset, 1e15) : 0.0;
+#endif
 
 	float roughness = roughness_highp;
 	float metallic = metallic_highp;
@@ -3927,7 +3943,11 @@ void fragment_shader(in SceneData scene_data) {
 	if (!gl_HelperInvocation) {
 		ivec2 local_px = ivec2(gl_FragCoord.xy);
 		if (all(greaterThanEqual(local_px, ivec2(0))) && all(lessThan(local_px, ivec2(int(VSM_PAGE_SIZE))))) {
-			uint packed_depth = vsm_depth_pack(vsm_depth_interp);
+			float vsm_depth = vsm_depth_interp;
+#ifdef DEPTH_OFFSET_USED
+			vsm_depth += depth_offset_clamped;
+#endif
+			uint packed_depth = vsm_depth_pack(vsm_depth);
 			if (packed_depth != 0u) {
 				uvec2 phys_page = vsm_raster_entry_page(vsm_page_info_interp.x);
 				int layer = int((vsm_page_info_interp.x >> 24u) & 1u);
@@ -4151,6 +4171,22 @@ void fragment_shader(in SceneData scene_data) {
 	vec2 prev_position_uv = prev_position_clip * vec2(0.5, 0.5);
 
 	motion_vector = prev_position_uv - position_uv;
+#endif
+
+// GodotNext: depth_offset (#149, plan §21.4 contract N6). Recompute conservative depth from view-space
+// z - max(depth_offset, 0.0); DEPTH_OFFSET == 0.0 preserves gl_FragCoord.z bit-identically.
+#ifdef DEPTH_OFFSET_WRITE_FRAG_DEPTH
+	if (depth_offset_clamped > 0.0) {
+#ifdef MODE_DUAL_PARABOLOID
+		float pdo_depth = gl_FragCoord.z - depth_offset_clamped / max(scene_data.z_far, 1e-5);
+#else
+		vec4 pdo_clip = projection_matrix * vec4(vertex_interp.xy, vertex_interp.z - depth_offset_clamped, 1.0);
+		float pdo_depth = (abs(pdo_clip.w) > 1e-20) ? (pdo_clip.z / pdo_clip.w) : 0.0;
+#endif
+		gl_FragDepth = (pdo_depth > 0.0) ? min(pdo_depth, gl_FragCoord.z) : 0.0;
+	} else {
+		gl_FragDepth = gl_FragCoord.z;
+	}
 #endif
 }
 

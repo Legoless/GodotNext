@@ -104,6 +104,7 @@ void main() {
 				if (!_ng_raster_covered) {
 					continue;
 				}
+				depth = _ng_apply_depth_offset(scene_data_block.data, depth);
 				_ng_raster_write(ivec2(x, y), depth, 0u);
 			}
 		}
@@ -131,6 +132,10 @@ void main() {
 				_ng_raster_interpolate(vec2(float(x) + 0.5, float(y) + 0.5));
 				_ng_raster_fragment(scene_data_block.data);
 				if (!_ng_raster_covered) {
+					continue;
+				}
+				depth = _ng_apply_depth_offset(scene_data_block.data, depth);
+				if (!(depth > 0.0)) {
 					continue;
 				}
 				_ng_raster_write(ivec2(x, y), depth, visibility_id);
