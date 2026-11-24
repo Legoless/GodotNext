@@ -484,14 +484,16 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 	}
 }
 
-// GodotNext: megalights_inputs (#136)
-RID RenderForwardClustered::RenderBufferDataForwardClustered::get_nextgeo_stage_a_fb(bool p_voxel_gi, bool p_megalights_inputs) {
+// GodotNext: megalights_inputs (#136), nextgeo_vertex_offset (#164)
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_nextgeo_stage_a_fb(bool p_voxel_gi, bool p_megalights_inputs, bool p_with_velocity) {
 	ERR_FAIL_NULL_V(render_buffers, RID());
 	ensure_normal_roughness_texture();
 	render_buffers->ensure_nextgeo_targets();
 
 	RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS);
 	RID instance_id_buffer = render_buffers->get_nextgeo_instance_id();
+	RID velocity_buffer = p_with_velocity ? render_buffers->get_velocity_buffer(false) : RID();
+	const bool with_vel = p_with_velocity && velocity_buffer.is_valid();
 	// GodotNext: megalights_inputs (#136). Stage A writes the same targets as the depth prepass.
 	if (p_megalights_inputs) {
 		ERR_FAIL_COND_V_MSG(render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, RID(), "MegaLights input targets are not allocated when MSAA is enabled.");
@@ -501,14 +503,26 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_nextgeo_stage_
 		if (p_voxel_gi) {
 			ensure_voxelgi();
 			RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI);
+			if (with_vel) {
+				return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, ml_albedo, ml_material, voxelgi_buffer, instance_id_buffer, velocity_buffer);
+			}
 			return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, ml_albedo, ml_material, voxelgi_buffer, instance_id_buffer);
+		}
+		if (with_vel) {
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, ml_albedo, ml_material, instance_id_buffer, velocity_buffer);
 		}
 		return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, ml_albedo, ml_material, instance_id_buffer);
 	}
 	if (p_voxel_gi) {
 		ensure_voxelgi();
 		RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI);
+		if (with_vel) {
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, voxelgi_buffer, instance_id_buffer, velocity_buffer);
+		}
 		return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, voxelgi_buffer, instance_id_buffer);
+	}
+	if (with_vel) {
+		return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, instance_id_buffer, velocity_buffer);
 	}
 	return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, instance_id_buffer);
 }
@@ -5099,8 +5113,9 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 				}
 				NextGeoVSMBinProgram program;
 				program.bin = bin;
-				// GodotNext: nextgeo_displacement (#150) x vsm_nanite (#217). Include per-material raster features (DISPLACED).
+				// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
 				program.features = owner.material->get_raster_features();
+				program.vertex_offset_max = owner.material->get_effective_vertex_offset_max(float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default")));
 				program.sw_shader = sw_sh;
 				program.hw_shader = hw_sh;
 				program.hw_mesh_shader = hw_mesh_sh;
@@ -6935,8 +6950,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							}
 							NextGeoRasterBinProgram program;
 							program.bin = bin;
-							// GodotNext: nextgeo_masked_two_sided (#153). Pass bin features for programmable_raster_distance demotion.
+							// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164).
 							program.features = owner.material->get_raster_features();
+							program.vertex_offset_max = owner.material->get_effective_vertex_offset_max(float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default")));
 							program.sw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(false, buffer);
 							program.hw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(true, buffer);
 							if (hw_raster_sel.use_mesh) {
@@ -6992,16 +7008,24 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					RENDER_TIMESTAMP("NextGeo Stage A");
 					RD::get_singleton()->draw_command_begin_label("NextGeo Stage A");
 					bool stage_a_redraw = false;
+					// GodotNext: nextgeo_vertex_offset (#164). When the view writes prepass velocity and has
+					// VERTEX_OFFSET buckets, Stage A writes WPO motion vectors (prev TIME + prev model xform)
+					// before NextGI and motion-pass upscalers while leaving non-WPO rigid velocity untouched.
+					const float vertex_offset_max_default = float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default"));
+					const bool stage_a_velocity = velocity_plan.prepass_writes && rb->get_velocity_buffer(false).is_valid() && nextgeo_resolve.has_vertex_offset_buckets();
+					if (stage_a_velocity) {
+						scene_shader.enable_nextgeo_motion_shader_group(megalights_inputs_active);
+					}
 					// GodotNext: nextgeo_shading_bins (#158). Stage A's compute bins, when its targets are storable.
 					NextGeoResolve::ComputeStage stage_a_compute;
-					nextgeo_shading_stage_a_reason = _nextgeo_shading_stage(false, rb, rb_data, using_voxelgi, megalights_inputs_active, 0u, false, nextgeo_stage_a_pass_uniforms, stage_a_compute);
+					nextgeo_shading_stage_a_reason = _nextgeo_shading_stage(false, rb, rb_data, using_voxelgi, megalights_inputs_active, 0u, false, nextgeo_stage_a_pass_uniforms, stage_a_compute, stage_a_velocity);
 					nextgeo_shading_stage_a_variant = nextgeo_shading_stage_a_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? int32_t(stage_a_compute.variant) : -1;
 					nextgeo_resolve.draw_stage_a(
 							RSG::virtual_mesh_storage,
 							rb->get_nextgeo_visibility(),
 							nextgeo_cut.get_clusters_buffer(),
-							// GodotNext: megalights_inputs (#136)
-							rb_data->get_nextgeo_stage_a_fb(using_voxelgi, megalights_inputs_active),
+							// GodotNext: megalights_inputs (#136), nextgeo_vertex_offset (#164)
+							rb_data->get_nextgeo_stage_a_fb(using_voxelgi, megalights_inputs_active, stage_a_velocity),
 							render_base_uniform_set,
 							rp_uniform_set,
 							base_specialization,
@@ -7012,7 +7036,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							megalights_inputs_active,
 							stage_a_redraw,
 							// GodotNext: nextgeo_shading_bins (#158)
-							nextgeo_shading_stage_a_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? &stage_a_compute : nullptr);
+							nextgeo_shading_stage_a_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? &stage_a_compute : nullptr,
+							stage_a_velocity,
+							reset_temporal_history,
+							vertex_offset_max_default);
 					if (stage_a_redraw) {
 						RenderingServerDefault::redraw_request();
 					}
@@ -7159,6 +7186,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				NextGeoResolve::ComputeStage stage_b_compute;
 				nextgeo_shading_stage_b_reason = _nextgeo_shading_stage(true, rb, rb_data, using_voxelgi, megalights_inputs_active, opaque_color_pass_flags, zero_vel, nextgeo_stage_b_pass_uniforms, stage_b_compute);
 				nextgeo_shading_stage_b_variant = nextgeo_shading_stage_b_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? int32_t(stage_b_compute.variant) : -1;
+				const float vertex_offset_max_default = float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default"));
 				const bool stage_b_opened = nextgeo_resolve.draw_stage_b(
 						RSG::virtual_mesh_storage,
 						rb->get_nextgeo_visibility(),
@@ -7177,7 +7205,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 						stage_b_redraw,
 						stage_b_draws,
 						// GodotNext: nextgeo_shading_bins (#158)
-						nextgeo_shading_stage_b_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? &stage_b_compute : nullptr);
+						nextgeo_shading_stage_b_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? &stage_b_compute : nullptr,
+						reset_temporal_history,
+						vertex_offset_max_default);
 				if (stage_b_redraw) {
 					RenderingServerDefault::redraw_request();
 				}
@@ -8747,8 +8777,8 @@ void RenderForwardClustered::base_uniforms_changed() {
 	render_base_uniform_set = RID();
 }
 
-// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7).
-RendererRD::NextGeoShadingReason RenderForwardClustered::_nextgeo_shading_stage(bool p_stage_b, const Ref<RenderSceneBuffersRD> &p_rb, const Ref<RenderBufferDataForwardClustered> &p_rb_data, bool p_voxel_gi, bool p_megalights_inputs, uint32_t p_color_pass_flags, bool p_zero_velocity_write, const LocalVector<RD::Uniform> &p_pass_uniforms, NextGeoResolve::ComputeStage &r_stage) {
+// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7), nextgeo_vertex_offset (#164).
+RendererRD::NextGeoShadingReason RenderForwardClustered::_nextgeo_shading_stage(bool p_stage_b, const Ref<RenderSceneBuffersRD> &p_rb, const Ref<RenderBufferDataForwardClustered> &p_rb_data, bool p_voxel_gi, bool p_megalights_inputs, uint32_t p_color_pass_flags, bool p_zero_velocity_write, const LocalVector<RD::Uniform> &p_pass_uniforms, NextGeoResolve::ComputeStage &r_stage, bool p_stage_a_velocity) {
 	if (!nextgeo_shading_compute_active || p_rb.is_null() || p_rb_data.is_null()) {
 		return RendererRD::NEXTGEO_SHADING_REASON_SETTING;
 	}
@@ -8766,7 +8796,7 @@ RendererRD::NextGeoShadingReason RenderForwardClustered::_nextgeo_shading_stage(
 	const RD::DataFormat *formats = p_stage_b ? NextGeoResolve::COMPUTE_STAGE_B_FORMATS : NextGeoResolve::COMPUTE_STAGE_A_FORMATS;
 	r_stage.flags = 0u;
 	if (!p_stage_b) {
-		r_stage.variant = SceneShaderForwardClustered::resolve_compute_stage_a_variant(p_voxel_gi, p_megalights_inputs);
+		r_stage.variant = SceneShaderForwardClustered::resolve_compute_stage_a_variant(p_voxel_gi, p_megalights_inputs, p_stage_a_velocity);
 		targets[0] = p_rb_data->get_normal_roughness();
 		needed[0] = true;
 		if (p_megalights_inputs) {
@@ -8780,6 +8810,10 @@ RendererRD::NextGeoShadingReason RenderForwardClustered::_nextgeo_shading_stage(
 		}
 		targets[4] = p_rb->get_nextgeo_instance_id();
 		needed[4] = true;
+		if (p_stage_a_velocity) {
+			targets[5] = p_rb->get_velocity_buffer(false);
+			needed[5] = true;
+		}
 	} else {
 		// The DLSS-RR albedo guides are attachments without storage usage.
 		if ((p_color_pass_flags & COLOR_PASS_FLAG_RR_GUIDES) != 0u) {
@@ -10312,18 +10346,18 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	if (material_displaced && material_raster_rejects != 0u && route_facts.material_fallback == RendererRD::NEXTGEO_FALLBACK_NONE) {
 		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE;
 	}
-	// GodotNext: nextgeo_masked_two_sided (#153), depth_offset (#149), & nextgeo_raster_bins (#155, plan §21.4 N3).
+	// GodotNext: nextgeo_masked_two_sided (#153), depth_offset (#149), nextgeo_vertex_offset (#164), nextgeo_raster_bins (#155, plan §21.4 N3, N5, N6).
 	// Pixel-programmable surfaces (masked: alpha scissor, alpha hash, fragment discard; depth offset: DEPTH_OFFSET)
-	// route into programmable raster bins by default on the Nanite device tier. Vertex offset (#164) and
-	// displacement (#163) remain behind rendering/nextgeo/debug_programmable_raster until their issues ship.
+	// and vertex-offset (VERTEX write) surfaces route into programmable raster bins by default on the Nanite
+	// device tier. Displacement (#163) remains behind rendering/nextgeo/debug_programmable_raster until its issue ships.
 	bool admit_programmable = false;
-	const bool pixel_prog_admitted = (material_raster_features & RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u &&
+	const bool default_prog_admitted = (material_raster_features & (RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES | RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET)) != 0u &&
 			p_material->shader_data->nextgeo_masked_fallback == RendererRD::NEXTGEO_FALLBACK_NONE;
 	const bool wants_debug_programmable = (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE) || material_displaced;
 	const bool debug_admitted = wants_debug_programmable &&
 			p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
 			bool(GLOBAL_GET("rendering/nextgeo/debug_programmable_raster"));
-	if ((pixel_prog_admitted || debug_admitted) && material_raster_rejects == 0u &&
+	if ((default_prog_admitted || debug_admitted) && material_raster_rejects == 0u &&
 			p_material->shader_data->has_raster_target() && route_facts.mesh_has_virtual_geometry &&
 			RSG::virtual_mesh_storage != nullptr && nextgeo_cut.is_hybrid_raster_available() &&
 			p_material->shader_data->ensure_raster_target()) {

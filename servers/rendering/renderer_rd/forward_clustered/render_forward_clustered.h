@@ -241,8 +241,8 @@ public:
 		RID get_color_only_fb();
 		RID get_color_pass_fb(uint32_t p_color_pass_flags);
 		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB);
-		// GodotNext: megalights_inputs (#136)
-		RID get_nextgeo_stage_a_fb(bool p_voxel_gi, bool p_megalights_inputs);
+		// GodotNext: megalights_inputs (#136), nextgeo_vertex_offset (#164)
+		RID get_nextgeo_stage_a_fb(bool p_voxel_gi, bool p_megalights_inputs, bool p_with_velocity = false);
 		RID get_specular_only_fb();
 		RID get_velocity_only_fb();
 
@@ -272,7 +272,7 @@ private:
 	RID _setup_sdfgi_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_geom_facing_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
 	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Fills r_stage for one stage's compute bins (Stage A
 	// or B with p_color_pass_flags) and returns why the stage keeps the tile quads, NONE when it does not.
-	RendererRD::NextGeoShadingReason _nextgeo_shading_stage(bool p_stage_b, const Ref<RenderSceneBuffersRD> &p_rb, const Ref<RenderBufferDataForwardClustered> &p_rb_data, bool p_voxel_gi, bool p_megalights_inputs, uint32_t p_color_pass_flags, bool p_zero_velocity_write, const LocalVector<RD::Uniform> &p_pass_uniforms, NextGeoResolve::ComputeStage &r_stage);
+	RendererRD::NextGeoShadingReason _nextgeo_shading_stage(bool p_stage_b, const Ref<RenderSceneBuffersRD> &p_rb, const Ref<RenderBufferDataForwardClustered> &p_rb_data, bool p_voxel_gi, bool p_megalights_inputs, uint32_t p_color_pass_flags, bool p_zero_velocity_write, const LocalVector<RD::Uniform> &p_pass_uniforms, NextGeoResolve::ComputeStage &r_stage, bool p_stage_a_velocity = false);
 	// GodotNext: megalights_decals (#136). p_cluster_buffer binds the cluster to the MegaLights input prepass.
 	// GodotNext: nextgeo_shading_bins (#158). r_uniforms, when given, receives the set's uniforms.
 	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas = false, bool p_front_layer_pass = false, RID p_cluster_buffer = RID(), LocalVector<RD::Uniform> *r_uniforms = nullptr);

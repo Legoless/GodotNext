@@ -445,6 +445,9 @@ public:
 	mutable HashSet<Instance *> vsm_static_multimeshes;
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Max displacement magnitude across an instance's active materials.
 	float _instance_displacement_bound(const Instance *p_instance) const;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Max effective vertex_offset_max across an instance's active materials.
+	float _instance_vertex_offset_bound(const Instance *p_instance) const;
+	float last_vertex_offset_max_default = -1.0f;
 	void _process_nextgeo_residency_shadow_dirty();
 	uint64_t last_nextgeo_residency_epoch = 0;
 
@@ -493,6 +496,10 @@ public:
 		float displacement_bound = 0.0f;
 		// GodotNext: nextgeo_masked_two_sided (#153). Per-instance programmable raster cutoff distance (meters; 0 = always programmable).
 		float programmable_raster_distance = 0.0f;
+		// GodotNext: nextgeo_vertex_offset (#164). Max effective vertex_offset_max (meters), disable distance (0 = never), and opt-in RT proxy evaluation.
+		float vertex_offset_bound = 0.0f;
+		float vertex_offset_disable_distance = 0.0f;
+		bool rt_evaluate_vertex_offset = false;
 
 		Transform3D transform;
 		bool teleported = false;
@@ -1218,6 +1225,9 @@ public:
 	virtual void instance_geometry_set_lod_bias(RID p_instance, float p_lod_bias);
 	// GodotNext: nextgeo_masked_two_sided (#153).
 	virtual void instance_geometry_set_programmable_raster_distance(RID p_instance, float p_distance);
+	// GodotNext: nextgeo_vertex_offset (#164).
+	virtual void instance_geometry_set_vertex_offset_disable_distance(RID p_instance, float p_distance);
+	virtual void instance_geometry_set_rt_evaluate_vertex_offset(RID p_instance, bool p_enable);
 
 	virtual void instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value);
 	virtual void instance_geometry_get_shader_parameter_list(RID p_instance, List<PropertyInfo> *p_parameters) const;

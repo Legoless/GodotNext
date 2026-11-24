@@ -159,6 +159,15 @@ void RenderGeometryInstanceBase::set_casts_shadows(bool p_enable) {
 	}
 }
 
+// GodotNext: nextgeo_vertex_offset (#164).
+void RenderGeometryInstanceBase::set_vertex_offset_disable_distance(float p_distance) {
+	data->vertex_offset_disable_distance = (!Math::is_finite(p_distance) || p_distance < 0.0f) ? 0.0f : p_distance;
+}
+
+void RenderGeometryInstanceBase::set_rt_evaluate_vertex_offset(bool p_enable) {
+	data->rt_evaluate_vertex_offset = p_enable;
+}
+
 void RenderGeometryInstanceBase::reset_motion_vectors() {
 }
 

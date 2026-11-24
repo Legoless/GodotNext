@@ -46,6 +46,8 @@ class Material : public Resource {
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 	float displacement_magnitude = 0.0f;
 	float displacement_center = 0.5f;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). -1.0 = inherit project default.
+	float vertex_offset_max = -1.0f;
 
 	enum {
 		INIT_STATE_UNINITIALIZED,
@@ -91,6 +93,10 @@ public:
 
 	void set_displacement_center(float p_center);
 	float get_displacement_center() const;
+
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	void set_vertex_offset_max(float p_vertex_offset_max);
+	float get_vertex_offset_max() const;
 
 	virtual RID get_rid() const override;
 	virtual RID get_shader_rid() const;

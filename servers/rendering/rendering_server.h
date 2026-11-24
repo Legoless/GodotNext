@@ -201,6 +201,8 @@ public:
 
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) = 0;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	virtual void material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) = 0;
 
 	virtual void material_set_use_debanding(bool p_enable) = 0;
 
@@ -868,6 +870,9 @@ public:
 	virtual void instance_geometry_set_lod_bias(RID p_instance, float p_lod_bias) = 0;
 	// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1).
 	virtual void instance_geometry_set_programmable_raster_distance(RID p_instance, float p_distance) = 0;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	virtual void instance_geometry_set_vertex_offset_disable_distance(RID p_instance, float p_distance) = 0;
+	virtual void instance_geometry_set_rt_evaluate_vertex_offset(RID p_instance, bool p_enable) = 0;
 	virtual void instance_geometry_set_transparency(RID p_instance, float p_transparency) = 0;
 
 	virtual void instance_geometry_set_shader_parameter(RID p_instance, const StringName &, const Variant &p_value) = 0;

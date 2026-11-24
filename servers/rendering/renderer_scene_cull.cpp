@@ -892,6 +892,9 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_casts_shadows(instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF);
 				// GodotNext: vsm_caching (#212).
 				geom->geometry_instance->set_shadow_cache_invalidation(instance->shadow_cache_invalidation);
+				// GodotNext: nextgeo_vertex_offset (#164).
+				geom->geometry_instance->set_vertex_offset_disable_distance(instance->vertex_offset_disable_distance);
+				geom->geometry_instance->set_rt_evaluate_vertex_offset(instance->rt_evaluate_vertex_offset);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1790,6 +1793,47 @@ void RendererSceneCull::instance_geometry_set_programmable_raster_distance(RID p
 	_vsm_sync_instance(instance, instance->scenario, false, true);
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void RendererSceneCull::instance_geometry_set_vertex_offset_disable_distance(RID p_instance, float p_distance) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+
+	const float dist = (!Math::is_finite(p_distance) || p_distance < 0.0f) ? 0.0f : p_distance;
+	if (instance->vertex_offset_disable_distance == dist) {
+		return;
+	}
+	instance->vertex_offset_disable_distance = dist;
+	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data != nullptr) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+		if (geom->geometry_instance != nullptr) {
+			geom->geometry_instance->set_vertex_offset_disable_distance(dist);
+		}
+	}
+	if (RSG::virtual_mesh_storage != nullptr && instance->virtual_record != UINT32_MAX) {
+		RSG::virtual_mesh_storage->instance_record_set_vertex_offset_disable_distance(instance->virtual_record, dist);
+	}
+	_vsm_sync_instance(instance, instance->scenario, false, true);
+}
+
+void RendererSceneCull::instance_geometry_set_rt_evaluate_vertex_offset(RID p_instance, bool p_enable) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+
+	if (instance->rt_evaluate_vertex_offset == p_enable) {
+		return;
+	}
+	instance->rt_evaluate_vertex_offset = p_enable;
+	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data != nullptr) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+		if (geom->geometry_instance != nullptr) {
+			geom->geometry_instance->set_rt_evaluate_vertex_offset(p_enable);
+		}
+	}
+	if (RSG::virtual_mesh_storage != nullptr && instance->virtual_record != UINT32_MAX) {
+		RSG::virtual_mesh_storage->instance_record_set_rt_evaluate_vertex_offset(instance->virtual_record, p_enable);
+	}
+}
+
 void RendererSceneCull::instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value) {
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);
@@ -1916,6 +1960,10 @@ void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 	RSG::virtual_mesh_storage->instance_record_set_displacement_bound(p_instance->virtual_record, p_instance->displacement_bound);
 	// GodotNext: nextgeo_masked_two_sided (#153). Push per-instance programmable raster cutoff distance.
 	RSG::virtual_mesh_storage->instance_record_set_programmable_raster_distance(p_instance->virtual_record, p_instance->programmable_raster_distance);
+	// GodotNext: nextgeo_vertex_offset (#164). Push per-instance WPO bound, disable distance, and RT opt-in flag.
+	RSG::virtual_mesh_storage->instance_record_set_vertex_offset_bound(p_instance->virtual_record, p_instance->vertex_offset_bound);
+	RSG::virtual_mesh_storage->instance_record_set_vertex_offset_disable_distance(p_instance->virtual_record, p_instance->vertex_offset_disable_distance);
+	RSG::virtual_mesh_storage->instance_record_set_rt_evaluate_vertex_offset(p_instance->virtual_record, p_instance->rt_evaluate_vertex_offset);
 	const AABB world = p_instance->transformed_aabb.has_surface() ? p_instance->transformed_aabb : p_instance->transform.xform(p_instance->aabb);
 	_instance_record_set_transform(p_instance, p_instance->transform, world, p_instance->visible);
 }
@@ -1952,6 +2000,41 @@ float RendererSceneCull::_instance_displacement_bound(const Instance *p_instance
 		max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(p_instance->material_overlay));
 	}
 	return max_disp;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+float RendererSceneCull::_instance_vertex_offset_bound(const Instance *p_instance) const {
+	if (RSG::material_storage == nullptr) {
+		return 0.0f;
+	}
+	const float default_max = ProjectSettings::get_singleton() != nullptr ? MAX(0.0f, float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default"))) : 0.5f;
+	float max_wpo = 0.0f;
+	if (p_instance->material_override.is_valid()) {
+		max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(p_instance->material_override, default_max));
+	} else if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid()) {
+		const int surface_count = RSG::mesh_storage->mesh_get_surface_count(p_instance->base);
+		for (int i = 0; i < surface_count; i++) {
+			RID mat = (i < p_instance->materials.size() && p_instance->materials[i].is_valid()) ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(p_instance->base, i);
+			if (mat.is_valid()) {
+				max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(mat, default_max));
+			}
+		}
+	} else if (p_instance->base_type == RSE::INSTANCE_MULTIMESH && p_instance->base.is_valid()) {
+		RID mesh = RSG::mesh_storage->multimesh_get_mesh(p_instance->base);
+		if (mesh.is_valid()) {
+			const int surface_count = RSG::mesh_storage->mesh_get_surface_count(mesh);
+			for (int i = 0; i < surface_count; i++) {
+				RID mat = RSG::mesh_storage->mesh_surface_get_material(mesh, i);
+				if (mat.is_valid()) {
+					max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(mat, default_max));
+				}
+			}
+		}
+	}
+	if (p_instance->material_overlay.is_valid()) {
+		max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(p_instance->material_overlay, default_max));
+	}
+	return max_wpo;
 }
 
 void RendererSceneCull::_instance_record_release(Instance *p_instance) const {
@@ -2239,7 +2322,17 @@ void RendererSceneCull::_instance_record_set_transform(Instance *p_instance, con
 	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
 		return;
 	}
-	RSG::virtual_mesh_storage->instance_record_set_transform(p_instance->virtual_record, p_transform, p_world_aabb, p_visible, p_instance->teleported, p_instance->lod_bias);
+	// GodotNext: nextgeo_vertex_offset (#164). Keep Record's world AABB uninflated by vertex_offset_bound so
+	// distance cutoffs measure against base bounds while instance_cull.glsl, VSM_SEED, and CPU_cut_hash
+	// explicitly inflate by vertex_offset_bound * instance_max_scale without double-inflating.
+	AABB record_world_aabb = p_world_aabb;
+	if (p_instance->vertex_offset_bound > 0.0f) {
+		AABB base_local = p_instance->aabb;
+		base_local.position += Vector3(1.0f, 1.0f, 1.0f) * p_instance->vertex_offset_bound;
+		base_local.size = (base_local.size - Vector3(2.0f, 2.0f, 2.0f) * p_instance->vertex_offset_bound).maxf(0.0f);
+		record_world_aabb = p_transform.xform(base_local);
+	}
+	RSG::virtual_mesh_storage->instance_record_set_transform(p_instance->virtual_record, p_transform, record_world_aabb, p_visible, p_instance->teleported, p_instance->lod_bias);
 }
 
 void RendererSceneCull::_update_instance(Instance *p_instance) const {
@@ -2755,6 +2848,11 @@ void RendererSceneCull::_update_instance_aabb(Instance *p_instance) const {
 	p_instance->displacement_bound = _instance_displacement_bound(p_instance);
 	if (p_instance->displacement_bound > 0.0f) {
 		new_aabb.grow_by(p_instance->displacement_bound);
+	}
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Inflate CPU frustum & VSM invalidation bounds by vertex_offset_max.
+	p_instance->vertex_offset_bound = _instance_vertex_offset_bound(p_instance);
+	if (p_instance->vertex_offset_bound > 0.0f) {
+		new_aabb.grow_by(p_instance->vertex_offset_bound);
 	}
 
 	p_instance->aabb = new_aabb;
@@ -5763,13 +5861,15 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 			geom->geometry_instance->set_surface_materials(p_instance->materials);
 		}
 		_instance_record_update_state(p_instance);
-		// GodotNext: nextgeo_displacement (#150). Re-inflate bounds if a material's displacement magnitude changed.
+		// GodotNext: nextgeo_displacement (#150) & nextgeo_vertex_offset (#164). Re-inflate bounds if displacement or WPO max changed.
 		const float new_disp_bound = _instance_displacement_bound(p_instance);
-		if (new_disp_bound != p_instance->displacement_bound) {
+		const float new_wpo_bound = _instance_vertex_offset_bound(p_instance);
+		if (new_disp_bound != p_instance->displacement_bound || new_wpo_bound != p_instance->vertex_offset_bound) {
 			_update_instance_aabb(p_instance);
 		}
 		if (RSG::virtual_mesh_storage != nullptr && p_instance->virtual_record != UINT32_MAX) {
 			RSG::virtual_mesh_storage->instance_record_set_displacement_bound(p_instance->virtual_record, p_instance->displacement_bound);
+			RSG::virtual_mesh_storage->instance_record_set_vertex_offset_bound(p_instance->virtual_record, p_instance->vertex_offset_bound);
 		}
 	}
 
@@ -5794,6 +5894,10 @@ void RendererSceneCull::update_dirty_instances() const {
 void RendererSceneCull::update() {
 	//optimize bvhs
 
+	const float current_wpo_default = ProjectSettings::get_singleton() != nullptr ? MAX(0.0f, float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default"))) : 0.5f;
+	const bool wpo_default_changed = last_vertex_offset_max_default >= 0.0f && current_wpo_default != last_vertex_offset_max_default;
+	last_vertex_offset_max_default = current_wpo_default;
+
 	uint32_t rid_count = scenario_owner.get_rid_count();
 	RID *rids = (RID *)alloca(sizeof(RID) * rid_count);
 	scenario_owner.fill_owned_buffer(rids);
@@ -5801,6 +5905,14 @@ void RendererSceneCull::update() {
 		Scenario *s = scenario_owner.get_or_null(rids[i]);
 		s->indexers[Scenario::INDEXER_GEOMETRY].optimize_incremental(indexer_update_iterations);
 		s->indexers[Scenario::INDEXER_VOLUMES].optimize_incremental(indexer_update_iterations);
+		if (wpo_default_changed) {
+			for (SelfList<Instance> *E = s->instances.first(); E; E = E->next()) {
+				Instance *inst = E->self();
+				if (inst->base_type == RSE::INSTANCE_MESH && inst->virtual_record != UINT32_MAX) {
+					_instance_queue_update(inst, true, true);
+				}
+			}
+		}
 	}
 	scene_render->update();
 	update_dirty_instances();

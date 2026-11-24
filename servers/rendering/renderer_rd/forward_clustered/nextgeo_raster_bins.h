@@ -156,8 +156,11 @@ struct NextGeoMaterialFallbackFacts {
 	// programmable raster bins on the Nanite device tier by default.
 	bool admit_masked = false;
 	bool admit_depth_offset = false;
-	// rendering/nextgeo/debug_programmable_raster: admits masked, depth-offset and vertex-offset
-	// materials into programmable raster bins (vertex offset stays behind this gate until #164).
+	// GodotNext: nextgeo_vertex_offset (#164). Admits vertex-offset (VERTEX write) materials into
+	// programmable raster bins on the Nanite device tier by default.
+	bool admit_vertex_offset = false;
+	// rendering/nextgeo/debug_programmable_raster: admits programmable raster materials (such as
+	// displaced materials) when enabled.
 	bool admit_programmable = false;
 };
 
@@ -177,13 +180,51 @@ inline NextGeoFallback nextgeo_material_fallback(const NextGeoMaterialFallbackFa
 	if (p_facts.screen_reads || (p_facts.masked && !(p_facts.admit_masked || p_facts.admit_programmable))) {
 		return NEXTGEO_FALLBACK_ALPHA;
 	}
-	if (p_facts.other_custom_vertex || (p_facts.depth_offset && !(p_facts.admit_depth_offset || p_facts.admit_programmable)) || (p_facts.writes_vertex && !p_facts.admit_programmable)) {
+	if (p_facts.other_custom_vertex || (p_facts.depth_offset && !(p_facts.admit_depth_offset || p_facts.admit_programmable)) || (p_facts.writes_vertex && !(p_facts.admit_vertex_offset || p_facts.admit_programmable))) {
 		return NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER;
 	}
 	if (p_facts.unsupported_derivative) {
 		return NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE;
 	}
 	return NEXTGEO_FALLBACK_NONE;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Resolves Material.vertex_offset_max (-1.0 = inherit
+// rendering/nextgeo/vertex_offset_max_default), inflates bounds by vertex_offset_max * instance_max_scale,
+// and clamps offsets exceeding the bound.
+static constexpr float NEXTGEO_VERTEX_OFFSET_MAX_DEFAULT = 0.5f;
+static constexpr float NEXTGEO_VERTEX_OFFSET_MAX_INHERIT = -1.0f;
+
+inline float nextgeo_resolve_vertex_offset_max(float p_material_value, float p_project_default) {
+	if (Math::is_finite(p_material_value) && p_material_value >= 0.0f) {
+		return p_material_value;
+	}
+	return (Math::is_finite(p_project_default) && p_project_default >= 0.0f) ? p_project_default : 0.0f;
+}
+
+inline float nextgeo_effective_vertex_offset_bound(bool p_writes_vertex, float p_material_value, float p_project_default) {
+	if (!p_writes_vertex) {
+		return 0.0f;
+	}
+	return nextgeo_resolve_vertex_offset_max(p_material_value, p_project_default);
+}
+
+inline float nextgeo_inflate_vertex_offset_world_margin(float p_vertex_offset_max, float p_instance_max_scale) {
+	if (!Math::is_finite(p_vertex_offset_max) || !(p_vertex_offset_max > 0.0f) || !Math::is_finite(p_instance_max_scale)) {
+		return 0.0f;
+	}
+	return p_vertex_offset_max * Math::abs(p_instance_max_scale);
+}
+
+// Clamps p_delta to length <= p_max_offset. Returns true if clamped.
+inline bool nextgeo_clamp_vertex_offset(Vector3 &r_delta, float p_max_offset) {
+	const float limit = (Math::is_finite(p_max_offset) && p_max_offset > 0.0f) ? p_max_offset : 0.0f;
+	const real_t len = r_delta.length();
+	if (len > real_t(limit)) {
+		r_delta = (limit > 0.0f && len > real_t(0.0)) ? (r_delta * (real_t(limit) / len)) : Vector3();
+		return true;
+	}
+	return false;
 }
 
 // GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1). True when a programmable bin only runs
@@ -193,6 +234,14 @@ inline NextGeoFallback nextgeo_material_fallback(const NextGeoMaterialFallbackFa
 inline bool nextgeo_raster_bin_can_demote_by_distance(uint32_t p_features) {
 	return (p_features & RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u &&
 			(p_features & RendererVirtualMeshStorage::RASTER_VERTEX_PROGRAMMABLE_FEATURES) == 0u;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164). True when a programmable bin runs vertex offset (without
+// non-demotable displacement) and can demote to FIXED past vertex_offset_disable_distance (combined
+// with programmable_raster_distance when also pixel-programmable).
+inline bool nextgeo_raster_bin_can_demote_vertex_offset(uint32_t p_features) {
+	return (p_features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u &&
+			(p_features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) == 0u;
 }
 
 // Distance from p_camera_pos to the closest point on the world AABB [p_aabb_min, p_aabb_max].
@@ -213,6 +262,32 @@ inline bool nextgeo_programmable_raster_cutoff(const Vector3 &p_camera_pos, cons
 		return false;
 	}
 	return nextgeo_aabb_camera_distance(p_camera_pos, p_aabb_min, p_aabb_max) > p_distance;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164). True when WPO is disabled at this camera position (for both
+// pure VERTEX_OFFSET demotion to FIXED and combined MASKED | VERTEX_OFFSET skipping vertex() offset).
+inline bool nextgeo_vertex_offset_disabled_at_distance(const Vector3 &p_camera_pos, const Vector3 &p_aabb_min, const Vector3 &p_aabb_max, float p_disable_distance) {
+	if (!Math::is_finite(p_disable_distance) || !(p_disable_distance > 0.0f)) {
+		return false;
+	}
+	return nextgeo_aabb_camera_distance(p_camera_pos, p_aabb_min, p_aabb_max) > p_disable_distance;
+}
+
+// Combined CPU reference for cluster_cull.glsl (main & VSM): returns true when a programmable bin
+// demotes completely to NEXTGEO_RASTER_BIN_FIXED given both cutoff distances.
+inline bool nextgeo_raster_bin_demotes_to_fixed(const Vector3 &p_camera_pos, const Vector3 &p_aabb_min, const Vector3 &p_aabb_max, float p_programmable_distance, float p_vertex_offset_disable_distance, uint32_t p_bin_features) {
+	if ((p_bin_features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u) {
+		return false;
+	}
+	const bool has_pixel = (p_bin_features & RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u;
+	const bool has_wpo = (p_bin_features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+	if (!has_pixel && !has_wpo) {
+		return false;
+	}
+	const float dist = nextgeo_aabb_camera_distance(p_camera_pos, p_aabb_min, p_aabb_max);
+	const bool pixel_ok = !has_pixel || (Math::is_finite(p_programmable_distance) && p_programmable_distance > 0.0f && dist > p_programmable_distance);
+	const bool wpo_ok = !has_wpo || (Math::is_finite(p_vertex_offset_disable_distance) && p_vertex_offset_disable_distance > 0.0f && dist > p_vertex_offset_disable_distance);
+	return pixel_ok && wpo_ok;
 }
 
 // GodotNext: nextgeo_displacement (#150). When all programmable raster bins are occupied, a surface

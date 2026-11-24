@@ -92,6 +92,10 @@ public:
 	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) = 0;
 	virtual float material_get_displacement_magnitude(RID p_material) const { return 0.0f; }
 	virtual float material_get_displacement_center(RID p_material) const { return 0.5f; }
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	virtual void material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) = 0;
+	virtual float material_get_vertex_offset_max(RID p_material) const { return -1.0f; }
+	virtual float material_get_effective_vertex_offset_max(RID p_material, float p_project_default) const { return 0.0f; }
 
 	virtual bool material_is_animated(RID p_material) = 0;
 	// GodotNext: vsm_caching (#212, plan §21.3 contract S5). RendererVirtualShadowMapStorage::CacheDynamicReason

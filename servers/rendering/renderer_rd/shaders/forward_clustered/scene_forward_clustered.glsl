@@ -1145,6 +1145,7 @@ vec4 _ng_fragcoord_ddx = vec4(1.0, 0.0, 0.0, 0.0);
 vec4 _ng_fragcoord_ddy = vec4(0.0, 1.0, 0.0, 0.0);
 bool _ng_front_facing = true;
 bool _ng_skip_masked_discard = false;
+bool _ng_skip_vertex_offset = false;
 uint instance_index_interp = 0u;
 
 int _ng_vertex_id = 0;
@@ -1289,8 +1290,14 @@ layout(location = 3) out uvec2 voxel_gi_buffer;
 #ifdef MODE_VISIBILITY_RESOLVE
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 4) out uint nextgeo_instance_id;
+#ifdef MOTION_VECTORS
+layout(location = 5) out vec2 motion_vector;
+#endif
 #else
 layout(location = 3) out uint nextgeo_instance_id;
+#ifdef MOTION_VECTORS
+layout(location = 4) out vec2 motion_vector;
+#endif
 #endif
 #elif defined(MOTION_VECTORS)
 #ifdef MODE_RENDER_VOXEL_GI
@@ -1309,8 +1316,14 @@ layout(location = 1) out uvec2 voxel_gi_buffer;
 #ifdef MODE_VISIBILITY_RESOLVE
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 2) out uint nextgeo_instance_id;
+#ifdef MOTION_VECTORS
+layout(location = 3) out vec2 motion_vector;
+#endif
 #else
 layout(location = 1) out uint nextgeo_instance_id;
+#ifdef MOTION_VECTORS
+layout(location = 2) out vec2 motion_vector;
+#endif
 #endif
 #elif defined(MOTION_VECTORS)
 #ifdef MODE_RENDER_VOXEL_GI
@@ -1628,8 +1641,34 @@ void _ng_resolve_vertex_corner(
 	mat3 modelview_normal = mat3(read_view_matrix) * model_normal_matrix;
 	vec2 read_viewport_size = scene_data.viewport_size;
 
+	vec3 _ng_vertex_before_wpo = vertex;
 	{
 #CODE : RESOLVE_VERTEX
+	}
+
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 contract N5). Skip WPO past
+	// vertex_offset_disable_distance and clamp offsets to Material.vertex_offset_max so
+	// visibility resolve matches the programmable rasterizers.
+	if (_ng_skip_vertex_offset) {
+		vertex = _ng_vertex_before_wpo;
+	} else if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_VERTEX_OFFSET) != 0u) {
+		vec3 _ng_wpo_delta = vertex - _ng_vertex_before_wpo;
+#if !defined(SKIP_TRANSFORM_USED) && defined(VERTEX_WORLD_COORDS_USED)
+		float _ng_wpo_scale = max(length(model_matrix[0].xyz), max(length(model_matrix[1].xyz), length(model_matrix[2].xyz)));
+		float _ng_wpo_limit = max(resolve_push.vertex_offset_max, 0.0) * _ng_wpo_scale;
+#else
+		float _ng_wpo_limit = max(resolve_push.vertex_offset_max, 0.0);
+#endif
+		float _ng_wpo_tol = max(_ng_wpo_limit * 1e-5, 1e-6);
+		float _ng_wpo_thresh = _ng_wpo_limit + _ng_wpo_tol;
+		float _ng_wpo_len_sq = dot(_ng_wpo_delta, _ng_wpo_delta);
+		if (_ng_wpo_len_sq > _ng_wpo_thresh * _ng_wpo_thresh) {
+			if (_ng_wpo_limit > 0.0) {
+				vertex = _ng_vertex_before_wpo + _ng_wpo_delta * (_ng_wpo_limit * inversesqrt(_ng_wpo_len_sq));
+			} else {
+				vertex = _ng_vertex_before_wpo;
+			}
+		}
 	}
 
 	vec3 normal = normal_highp;
@@ -4169,6 +4208,26 @@ void fragment_shader(in SceneData scene_data) {
 
 #endif //MODE_RENDER_DEPTH
 #ifdef MOTION_VECTORS
+#ifdef MODE_VISIBILITY_RESOLVE
+	if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_WRITE_VELOCITY) != 0u) {
+		if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_RESET_VELOCITY) != 0u) {
+			motion_vector = vec2(0.0);
+		} else {
+			vec2 position_clip = (screen_position.xy / screen_position.w) - scene_data.taa_jitter;
+			vec2 prev_position_clip = (prev_screen_position.xy / prev_screen_position.w) - scene_data_block.prev_data.taa_jitter;
+
+			vec2 position_uv = position_clip * vec2(0.5, 0.5);
+			vec2 prev_position_uv = prev_position_clip * vec2(0.5, 0.5);
+
+			motion_vector = prev_position_uv - position_uv;
+			if (motion_vector.x == -1.0 && motion_vector.y == -1.0) {
+				motion_vector.x = -0.9990234375;
+			}
+		}
+	} else {
+		motion_vector = vec2(0.0);
+	}
+#else
 	vec2 position_clip = (screen_position.xy / screen_position.w) - scene_data.taa_jitter;
 	vec2 prev_position_clip = (prev_screen_position.xy / prev_screen_position.w) - scene_data_block.prev_data.taa_jitter;
 
@@ -4176,6 +4235,7 @@ void fragment_shader(in SceneData scene_data) {
 	vec2 prev_position_uv = prev_position_clip * vec2(0.5, 0.5);
 
 	motion_vector = prev_position_uv - position_uv;
+#endif
 #endif
 
 // GodotNext: depth_offset (#149, plan §21.4 contract N6). Recompute conservative depth from view-space
@@ -4278,17 +4338,24 @@ void main() {
 
 	instance_index_interp = _ng_entry.x;
 	_ng_instance_id = int(_ng_entry.x);
-	// GodotNext: nextgeo_masked_two_sided (#153). Past programmable_raster_distance, masked clusters
-	// were demoted to the FIXED raster bin; skip masked discards in resolve so distant surfaces stay solid.
+	// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Past
+	// programmable_raster_distance or vertex_offset_disable_distance, clusters were demoted to FIXED;
+	// skip masked discards or WPO in resolve so distant surfaces stay consistent with raster.
 	_ng_skip_masked_discard = false;
-	if (_ng_record.prev_world_aabb_min.w > 0.0) {
+	_ng_skip_vertex_offset = false;
+	float _ng_wpo_disable_dist = uintBitsToFloat(_ng_record.page_table_offset);
+	if (_ng_record.prev_world_aabb_min.w > 0.0 || _ng_wpo_disable_dist > 0.0) {
 		vec3 _ng_cam_pos = vec3(
 				scene_data_block.data.inv_view_matrix[0].w,
 				scene_data_block.data.inv_view_matrix[1].w,
 				scene_data_block.data.inv_view_matrix[2].w);
 		vec3 _ng_closest = clamp(_ng_cam_pos, _ng_record.world_aabb_min.xyz, _ng_record.world_aabb_max.xyz);
-		if (length(_ng_cam_pos - _ng_closest) > _ng_record.prev_world_aabb_min.w) {
+		float _ng_dist = length(_ng_cam_pos - _ng_closest);
+		if (_ng_record.prev_world_aabb_min.w > 0.0 && _ng_dist > _ng_record.prev_world_aabb_min.w) {
 			_ng_skip_masked_discard = true;
+		}
+		if (_ng_wpo_disable_dist > 0.0 && _ng_dist > _ng_wpo_disable_dist) {
+			_ng_skip_vertex_offset = true;
 		}
 	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
@@ -4373,18 +4440,22 @@ void main() {
 		color_attrib = _ng_c_col;
 
 #ifdef MOTION_VECTORS
-		_ng_resolve_vertex_corner(
-				_ng_c_pos,
-				_ng_c_nrm,
-				_ng_c_tan,
-				_ng_c_bin,
-				_ng_entry.x,
-				scene_data_block.prev_data,
-				_ng_prev_xform,
+		if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_WRITE_VELOCITY) != 0u && (resolve_push.flags & NEXTGEO_RESOLVE_FLAG_RESET_VELOCITY) == 0u) {
+			_ng_resolve_vertex_corner(
+					_ng_c_pos,
+					_ng_c_nrm,
+					_ng_c_tan,
+					_ng_c_bin,
+					_ng_entry.x,
+					scene_data_block.prev_data,
+					_ng_prev_xform,
 #ifdef USE_DOUBLE_PRECISION
-				_ng_record.prev_model_precision.xyz,
+					_ng_record.prev_model_precision.xyz,
 #endif
-				_ng_prev_clip_c[_ng_corner]);
+					_ng_prev_clip_c[_ng_corner]);
+		} else {
+			_ng_prev_clip_c[_ng_corner] = vec4(0.0, 0.0, 0.0, 1.0);
+		}
 #endif
 
 		_ng_resolve_vertex_corner(

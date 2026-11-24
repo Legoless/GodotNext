@@ -392,10 +392,11 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	fallback_facts.unsupported_derivative = uses_unsupported_derivative;
 	fallback_facts.raster_rejects = raster_rejects;
 	nextgeo_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
-	// GodotNext: nextgeo_masked_two_sided (#153) & depth_offset (#149). Default routing on the Nanite tier
-	// admits pixel-programmable materials (masked + DEPTH_OFFSET); vertex offset stays behind debug_programmable_raster.
+	// GodotNext: nextgeo_masked_two_sided (#153), depth_offset (#149), nextgeo_vertex_offset (#164).
+	// Default routing on the Nanite tier admits masked, DEPTH_OFFSET, and vertex-offset materials.
 	fallback_facts.admit_masked = true;
 	fallback_facts.admit_depth_offset = true;
+	fallback_facts.admit_vertex_offset = true;
 	nextgeo_masked_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
 	fallback_facts.admit_programmable = true;
 	nextgeo_programmable_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
@@ -575,6 +576,31 @@ void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
 		SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.version_free(raster_hw_mesh_version);
 		raster_hw_mesh_version = RID();
 	}
+	// GodotNext: nextgeo_vertex_offset (#164).
+	if (rt_vertex_offset_version.is_valid()) {
+		SceneShaderForwardClustered::singleton->rt_vertex_offset_shader.version_free(rt_vertex_offset_version);
+		rt_vertex_offset_version = RID();
+	}
+}
+
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5, GN-12). Lazily compiles the RT proxy
+// vertex-offset compute shader only when an instance opts in via rt_evaluate_vertex_offset.
+RID SceneShaderForwardClustered::ShaderData::get_rt_vertex_offset_shader() {
+	if (!uses_vertex || !raster_target_valid || SceneShaderForwardClustered::singleton == nullptr) {
+		return RID();
+	}
+	MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
+	RtVertexOffsetShaderRD &rt_shader = SceneShaderForwardClustered::singleton->rt_vertex_offset_shader;
+	if (rt_vertex_offset_version.is_null()) {
+		HashMap<String, String> rt_code;
+		rt_code["resolve_vertex"] = raster_code.has("resolve_vertex") ? raster_code["resolve_vertex"] : String();
+		rt_vertex_offset_version = rt_shader.version_create(false);
+		rt_shader.version_set_compute_code(rt_vertex_offset_version, rt_code, raster_uniforms, raster_globals, raster_defines);
+	}
+	if (!rt_shader.is_group_enabled(0)) {
+		rt_shader.enable_group(0);
+	}
+	return rt_shader.version_get_shader(rt_vertex_offset_version, 0);
 }
 
 RID SceneShaderForwardClustered::ShaderData::get_raster_target_shader(bool p_hardware, bool p_buffer) const {
@@ -888,6 +914,15 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 			return ShaderVersion::SHADER_VERSION_AVBOIT_BOUNDS + (p_ubershader ? ShaderVersion::SHADER_VERSION_AVBOIT_PASS_COUNT : 0);
 		case PIPELINE_VERSION_AVBOIT_OCCLUSION:
 			return ShaderVersion::SHADER_VERSION_AVBOIT_OCCLUSION + (p_ubershader ? ShaderVersion::SHADER_VERSION_AVBOIT_PASS_COUNT : 0);
+		// GodotNext: nextgeo_vertex_offset (#164). Stage A guides with motion vectors for WPO.
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION;
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -937,7 +972,12 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR ||
 			// GodotNext: megalights_inputs (#136)
 			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML ||
-			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML;
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML ||
+			// GodotNext: nextgeo_vertex_offset (#164)
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION ||
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION ||
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION ||
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION;
 
 	// GodotNext: vsm_non_nanite (#218). The VSM depth variant has no depth attachment.
 	// GodotNext: avboit (#295). The AVBOIT pre-passes draw into depth-less low-resolution grids.
@@ -1084,6 +1124,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 				blend_state = RD::PipelineColorBlendState::create_disabled(2);
 				break;
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI:
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION: // GodotNext: nextgeo_vertex_offset (#164)
 				blend_state = RD::PipelineColorBlendState::create_disabled(3);
 				break;
 			// GodotNext: megalights_inputs (#136). Velocity stays the last color attachment.
@@ -1096,12 +1137,17 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION:
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW:
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML:
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION: // GodotNext: nextgeo_vertex_offset (#164)
 				blend_state = RD::PipelineColorBlendState::create_disabled(4);
 				break;
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION:
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW:
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML:
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION: // GodotNext: nextgeo_vertex_offset (#164)
 				blend_state = RD::PipelineColorBlendState::create_disabled(5);
+				break;
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION: // GodotNext: nextgeo_vertex_offset (#164)
+				blend_state = RD::PipelineColorBlendState::create_disabled(6);
 				break;
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR:
 				blend_state = blend_state_color_opaque;
@@ -1253,6 +1299,25 @@ void SceneShaderForwardClustered::MaterialData::set_next_pass(RID p_pass) {
 void SceneShaderForwardClustered::MaterialData::set_displacement(float p_magnitude, float p_center) {
 	displacement_magnitude = p_magnitude;
 	displacement_center = p_center;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void SceneShaderForwardClustered::MaterialData::set_vertex_offset_max(float p_vertex_offset_max) {
+	vertex_offset_max = p_vertex_offset_max;
+}
+
+float SceneShaderForwardClustered::MaterialData::get_effective_vertex_offset_max(float p_project_default) const {
+	if (shader_data == nullptr || !shader_data->uses_vertex) {
+		return 0.0f;
+	}
+	return RendererRD::nextgeo_resolve_vertex_offset_max(vertex_offset_max, p_project_default);
+}
+
+bool SceneShaderForwardClustered::MaterialData::get_rt_vertex_offset_uniforms(Vector<RD::Uniform> &r_uniforms) const {
+	if (shader_data == nullptr) {
+		return false;
+	}
+	return get_parameter_uniforms(r_uniforms, shader_data->texture_uniforms, shader_data->ubo_size, true);
 }
 
 uint32_t SceneShaderForwardClustered::MaterialData::get_raster_features() const {
@@ -1409,6 +1474,13 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_AVBOIT, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_AVBOIT_PREPASS\n#define MODE_AVBOIT_OCCLUSION\n", false)); // SHADER_VERSION_AVBOIT_OCCLUSION
 		}
 
+		// GodotNext: nextgeo_vertex_offset (#164). Stage A guides with motion vectors so VERTEX_OFFSET
+		// buckets write accurate velocity before NextGI and motion-pass upscalers.
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_MOTION, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_MOTION, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_MEGALIGHTS_MOTION, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_MEGALIGHTS_MOTION, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION
+
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
 		// GodotNext: megalights_inputs (#136). The F0 pack constants and ML_QUANTIZE_CHROMA reach every
@@ -1426,6 +1498,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n", false));
 		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR_MOTION_VECTORS, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n", false));
 		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n", false));
+		// GodotNext: nextgeo_vertex_offset (#164). Stage A guides with velocity output.
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_MOTION, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_VOXEL_GI_MOTION, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_ML_MOTION, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n#define MOTION_VECTORS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_VOXEL_GI_ML_MOTION, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n#define MOTION_VECTORS\n", false));
 		resolve_compute_shader.initialize(compute_versions, p_defines + String("\n") + RendererRD::MegaLightsInputs::glsl_pack_prelude(), Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
@@ -1745,6 +1822,10 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		raster_hw_mesh_shader.initialize(raster_variants, raster_defines);
 		raster_hw_mesh_shader.set_group_int64_atomics(0, true, false);
 		raster_hw_mesh_shader.set_group_int64_atomics(1, false, true);
+		// GodotNext: nextgeo_vertex_offset (#164). Opt-in RT proxy vertex-offset compute shader.
+		Vector<ShaderRD::VariantDefine> rt_wpo_variants;
+		rt_wpo_variants.push_back(ShaderRD::VariantDefine(0, "", false));
+		rt_vertex_offset_shader.initialize(rt_wpo_variants, raster_defines);
 
 		const RendererRD::NextGeoRasterTier tier = RendererRD::nextgeo_raster_tier(RD::get_singleton());
 		raster_target_ready = tier.hybrid;
@@ -1927,6 +2008,11 @@ bool SceneShaderForwardClustered::is_vsm_shader_group_enabled() const {
 // GodotNext: avboit (#295)
 void SceneShaderForwardClustered::enable_avboit_shader_group() {
 	shader.enable_group(SHADER_GROUP_AVBOIT);
+}
+
+// GodotNext: nextgeo_vertex_offset (#164)
+void SceneShaderForwardClustered::enable_nextgeo_motion_shader_group(bool p_megalights_inputs) {
+	shader.enable_group(p_megalights_inputs ? SHADER_GROUP_NEXTGEO_MEGALIGHTS_MOTION : SHADER_GROUP_NEXTGEO_MOTION);
 }
 
 const char *SceneShaderForwardClustered::ShaderVersion::megalights_variant_defines(uint16_t p_relative) {

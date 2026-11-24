@@ -72,6 +72,9 @@
 		<member name="programmable_raster_distance" type="float" setter="set_programmable_raster_distance" getter="get_programmable_raster_distance" default="0.0">
 			Distance from the camera in meters past which NextGeo pixel-programmable raster bins (such as masked alpha-scissor, alpha-hash, or fragment [code]discard[/code] materials without vertex offset or displacement) fall back to the fixed-function raster bin for both the main view and virtual shadow maps. A value of [code]0.0[/code] keeps programmable rasterization enabled at all distances.
 		</member>
+		<member name="rt_evaluate_vertex_offset" type="bool" setter="set_rt_evaluate_vertex_offset" getter="get_rt_evaluate_vertex_offset" default="false">
+			If [code]true[/code], enables per-frame GPU compute evaluation of spatial shader [code]vertex()[/code] offsets on this instance's NextGeo ray tracing proxy and refits its bottom-level acceleration structure (BLAS) for hardware ray tracing (NextGI), within the per-frame refit triangle budget. When [code]false[/code] (the default), hardware ray tracing traces the static undisplaced ray tracing proxy. Has no effect when [member vertex_offset_disable_distance] disables vertex offset evaluation for the instance.
+		</member>
 		<member name="shadow_cache_invalidation" type="int" setter="set_shadow_cache_invalidation" getter="get_shadow_cache_invalidation" enum="GeometryInstance3D.ShadowCacheInvalidation" default="0">
 			Controls how this instance interacts with virtual shadow map caching (see [member ProjectSettings.rendering/lights_and_shadows/shadow_method]). Changing it invalidates the pages the instance's cached shadow covers, as removing the instance and adding it back would.
 		</member>
@@ -80,6 +83,9 @@
 			In spatial shaders, [code]1.0 - transparency[/code] is set as the default value of the [code]ALPHA[/code] built-in.
 			[b]Note:[/b] [member transparency] is clamped between [code]0.0[/code] and [code]1.0[/code], so this property cannot be used to make transparent materials more opaque than they originally are.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method. When using the Mobile or Compatibility rendering method, [member transparency] is ignored and is considered as always being [code]0.0[/code].
+		</member>
+		<member name="vertex_offset_disable_distance" type="float" setter="set_vertex_offset_disable_distance" getter="get_vertex_offset_disable_distance" default="0.0">
+			Distance from the camera in meters past which NextGeo disables spatial shader [code]vertex()[/code] offset evaluation for this instance in the main view, virtual shadow maps, visibility resolve, and opt-in ray tracing proxy evaluation. Pure vertex-offset clusters demote to the fixed-function raster bin past this distance. A value of [code]0.0[/code] keeps vertex offset evaluation enabled at all distances.
 		</member>
 		<member name="visibility_range_begin" type="float" setter="set_visibility_range_begin" getter="get_visibility_range_begin" default="0.0" keywords="lod_begin, hlod_begin">
 			Starting distance from which the GeometryInstance3D will be visible, taking [member visibility_range_begin_margin] into account as well. The default value of 0 is used to disable the range check.

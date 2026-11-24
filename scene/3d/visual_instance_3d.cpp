@@ -439,6 +439,26 @@ float GeometryInstance3D::get_programmable_raster_distance() const {
 	return programmable_raster_distance;
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void GeometryInstance3D::set_vertex_offset_disable_distance(float p_distance) {
+	ERR_FAIL_COND(p_distance < 0.0f);
+	vertex_offset_disable_distance = p_distance;
+	RS::get_singleton()->instance_geometry_set_vertex_offset_disable_distance(get_instance(), vertex_offset_disable_distance);
+}
+
+float GeometryInstance3D::get_vertex_offset_disable_distance() const {
+	return vertex_offset_disable_distance;
+}
+
+void GeometryInstance3D::set_rt_evaluate_vertex_offset(bool p_enable) {
+	rt_evaluate_vertex_offset = p_enable;
+	RS::get_singleton()->instance_geometry_set_rt_evaluate_vertex_offset(get_instance(), rt_evaluate_vertex_offset);
+}
+
+bool GeometryInstance3D::get_rt_evaluate_vertex_offset() const {
+	return rt_evaluate_vertex_offset;
+}
+
 void GeometryInstance3D::set_instance_shader_parameter(const StringName &p_name, const Variant &p_value) {
 	if (p_value.get_type() == Variant::NIL) {
 		Variant def_value = RS::get_singleton()->instance_geometry_get_shader_parameter_default_value(get_instance(), p_name);
@@ -613,6 +633,11 @@ void GeometryInstance3D::_bind_methods() {
 	// GodotNext: nextgeo_masked_two_sided (#153).
 	ClassDB::bind_method(D_METHOD("set_programmable_raster_distance", "distance"), &GeometryInstance3D::set_programmable_raster_distance);
 	ClassDB::bind_method(D_METHOD("get_programmable_raster_distance"), &GeometryInstance3D::get_programmable_raster_distance);
+	// GodotNext: nextgeo_vertex_offset (#164).
+	ClassDB::bind_method(D_METHOD("set_vertex_offset_disable_distance", "distance"), &GeometryInstance3D::set_vertex_offset_disable_distance);
+	ClassDB::bind_method(D_METHOD("get_vertex_offset_disable_distance"), &GeometryInstance3D::get_vertex_offset_disable_distance);
+	ClassDB::bind_method(D_METHOD("set_rt_evaluate_vertex_offset", "enable"), &GeometryInstance3D::set_rt_evaluate_vertex_offset);
+	ClassDB::bind_method(D_METHOD("get_rt_evaluate_vertex_offset"), &GeometryInstance3D::get_rt_evaluate_vertex_offset);
 
 	ClassDB::bind_method(D_METHOD("set_transparency", "transparency"), &GeometryInstance3D::set_transparency);
 	ClassDB::bind_method(D_METHOD("get_transparency"), &GeometryInstance3D::get_transparency);
@@ -669,6 +694,9 @@ void GeometryInstance3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lod_bias", PROPERTY_HINT_RANGE, "0.001,128,0.001"), "set_lod_bias", "get_lod_bias");
 	// GodotNext: nextgeo_masked_two_sided (#153).
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "programmable_raster_distance", PROPERTY_HINT_RANGE, "0,16384,0.01,or_greater,suffix:m"), "set_programmable_raster_distance", "get_programmable_raster_distance");
+	// GodotNext: nextgeo_vertex_offset (#164).
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "vertex_offset_disable_distance", PROPERTY_HINT_RANGE, "0,16384,0.01,or_greater,suffix:m"), "set_vertex_offset_disable_distance", "get_vertex_offset_disable_distance");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "rt_evaluate_vertex_offset"), "set_rt_evaluate_vertex_offset", "get_rt_evaluate_vertex_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ignore_occlusion_culling"), "set_ignore_occlusion_culling", "is_ignoring_occlusion_culling");
 
 	ADD_GROUP("Global Illumination", "gi_");

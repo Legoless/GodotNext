@@ -74,6 +74,8 @@ public:
 		RECORD_VSM_CACHE_MODE_SHIFT = 12u,
 		RECORD_VSM_CACHE_MODE_MASK = 3u << 12,
 		RECORD_VSM_DYNAMIC = 1u << 14,
+		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Per-instance opt-in RT proxy WPO evaluation.
+		RECORD_RT_EVALUATE_VERTEX_OFFSET = 1u << 15,
 	};
 
 	// gi_flags.
@@ -93,12 +95,12 @@ public:
 		float prev_world_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = programmable_raster_distance (#153).
 		float prev_world_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = displacement_bound (#150).
 		uint32_t virtual_mesh = UINT32_MAX;
-		uint32_t page_table_offset = 0;
+		uint32_t page_table_offset = 0; // floatBitsToUint(vertex_offset_disable_distance) (#164; 0 = never).
 		uint32_t surface_mask = 0;
 		uint32_t bucket_base = 0;
 		uint32_t layer_mask = 0xFFFFFFFFu;
 		uint32_t flags = 0;
-		uint32_t gi_flags = 0;
+		uint32_t gi_flags = 0; // Low 16 bits: GI flags; high 16 bits: float16 vertex_offset_bound (#164).
 		uint32_t pad0 = 0; // Fixed-function shadow surface_mask (#155).
 		uint32_t tlas_instance_index = UINT32_MAX;
 		uint32_t blas_handle = UINT32_MAX;
@@ -427,6 +429,33 @@ public:
 	void instance_record_set_displacement_bound(uint32_t p_record, float p_magnitude);
 	// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1). Per-instance programmable raster cutoff distance in meters (0 = always).
 	void instance_record_set_programmable_raster_distance(uint32_t p_record, float p_distance);
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Per-instance WPO bound (packed as conservative f16
+	// in gi_flags[31:16]), disable distance (float bits in page_table_offset; 0 = never), and RT evaluation flag.
+	static _FORCE_INLINE_ uint16_t pack_vertex_offset_bound_half(float p_bound) {
+		if (!Math::is_finite(p_bound) || !(p_bound > 0.0f)) {
+			return 0u;
+		}
+		const float clamped = MIN(p_bound, 65504.0f);
+		uint16_t h = Math::make_half_float(clamped);
+		if (Math::half_to_float(h) < clamped && h < 0x7BFFu) {
+			h++;
+		}
+		return h;
+	}
+	static _FORCE_INLINE_ float unpack_vertex_offset_bound_half(uint32_t p_gi_flags) {
+		return Math::half_to_float(uint16_t((p_gi_flags >> 16u) & 0xFFFFu));
+	}
+	static _FORCE_INLINE_ float get_record_vertex_offset_bound(const Record &p_record) {
+		return unpack_vertex_offset_bound_half(p_record.gi_flags);
+	}
+	static _FORCE_INLINE_ float get_record_vertex_offset_disable_distance(const Record &p_record) {
+		float dist = 0.0f;
+		memcpy(&dist, &p_record.page_table_offset, sizeof(float));
+		return (Math::is_finite(dist) && dist > 0.0f) ? dist : 0.0f;
+	}
+	void instance_record_set_vertex_offset_bound(uint32_t p_record, float p_bound);
+	void instance_record_set_vertex_offset_disable_distance(uint32_t p_record, float p_distance);
+	void instance_record_set_rt_evaluate_vertex_offset(uint32_t p_record, bool p_enable);
 	static _FORCE_INLINE_ AABB inflate_aabb_for_displacement(const AABB &p_aabb, float p_magnitude) {
 		return (Math::is_finite(p_magnitude) && p_magnitude > 0.0f) ? p_aabb.grow(p_magnitude) : p_aabb;
 	}

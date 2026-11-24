@@ -96,6 +96,10 @@ public:
 		// GodotNext: nextgeo_rt_native (#156). The vertex code moves the surface: it writes VERTEX,
 		// POSITION, MODELVIEW_MATRIX or PROJECTION_MATRIX, or uses skip_vertex_transform.
 		virtual bool nextgeo_moves_vertices() const { return false; }
+		// GodotNext: nextgeo_vertex_offset (#164). True when the shader writes VERTEX in vertex().
+		virtual bool nextgeo_writes_vertex() const { return false; }
+		// GodotNext: nextgeo_vertex_offset (#164). Lazily compiled RT proxy vertex-offset compute shader.
+		virtual RID get_rt_vertex_offset_shader() { return RID(); }
 		// GodotNext: path_tracer (#167). The cull mode the path tracer applies to its camera and bounce rays.
 		virtual RSE::CullMode get_cull_mode() const { return RSE::CULL_MODE_BACK; }
 		// GodotNext: vsm_caching (#212). RendererVirtualShadowMapStorage::CacheDynamicReason bits.
@@ -133,6 +137,9 @@ public:
 		virtual void set_next_pass(RID p_pass) = 0;
 		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 		virtual void set_displacement(float p_magnitude, float p_center) {}
+		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+		virtual void set_vertex_offset_max(float p_vertex_offset_max) {}
+		virtual bool get_rt_vertex_offset_uniforms(Vector<RD::Uniform> &r_uniforms) const { return false; }
 		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) = 0;
 		virtual ~MaterialData();
 
@@ -370,6 +377,8 @@ private:
 		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 		float displacement_magnitude = 0.0f;
 		float displacement_center = 0.5f;
+		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). -1.0 = inherit project default.
+		float vertex_offset_max = -1.0f;
 		SelfList<Material> update_element;
 		// GodotNext: path_tracer (#167). The material_change_serial of its last change (an update, a shader).
 		uint64_t change_serial = 0;
@@ -597,6 +606,11 @@ public:
 	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) override;
 	virtual float material_get_displacement_magnitude(RID p_material) const override;
 	virtual float material_get_displacement_center(RID p_material) const override;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	virtual void material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) override;
+	virtual float material_get_vertex_offset_max(RID p_material) const override;
+	virtual float material_get_effective_vertex_offset_max(RID p_material, float p_project_default) const override;
+	MaterialData *material_get_material_data(RID p_material);
 
 	virtual bool material_is_animated(RID p_material) override;
 	// GodotNext: vsm_caching (#212).

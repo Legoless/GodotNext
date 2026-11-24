@@ -146,14 +146,19 @@ struct NextGeoVSMCounters {
 	uint32_t always_layer0_clusters = 0u; // 25
 	// GodotNext: nextgeo_masked_two_sided (#153). Clusters demoted from programmable to FIXED bin past programmable_raster_distance.
 	uint32_t distance_fixed_clusters = 0u; // 26
-	uint32_t pad1 = 0u; // 27
+	// GodotNext: nextgeo_vertex_offset (#164). WPO clusters demoted to FIXED past vertex_offset_disable_distance and clamped vertices.
+	uint32_t vertex_offset_distance_fixed = 0u; // 27
+	uint32_t vertex_offset_clamped = 0u; // 28
+	uint32_t pad1[3] = {}; // 29..31
 };
-static_assert(sizeof(NextGeoVSMCounters) == 112, "NextGeoVSMCounters must match GLSL layout (112 bytes).");
+static_assert(sizeof(NextGeoVSMCounters) == 128, "NextGeoVSMCounters must match GLSL layout (128 bytes).");
 static_assert(offsetof(NextGeoVSMCounters, cluster_count) == 11 * sizeof(uint32_t), "cluster_count word index must stay 11.");
 static_assert(offsetof(NextGeoVSMCounters, sw_clusters) == 12 * sizeof(uint32_t), "sw_clusters word index must stay 12.");
 static_assert(offsetof(NextGeoVSMCounters, sw_writes) == 20 * sizeof(uint32_t), "sw_writes word index must stay 20.");
 static_assert(offsetof(NextGeoVSMCounters, sink) == 21 * sizeof(uint32_t), "sink word index must stay 21.");
 static_assert(offsetof(NextGeoVSMCounters, hiz_pages_built) == 22 * sizeof(uint32_t), "hiz_pages_built word index must stay 22.");
+static_assert(offsetof(NextGeoVSMCounters, vertex_offset_distance_fixed) == 27 * sizeof(uint32_t), "vertex_offset_distance_fixed word index must stay 27.");
+static_assert(offsetof(NextGeoVSMCounters, vertex_offset_clamped) == 28 * sizeof(uint32_t), "vertex_offset_clamped word index must stay 28.");
 
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_CLUSTER_COUNT = 11u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_SW_CLUSTERS = 12u;

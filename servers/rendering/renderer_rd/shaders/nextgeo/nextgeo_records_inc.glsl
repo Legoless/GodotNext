@@ -11,12 +11,12 @@ struct NextGeoInstanceRecord {
 	vec4 prev_world_aabb_min; // 128, w = programmable_raster_distance (#153; 0 = always programmable)
 	vec4 prev_world_aabb_max; // 144, w = displacement_bound (#150)
 	uint virtual_mesh; // 160
-	uint page_table_offset; // 164
+	uint page_table_offset; // 164: floatBitsToUint(vertex_offset_disable_distance) (#164; 0 = never disable)
 	uint surface_mask; // 168
 	uint bucket_base; // 172
 	uint layer_mask; // 176
 	uint flags; // 180
-	uint gi_flags; // 184
+	uint gi_flags; // 184: [15:0] GI flags, [31:16] conservative float16 vertex_offset_bound (#164)
 	uint pad0; // 188: fixed-function shadow surface_mask (#155)
 	uint tlas_instance_index; // 192
 	uint blas_handle; // 196
@@ -65,6 +65,8 @@ const uint NEXTGEO_RECORD_VSM_CACHE_RIGID = 2u << 12;
 const uint NEXTGEO_RECORD_VSM_CACHE_STATIC = 3u << 12;
 const uint NEXTGEO_RECORD_VSM_CACHE_MODE_MASK = 3u << 12;
 const uint NEXTGEO_RECORD_VSM_DYNAMIC = 1u << 14;
+// GodotNext: nextgeo_vertex_offset (#164). Opt-in RT proxy vertex() evaluation and BLAS refit.
+const uint NEXTGEO_RECORD_RT_EVALUATE_VERTEX_OFFSET = 1u << 15;
 
 // NextGeoInstanceRecord::gi_flags.
 const uint NEXTGEO_GI_MODE_MASK = 3u << 0;
@@ -72,6 +74,15 @@ const uint NEXTGEO_GI_MODE_NONE = 0u << 0;
 const uint NEXTGEO_GI_MODE_STATIC = 1u << 0;
 const uint NEXTGEO_GI_MODE_DYNAMIC = 2u << 0;
 const uint NEXTGEO_GI_LIGHTMAPPED = 1u << 2;
+
+// GodotNext: nextgeo_vertex_offset (#164). Unpack conservative float16 WPO bound and disable distance.
+float nextgeo_record_vertex_offset_bound(NextGeoInstanceRecord p_record) {
+	return max(unpackHalf2x16(p_record.gi_flags >> 16u).x, 0.0);
+}
+
+float nextgeo_record_vertex_offset_disable_distance(NextGeoInstanceRecord p_record) {
+	return max(uintBitsToFloat(p_record.page_table_offset), 0.0);
+}
 
 // Per-(record, surface_id) bucket table entry bits (#80).
 const uint NEXTGEO_BUCKET_ID_MASK = 0x0FFFFFFFu;

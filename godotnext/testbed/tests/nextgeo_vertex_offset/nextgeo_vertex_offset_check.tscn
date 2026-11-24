@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/nextgeo_vertex_offset/nextgeo_vertex_offset_check.gd" id="1"]
+
+[node name="NextGeoVertexOffsetCheck" type="Node3D"]
+script = ExtResource("1")

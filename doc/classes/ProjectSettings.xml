@@ -3646,6 +3646,9 @@
 		<member name="rendering/nextgeo/sw_raster_max_edge_px" type="float" setter="" getter="" default="8.0">
 			The triangle-size switch of the [code]Hybrid[/code] raster mode, in pixels at the internal resolution. A cluster goes to the software rasterizer when its longest edge projects below this value and it lies entirely in front of the near plane; every other cluster goes to the hardware rasterizer. [code]0[/code] sends every cluster to the hardware rasterizer. Values above [code]64[/code] are clamped to [code]64[/code], so every software-rasterized triangle keeps the full subpixel precision. The default is provisional.
 		</member>
+		<member name="rendering/nextgeo/vertex_offset_max_default" type="float" setter="" getter="" default="0.5">
+			Default maximum vertex offset distance in meters inherited by spatial materials whose [member Material.vertex_offset_max] is negative ([code]-1.0[/code]). NextGeo inflates instance and cluster culling bounds by this distance (scaled by the instance's maximum scale axis) and clamps vertex offsets that exceed it. The default is provisional.
+		</member>
 		<member name="rendering/nextgeo/visibility_only" type="bool" setter="" getter="" default="false">
 			Skip virtual surfaces in the legacy opaque and motion render lists before Stage A/B resolve is enabled, isolating NextGeo visibility-buffer, depth, and motion-vector output for diagnostics and tests.
 		</member>

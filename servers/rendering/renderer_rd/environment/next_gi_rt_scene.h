@@ -523,6 +523,10 @@ public:
 		uint32_t skinned_instances = 0;
 		uint32_t skinned_refit_triangles = 0;
 		uint32_t skinned_build_triangles = 0;
+		// GodotNext: nextgeo_vertex_offset (#164). Opt-in RT proxy vertex-offset evaluation and BLAS refits.
+		uint32_t vertex_offset_instances = 0;
+		uint32_t vertex_offset_refit_triangles = 0;
+		uint32_t vertex_offset_build_triangles = 0;
 		uint64_t as_bytes = 0;
 		double tlas_fill_ms = 0.0;
 		double scene_update_ms = 0.0;
@@ -594,6 +598,28 @@ private:
 	};
 	HashMap<uint64_t, SkinnedPart> skinned_parts;
 	bool _skinned_part_blas_alive(const SkinnedPart &p_part) const;
+	// GodotNext: nextgeo_vertex_offset (#164). Per-instance opt-in RT proxy WPO parts keyed by (instance, element, part).
+	struct VertexOffsetPart {
+		RID mesh;
+		RID blas;
+		RID chunk_buffer;
+		RID bind_pose_buffer;
+		NextGIArenaAllocator::Allocation allocation;
+		uint32_t src_chunk = UINT32_MAX;
+		uint32_t src_allocation_offset = 0;
+		uint32_t src_allocation_size = 0;
+		uint32_t bind_pose_vertex_count = 0;
+		uint32_t proxy_pos_rel = 0;
+		uint32_t triangles = 0;
+		uint64_t last_frame = 0;
+		LocalVector<NextGIRTPartGeometry> geometries;
+	};
+	HashMap<uint64_t, VertexOffsetPart> vertex_offset_parts;
+	HashMap<RID, RID> vertex_offset_pipelines;
+	RID vertex_offset_dummy_instance_buffer;
+	bool _vertex_offset_part_blas_alive(const VertexOffsetPart &p_part) const;
+	void _free_vertex_offset_part(VertexOffsetPart &p_part);
+	RID _get_vertex_offset_pipeline(RID p_shader);
 	LocalVector<PendingCompact> pending_compactions;
 	HashMap<RID, uint64_t> mesh_last_tlas_frame;
 	bool as_memory_exceeded = false;

@@ -81,6 +81,9 @@ public:
 	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) {}
 	// GodotNext: light_source_parity (#140). Tracks whether the instance casts shadows for contact-shadow intensity split.
 	virtual void set_casts_shadows(bool p_enable) {}
+	// GodotNext: nextgeo_vertex_offset (#164).
+	virtual void set_vertex_offset_disable_distance(float p_distance) {}
+	virtual void set_rt_evaluate_vertex_offset(bool p_enable) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -143,6 +146,9 @@ public:
 		bool casts_shadows = true;
 		// GodotNext: vsm_caching (#212).
 		RSE::ShadowCacheInvalidation shadow_cache_invalidation = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
+		// GodotNext: nextgeo_vertex_offset (#164).
+		float vertex_offset_disable_distance = 0.0f;
+		bool rt_evaluate_vertex_offset = false;
 		bool dirty_dependencies = false;
 
 		DependencyTracker dependency_tracker;
@@ -170,6 +176,9 @@ public:
 	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) override;
 	// GodotNext: light_source_parity (#140).
 	virtual void set_casts_shadows(bool p_enable) override;
+	// GodotNext: nextgeo_vertex_offset (#164).
+	virtual void set_vertex_offset_disable_distance(float p_distance) override;
+	virtual void set_rt_evaluate_vertex_offset(bool p_enable) override;
 
 	virtual void reset_motion_vectors() override;
 

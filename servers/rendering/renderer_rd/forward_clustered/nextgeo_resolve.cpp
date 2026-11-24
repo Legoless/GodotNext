@@ -50,7 +50,7 @@ struct ClassifyPush {
 };
 
 static_assert(sizeof(ClassifyPush) == 16);
-static_assert(sizeof(NextGeoResolve::ResolvePush) == 16);
+static_assert(sizeof(NextGeoResolve::ResolvePush) == 32);
 
 // GodotNext: nextgeo_shading_bins (#158). shading_binning.glsl's PushParams.
 struct BinningPush {
@@ -122,6 +122,16 @@ uint32_t NextGeoResolve::get_compute_bucket_count() const {
 		}
 	}
 	return count;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164).
+bool NextGeoResolve::has_vertex_offset_buckets() const {
+	for (uint32_t i = 0; i < buckets.size(); i++) {
+		if (buckets[i].shader != nullptr && buckets[i].shader->uses_vertex) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool NextGeoResolve::compute_target_storable(RID p_texture, RD::DataFormat p_format) {
@@ -666,7 +676,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	}
 }
 
-uint32_t NextGeoResolve::_dispatch_compute_buckets(const LocalVector<ComputeBucket> &p_compute, bool p_stage_b, uint32_t p_flags, bool p_reverse_cull) {
+uint32_t NextGeoResolve::_dispatch_compute_buckets(const LocalVector<ComputeBucket> &p_compute, bool p_stage_b, uint32_t p_flags, bool p_reverse_cull, bool p_stage_a_motion, bool p_reset_velocity, float p_vertex_offset_default) {
 	RenderingDevice *rd = RD::get_singleton();
 	if (p_compute.is_empty() || rd == nullptr || !shading_args_buffer.is_valid()) {
 		return 0;
@@ -683,11 +693,20 @@ uint32_t NextGeoResolve::_dispatch_compute_buckets(const LocalVector<ComputeBuck
 		}
 		bucket.material->set_as_used();
 
+		const bool writes_vertex = bucket.shader != nullptr && bucket.shader->uses_vertex;
+		uint32_t compute_flags = p_flags;
+		if (!p_stage_b && p_stage_a_motion && !writes_vertex) {
+			compute_flags |= COMPUTE_FLAG_SKIP_VELOCITY;
+		}
+		const bool write_velocity = (!p_stage_b && p_stage_a_motion && writes_vertex) || (p_stage_b && (compute_flags & COMPUTE_FLAG_SKIP_VELOCITY) == 0u);
+
 		ResolvePush push;
 		push.bucket_id = entry.bucket;
 		push.material_feedback_index = p_stage_b ? bucket.material_feedback_index : UINT32_MAX;
-		push.tile_list_base = p_flags;
+		push.tile_list_base = compute_flags;
 		push.cull_sign = p_reverse_cull ? -1.0f : 1.0f;
+		push.vertex_offset_max = writes_vertex && bucket.material != nullptr ? bucket.material->get_effective_vertex_offset_max(p_vertex_offset_default) : 0.0f;
+		push.flags = (writes_vertex ? RESOLVE_FLAG_VERTEX_OFFSET : 0u) | (write_velocity ? RESOLVE_FLAG_WRITE_VELOCITY : 0u) | (p_reset_velocity ? RESOLVE_FLAG_RESET_VELOCITY : 0u);
 		rd->compute_list_set_push_constant(cl, &push, sizeof(push));
 		rd->compute_list_dispatch_indirect(cl, shading_args_buffer, entry.bucket * RendererRD::NEXTGEO_SHADING_ARGS_WORDS * sizeof(uint32_t));
 		dispatches++;
@@ -696,7 +715,7 @@ uint32_t NextGeoResolve::_dispatch_compute_buckets(const LocalVector<ComputeBuck
 	return dispatches;
 }
 
-uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool p_megalights_inputs, bool &r_request_redraw, const ComputeStage *p_compute) {
+uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool p_megalights_inputs, bool &r_request_redraw, const ComputeStage *p_compute, bool p_with_velocity, bool p_reset_velocity, float p_vertex_offset_default) {
 	if (buckets.is_empty() || current_max_tiles == 0 || !p_framebuffer.is_valid() || !indirect_args_buffer.is_valid()) {
 		return 0;
 	}
@@ -706,9 +725,15 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 	}
 
 	const RD::FramebufferFormatID fb_format = rd->framebuffer_get_format(p_framebuffer);
-	// GodotNext: megalights_inputs (#136)
+	// GodotNext: megalights_inputs (#136), nextgeo_vertex_offset (#164).
 	SceneShaderForwardClustered::PipelineVersion version = SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES;
-	if (p_megalights_inputs) {
+	if (p_with_velocity) {
+		if (p_megalights_inputs) {
+			version = p_using_voxelgi ? SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION : SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION;
+		} else {
+			version = p_using_voxelgi ? SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION : SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION;
+		}
+	} else if (p_megalights_inputs) {
 		version = p_using_voxelgi ? SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML : SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML;
 	} else if (p_using_voxelgi) {
 		version = SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI;
@@ -758,6 +783,8 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 				continue;
 			}
 
+			const bool writes_vertex = bucket.shader->uses_vertex;
+
 			SceneShaderForwardClustered::ShaderData::PipelineKey key;
 			key.vertex_format_id = RD::INVALID_ID;
 			key.framebuffer_format_id = fb_format;
@@ -768,7 +795,9 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 			key.shader_specialization = stage_a_spec;
 			key.wireframe = false;
 			key.ubershader = 0;
-			key.zero_velocity_write = 0;
+			// GodotNext: nextgeo_vertex_offset (#164). In Stage A motion mode, non-WPO buckets keep
+			// visibility_export's rigid motion vectors untouched; only WPO buckets write velocity.
+			key.zero_velocity_write = (p_with_velocity && !writes_vertex) ? 1 : 0;
 
 			const uint32_t key_hash = key.hash();
 			const RID pipeline = bucket.shader->pipeline_hash_map.get_pipeline(key, key_hash, true, RSE::PIPELINE_SOURCE_SPECIALIZATION);
@@ -801,6 +830,8 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 			push.material_feedback_index = UINT32_MAX;
 			push.tile_list_base = i * current_max_tiles;
 			push.cull_sign = p_reverse_cull ? -1.0f : 1.0f;
+			push.vertex_offset_max = writes_vertex ? bucket.material->get_effective_vertex_offset_max(p_vertex_offset_default) : 0.0f;
+			push.flags = (writes_vertex ? RESOLVE_FLAG_VERTEX_OFFSET : 0u) | ((p_with_velocity && writes_vertex) ? RESOLVE_FLAG_WRITE_VELOCITY : 0u) | (p_reset_velocity ? RESOLVE_FLAG_RESET_VELOCITY : 0u);
 			rd->draw_list_set_push_constant(dl, &push, sizeof(push));
 			rd->draw_list_draw_indirect(dl, false, indirect_args_buffer, i * 16u, 1, 0);
 			draws++;
@@ -815,7 +846,7 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 				r_request_redraw = true;
 			}
 		}
-		const uint32_t dispatches = _dispatch_compute_buckets(compute, false, p_compute->flags, p_reverse_cull);
+		const uint32_t dispatches = _dispatch_compute_buckets(compute, false, p_compute->flags, p_reverse_cull, p_with_velocity, p_reset_velocity, p_vertex_offset_default);
 		draws += dispatches;
 		s_last_published_stage_a_compute.store(dispatches, std::memory_order_relaxed);
 	}
@@ -823,7 +854,7 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 	return draws;
 }
 
-bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_colors, RID p_render_base_uniform_set, RID p_rp_uniform_set, uint32_t p_pipeline_color_pass_flags, bool p_zero_velocity_write, bool p_use_directional_soft_shadow, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw, uint32_t &r_draws, const ComputeStage *p_compute) {
+bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_colors, RID p_render_base_uniform_set, RID p_rp_uniform_set, uint32_t p_pipeline_color_pass_flags, bool p_zero_velocity_write, bool p_use_directional_soft_shadow, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw, uint32_t &r_draws, const ComputeStage *p_compute, bool p_reset_velocity, float p_vertex_offset_default) {
 	r_draws = 0;
 	if (buckets.is_empty() || current_max_tiles == 0 || !p_framebuffer.is_valid() || !indirect_args_buffer.is_valid()) {
 		return false;
@@ -918,11 +949,16 @@ bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_v
 		}
 		bucket.material->set_as_used();
 
+		const bool writes_vertex = bucket.shader->uses_vertex;
+		const bool write_velocity = !p_zero_velocity_write && (p_pipeline_color_pass_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS) != 0;
+
 		ResolvePush push;
 		push.bucket_id = i;
 		push.material_feedback_index = bucket.material_feedback_index;
 		push.tile_list_base = i * current_max_tiles;
 		push.cull_sign = p_reverse_cull ? -1.0f : 1.0f;
+		push.vertex_offset_max = writes_vertex ? bucket.material->get_effective_vertex_offset_max(p_vertex_offset_default) : 0.0f;
+		push.flags = (writes_vertex ? RESOLVE_FLAG_VERTEX_OFFSET : 0u) | (write_velocity ? RESOLVE_FLAG_WRITE_VELOCITY : 0u) | (p_reset_velocity ? RESOLVE_FLAG_RESET_VELOCITY : 0u);
 		rd->draw_list_set_push_constant(dl, &push, sizeof(push));
 		rd->draw_list_draw_indirect(dl, false, indirect_args_buffer, i * 16u, 1, 0);
 		r_draws++;
@@ -931,7 +967,7 @@ bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_v
 	rd->draw_list_end();
 	// GodotNext: nextgeo_shading_bins (#158)
 	if (!compute.is_empty()) {
-		const uint32_t dispatches = _dispatch_compute_buckets(compute, true, p_compute->flags, p_reverse_cull);
+		const uint32_t dispatches = _dispatch_compute_buckets(compute, true, p_compute->flags, p_reverse_cull, false, p_reset_velocity, p_vertex_offset_default);
 		r_draws += dispatches;
 		s_last_published_stage_b_compute.store(dispatches, std::memory_order_relaxed);
 	}

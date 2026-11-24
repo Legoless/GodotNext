@@ -289,6 +289,30 @@ float MaterialStorage::material_get_displacement_center(RID p_material) const {
 	return material != nullptr ? material->displacement_center : 0.5f;
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void MaterialStorage::material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) {
+	DummyMaterial *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL(material);
+
+	material->vertex_offset_max = (Math::is_finite(p_vertex_offset_max) && p_vertex_offset_max >= 0.0f) ? p_vertex_offset_max : -1.0f;
+}
+
+float MaterialStorage::material_get_vertex_offset_max(RID p_material) const {
+	const DummyMaterial *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->vertex_offset_max : -1.0f;
+}
+
+float MaterialStorage::material_get_effective_vertex_offset_max(RID p_material, float p_project_default) const {
+	const DummyMaterial *material = material_owner.get_or_null(p_material);
+	if (material == nullptr) {
+		return 0.0f;
+	}
+	if (material->vertex_offset_max >= 0.0f && Math::is_finite(material->vertex_offset_max)) {
+		return material->vertex_offset_max;
+	}
+	return (Math::is_finite(p_project_default) && p_project_default >= 0.0f) ? p_project_default : 0.0f;
+}
+
 void MaterialStorage::material_get_instance_shader_parameters(RID p_material, List<InstanceShaderParam> *r_parameters) {
 	DummyMaterial *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL(material);

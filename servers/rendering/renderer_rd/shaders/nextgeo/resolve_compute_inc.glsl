@@ -35,6 +35,11 @@ layout(rg8ui, set = 2, binding = 13) uniform restrict writeonly uimage2D nextgeo
 #endif
 uint nextgeo_instance_id;
 layout(r32ui, set = 2, binding = 14) uniform restrict writeonly uimage2D nextgeo_out_instance_id;
+#ifdef MOTION_VECTORS
+// GodotNext: nextgeo_vertex_offset (#164). Stage A velocity output for WPO buckets.
+vec2 motion_vector;
+layout(rg16f, set = 2, binding = 15) uniform restrict writeonly image2D nextgeo_out_velocity;
+#endif
 
 #else
 
@@ -66,6 +71,11 @@ void nextgeo_resolve_compute_store(ivec2 p_px) {
 	imageStore(nextgeo_out_voxel_gi, p_px, uvec4(voxel_gi_buffer, 0u, 0u));
 #endif
 	imageStore(nextgeo_out_instance_id, p_px, uvec4(nextgeo_instance_id, 0u, 0u, 0u));
+#ifdef MOTION_VECTORS
+	if ((resolve_push.tile_list_base & NEXTGEO_RESOLVE_COMPUTE_SKIP_VELOCITY) == 0u) {
+		imageStore(nextgeo_out_velocity, p_px, vec4(motion_vector, 0.0, 0.0));
+	}
+#endif
 #else
 #ifdef MODE_SEPARATE_SPECULAR
 	imageStore(nextgeo_out_color, p_px, diffuse_buffer);

@@ -93,7 +93,9 @@ TEST_CASE("[Upscalers][RRGuides] Color pass flag counts and shader version layou
 	CHECK_EQ(int(Version::SHADER_VERSION_VSM_BASE), int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT));
 	// GodotNext: avboit (#295). The AVBOIT pre-pass variants follow the VSM variants.
 	CHECK_EQ(int(Version::SHADER_VERSION_AVBOIT_BASE), int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
-	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), int(Version::SHADER_VERSION_AVBOIT_BASE) + int(Version::SHADER_VERSION_AVBOIT_COUNT));
+	// GodotNext: nextgeo_vertex_offset (#164). Four Stage A motion-vector variants follow AVBOIT.
+	CHECK_EQ(int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE), int(Version::SHADER_VERSION_AVBOIT_BASE) + int(Version::SHADER_VERSION_AVBOIT_COUNT));
+	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_COUNT));
 
 	// Every variant with the guide outputs is in an RR group, so none compiles with RR off.
 	for (uint32_t flags = 0; flags < uint32_t(Shader::SHADER_COLOR_PASS_FLAG_COUNT); flags++) {

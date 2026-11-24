@@ -68,6 +68,10 @@
 			[b]Note:[/b] This only applies to [StandardMaterial3D]s and [ShaderMaterial]s with type "Spatial".
 			[b]Note:[/b] This will not impact how transparent objects are sorted relative to opaque objects or how dynamic meshes will be sorted relative to other opaque meshes. This is because all transparent objects are drawn after all opaque objects and all dynamic opaque meshes are drawn before other opaque meshes.
 		</member>
+		<member name="vertex_offset_max" type="float" setter="set_vertex_offset_max" getter="get_vertex_offset_max" default="-1.0">
+			The maximum vertex offset distance in meters (local space, scaled by the instance's maximum scale axis) for spatial materials whose [code]vertex()[/code] function writes [code]VERTEX[/code] on NextGeo virtualized meshes. NextGeo inflates instance and cluster culling bounds by this distance and clamps vertex offsets that exceed it. A negative value (such as the default [code]-1.0[/code]) inherits [member ProjectSettings.rendering/nextgeo/vertex_offset_max_default]. Setting [code]0.0[/code] clamps all NextGeo vertex offsets to zero without falling back to legacy rasterization.
+			[b]Note:[/b] This only applies to spatial materials.
+		</member>
 	</members>
 	<constants>
 		<constant name="RENDER_PRIORITY_MAX" value="127">

@@ -24,6 +24,8 @@ if "RD_GLSL" in env["BUILDERS"]:
     env.Depends("raster_material_hw.glsl.gen.h", vsm_includes)
     env.Depends("raster_material_hw_mesh.glsl.gen.h", vsm_includes)
     env.Depends("raster_material_sw.glsl.gen.h", vsm_includes)
+    # GodotNext: nextgeo_vertex_offset (#164). RT proxy vertex-offset compute shader includes parent headers.
+    env.Depends("rt_vertex_offset.glsl.gen.h", [str(f) for f in Glob("../*_inc.glsl")])
 
     for glsl_file in gl_include_files:
         env.GLSL_HEADER(glsl_file)

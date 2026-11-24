@@ -109,7 +109,9 @@ layout(set = 0, binding = 5, std430) buffer restrict VSMCounters {
 	uint dynamic_clusters;
 	uint always_layer0_clusters;
 	uint distance_fixed_clusters; // #153: pixel-programmable clusters demoted to FIXED past programmable_raster_distance
-	uint pad1;
+	uint vertex_offset_distance_fixed; // #164: WPO clusters demoted to FIXED past vertex_offset_disable_distance
+	uint vertex_offset_clamped; // #164: vertices clamped to Material.vertex_offset_max
+	uint pad1[3];
 }
 vsm_counters;
 
@@ -315,9 +317,10 @@ float vsm_projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, flo
 		return (p_error * scale / page_texel) * vsm_params.lod_bias;
 	}
 	vec3 center = vsm_instance_point(p_record, p_lod_sphere.xyz);
-	// GodotNext: nextgeo_displacement (#150) x vsm_nanite (#217). Inflate sphere radius by displacement bound.
-	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
-	float radius = (p_lod_sphere.w + disp_bound) * scale;
+	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
+	// Inflate sphere radius by displacement and vertex-offset bounds.
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	float radius = (p_lod_sphere.w + expand) * scale;
 	vec3 light_origin = vsm_light_origin(md);
 	float distance = max(length(center - light_origin) - radius, max(md.near_w, 1.0e-5));
 	return (p_error * scale / (page_texel * distance)) * vsm_params.lod_bias;
@@ -458,10 +461,11 @@ bool vsm_local_aabb_page_bounds(NextGeoInstanceRecord p_record, vec3 lmin, vec3 
 		r_straddles_near = false;
 		return false;
 	}
-	// GodotNext: nextgeo_displacement (#150) x vsm_nanite (#217). Inflate local bounds by displacement bound.
-	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
-	lmin -= vec3(disp_bound);
-	lmax += vec3(disp_bound);
+	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
+	// Inflate local bounds by displacement and vertex-offset bounds.
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	lmin -= vec3(expand);
+	lmax += vec3(expand);
 	vec3 corners[8];
 	for (int c = 0; c < 8; c++) {
 		vec3 lp = vec3((c & 1) != 0 ? lmax.x : lmin.x, (c & 2) != 0 ? lmax.y : lmin.y, (c & 4) != 0 ? lmax.z : lmin.z);
@@ -608,7 +612,9 @@ void main() {
 	vec2 px_max;
 	float min_depth;
 	bool straddles_near;
-	if (!vsm_world_aabb_page_bounds(record.world_aabb_min.xyz, record.world_aabb_max.xyz, md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
+	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
+	if (!vsm_world_aabb_page_bounds(record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_max.xyz + vec3(wpo_margin), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
 		return;
 	}
 	if (!has_prog_surface && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
@@ -640,7 +646,8 @@ bool vsm_sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_b
 		return (p_max_edge * p_scale / page_texel) < threshold;
 	}
 	vec3 center = vsm_instance_point(p_record, p_bounds.xyz);
-	float w_min = vsm_row(md.row3, center) - p_bounds.w * p_scale;
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	float w_min = vsm_row(md.row3, center) - (p_bounds.w + expand) * p_scale;
 	if (!(w_min > md.near_w)) {
 		return false;
 	}
@@ -780,23 +787,35 @@ void main() {
 		}
 		uint bin_features = bin < 68u ? vsm_params.bin_features[bin] : 0u;
 		bool dist_demoted = false;
-		// GodotNext: nextgeo_masked_two_sided (#153). Past programmable_raster_distance, pixel-programmable
-		// bins (without vertex offset / displacement) demote to the FIXED shadow rasterizer.
-		if (bin != NEXTGEO_RASTER_BIN_FIXED &&
-				(bin_features & NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u &&
-				(bin_features & NEXTGEO_RASTER_VERTEX_PROGRAMMABLE_FEATURES) == 0u &&
-				record.prev_world_aabb_min.w > 0.0) {
-			vec3 closest = clamp(vsm_params.camera_position.xyz, record.world_aabb_min.xyz, record.world_aabb_max.xyz);
-			if (length(vsm_params.camera_position.xyz - closest) > record.prev_world_aabb_min.w) {
-				bin = NEXTGEO_RASTER_BIN_FIXED;
-				bin_features = 0u;
-				dist_demoted = true;
+		bool masked_demoted = false;
+		bool wpo_demoted = false;
+		bool wpo_disabled = false;
+		// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Past
+		// programmable_raster_distance / vertex_offset_disable_distance, demote non-displaced
+		// programmable bins to the FIXED shadow rasterizer once all active programmable features disable.
+		if (bin != NEXTGEO_RASTER_BIN_FIXED && (bin_features & NEXTGEO_RASTER_FEATURE_DISPLACED) == 0u) {
+			bool has_pix_feat = (bin_features & NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u;
+			bool has_wpo_feat = (bin_features & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+			float prog_dist = record.prev_world_aabb_min.w;
+			float wpo_dist = nextgeo_record_vertex_offset_disable_distance(record);
+			if ((has_pix_feat && prog_dist > 0.0) || (has_wpo_feat && wpo_dist > 0.0)) {
+				vec3 closest = clamp(vsm_params.camera_position.xyz, record.world_aabb_min.xyz, record.world_aabb_max.xyz);
+				float cam_dist = length(vsm_params.camera_position.xyz - closest);
+				bool pix_disabled = has_pix_feat && prog_dist > 0.0 && cam_dist > prog_dist;
+				wpo_disabled = has_wpo_feat && wpo_dist > 0.0 && cam_dist > wpo_dist;
+				if ((has_pix_feat || has_wpo_feat) && (!has_pix_feat || pix_disabled) && (!has_wpo_feat || wpo_disabled)) {
+					bin = NEXTGEO_RASTER_BIN_FIXED;
+					bin_features = 0u;
+					dist_demoted = true;
+					masked_demoted = pix_disabled;
+					wpo_demoted = wpo_disabled;
+				}
 			}
 		}
 		if (bin == NEXTGEO_RASTER_BIN_FIXED && !dist_demoted && (record.pad0 & (1u << surface_id)) == 0u) {
 			continue;
 		}
-		bool has_wpo = (bin_features & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+		bool has_wpo = ((bin_features & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u) && !wpo_disabled;
 		bool has_dynamic_bin = has_wpo || ((bin_features & NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET) != 0u);
 		uint layer = vsm_instance_layer(record, vsm_params.cull_flags, has_dynamic_bin);
 		uint req_dirty = layer != 0u ? VSM_ENTRY_DIRTY_DYNAMIC : VSM_ENTRY_DIRTY_STATIC;
@@ -811,20 +830,19 @@ void main() {
 					uintBitsToFloat(pages.data[route_rec_word + 1u]),
 					uintBitsToFloat(pages.data[route_rec_word + 2u]),
 					uintBitsToFloat(pages.data[route_rec_word + 3u]));
-			if (!has_wpo) {
-				vec3 c_w = vsm_instance_point(record, bounds.xyz);
-				float r_w = bounds.w * route_scale;
-				vec2 px_min;
-				vec2 px_max;
-				float min_depth;
-				bool straddles_near;
-				if (!vsm_world_aabb_page_bounds(c_w - vec3(r_w), c_w + vec3(r_w), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
-					continue;
-				}
-				if (vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
-					vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_clusters, 1u));
-					continue;
-				}
+			vec3 c_w = vsm_instance_point(record, bounds.xyz);
+			float expand = max(record.prev_world_aabb_max.w, 0.0) + (has_wpo ? nextgeo_record_vertex_offset_bound(record) : 0.0);
+			float r_w = (bounds.w + expand) * route_scale;
+			vec2 px_min;
+			vec2 px_max;
+			float min_depth;
+			bool straddles_near;
+			if (!vsm_world_aabb_page_bounds(c_w - vec3(r_w), c_w + vec3(r_w), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+				continue;
+			}
+			if (!has_wpo && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+				vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_clusters, 1u));
+				continue;
 			}
 			float max_edge = unpackHalf2x16(pages.data[route_rec_word + 16u]).x;
 			software = vsm_sw_raster_route(record, route_scale, bounds, max_edge, md, mip);
@@ -847,8 +865,11 @@ void main() {
 		}
 
 		if (bin == NEXTGEO_RASTER_BIN_FIXED) {
-			if (dist_demoted) {
+			if (masked_demoted) {
 				vsm_ng_sink(atomicAdd(vsm_counters.distance_fixed_clusters, 1u));
+			}
+			if (wpo_demoted) {
+				vsm_ng_sink(atomicAdd(vsm_counters.vertex_offset_distance_fixed, 1u));
 			}
 			if (software) {
 				uint s = atomicAdd(vsm_counters.sw_clusters, 1u);
@@ -1136,9 +1157,9 @@ float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, 
 		return p_max_parent_error * scale * p_view.x * p_view.w;
 	}
 	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
-	// GodotNext: nextgeo_displacement (#150). Inflate sphere radius by the instance's displacement bound.
-	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
-	float radius = (p_lod_sphere.w + disp_bound) * scale;
+	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	float radius = (p_lod_sphere.w + expand) * scale;
 	float distance = max(length(center - p_camera.xyz) - radius, p_view.z);
 	if ((p_flags & 8u) != 0u) {
 		return p_max_parent_error * scale * 0.5 * p_view.y / distance * p_view.w;
@@ -1198,9 +1219,9 @@ bool sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_bound
 		return false;
 	}
 	vec3 center = instance_point(p_record, p_bounds.xyz);
-	// GodotNext: nextgeo_displacement (#150). Inflate cluster culling sphere by the displacement bound.
-	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
-	float z_min = dot(center - cull.camera.xyz, cull.raster_forward.xyz) - (p_bounds.w + disp_bound) * p_scale;
+	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate cluster culling sphere by displacement and WPO bounds.
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	float z_min = dot(center - cull.camera.xyz, cull.raster_forward.xyz) - (p_bounds.w + expand) * p_scale;
 	if (!(z_min > cull.raster_forward.w)) {
 		return false;
 	}
@@ -1432,9 +1453,9 @@ void main() {
 								last_requested_page = missing_page;
 								float scale = record.world_aabb_min.w;
 								vec3 center = instance_point(record, own_lod.xyz);
-								// GodotNext: nextgeo_displacement (#150). Inflate sphere radius by the displacement bound.
-								float disp_bound = max(record.prev_world_aabb_max.w, 0.0);
-								float dist = max(length(center - cull.camera.xyz) - (own_lod.w + disp_bound) * scale, 0.0);
+								// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
+								float expand = max(record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(record);
+								float dist = max(length(center - cull.camera.xyz) - (own_lod.w + expand) * scale, 0.0);
 								uint req_slot = atomicAdd(page_requests.data[0], 1u);
 								if (req_slot < page_requests.data[1]) {
 									uint req_base = 4u + page_requests.data[3] + req_slot * 4u;
@@ -1476,16 +1497,33 @@ void main() {
 			uint bin = NEXTGEO_RASTER_BIN_FIXED;
 			if ((cull.cull.w & NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS) != 0u) {
 				bin = raster_bin_of(record, mesh, global_cluster);
-				// GodotNext: nextgeo_masked_two_sided (#153). Past programmable_raster_distance, pixel-programmable
-				// bins demote to the FIXED bin so distant masked clusters skip per-pixel programmable raster.
-				if (bin > NEXTGEO_RASTER_BIN_FIXED && bin < NEXTGEO_RASTER_BIN_LIMIT && record.prev_world_aabb_min.w > 0.0) {
+				// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Past
+				// programmable_raster_distance / vertex_offset_disable_distance, demote non-displaced
+				// programmable bins to FIXED once all active programmable features are disabled.
+				if (bin > NEXTGEO_RASTER_BIN_FIXED && bin < NEXTGEO_RASTER_BIN_LIMIT) {
 					uint demote_bit = bin - 1u;
-					uint demote_word = demote_bit < 32u ? cull.raster_bin_demote_mask.x : cull.raster_bin_demote_mask.y;
-					if ((demote_word & (1u << (demote_bit & 31u))) != 0u) {
-						vec3 closest = clamp(cull.camera.xyz, record.world_aabb_min.xyz, record.world_aabb_max.xyz);
-						if (length(cull.camera.xyz - closest) > record.prev_world_aabb_min.w) {
-							bin = NEXTGEO_RASTER_BIN_FIXED;
-							atomicAdd(counters.raster_distance_fixed[params.phase], 1u);
+					uint bit_mask = 1u << (demote_bit & 31u);
+					uint pix_word = demote_bit < 32u ? cull.raster_bin_demote_mask.x : cull.raster_bin_demote_mask.y;
+					uint wpo_word = demote_bit < 32u ? cull.raster_bin_demote_mask.z : cull.raster_bin_demote_mask.w;
+					bool has_pix = (pix_word & bit_mask) != 0u;
+					bool has_wpo = (wpo_word & bit_mask) != 0u;
+					if (has_pix || has_wpo) {
+						float prog_dist = record.prev_world_aabb_min.w;
+						float wpo_dist = nextgeo_record_vertex_offset_disable_distance(record);
+						if ((has_pix && prog_dist > 0.0) || (has_wpo && wpo_dist > 0.0)) {
+							vec3 closest = clamp(cull.camera.xyz, record.world_aabb_min.xyz, record.world_aabb_max.xyz);
+							float cam_dist = length(cull.camera.xyz - closest);
+							bool pix_demoted = has_pix && prog_dist > 0.0 && cam_dist > prog_dist;
+							bool wpo_demoted = has_wpo && wpo_dist > 0.0 && cam_dist > wpo_dist;
+							if ((!has_pix || pix_demoted) && (!has_wpo || wpo_demoted)) {
+								bin = NEXTGEO_RASTER_BIN_FIXED;
+								if (pix_demoted) {
+									atomicAdd(counters.raster_distance_fixed[params.phase], 1u);
+								}
+								if (wpo_demoted) {
+									atomicAdd(counters.vertex_offset_distance_fixed[params.phase], 1u);
+								}
+							}
 						}
 					}
 				}

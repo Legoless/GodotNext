@@ -179,10 +179,24 @@ layout(set = 2, binding = 2, std430) buffer restrict Vis64 {
 	uint64_t data[];
 }
 vis64;
+// GodotNext: nextgeo_vertex_offset (#164). Main-view CutCounters for vertex_offset_clamped (word 44) and #277 sink (word 45).
+layout(set = 2, binding = 3, std430) buffer restrict CutCountersBuf {
+	uint data[];
+}
+cut_counters;
 #else
 layout(set = 2, binding = 2, r64ui) uniform restrict u64image2D vis64;
+// GodotNext: nextgeo_vertex_offset (#164). Main-view CutCounters for vertex_offset_clamped (word 44) and #277 sink (word 45).
+layout(set = 2, binding = 3, std430) buffer restrict CutCountersBuf {
+	uint data[];
+}
+cut_counters;
 #endif
 #endif
+
+// GodotNext: nextgeo_vertex_offset (#164). Flags carried in bin_push.flags (bit 0 = NO_CULL).
+const uint NEXTGEO_RASTER_BIN_FLAG_VERTEX_OFFSET = 1u << 1u;
+const uint NEXTGEO_RASTER_BIN_FLAG_COUNT_CLAMPED = 1u << 2u;
 
 layout(push_constant, std430) uniform RasterBinPush {
 	uint list_base; // First entry of the phase's region in raster_bin_lists.
@@ -190,7 +204,7 @@ layout(push_constant, std430) uniform RasterBinPush {
 	uint bin;
 	uint flags;
 	ivec2 size; // The visibility buffer's size.
-	uvec2 pad;
+	uvec2 pad; // pad.x = VSM cluster_capacity (under DEPTH_ONLY), pad.y = floatBitsToUint(vertex_offset_max) (#164).
 }
 bin_push;
 
@@ -231,6 +245,8 @@ vec4 _ng_fragcoord = vec4(0.0, 0.0, 0.0, 1.0);
 vec4 _ng_fragcoord_ddx = vec4(1.0, 0.0, 0.0, 0.0);
 vec4 _ng_fragcoord_ddy = vec4(0.0, 1.0, 0.0, 0.0);
 bool _ng_front_facing = true;
+bool _ng_skip_masked_discard = false;
+bool _ng_skip_vertex_offset = false;
 uint instance_index_interp = 0u;
 
 int _ng_vertex_id = 0;
@@ -443,8 +459,51 @@ void _ng_resolve_vertex_corner(
 	mat3 modelview_normal = mat3(read_view_matrix) * model_normal_matrix;
 	vec2 read_viewport_size = scene_data.viewport_size;
 
+	vec3 _ng_vertex_before_wpo = vertex;
 	{
 #CODE : RESOLVE_VERTEX
+	}
+
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 contract N5). Skip WPO past
+	// vertex_offset_disable_distance and clamp offsets exceeding Material.vertex_offset_max.
+	if (_ng_skip_vertex_offset) {
+		vertex = _ng_vertex_before_wpo;
+	} else if ((bin_push.flags & NEXTGEO_RASTER_BIN_FLAG_VERTEX_OFFSET) != 0u) {
+		vec3 _ng_wpo_delta = vertex - _ng_vertex_before_wpo;
+#if !defined(SKIP_TRANSFORM_USED) && defined(VERTEX_WORLD_COORDS_USED)
+		float _ng_wpo_scale = max(length(model_matrix[0].xyz), max(length(model_matrix[1].xyz), length(model_matrix[2].xyz)));
+		float _ng_wpo_limit = max(uintBitsToFloat(bin_push.pad.y), 0.0) * _ng_wpo_scale;
+#else
+		float _ng_wpo_limit = max(uintBitsToFloat(bin_push.pad.y), 0.0);
+#endif
+		float _ng_wpo_tol = max(_ng_wpo_limit * 1e-5, 1e-6);
+		float _ng_wpo_thresh = _ng_wpo_limit + _ng_wpo_tol;
+		float _ng_wpo_len_sq = dot(_ng_wpo_delta, _ng_wpo_delta);
+		if (_ng_wpo_len_sq > _ng_wpo_thresh * _ng_wpo_thresh) {
+			if (_ng_wpo_limit > 0.0) {
+				vertex = _ng_vertex_before_wpo + _ng_wpo_delta * (_ng_wpo_limit * inversesqrt(_ng_wpo_len_sq));
+			} else {
+				vertex = _ng_vertex_before_wpo;
+			}
+#ifndef NEXTGEO_RASTER_HW_VERTEX
+			if ((bin_push.flags & NEXTGEO_RASTER_BIN_FLAG_COUNT_CLAMPED) != 0u
+#ifdef NEXTGEO_RASTER_HW_FRAGMENT
+					&& !gl_HelperInvocation
+#endif
+			) {
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+				// #277: every atomic return value is used.
+				if (atomicAdd(vsm_counters.data[28u], 1u) == 0xFFFFFFFFu) {
+					vsm_counters.data[21u] = 1u;
+				}
+#else
+				if (atomicAdd(cut_counters.data[44u], 1u) == 0xFFFFFFFFu) {
+					cut_counters.data[45u] = 1u;
+				}
+#endif
+			}
+#endif
+		}
 	}
 
 	vec3 normal = normal_highp;
@@ -645,6 +704,30 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 	NextGeoInstanceRecord _ng_record = nextgeo_records.data[p_entry.x];
 	instance_index_interp = p_entry.x;
 	_ng_instance_id = int(p_entry.x);
+	_ng_skip_masked_discard = false;
+	_ng_skip_vertex_offset = false;
+	{
+		float _ng_prog_dist = _ng_record.prev_world_aabb_min.w;
+		float _ng_wpo_dist = nextgeo_record_vertex_offset_disable_distance(_ng_record);
+		if (_ng_prog_dist > 0.0 || _ng_wpo_dist > 0.0) {
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+			vec3 _ng_cam_pos = scene_data_block.data.main_cam_inv_view_matrix[3].xyz;
+#else
+			vec3 _ng_cam_pos = vec3(
+					scene_data_block.data.inv_view_matrix[0].w,
+					scene_data_block.data.inv_view_matrix[1].w,
+					scene_data_block.data.inv_view_matrix[2].w);
+#endif
+			vec3 _ng_closest = clamp(_ng_cam_pos, _ng_record.world_aabb_min.xyz, _ng_record.world_aabb_max.xyz);
+			float _ng_cam_dist = length(_ng_cam_pos - _ng_closest);
+			if (_ng_prog_dist > 0.0 && _ng_cam_dist > _ng_prog_dist) {
+				_ng_skip_masked_discard = true;
+			}
+			if (_ng_wpo_dist > 0.0 && _ng_cam_dist > _ng_wpo_dist) {
+				_ng_skip_vertex_offset = true;
+			}
+		}
+	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
 
 	uint _ng_w = p_desc.x + p_v_idx * _ng_stride;
@@ -759,6 +842,30 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 	NextGeoInstanceRecord _ng_record = nextgeo_records.data[p_entry.x];
 	instance_index_interp = p_entry.x;
 	_ng_instance_id = int(p_entry.x);
+	_ng_skip_masked_discard = false;
+	_ng_skip_vertex_offset = false;
+	{
+		float _ng_prog_dist = _ng_record.prev_world_aabb_min.w;
+		float _ng_wpo_dist = nextgeo_record_vertex_offset_disable_distance(_ng_record);
+		if (_ng_prog_dist > 0.0 || _ng_wpo_dist > 0.0) {
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+			vec3 _ng_cam_pos = scene_data_block.data.main_cam_inv_view_matrix[3].xyz;
+#else
+			vec3 _ng_cam_pos = vec3(
+					scene_data_block.data.inv_view_matrix[0].w,
+					scene_data_block.data.inv_view_matrix[1].w,
+					scene_data_block.data.inv_view_matrix[2].w);
+#endif
+			vec3 _ng_closest = clamp(_ng_cam_pos, _ng_record.world_aabb_min.xyz, _ng_record.world_aabb_max.xyz);
+			float _ng_cam_dist = length(_ng_cam_pos - _ng_closest);
+			if (_ng_prog_dist > 0.0 && _ng_cam_dist > _ng_prog_dist) {
+				_ng_skip_masked_discard = true;
+			}
+			if (_ng_wpo_dist > 0.0 && _ng_cam_dist > _ng_wpo_dist) {
+				_ng_skip_vertex_offset = true;
+			}
+		}
+	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
 
 	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
@@ -1073,32 +1180,34 @@ void _ng_raster_fragment(in SceneData scene_data) {
 	float depth_offset = 0.0;
 #endif
 
-	{
+	if (!_ng_skip_masked_discard) {
+		{
 #CODE : RASTER_FRAGMENT
-	}
+		}
 
-	float alpha = alpha_highp;
+		float alpha = alpha_highp;
 
 #ifndef USE_SHADOW_TO_OPACITY
 #ifdef ALPHA_SCISSOR_USED
-	if (alpha < alpha_scissor_threshold) {
-		_ng_raster_covered = false;
-		return;
-	}
+		if (alpha < alpha_scissor_threshold) {
+			_ng_raster_covered = false;
+			return;
+		}
 #endif
 
 #ifdef ALPHA_HASH_USED
-	mat4 _ng_inv_model = inverse(read_model_matrix);
-	vec3 object_pos = (_ng_inv_model * inv_view_matrix * vec4(vertex, 1.0)).xyz;
-	mat3 _ng_view_to_object = mat3(_ng_inv_model) * mat3(inv_view_matrix);
-	vec3 _ng_object_pos_ddx = _ng_view_to_object * vertex_interp_ddx;
-	vec3 _ng_object_pos_ddy = _ng_view_to_object * vertex_interp_ddy;
-	if (alpha < compute_alpha_hash_threshold_grad(object_pos, _ng_object_pos_ddx, _ng_object_pos_ddy, alpha_hash_scale)) {
-		_ng_raster_covered = false;
-		return;
+		mat4 _ng_inv_model = inverse(read_model_matrix);
+		vec3 object_pos = (_ng_inv_model * inv_view_matrix * vec4(vertex, 1.0)).xyz;
+		mat3 _ng_view_to_object = mat3(_ng_inv_model) * mat3(inv_view_matrix);
+		vec3 _ng_object_pos_ddx = _ng_view_to_object * vertex_interp_ddx;
+		vec3 _ng_object_pos_ddy = _ng_view_to_object * vertex_interp_ddy;
+		if (alpha < compute_alpha_hash_threshold_grad(object_pos, _ng_object_pos_ddx, _ng_object_pos_ddy, alpha_hash_scale)) {
+			_ng_raster_covered = false;
+			return;
+		}
+#endif
+#endif
 	}
-#endif
-#endif
 
 #ifdef DEPTH_OFFSET_USED
 	_ng_depth_offset = (depth_offset > 0.0) ? min(depth_offset, 1e15) : 0.0;

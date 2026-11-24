@@ -3498,7 +3498,7 @@ TEST_CASE("[VSM][NextGeo] Layout, capacities, provisional settings and shared RA
 
 	CHECK_EQ(sizeof(NextGeoVSMMapMeta), size_t(16));
 	CHECK_EQ(sizeof(NextGeoVSMParams), size_t(352));
-	CHECK_EQ(sizeof(NextGeoVSMCounters), size_t(112));
+	CHECK_EQ(sizeof(NextGeoVSMCounters), size_t(128));
 	CHECK_EQ(NEXTGEO_VSM_HIZ_PAGE_SIZE, 8u);
 	CHECK_EQ(NEXTGEO_VSM_HIZ_BLOCK_SIZE, 8u);
 	CHECK(NEXTGEO_VSM_CLUSTER_CAPACITY <= (1u << 21));

@@ -1268,6 +1268,10 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_skinned_instances"] = int64_t(rt_stats.skinned_instances);
 		info["rt_skinned_refit_triangles"] = int64_t(rt_stats.skinned_refit_triangles);
 		info["rt_skinned_build_triangles"] = int64_t(rt_stats.skinned_build_triangles);
+		// GodotNext: nextgeo_vertex_offset (#164).
+		info["rt_vertex_offset_instances"] = int64_t(rt_stats.vertex_offset_instances);
+		info["rt_vertex_offset_refit_triangles"] = int64_t(rt_stats.vertex_offset_refit_triangles);
+		info["rt_vertex_offset_build_triangles"] = int64_t(rt_stats.vertex_offset_build_triangles);
 		info["rt_as_bytes"] = int64_t(rt_stats.as_bytes);
 		info["rt_tlas_fill_ms"] = rt_stats.tlas_fill_ms;
 		info["rt_scene_update_ms"] = rt_stats.scene_update_ms;

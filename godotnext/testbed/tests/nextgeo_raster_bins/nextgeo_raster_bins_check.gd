@@ -555,11 +555,10 @@ func _check_routes() -> void:
 	for phase in _phases:
 		var phase_name: String = phase["name"]
 		var routes: Dictionary = _routes.get(phase_name, {})
-		var debug_admitted := bool(phase["bins"]) and _expect_bins
 		for instance: MeshInstance3D in _programmable:
 			var got: Array = routes.get(instance.name, ["", ""])
-			# #153 admits masked surfaces by default on the Nanite tier; VertexOffset stays behind debug_programmable_raster.
-			var admitted := debug_admitted if instance.name == "VertexOffset" else _expect_bins
+			# #153 admits masked surfaces and #164 admits VertexOffset by default on the Nanite tier.
+			var admitted := _expect_bins
 			var expected_route := "virtual" if admitted else "legacy"
 			var expected_reason := "NONE"
 			if not admitted:

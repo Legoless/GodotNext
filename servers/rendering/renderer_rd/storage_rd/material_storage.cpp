@@ -2406,6 +2406,8 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 				material->data->set_render_priority(material->priority);
 				// GodotNext: nextgeo_displacement (#150).
 				material->data->set_displacement(material->displacement_magnitude, material->displacement_center);
+				// GodotNext: nextgeo_vertex_offset (#164).
+				material->data->set_vertex_offset_max(material->vertex_offset_max);
 			}
 			material->shader_type = new_type;
 		}
@@ -2706,6 +2708,8 @@ void MaterialStorage::material_set_shader(RID p_material, RID p_shader) {
 	material->data->set_render_priority(material->priority);
 	// GodotNext: nextgeo_displacement (#150).
 	material->data->set_displacement(material->displacement_magnitude, material->displacement_center);
+	// GodotNext: nextgeo_vertex_offset (#164).
+	material->data->set_vertex_offset_max(material->vertex_offset_max);
 	//updating happens later
 	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 	_material_queue_update(material, true, true);
@@ -2718,6 +2722,11 @@ MaterialStorage::ShaderData *MaterialStorage::material_get_shader_data(RID p_mat
 	}
 
 	return nullptr;
+}
+
+MaterialStorage::MaterialData *MaterialStorage::material_get_material_data(RID p_material) {
+	MaterialStorage::Material *material = get_material(p_material);
+	return material != nullptr ? material->data : nullptr;
 }
 
 void MaterialStorage::material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) {
@@ -2822,6 +2831,40 @@ float MaterialStorage::material_get_displacement_magnitude(RID p_material) const
 float MaterialStorage::material_get_displacement_center(RID p_material) const {
 	const Material *material = material_owner.get_or_null(p_material);
 	return material != nullptr ? material->displacement_center : 0.5f;
+}
+
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void MaterialStorage::material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) {
+	Material *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL(material);
+
+	const float sanitized = (Math::is_finite(p_vertex_offset_max) && p_vertex_offset_max >= 0.0f) ? p_vertex_offset_max : -1.0f;
+	if (material->vertex_offset_max == sanitized) {
+		return;
+	}
+
+	material->vertex_offset_max = sanitized;
+	material->change_serial = ++material_change_serial;
+	if (material->data) {
+		material->data->set_vertex_offset_max(sanitized);
+	}
+	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+}
+
+float MaterialStorage::material_get_vertex_offset_max(RID p_material) const {
+	const Material *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->vertex_offset_max : -1.0f;
+}
+
+float MaterialStorage::material_get_effective_vertex_offset_max(RID p_material, float p_project_default) const {
+	const Material *material = material_owner.get_or_null(p_material);
+	if (material == nullptr || material->shader == nullptr || material->shader->data == nullptr || !material->shader->data->nextgeo_writes_vertex()) {
+		return 0.0f;
+	}
+	if (material->vertex_offset_max >= 0.0f && Math::is_finite(material->vertex_offset_max)) {
+		return material->vertex_offset_max;
+	}
+	return (Math::is_finite(p_project_default) && p_project_default >= 0.0f) ? p_project_default : 0.0f;
 }
 
 bool MaterialStorage::material_is_animated(RID p_material) {

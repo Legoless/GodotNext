@@ -34,11 +34,20 @@
 #endif
 
 #ifdef MODE_VISIBILITY_RESOLVE
+// GodotNext: nextgeo_vertex_offset (#164). Flags carried in ResolvePush.flags.
+const uint NEXTGEO_RESOLVE_FLAG_VERTEX_OFFSET = 1u << 0u;
+const uint NEXTGEO_RESOLVE_FLAG_WRITE_VELOCITY = 1u << 1u;
+const uint NEXTGEO_RESOLVE_FLAG_RESET_VELOCITY = 1u << 2u;
+
 layout(push_constant, std430) uniform ResolvePush {
 	uint bucket_id;
 	uint material_feedback_index;
 	uint tile_list_base;
 	float cull_sign;
+	float vertex_offset_max;
+	uint flags;
+	uint pad0;
+	uint pad1;
 }
 resolve_push;
 #else

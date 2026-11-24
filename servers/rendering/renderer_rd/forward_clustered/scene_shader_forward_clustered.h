@@ -39,6 +39,8 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_sw.glsl.gen.h"
 // GodotNext: nextgeo_shading_bins (#158)
 #include "servers/rendering/renderer_rd/shaders/nextgeo/resolve_compute.glsl.gen.h"
+// GodotNext: nextgeo_vertex_offset (#164)
+#include "servers/rendering/renderer_rd/shaders/nextgeo/rt_vertex_offset.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -78,6 +80,9 @@ public:
 		SHADER_GROUP_VSM,
 		// GodotNext: avboit (#295). The AVBOIT pre-pass variants, off until a view draws with AVBOIT.
 		SHADER_GROUP_AVBOIT,
+		// GodotNext: nextgeo_vertex_offset (#164). Stage A motion-vector variants, off until a view has WPO buckets.
+		SHADER_GROUP_NEXTGEO_MOTION,
+		SHADER_GROUP_NEXTGEO_MEGALIGHTS_MOTION,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -141,6 +146,14 @@ public:
 		constexpr static uint16_t SHADER_VERSION_AVBOIT_OCCLUSION = SHADER_VERSION_AVBOIT_BASE + 1;
 		constexpr static uint16_t SHADER_VERSION_AVBOIT_PASS_COUNT = 2;
 		constexpr static uint16_t SHADER_VERSION_AVBOIT_COUNT = SHADER_VERSION_AVBOIT_PASS_COUNT * 2;
+		// GodotNext: nextgeo_vertex_offset (#164). Stage A guide variants with motion-vector output so
+		// VERTEX_OFFSET buckets write accurate velocity before NextGI and motion-pass upscalers.
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE = SHADER_VERSION_AVBOIT_BASE + SHADER_VERSION_AVBOIT_COUNT;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION = SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE + 0;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION = SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE + 1;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION = SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE + 2;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION = SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE + 3;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_COUNT = 4;
 		// GodotNext: megalights_inputs (#136). init() pushes these groups, default off.
 		static constexpr bool MEGALIGHTS_VARIANTS_DEFAULT_ENABLED = false;
 		static constexpr ShaderGroup megalights_variant_group(uint16_t p_relative) {
@@ -219,13 +232,19 @@ public:
 		// GodotNext: avboit (#295)
 		PIPELINE_VERSION_AVBOIT_BOUNDS,
 		PIPELINE_VERSION_AVBOIT_OCCLUSION,
+		// GodotNext: nextgeo_vertex_offset (#164)
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_MOTION,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML_MOTION,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION,
 		PIPELINE_VERSION_MAX
 	};
 
 	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The variants of the Stage A/B resolve's compute
-	// form (resolve_compute_shader), one group each: Stage A's guides (+ voxel GI, + MegaLights inputs) and
-	// Stage B's colour (+ separate specular, + motion vectors). The RR guide targets have no storage usage,
-	// so Stage B with the guides keeps the tile quads and has no compute variant.
+	// form (resolve_compute_shader), one group each: Stage A's guides (+ voxel GI, + MegaLights inputs,
+	// + motion vectors for #164 WPO) and Stage B's colour (+ separate specular, + motion vectors). The RR
+	// guide targets have no storage usage, so Stage B with the guides keeps the tile quads and has no
+	// compute variant.
 	enum ResolveComputeVariant {
 		RESOLVE_COMPUTE_GUIDES,
 		RESOLVE_COMPUTE_GUIDES_VOXEL_GI,
@@ -235,10 +254,16 @@ public:
 		RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR,
 		RESOLVE_COMPUTE_COLOR_MOTION_VECTORS,
 		RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS,
+		// GodotNext: nextgeo_vertex_offset (#164). Stage A guides with velocity output for WPO.
+		RESOLVE_COMPUTE_GUIDES_MOTION,
+		RESOLVE_COMPUTE_GUIDES_VOXEL_GI_MOTION,
+		RESOLVE_COMPUTE_GUIDES_ML_MOTION,
+		RESOLVE_COMPUTE_GUIDES_VOXEL_GI_ML_MOTION,
 		RESOLVE_COMPUTE_VARIANT_MAX
 	};
-	static constexpr ResolveComputeVariant resolve_compute_stage_a_variant(bool p_voxel_gi, bool p_megalights_inputs) {
-		return ResolveComputeVariant(RESOLVE_COMPUTE_GUIDES + (p_voxel_gi ? 1 : 0) + (p_megalights_inputs ? 2 : 0));
+	static constexpr ResolveComputeVariant resolve_compute_stage_a_variant(bool p_voxel_gi, bool p_megalights_inputs, bool p_motion_vectors = false) {
+		const int base = p_motion_vectors ? int(RESOLVE_COMPUTE_GUIDES_MOTION) : int(RESOLVE_COMPUTE_GUIDES);
+		return ResolveComputeVariant(base + (p_voxel_gi ? 1 : 0) + (p_megalights_inputs ? 2 : 0));
 	}
 	static constexpr ResolveComputeVariant resolve_compute_stage_b_variant(bool p_separate_specular, bool p_motion_vectors) {
 		return ResolveComputeVariant(RESOLVE_COMPUTE_COLOR + (p_separate_specular ? 1 : 0) + (p_motion_vectors ? 2 : 0));
@@ -399,7 +424,8 @@ public:
 		// GodotNext: rr_guides (#205). One entry per shader variant, the Stage B RR variants included.
 		// GodotNext: vsm_non_nanite (#218). Plus the VSM depth variants.
 		// GodotNext: avboit (#295). And the AVBOIT pre-pass variants.
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT + ShaderVersion::SHADER_VERSION_VSM_COUNT + ShaderVersion::SHADER_VERSION_AVBOIT_COUNT;
+		// GodotNext: nextgeo_vertex_offset (#164). And the Stage A motion variants for WPO.
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT + ShaderVersion::SHADER_VERSION_VSM_COUNT + ShaderVersion::SHADER_VERSION_AVBOIT_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -488,6 +514,8 @@ public:
 		RID raster_hw_version;
 		// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader form of the HW material raster target.
 		RID raster_hw_mesh_version;
+		// GodotNext: nextgeo_vertex_offset (#164). Lazily compiled RT proxy vertex-offset compute shader.
+		RID rt_vertex_offset_version;
 		bool nextgeo_raster_reject_logged = false;
 		// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The Stage A/B resolve's compute form: whether
 		// the material has one (a material NextGeo resolves, and whose code cannot discard or write DEPTH),
@@ -553,6 +581,9 @@ public:
 		virtual uint32_t get_raster_features() const override { return raster_features; }
 		// GodotNext: nextgeo_rt_native (#156)
 		virtual bool nextgeo_moves_vertices() const override { return uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform; }
+		// GodotNext: nextgeo_vertex_offset (#164)
+		virtual bool nextgeo_writes_vertex() const override { return uses_vertex; }
+		virtual RID get_rt_vertex_offset_shader() override;
 		// GodotNext: path_tracer (#167).
 		virtual RSE::CullMode get_cull_mode() const override { return cull_mode; }
 		// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
@@ -619,9 +650,14 @@ public:
 		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 		float displacement_magnitude = 0.0f;
 		float displacement_center = 0.5f;
+		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). -1.0 inherits project default.
+		float vertex_offset_max = -1.0f;
 		virtual void set_render_priority(int p_priority);
 		virtual void set_next_pass(RID p_pass);
 		virtual void set_displacement(float p_magnitude, float p_center) override;
+		virtual void set_vertex_offset_max(float p_vertex_offset_max) override;
+		float get_effective_vertex_offset_max(float p_project_default) const;
+		virtual bool get_rt_vertex_offset_uniforms(Vector<RD::Uniform> &r_uniforms) const override;
 		uint32_t get_raster_features() const;
 		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty);
 		virtual ~MaterialData();
@@ -644,6 +680,8 @@ public:
 	// GodotNext: nextgeo_shading_bins (#158). The Stage A/B resolve's compute form, one group per
 	// ResolveComputeVariant; groups enable when a shading bin first uses them.
 	ResolveComputeShaderRD resolve_compute_shader;
+	// GodotNext: nextgeo_vertex_offset (#164). Opt-in RT proxy vertex-offset compute shader.
+	RtVertexOffsetShaderRD rt_vertex_offset_shader;
 	bool raster_target_ready = false;
 	bool raster_image_int64_supported = false;
 	bool raster_buffer_int64_supported = false;
@@ -703,6 +741,8 @@ public:
 	bool is_vsm_shader_group_enabled() const;
 	// GodotNext: avboit (#295)
 	void enable_avboit_shader_group();
+	// GodotNext: nextgeo_vertex_offset (#164)
+	void enable_nextgeo_motion_shader_group(bool p_megalights_inputs = false);
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	bool is_nextgeo_shader_group_enabled() const;

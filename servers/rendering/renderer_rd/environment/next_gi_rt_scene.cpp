@@ -56,6 +56,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
@@ -959,6 +960,48 @@ bool NextGIRTScene::_skinned_part_blas_alive(const SkinnedPart &p_part) const {
 	return mesh_storage != nullptr && p_part.chunk < mesh_storage->mesh_nextgi_rt_get_chunk_count() && mesh_storage->mesh_nextgi_rt_get_chunk_buffer(p_part.chunk) == p_part.chunk_buffer;
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 contract N5, GN-12).
+bool NextGIRTScene::_vertex_offset_part_blas_alive(const VertexOffsetPart &p_part) const {
+	if (!p_part.blas.is_valid() || !p_part.chunk_buffer.is_valid() || !p_part.allocation.is_valid()) {
+		return false;
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	return mesh_storage != nullptr && p_part.allocation.chunk < mesh_storage->mesh_nextgi_rt_get_chunk_count() && mesh_storage->mesh_nextgi_rt_get_chunk_buffer(p_part.allocation.chunk) == p_part.chunk_buffer;
+}
+
+void NextGIRTScene::_free_vertex_offset_part(VertexOffsetPart &p_part) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		if (_vertex_offset_part_blas_alive(p_part)) {
+			rd->free_rid(p_part.blas);
+		}
+		if (p_part.bind_pose_buffer.is_valid()) {
+			rd->free_rid(p_part.bind_pose_buffer);
+		}
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage != nullptr && p_part.allocation.is_valid()) {
+		mesh_storage->mesh_nextgi_rt_arena_free(p_part.allocation);
+	}
+	p_part = VertexOffsetPart();
+}
+
+RID NextGIRTScene::_get_vertex_offset_pipeline(RID p_shader) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || !p_shader.is_valid()) {
+		return RID();
+	}
+	RID *existing = vertex_offset_pipelines.getptr(p_shader);
+	if (existing != nullptr && rd->compute_pipeline_is_valid(*existing)) {
+		return *existing;
+	}
+	const RID pipeline = rd->compute_pipeline_create(p_shader);
+	if (pipeline.is_valid()) {
+		vertex_offset_pipelines[p_shader] = pipeline;
+	}
+	return pipeline;
+}
+
 void NextGIRTScene::free_far_field() {
 	if (far_field != nullptr) {
 		far_field->free();
@@ -1007,6 +1050,21 @@ void NextGIRTScene::free() {
 		}
 	}
 	skinned_parts.clear();
+	// GodotNext: nextgeo_vertex_offset (#164).
+	for (KeyValue<uint64_t, VertexOffsetPart> &entry : vertex_offset_parts) {
+		_free_vertex_offset_part(entry.value);
+	}
+	vertex_offset_parts.clear();
+	for (const KeyValue<RID, RID> &entry : vertex_offset_pipelines) {
+		if (entry.value.is_valid() && RD::get_singleton()->compute_pipeline_is_valid(entry.value)) {
+			RD::get_singleton()->free_rid(entry.value);
+		}
+	}
+	vertex_offset_pipelines.clear();
+	if (vertex_offset_dummy_instance_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(vertex_offset_dummy_instance_buffer);
+		vertex_offset_dummy_instance_buffer = RID();
+	}
 	if (sdf_stream != nullptr) {
 		sdf_stream->free_resources();
 		memdelete(sdf_stream);
@@ -1921,6 +1979,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	stats.skinned_instances = 0;
 	stats.skinned_refit_triangles = 0;
 	stats.skinned_build_triangles = 0;
+	// GodotNext: nextgeo_vertex_offset (#164). Per-frame opt-in RT proxy WPO counters.
+	stats.vertex_offset_instances = 0;
+	stats.vertex_offset_refit_triangles = 0;
+	stats.vertex_offset_build_triangles = 0;
 	// GodotNext: nextgi_shadow_policy (#145)
 	stats.shadow_only_instances = 0;
 	stats.shadow_alpha_instances = 0;
@@ -2354,12 +2416,357 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		}
 
 		const Transform3D transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 contract N5, GN-12). Opt-in RT proxy
+		// vertex() compute evaluation and BLAS UPDATE-refit within budget.
+		LocalVector<MeshStorage::NextGIRTPart> wpo_tlas_parts;
+		bool using_wpo_parts = false;
+		if (geometry_instance->data != nullptr && geometry_instance->data->rt_evaluate_vertex_offset &&
+				!parts->is_empty() && (*parts)[0].is_proxy &&
+				p_render_data->scene_data != nullptr && p_render_data->scene_data->get_uniform_buffer().is_valid() &&
+				p_render_data->render_buffers.is_valid() && _nextgeo_rt_native_vertex_offset(geometry_instance, mesh)) {
+			bool wpo_within_distance = true;
+			const float disable_dist = geometry_instance->data->vertex_offset_disable_distance;
+			if (disable_dist > 0.0f) {
+				const AABB base_world_aabb = transform.xform(mesh_storage->mesh_get_aabb(mesh));
+				const Vector3 closest = camera_origin.clamp(base_world_aabb.position, base_world_aabb.position + base_world_aabb.size);
+				if (float(camera_origin.distance_to(closest)) > disable_dist) {
+					wpo_within_distance = false;
+				}
+			}
+			const RenderingServerTypes::VirtualGeometryDesc *vgd = RSG::virtual_mesh_storage != nullptr ? RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh) : nullptr;
+			MaterialStorage *mat_storage = MaterialStorage::get_singleton();
+			RenderingDevice *rd = RD::get_singleton();
+			UniformSetCacheRD *usc = UniformSetCacheRD::get_singleton();
+			if (wpo_within_distance && vgd != nullptr && mat_storage != nullptr && rd != nullptr && usc != nullptr) {
+				if (vertex_offset_dummy_instance_buffer.is_null()) {
+					Vector<uint8_t> zeros;
+					zeros.resize_initialized(256);
+					vertex_offset_dummy_instance_buffer = rd->storage_buffer_create(256, zeros);
+				}
+				const float wpo_default = float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default"));
+				const Vector3 s_abs = transform.basis.get_scale_abs();
+				const float inst_max_scale = MAX(float(s_abs.x), MAX(float(s_abs.y), float(s_abs.z)));
+				const bool non_uniform_scale = Math::abs(float(s_abs.x) - float(s_abs.y)) > 1e-4f || Math::abs(float(s_abs.y) - float(s_abs.z)) > 1e-4f;
+				const uint32_t vgd_part_count = uint32_t(vgd->rt_proxy_parts.size() / 4);
+				const uint32_t total_proxy_verts = uint32_t(vgd->rt_proxy_positions.size() / 3);
+				const uint32_t total_proxy_indices = uint32_t(vgd->rt_proxy_indices.size() / 4);
+
+				struct RTVertexOffsetPush {
+					float model_matrix[16];
+					uint32_t bind_pose_base_vertex;
+					uint32_t out_float_offset;
+					uint32_t vertex_count;
+					uint32_t instance_flags;
+					float vertex_offset_max;
+					float max_scale;
+					uint32_t instance_id;
+					uint32_t pad0;
+				};
+				static_assert(sizeof(RTVertexOffsetPush) == 96, "RTVertexOffsetPush must match rt_vertex_offset.glsl.");
+
+				// Pick the effective WPO material for a surface.
+				auto resolve_surface_material = [&](uint32_t p_surface) -> RID {
+					if (geometry_instance->data->material_override.is_valid()) {
+						return geometry_instance->data->material_override;
+					}
+					if (p_surface < geometry_instance->data->surface_materials.size() && geometry_instance->data->surface_materials[p_surface].is_valid()) {
+						return geometry_instance->data->surface_materials[p_surface];
+					}
+					return mesh_storage->mesh_surface_get_material(mesh, p_surface);
+				};
+
+				bool all_parts_ready = true;
+				for (uint32_t part_idx = 0; part_idx < parts->size(); part_idx++) {
+					const MeshStorage::NextGIRTPart &src_part = (*parts)[part_idx];
+					if (src_part.geometries.is_empty() || src_part.chunk == UINT32_MAX || src_part.allocation_size == 0u || part_idx >= vgd_part_count) {
+						all_parts_ready = false;
+						break;
+					}
+					const uint32_t p_v_off = uint32_t(MAX(vgd->rt_proxy_parts[part_idx * 4 + 0], 0));
+					const uint32_t p_v_cnt = uint32_t(MAX(vgd->rt_proxy_parts[part_idx * 4 + 1], 0));
+					const uint32_t p_i_off = uint32_t(MAX(vgd->rt_proxy_parts[part_idx * 4 + 2], 0));
+					const uint32_t p_i_cnt = uint32_t(MAX(vgd->rt_proxy_parts[part_idx * 4 + 3], 0));
+					if (p_v_cnt == 0u || p_v_off + p_v_cnt > total_proxy_verts || p_i_off + p_i_cnt > total_proxy_indices) {
+						all_parts_ready = false;
+						break;
+					}
+					// Find a WPO shader/material among this part's geometries.
+					RID wpo_material;
+					MaterialStorage::ShaderData *wpo_sd = nullptr;
+					MaterialStorage::MaterialData *wpo_md = nullptr;
+					for (const NextGIRTPartGeometry &g : src_part.geometries) {
+						const RID m = resolve_surface_material(g.surface);
+						MaterialStorage::ShaderData *sd = m.is_valid() ? mat_storage->material_get_shader_data(m) : nullptr;
+						if (sd != nullptr && sd->nextgeo_writes_vertex()) {
+							wpo_material = m;
+							wpo_sd = sd;
+							wpo_md = mat_storage->material_get_material_data(m);
+							break;
+						}
+					}
+					if (wpo_sd == nullptr || wpo_md == nullptr) {
+						wpo_tlas_parts.push_back(src_part);
+						continue;
+					}
+					const RID rt_shader = wpo_sd->get_rt_vertex_offset_shader();
+					const RID rt_pipeline = _get_vertex_offset_pipeline(rt_shader);
+					if (rt_shader.is_null() || rt_pipeline.is_null()) {
+						all_parts_ready = false;
+						break;
+					}
+
+					const uint64_t wpo_key = (uint64_t(uintptr_t(geometry_instance)) << 16u) ^ (uint64_t(fed.element_index & 0xFFu) << 8u) ^ uint64_t(part_idx);
+					VertexOffsetPart *wpart = vertex_offset_parts.getptr(wpo_key);
+					const bool needs_create = wpart == nullptr || !_vertex_offset_part_blas_alive(*wpart) ||
+							wpart->mesh != mesh || wpart->src_chunk != src_part.chunk ||
+							wpart->src_allocation_offset != src_part.allocation_offset || wpart->src_allocation_size != src_part.allocation_size ||
+							wpart->bind_pose_vertex_count != p_v_cnt;
+					const uint32_t budget_used = stats.refit_triangles + stats.vertex_offset_refit_triangles + stats.vertex_offset_build_triangles;
+					const bool within_budget = (budget_used + src_part.triangle_count <= NEXTGI_RT_REFIT_TRIANGLE_CAP) || (budget_used == 0u);
+					if (needs_create) {
+						if (!within_budget) {
+							all_parts_ready = false;
+							break;
+						}
+						if (wpart != nullptr) {
+							_free_vertex_offset_part(*wpart);
+							vertex_offset_parts.erase(wpo_key);
+							wpart = nullptr;
+						}
+						const RID src_chunk_buf = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(src_part.chunk);
+						if (src_chunk_buf.is_null()) {
+							all_parts_ready = false;
+							break;
+						}
+						NextGIArenaAllocator::Allocation alloc = mesh_storage->mesh_nextgi_rt_arena_allocate(src_part.allocation_size);
+						if (!alloc.is_valid()) {
+							all_parts_ready = false;
+							break;
+						}
+						const RID dst_chunk_buf = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(alloc.chunk);
+						if (dst_chunk_buf.is_null()) {
+							mesh_storage->mesh_nextgi_rt_arena_free(alloc);
+							all_parts_ready = false;
+							break;
+						}
+						// Copy indices, card groups, and initial positions into the per-instance RT arena slice.
+						// Avoid rd->buffer_copy when src and dst share the same RT arena chunk buffer (RDG forbids
+						// buffer self-copy); upload the static proxy payload directly from vgd instead.
+						if (src_chunk_buf != dst_chunk_buf) {
+							rd->buffer_copy(src_chunk_buf, dst_chunk_buf, src_part.allocation_offset, alloc.offset, src_part.allocation_size);
+						} else {
+							Vector<uint8_t> init_payload;
+							init_payload.resize_initialized(int64_t(src_part.allocation_size));
+							uint8_t *dst_ptr = init_payload.ptrw();
+							const uint32_t proxy_pos_rel_init = src_part.geometries[0].vertex_offset - src_part.allocation_offset;
+							const uint32_t pos_bytes = p_v_cnt * uint32_t(sizeof(float)) * 3u;
+							const uint32_t proxy_idx_rel_init = _nextgi_align16(proxy_pos_rel_init + pos_bytes);
+							const uint32_t idx_bytes = p_i_cnt * uint32_t(sizeof(uint32_t));
+							if (uint64_t(proxy_pos_rel_init) + pos_bytes <= src_part.allocation_size) {
+								memcpy(dst_ptr + proxy_pos_rel_init, vgd->rt_proxy_positions.ptr() + uint64_t(p_v_off) * 3u, pos_bytes);
+							}
+							if (uint64_t(proxy_idx_rel_init) + idx_bytes <= src_part.allocation_size) {
+								memcpy(dst_ptr + proxy_idx_rel_init, vgd->rt_proxy_indices.ptr() + uint64_t(p_i_off) * 4u, idx_bytes);
+							}
+							const uint32_t part_first_tri_global = p_i_off / 3u;
+							const uint32_t total_group_bytes = uint32_t(vgd->rt_proxy_triangle_groups.size());
+							for (const NextGIRTPartGeometry &g : src_part.geometries) {
+								if (!g.has_stage2_cards || g.group_offset < src_part.allocation_offset || g.index_offset < src_part.allocation_offset + proxy_idx_rel_init) {
+									continue;
+								}
+								const uint32_t group_rel = g.group_offset - src_part.allocation_offset;
+								const uint32_t first_tri_in_part = (g.index_offset - (src_part.allocation_offset + proxy_idx_rel_init)) / (3u * uint32_t(sizeof(uint32_t)));
+								const uint64_t src_group_byte = uint64_t(part_first_tri_global + first_tri_in_part) * sizeof(uint16_t);
+								const uint32_t group_bytes = g.triangle_count * uint32_t(sizeof(uint16_t));
+								if (src_group_byte + group_bytes <= total_group_bytes && uint64_t(group_rel) + group_bytes <= src_part.allocation_size) {
+									memcpy(dst_ptr + group_rel, vgd->rt_proxy_triangle_groups.ptr() + src_group_byte, group_bytes);
+								}
+							}
+							rd->buffer_update(dst_chunk_buf, alloc.offset, uint32_t(init_payload.size()), init_payload.ptr());
+						}
+
+						// Compute area-weighted smooth normals once on CPU for bind-pose buffer (pos.xyz, 0, nrm.xyz, 0).
+						const float *pos_ptr = vgd->rt_proxy_positions.ptr() + uint64_t(p_v_off) * 3u;
+						const uint32_t *idx_ptr = reinterpret_cast<const uint32_t *>(vgd->rt_proxy_indices.ptr()) + p_i_off;
+						LocalVector<Vector3> smooth_nrm;
+						smooth_nrm.resize_initialized(p_v_cnt);
+						const uint32_t tri_cnt = p_i_cnt / 3u;
+						for (uint32_t t = 0; t < tri_cnt; t++) {
+							const uint32_t i0 = idx_ptr[t * 3u + 0u];
+							const uint32_t i1 = idx_ptr[t * 3u + 1u];
+							const uint32_t i2 = idx_ptr[t * 3u + 2u];
+							if (i0 < p_v_cnt && i1 < p_v_cnt && i2 < p_v_cnt) {
+								const Vector3 p0(pos_ptr[i0 * 3u + 0u], pos_ptr[i0 * 3u + 1u], pos_ptr[i0 * 3u + 2u]);
+								const Vector3 p1(pos_ptr[i1 * 3u + 0u], pos_ptr[i1 * 3u + 1u], pos_ptr[i1 * 3u + 2u]);
+								const Vector3 p2(pos_ptr[i2 * 3u + 0u], pos_ptr[i2 * 3u + 1u], pos_ptr[i2 * 3u + 2u]);
+								const Vector3 fn = (p1 - p0).cross(p2 - p0);
+								smooth_nrm[i0] += fn;
+								smooth_nrm[i1] += fn;
+								smooth_nrm[i2] += fn;
+							}
+						}
+						Vector<uint8_t> bind_bytes;
+						bind_bytes.resize(int64_t(p_v_cnt) * 8 * int64_t(sizeof(float)));
+						float *bind_f = reinterpret_cast<float *>(bind_bytes.ptrw());
+						for (uint32_t v = 0; v < p_v_cnt; v++) {
+							Vector3 n = smooth_nrm[v];
+							const real_t l = n.length();
+							n = l > 1e-8 ? (n / l) : Vector3(0.0, 1.0, 0.0);
+							bind_f[v * 8u + 0u] = pos_ptr[v * 3u + 0u];
+							bind_f[v * 8u + 1u] = pos_ptr[v * 3u + 1u];
+							bind_f[v * 8u + 2u] = pos_ptr[v * 3u + 2u];
+							bind_f[v * 8u + 3u] = 0.0f;
+							bind_f[v * 8u + 4u] = float(n.x);
+							bind_f[v * 8u + 5u] = float(n.y);
+							bind_f[v * 8u + 6u] = float(n.z);
+							bind_f[v * 8u + 7u] = 0.0f;
+						}
+						const RID bind_buf = rd->storage_buffer_create(uint32_t(bind_bytes.size()), bind_bytes);
+						if (bind_buf.is_null()) {
+							mesh_storage->mesh_nextgi_rt_arena_free(alloc);
+							all_parts_ready = false;
+							break;
+						}
+
+						VertexOffsetPart created;
+						created.mesh = mesh;
+						created.chunk_buffer = dst_chunk_buf;
+						created.bind_pose_buffer = bind_buf;
+						created.allocation = alloc;
+						created.src_chunk = src_part.chunk;
+						created.src_allocation_offset = src_part.allocation_offset;
+						created.src_allocation_size = src_part.allocation_size;
+						created.bind_pose_vertex_count = p_v_cnt;
+						created.proxy_pos_rel = src_part.geometries[0].vertex_offset - src_part.allocation_offset;
+						created.triangles = src_part.triangle_count;
+						created.last_frame = frame;
+						LocalVector<RD::AccelerationStructureGeometry> as_geoms;
+						for (const NextGIRTPartGeometry &g : src_part.geometries) {
+							NextGIRTPartGeometry rg = g;
+							rg.vertex_offset = alloc.offset + (g.vertex_offset - src_part.allocation_offset);
+							rg.index_offset = alloc.offset + (g.index_offset - src_part.allocation_offset);
+							if (rg.has_stage2_cards) {
+								rg.group_offset = alloc.offset + (g.group_offset - src_part.allocation_offset);
+							}
+							created.geometries.push_back(rg);
+							RD::AccelerationStructureGeometry asg;
+							asg.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
+							asg.vertex_buffer = dst_chunk_buf;
+							asg.vertex_offset = rg.vertex_offset;
+							asg.vertex_stride = sizeof(float) * 3;
+							asg.vertex_count = rg.vertex_count;
+							asg.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+							asg.index_buffer = dst_chunk_buf;
+							asg.index_offset = rg.index_offset;
+							asg.index_count = rg.triangle_count * 3u;
+							asg.index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+							as_geoms.push_back(asg);
+						}
+						const BitField<RD::AccelerationStructureFlagBits> blas_flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT | RD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT;
+						created.blas = rd->blas_create(Span<RD::AccelerationStructureGeometry>(as_geoms.ptr(), as_geoms.size()), blas_flags);
+						if (!created.blas.is_valid()) {
+							rd->free_rid(bind_buf);
+							mesh_storage->mesh_nextgi_rt_arena_free(alloc);
+							all_parts_ready = false;
+							break;
+						}
+						vertex_offset_parts.insert(wpo_key, created);
+						wpart = vertex_offset_parts.getptr(wpo_key);
+					}
+
+					// Dispatch vertex() compute pass + BLAS build/refit within budget.
+					if (within_budget && wpart != nullptr && wpart->blas.is_valid()) {
+						LocalVector<RD::Uniform> set0;
+						set0.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, wpart->bind_pose_buffer));
+						set0.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, wpart->chunk_buffer));
+						LocalVector<RD::Uniform> set1;
+						set1.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_render_data->scene_data->get_uniform_buffer()));
+						set1.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, vertex_offset_dummy_instance_buffer));
+						set1.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, mat_storage->global_shader_uniforms_get_storage_buffer()));
+						LocalVector<RD::Uniform> set2;
+						p_render_data->render_buffers->get_samplers().append_uniforms(set2, 0);
+						Vector<RD::Uniform> mat_uniforms;
+						bool mat_valid = wpo_md->get_rt_vertex_offset_uniforms(mat_uniforms);
+						for (const RD::Uniform &u : mat_uniforms) {
+							if (u.uniform_type == RD::UNIFORM_TYPE_TEXTURE) {
+								mat_valid = mat_valid && u.get_id_count() > 0;
+								for (uint32_t j = 0; j < u.get_id_count(); j++) {
+									mat_valid = mat_valid && rd->texture_is_valid(u.get_id(j));
+								}
+							}
+						}
+						if (mat_valid) {
+							const RID u_set0 = usc->get_cache_vec(rt_shader, 0, set0);
+							const RID u_set1 = usc->get_cache_vec(rt_shader, 1, set1);
+							const RID u_set2 = usc->get_cache_vec(rt_shader, 2, set2);
+							RID u_set3;
+							if (!mat_uniforms.is_empty()) {
+								LocalVector<RD::Uniform> set3;
+								for (const RD::Uniform &u : mat_uniforms) {
+									set3.push_back(u);
+								}
+								u_set3 = usc->get_cache_vec(rt_shader, 3, set3);
+							}
+							if (u_set0.is_valid() && u_set1.is_valid() && u_set2.is_valid() && (mat_uniforms.is_empty() || u_set3.is_valid())) {
+								RTVertexOffsetPush push = {};
+								MaterialStorage::store_transform(transform, push.model_matrix);
+								push.bind_pose_base_vertex = 0u;
+								push.out_float_offset = (wpart->allocation.offset + wpart->proxy_pos_rel) / uint32_t(sizeof(float));
+								push.vertex_count = wpart->bind_pose_vertex_count;
+								push.instance_flags = non_uniform_scale ? (1u << 4u) : 0u;
+								push.vertex_offset_max = mat_storage->material_get_effective_vertex_offset_max(wpo_material, wpo_default);
+								push.max_scale = inst_max_scale;
+								push.instance_id = geometry_instance->nextgeo_record_index != UINT32_MAX ? geometry_instance->nextgeo_record_index : 0u;
+
+								RD::ComputeListID cl = rd->compute_list_begin();
+								rd->compute_list_bind_compute_pipeline(cl, rt_pipeline);
+								rd->compute_list_bind_uniform_set(cl, u_set0, 0);
+								rd->compute_list_bind_uniform_set(cl, u_set1, 1);
+								rd->compute_list_bind_uniform_set(cl, u_set2, 2);
+								if (u_set3.is_valid()) {
+									rd->compute_list_bind_uniform_set(cl, u_set3, 3);
+								}
+								rd->compute_list_set_push_constant(cl, &push, sizeof(push));
+								rd->compute_list_dispatch(cl, (wpart->bind_pose_vertex_count + 63u) / 64u, 1u, 1u);
+								rd->compute_list_end();
+
+								if (needs_create) {
+									rd->blas_build(wpart->blas);
+									stats.vertex_offset_build_triangles += wpart->triangles;
+								} else {
+									rd->blas_build(wpart->blas, RD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
+									stats.vertex_offset_refit_triangles += wpart->triangles;
+								}
+							}
+						}
+					}
+
+					if (wpart == nullptr || !wpart->blas.is_valid()) {
+						all_parts_ready = false;
+						break;
+					}
+					wpart->last_frame = frame;
+					MeshStorage::NextGIRTPart out_part = src_part;
+					out_part.blas = wpart->blas;
+					out_part.chunk = wpart->allocation.chunk;
+					out_part.allocation_offset = wpart->allocation.offset;
+					out_part.allocation_size = wpart->allocation.size;
+					out_part.geometries = wpart->geometries;
+					wpo_tlas_parts.push_back(out_part);
+				}
+				if (all_parts_ready && !wpo_tlas_parts.is_empty()) {
+					using_wpo_parts = true;
+					stats.vertex_offset_instances++;
+				}
+			}
+		}
+
 		// GodotNext: nextgeo_rt_native (#156). In native mode a NextGeo instance traces the BLAS of
 		// its (mesh, distance band) bucket, its previous native BLAS, or else its proxy parts.
-		const LocalVector<MeshStorage::NextGIRTPart> *tlas_parts = parts;
-		bool native_parts = false;
+		const LocalVector<MeshStorage::NextGIRTPart> *tlas_parts = using_wpo_parts ? &wpo_tlas_parts : parts;
+		bool native_parts = using_wpo_parts;
 		float native_eps = 0.0f;
-		if (native != nullptr && !parts->is_empty() && (*parts)[0].is_proxy) {
+		if (!using_wpo_parts && native != nullptr && !parts->is_empty() && (*parts)[0].is_proxy) {
 			const NextGeoRTNativeExclusion exclusion = nextgeo_rt_native_exclusion(geometry_instance->mesh_instance.is_valid(), _nextgeo_rt_native_vertex_offset(geometry_instance, mesh), _nextgeo_rt_native_legacy_surfaces(mesh, *parts));
 			const uint64_t instance_key = (uint64_t(uintptr_t(geometry_instance)) << 8u) ^ uint64_t(fed.element_index);
 			const LocalVector<MeshStorage::NextGIRTPart> *selected = native->select(mesh, instance_key, transform.xform(mesh_storage->mesh_get_aabb(mesh)), transform, camera_origin, exclusion, native_eps);
@@ -2509,7 +2916,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				translucent_instance_count++;
 			}
 			// GodotNext: nextgeo_rt_native (#156). A native set's eps is its bucket's (select()).
-			record.origin_offset = nextgi_rt_origin_offset(native_parts ? native_eps : eps_rt, max_scale);
+			record.origin_offset = nextgi_rt_origin_offset((native_parts && !using_wpo_parts) ? native_eps : eps_rt, max_scale);
 			_queue_pages(geometry_instance, record, fed.element_index); // GodotNext: nextgi_src_page_levels (#247)
 			instance_records.push_back(record);
 			if (RSG::rasterizer != nullptr) {
@@ -2961,6 +3368,22 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				RD::get_singleton()->free_rid(part->blas);
 			}
 			skinned_parts.erase(key);
+		}
+	}
+	// GodotNext: nextgeo_vertex_offset (#164). Evict absent opt-in RT proxy WPO parts after the drop-out window.
+	{
+		LocalVector<uint64_t> stale_wpo;
+		for (const KeyValue<uint64_t, VertexOffsetPart> &entry : vertex_offset_parts) {
+			if (entry.value.last_frame + NEXTGI_RT_ABSENT_FRAMES < frame) {
+				stale_wpo.push_back(entry.key);
+			}
+		}
+		for (uint64_t key : stale_wpo) {
+			VertexOffsetPart *wpart = vertex_offset_parts.getptr(key);
+			if (wpart != nullptr) {
+				_free_vertex_offset_part(*wpart);
+			}
+			vertex_offset_parts.erase(key);
 		}
 	}
 

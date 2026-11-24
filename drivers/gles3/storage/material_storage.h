@@ -129,6 +129,8 @@ struct Material {
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 	float displacement_magnitude = 0.0f;
 	float displacement_center = 0.5f;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). -1.0 = inherit project default.
+	float vertex_offset_max = -1.0f;
 	SelfList<Material> update_element;
 
 	Dependency dependency;
@@ -697,6 +699,9 @@ public:
 	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) override;
 	virtual float material_get_displacement_magnitude(RID p_material) const override;
 	virtual float material_get_displacement_center(RID p_material) const override;
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	virtual void material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) override;
+	virtual float material_get_vertex_offset_max(RID p_material) const override;
 
 	virtual bool material_is_animated(RID p_material) override;
 	virtual bool material_casts_shadows(RID p_material) override;

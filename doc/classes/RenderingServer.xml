@@ -2052,6 +2052,14 @@
 				Sets the distance from the camera in meters past which NextGeo pixel-programmable raster bins (such as masked materials without vertex offset or displacement) switch to the fixed-function raster bin for the given geometry instance. A value of [code]0.0[/code] keeps programmable rasterization enabled at all distances. Equivalent to [member GeometryInstance3D.programmable_raster_distance].
 			</description>
 		</method>
+		<method name="instance_geometry_set_rt_evaluate_vertex_offset">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<description>
+				Enables or disables per-frame GPU compute evaluation of spatial shader [code]vertex()[/code] offsets and bottom-level acceleration structure (BLAS) refit on the specified geometry instance's NextGeo ray tracing proxy. Equivalent to [member GeometryInstance3D.rt_evaluate_vertex_offset].
+			</description>
+		</method>
 		<method name="instance_geometry_set_shader_parameter">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
@@ -2078,6 +2086,14 @@
 				A transparency of [code]0.0[/code] is fully opaque, while [code]1.0[/code] is fully transparent. Values greater than [code]0.0[/code] (exclusive) will force the geometry's materials to go through the transparent pipeline, which is slower to render and can exhibit rendering issues due to incorrect transparency sorting. However, unlike using a transparent material, setting [param transparency] to a value greater than [code]0.0[/code] (exclusive) will [i]not[/i] disable shadow rendering.
 				In spatial shaders, [code]1.0 - transparency[/code] is set as the default value of the [code]ALPHA[/code] built-in.
 				[b]Note:[/b] [param transparency] is clamped between [code]0.0[/code] and [code]1.0[/code], so this property cannot be used to make transparent materials more opaque than they originally are.
+			</description>
+		</method>
+		<method name="instance_geometry_set_vertex_offset_disable_distance">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="distance" type="float" />
+			<description>
+				Sets the distance from the camera in meters past which NextGeo disables spatial shader [code]vertex()[/code] offset evaluation for the given geometry instance in the main view, virtual shadow maps, visibility resolve, and opt-in ray tracing proxy evaluation. A value of [code]0.0[/code] keeps vertex offset evaluation enabled at all distances. Equivalent to [member GeometryInstance3D.vertex_offset_disable_distance].
 			</description>
 		</method>
 		<method name="instance_geometry_set_visibility_range">
@@ -2629,6 +2645,14 @@
 				When using the Mobile renderer, [method material_set_use_debanding] can be used to enable or disable the debanding feature of 3D materials ([BaseMaterial3D] and [ShaderMaterial]).
 				[method material_set_use_debanding] has no effect when using the Compatibility or Forward+ renderer. In Forward+, [Viewport] debanding can be used instead.
 				See also [member ProjectSettings.rendering/anti_aliasing/quality/use_debanding] and [method RenderingServer.viewport_set_use_debanding].
+			</description>
+		</method>
+		<method name="material_set_vertex_offset_max">
+			<return type="void" />
+			<param index="0" name="material" type="RID" />
+			<param index="1" name="vertex_offset_max" type="float" />
+			<description>
+				Sets the maximum vertex offset bound in meters for the given spatial material on NextGeo virtualized meshes. A negative value inherits [member ProjectSettings.rendering/nextgeo/vertex_offset_max_default]. Equivalent to [member Material.vertex_offset_max].
 			</description>
 		</method>
 		<method name="mesh_add_surface">

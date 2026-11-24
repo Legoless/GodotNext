@@ -601,13 +601,14 @@ TEST_CASE("[NextGeo][ShadingBins] The GLSL copies of the layouts match nextgeo_s
 	CHECK(compute.contains(vformat("set = 2, binding = %d, std430) restrict readonly buffer NextGeoShadingBins", Resolve::COMPUTE_SHADING_BIN_STATE_BINDING)));
 	CHECK(compute.contains(vformat("set = 2, binding = %d) uniform restrict writeonly image2D nextgeo_out_normal_roughness", Resolve::COMPUTE_IMAGE_BINDING_BASE)));
 	CHECK(compute.contains(vformat("set = 2, binding = %d) uniform restrict writeonly image2D nextgeo_out_color", Resolve::COMPUTE_IMAGE_BINDING_BASE)));
-	CHECK(compute.contains(vformat("set = 2, binding = %d) uniform restrict writeonly uimage2D nextgeo_out_instance_id", Resolve::COMPUTE_IMAGE_BINDING_BASE + Resolve::COMPUTE_IMAGE_COUNT - 1u)));
+	CHECK(compute.contains(vformat("set = 2, binding = %d) uniform restrict writeonly uimage2D nextgeo_out_instance_id", Resolve::COMPUTE_IMAGE_BINDING_BASE + 4u)));
+	CHECK(compute.contains(vformat("set = 2, binding = %d) uniform restrict writeonly image2D nextgeo_out_velocity", Resolve::COMPUTE_IMAGE_BINDING_BASE + Resolve::COMPUTE_IMAGE_COUNT - 1u)));
 	CHECK_EQ(glsl_integer(glsl_constant(resolve_compute_inc_shader_glsl, "NEXTGEO_RESOLVE_COMPUTE_SKIP_VELOCITY").get_slicec('<', 0).strip_edges()), 1);
 	CHECK_EQ(Resolve::COMPUTE_FLAG_SKIP_VELOCITY, 1u);
 
 	// The image formats it declares, binding by binding, are the ones the targets are checked against.
-	const char *stage_a_images[Resolve::COMPUTE_IMAGE_COUNT] = { "nextgeo_out_normal_roughness", "nextgeo_out_ml_albedo", "nextgeo_out_ml_material", "nextgeo_out_voxel_gi", "nextgeo_out_instance_id" };
-	const char *stage_b_images[Resolve::COMPUTE_IMAGE_COUNT] = { "nextgeo_out_color", "nextgeo_out_specular", "nextgeo_out_velocity", nullptr, nullptr };
+	const char *stage_a_images[Resolve::COMPUTE_IMAGE_COUNT] = { "nextgeo_out_normal_roughness", "nextgeo_out_ml_albedo", "nextgeo_out_ml_material", "nextgeo_out_voxel_gi", "nextgeo_out_instance_id", "nextgeo_out_velocity" };
+	const char *stage_b_images[Resolve::COMPUTE_IMAGE_COUNT] = { "nextgeo_out_color", "nextgeo_out_specular", "nextgeo_out_velocity", nullptr, nullptr, nullptr };
 	for (uint32_t i = 0; i < Resolve::COMPUTE_IMAGE_COUNT; i++) {
 		CHECK(compute.contains(glsl_image_declaration(Resolve::COMPUTE_STAGE_A_FORMATS[i], Resolve::COMPUTE_IMAGE_BINDING_BASE + i, stage_a_images[i])));
 		if (stage_b_images[i] != nullptr) {

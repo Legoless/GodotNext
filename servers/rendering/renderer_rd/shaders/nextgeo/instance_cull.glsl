@@ -64,7 +64,9 @@ void main() {
 			(record.layer_mask & sc.cull.x) == 0u) {
 		return;
 	}
-	if (!aabb_visible_planes(sc.frustum, record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
+	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
+	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
+	if (!aabb_visible_planes(sc.frustum, record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_max.xyz + vec3(wpo_margin))) {
 		return;
 	}
 	uint cap = sc.cull.z;
@@ -139,10 +141,14 @@ void main() {
 	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || record.virtual_mesh == 0xFFFFFFFFu) {
 		return;
 	}
-	if (!aabb_visible(record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
+	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
+	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
+	vec4 w_min = vec4(record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_min.w);
+	vec4 w_max = vec4(record.world_aabb_max.xyz + vec3(wpo_margin), record.world_aabb_max.w);
+	if (!aabb_visible(w_min.xyz, w_max.xyz)) {
 		return;
 	}
-	if (hiz_occluded(record.world_aabb_min, record.world_aabb_max, cull.view_proj)) {
+	if (hiz_occluded(w_min, w_max, cull.view_proj)) {
 		return;
 	}
 	atomicAdd(counters.phase1_count, 1u);
@@ -167,11 +173,15 @@ void main() {
 			(record.layer_mask & cull.cull.x) == 0u) {
 		return;
 	}
-	if (!aabb_visible(record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
+	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
+	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
+	if (!aabb_visible(record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_max.xyz + vec3(wpo_margin))) {
 		return;
 	}
 	atomicAdd(counters.pad[0], 1u); // hiz_tested
-	if (hiz_occluded(record.prev_world_aabb_min, record.prev_world_aabb_max, cull.prev_view_proj)) {
+	vec4 prev_min = vec4(record.prev_world_aabb_min.xyz - vec3(wpo_margin), record.prev_world_aabb_min.w);
+	vec4 prev_max = vec4(record.prev_world_aabb_max.xyz + vec3(wpo_margin), record.prev_world_aabb_max.w);
+	if (hiz_occluded(prev_min, prev_max, cull.prev_view_proj)) {
 		atomicAdd(counters.pad[1], 1u); // hiz_hit
 		uint slot = atomicAdd(counters.phase2_count, 1u);
 		phase2_nodes.data[slot] = uvec2(index, record.virtual_mesh);

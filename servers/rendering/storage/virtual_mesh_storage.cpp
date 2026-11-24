@@ -898,7 +898,7 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC;
+	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET;
 	uint32_t keep = record.flags & preserved_mask;
 	if ((p_flags & RECORD_VISIBLE) == 0u) {
 		keep &= ~RECORD_VISIBLE;
@@ -944,11 +944,55 @@ void RendererVirtualMeshStorage::instance_record_set_programmable_raster_distanc
 	_mark_dirty(p_record);
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void RendererVirtualMeshStorage::instance_record_set_vertex_offset_bound(uint32_t p_record, float p_bound) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const uint32_t packed = uint32_t(pack_vertex_offset_bound_half(p_bound)) << 16u;
+	const uint32_t merged = (records[p_record].gi_flags & 0xFFFFu) | packed;
+	if (records[p_record].gi_flags == merged) {
+		return;
+	}
+	records[p_record].gi_flags = merged;
+	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::instance_record_set_vertex_offset_disable_distance(uint32_t p_record, float p_distance) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const float dist = (!Math::is_finite(p_distance) || p_distance < 0.0f) ? 0.0f : p_distance;
+	uint32_t bits = 0u;
+	memcpy(&bits, &dist, sizeof(uint32_t));
+	if (records[p_record].page_table_offset == bits) {
+		return;
+	}
+	records[p_record].page_table_offset = bits;
+	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::instance_record_set_rt_evaluate_vertex_offset(uint32_t p_record, bool p_enable) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const uint32_t next_flags = p_enable ? (records[p_record].flags | RECORD_RT_EVALUATE_VERTEX_OFFSET) : (records[p_record].flags & ~RECORD_RT_EVALUATE_VERTEX_OFFSET);
+	if (records[p_record].flags == next_flags) {
+		return;
+	}
+	records[p_record].flags = next_flags;
+	_mark_dirty(p_record);
+}
+
 void RendererVirtualMeshStorage::instance_record_set_gi_flags(uint32_t p_record, uint32_t p_gi_flags) {
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
 	}
-	records[p_record].gi_flags = p_gi_flags;
+	const uint32_t merged = (records[p_record].gi_flags & 0xFFFF0000u) | (p_gi_flags & 0xFFFFu);
+	if (records[p_record].gi_flags == merged) {
+		return;
+	}
+	records[p_record].gi_flags = merged;
 	_mark_dirty(p_record);
 }
 

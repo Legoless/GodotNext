@@ -93,12 +93,18 @@ struct CutCounters {
 	uint32_t raster_bin_hw[2];
 	// GodotNext: nextgeo_masked_two_sided (#153). Clusters demoted to FIXED past programmable_raster_distance per phase.
 	uint32_t raster_distance_fixed[2];
+	// GodotNext: nextgeo_vertex_offset (#164). WPO clusters demoted to FIXED past vertex_offset_disable_distance and clamped vertices.
+	uint32_t vertex_offset_distance_fixed[2];
+	uint32_t vertex_offset_clamped;
+	uint32_t sink; // #277 D3D12 GBV atomic return sink.
 	uint32_t pad_end[2];
 };
-static_assert(sizeof(CutCounters) == 176, "CutCounters must match NextGeoCountersData (176 bytes).");
+static_assert(sizeof(CutCounters) == 192, "CutCounters must match NextGeoCountersData (192 bytes).");
 static_assert(offsetof(CutCounters, raster_sw) == 31 * sizeof(uint32_t), "sw_raster.glsl reads raster_sw at word 31.");
 static_assert(offsetof(CutCounters, raster_hw) == 33 * sizeof(uint32_t), "visibility_raster_mesh.glsl reads raster_hw at word 33.");
 static_assert(offsetof(CutCounters, raster_sw_writes) == 35 * sizeof(uint32_t), "sw_raster.glsl adds raster_sw_writes at word 35.");
+static_assert(offsetof(CutCounters, vertex_offset_clamped) == 44 * sizeof(uint32_t), "raster_material_inc.glsl adds vertex_offset_clamped at word 44.");
+static_assert(offsetof(CutCounters, sink) == 45 * sizeof(uint32_t), "raster_material_inc.glsl writes sink at word 45.");
 static_assert(offsetof(RendererRD::NextGeoVSMCounters, hw_clusters) == 13 * sizeof(uint32_t), "VSM mesh task copies hw_clusters from word 13.");
 
 struct RasterParams {
@@ -221,8 +227,11 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 				(record.layer_mask & cull_mask) == 0) {
 			continue;
 		}
-		const Vector3 lo(record.world_aabb_min[0], record.world_aabb_min[1], record.world_aabb_min[2]);
-		const Vector3 hi(record.world_aabb_max[0], record.world_aabb_max[1], record.world_aabb_max[2]);
+		// GodotNext: nextgeo_vertex_offset (#164). Mirror instance_cull.glsl AABB inflation.
+		const float wpo_bound = RendererVirtualMeshStorage::get_record_vertex_offset_bound(record);
+		const float wpo_margin = wpo_bound * Math::abs(record.world_aabb_min[3]);
+		const Vector3 lo(record.world_aabb_min[0] - wpo_margin, record.world_aabb_min[1] - wpo_margin, record.world_aabb_min[2] - wpo_margin);
+		const Vector3 hi(record.world_aabb_max[0] + wpo_margin, record.world_aabb_max[1] + wpo_margin, record.world_aabb_max[2] + wpo_margin);
 		bool visible = true;
 		for (int plane = 0; plane < 6 && visible; plane++) {
 			const Vector3 &n = *reinterpret_cast<const Vector3 *>(p_cut.frustum[plane]);
@@ -265,9 +274,9 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 					record.transform[0][0] * p_sphere[0] + record.transform[0][1] * p_sphere[1] + record.transform[0][2] * p_sphere[2] + record.transform[0][3],
 					record.transform[1][0] * p_sphere[0] + record.transform[1][1] * p_sphere[1] + record.transform[1][2] * p_sphere[2] + record.transform[1][3],
 					record.transform[2][0] * p_sphere[0] + record.transform[2][1] * p_sphere[1] + record.transform[2][2] * p_sphere[2] + record.transform[2][3]);
-			// GodotNext: nextgeo_displacement (#150). Mirror cluster_cull.glsl displacement bound inflation.
-			const float disp_bound = MAX(record.prev_world_aabb_max[3], 0.0f);
-			const float radius = (p_sphere[3] + disp_bound) * scale;
+			// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Mirror cluster_cull.glsl bound inflation.
+			const float expand = MAX(record.prev_world_aabb_max[3], 0.0f) + wpo_bound;
+			const float radius = (p_sphere[3] + expand) * scale;
 			const float distance = MAX(center.distance_to(eye) - radius, znear);
 			if ((cut_flags & RendererRD::NEXTGEO_CUT_FLAG_DUAL_PARABOLOID) != 0) {
 				return p_error * scale * 0.5f * height / distance * lod_bias;
@@ -810,7 +819,7 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	// dispatch and hardware draw, into the same visibility buffer before the export.
 	if (raster_bins_active) {
 		_compact_raster_bins(p_phase, p_list_base);
-		_draw_raster_bins(p_phase, p_list_base, p_raster, p_internal_size);
+		_draw_raster_bins(p_phase, p_list_base, p_raster, p_counters, p_internal_size);
 	}
 
 	// Export: depth, the R32 visibility ID, the instance ID and velocity.
@@ -1000,7 +1009,7 @@ RID NextGeoCut::_raster_bin_render_pipeline(RID p_shader, RD::FramebufferFormatI
 
 // Each programmable bin's software dispatch and hardware draw (N3): one indirect dispatch and one
 // indirect draw per bin, with the material's raster target and parameters bound.
-void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size) {
+void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, RID p_counters, const Size2i &p_internal_size) {
 	RenderingDevice *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	const int storage = p_raster.vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER ? 1 : 0;
@@ -1009,6 +1018,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
+	const RID counters_buf = p_counters.is_valid() ? p_counters : counters;
 	LocalVector<RD::Uniform> geometry_uniforms;
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
@@ -1021,6 +1031,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, raster_bin_lists));
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, raster_bin_state));
 	bin_uniforms.push_back(RD::Uniform(vis64_type, 2, p_raster.vis64));
+	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, counters_buf));
 
 	struct BinPush {
 		uint32_t list_base;
@@ -1028,7 +1039,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 		uint32_t bin;
 		uint32_t flags;
 		int32_t size[2];
-		uint32_t pad[2];
+		uint32_t pad[2]; // pad[1] = floatBitsToUint(vertex_offset_max) (#164)
 	};
 	static_assert(sizeof(BinPush) == 32, "BinPush must match raster_material_inc.glsl's RasterBinPush.");
 
@@ -1041,7 +1052,18 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 		return r_sets[0].is_valid() && r_sets[1].is_valid() && r_sets[2].is_valid() && (p_program.material_uniforms.is_empty() || r_sets[3].is_valid());
 	};
 
-	const uint32_t bin_flags = p_raster.debug_backface ? 1u : 0u;
+	const uint32_t base_bin_flags = p_raster.debug_backface ? 1u : 0u;
+	auto make_bin_push = [&](const NextGeoRasterBinProgram &p_program) -> BinPush {
+		const bool has_wpo = (p_program.features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+		uint32_t flags = base_bin_flags;
+		uint32_t wpo_bits = 0u;
+		if (has_wpo) {
+			flags |= (1u << 1u) | (1u << 2u); // NEXTGEO_RASTER_BIN_FLAG_VERTEX_OFFSET | COUNT_CLAMPED
+			const float limit = MAX(p_program.vertex_offset_max, 0.0f);
+			memcpy(&wpo_bits, &limit, sizeof(uint32_t));
+		}
+		return BinPush{ p_list_base, p_phase, p_program.bin, flags, { size.x, size.y }, { 0u, wpo_bits } };
+	};
 
 	// Software clusters: one workgroup each, dispatched indirectly per bin.
 	{
@@ -1056,7 +1078,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 			if (pipeline.is_null() || !bind_sets(shader, program, sets)) {
 				continue;
 			}
-			const BinPush push = { p_list_base, p_phase, program.bin, bin_flags, { size.x, size.y }, { 0u, 0u } };
+			const BinPush push = make_bin_push(program);
 			rd->compute_list_bind_compute_pipeline(list, pipeline);
 			for (uint32_t set = 0; set < 4; set++) {
 				if (sets[set].is_valid()) {
@@ -1088,7 +1110,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 			if (pipeline.is_null() || !bind_sets(shader, program, sets)) {
 				continue;
 			}
-			const BinPush push = { p_list_base, p_phase, program.bin, bin_flags, { size.x, size.y }, { 0u, 0u } };
+			const BinPush push = make_bin_push(program);
 			rd->draw_list_bind_render_pipeline(dl, pipeline);
 			for (uint32_t set = 0; set < 4; set++) {
 				if (sets[set].is_valid()) {
@@ -1528,6 +1550,9 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 	info["fixed_clusters"] = fixed_sw + fixed_hw;
 	info["programmable_clusters"] = prog_sw + prog_hw;
 	info["programmable_distance_fixed_clusters"] = int64_t(stats->raster_distance_fixed[0]) + int64_t(stats->raster_distance_fixed[1]);
+	// GodotNext: nextgeo_vertex_offset (#164). WPO distance-demoted clusters and clamped vertex count.
+	info["vertex_offset_distance_fixed_clusters"] = int64_t(stats->vertex_offset_distance_fixed[0]) + int64_t(stats->vertex_offset_distance_fixed[1]);
+	info["vertex_offset_clamped"] = int64_t(stats->vertex_offset_clamped);
 	info["hiz_tested"] = int64_t(stats->pad[0]);
 	info["hiz_hit"] = int64_t(stats->pad[1]);
 	info["hiz_behind"] = int64_t(stats->cut_lo);
@@ -1819,11 +1844,17 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_HYBRID_RASTER;
 		if (raster_bins_active) {
 			cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_PROGRAMMABLE_BINS;
-			// GodotNext: nextgeo_masked_two_sided (#153). Mark pixel-programmable bins demotable past programmable_raster_distance.
+			// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Mark non-displaced
+			// programmable bins demotable past programmable_raster_distance ([0..1]) and vertex_offset_disable_distance ([2..3]).
 			for (const NextGeoRasterBinProgram &prog : p_raster->raster_bin_programs) {
-				if (prog.bin > 0u && prog.bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT && RendererRD::nextgeo_raster_bin_can_demote_by_distance(prog.features)) {
+				if (prog.bin > 0u && prog.bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT && (prog.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) == 0u) {
 					const uint32_t bit = prog.bin - 1u;
-					cut.raster_bin_demote_mask[bit >> 5u] |= 1u << (bit & 31u);
+					if ((prog.features & RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u) {
+						cut.raster_bin_demote_mask[bit >> 5u] |= 1u << (bit & 31u);
+					}
+					if ((prog.features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u) {
+						cut.raster_bin_demote_mask[2u + (bit >> 5u)] |= 1u << (bit & 31u);
+					}
 				}
 			}
 		}
@@ -2796,6 +2827,17 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	};
 
 	const int32_t ps = int32_t(RendererVirtualShadowMapStorage::PAGE_SIZE);
+	auto make_vsm_bin_push = [&](const NextGeoVSMBinProgram &p_program) -> BinPush {
+		const bool has_wpo = (p_program.features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+		uint32_t flags = 0u;
+		uint32_t wpo_bits = 0u;
+		if (has_wpo) {
+			flags |= (1u << 1u) | (1u << 2u); // NEXTGEO_RASTER_BIN_FLAG_VERTEX_OFFSET | COUNT_CLAMPED
+			const float limit = MAX(p_program.vertex_offset_max, 0.0f);
+			memcpy(&wpo_bits, &limit, sizeof(uint32_t));
+		}
+		return BinPush{ 0u, 0u, p_program.bin, flags, { ps, ps }, { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, wpo_bits } };
+	};
 	{
 		RD::ComputeListID list = rd->compute_list_begin();
 		for (const NextGeoVSMBinProgram &program : p_inputs.raster_bin_programs) {
@@ -2807,7 +2849,7 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 			if (pipeline.is_null() || !bind_sets(program.sw_shader, program, sets)) {
 				continue;
 			}
-			const BinPush push = { 0u, 0u, program.bin, 0u, { ps, ps }, { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, 0u } };
+			const BinPush push = make_vsm_bin_push(program);
 			rd->compute_list_bind_compute_pipeline(list, pipeline);
 			for (uint32_t set = 0; set < 4; set++) {
 				if (sets[set].is_valid()) {
@@ -2834,7 +2876,7 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 			if (pipeline.is_null() || !bind_sets(shader, program, sets)) {
 				continue;
 			}
-			const BinPush push = { 0u, 0u, program.bin, 0u, { ps, ps }, { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, 0u } };
+			const BinPush push = make_vsm_bin_push(program);
 			rd->draw_list_bind_render_pipeline(dl, pipeline);
 			for (uint32_t set = 0; set < 4; set++) {
 				if (sets[set].is_valid()) {
@@ -3338,8 +3380,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			stats["static_clusters"] = int64_t(dc.static_clusters + lc.static_clusters);
 			stats["dynamic_clusters"] = int64_t(dc.dynamic_clusters + lc.dynamic_clusters);
 			stats["always_layer0_clusters"] = int64_t(dc.always_layer0_clusters + lc.always_layer0_clusters);
-			// GodotNext: nextgeo_masked_two_sided (#153).
+			// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164).
 			stats["distance_fixed_clusters"] = int64_t(dc.distance_fixed_clusters + lc.distance_fixed_clusters);
+			stats["vertex_offset_distance_fixed_clusters"] = int64_t(dc.vertex_offset_distance_fixed + lc.vertex_offset_distance_fixed);
+			stats["vertex_offset_clamped"] = int64_t(dc.vertex_offset_clamped + lc.vertex_offset_clamped);
 		}
 		*r_stats = stats;
 	}

@@ -464,11 +464,13 @@ TEST_CASE("[AVBOIT] Shader variants, the specialization bits and the pipeline ke
 	using Version = Shader::ShaderVersion;
 	// Appended after every other variant (the last are #218's VSM depth variants), so no earlier index
 	// moves, with ubershader twins.
+	// GodotNext: nextgeo_vertex_offset (#164). Four Stage A motion-vector variants follow AVBOIT.
 	CHECK_EQ(int(Version::SHADER_VERSION_AVBOIT_BASE), int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
 	CHECK_EQ(int(Version::SHADER_VERSION_AVBOIT_COUNT), 4);
-	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), int(Version::SHADER_VERSION_AVBOIT_BASE) + int(Version::SHADER_VERSION_AVBOIT_COUNT));
+	CHECK_EQ(int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE), int(Version::SHADER_VERSION_AVBOIT_BASE) + int(Version::SHADER_VERSION_AVBOIT_COUNT));
+	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_MOTION_COUNT));
 	CHECK_EQ(int(Shader::SHADER_GROUP_AVBOIT), int(Shader::SHADER_GROUP_VSM) + 1);
-	CHECK_EQ(int(Shader::PIPELINE_VERSION_AVBOIT_OCCLUSION) + 1, int(Shader::PIPELINE_VERSION_MAX));
+	CHECK_EQ(int(Shader::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML_MOTION) + 1, int(Shader::PIPELINE_VERSION_MAX));
 
 	// sc_avboit_composite() reads bits 8 to 10 of packed_1, above the eight flags before it.
 	Shader::ShaderSpecialization specialization = {};

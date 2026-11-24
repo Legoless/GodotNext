@@ -2620,6 +2620,25 @@ float MaterialStorage::material_get_displacement_center(RID p_material) const {
 	return material != nullptr ? material->displacement_center : 0.5f;
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void MaterialStorage::material_set_vertex_offset_max(RID p_material, float p_vertex_offset_max) {
+	GLES3::Material *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL(material);
+
+	const float sanitized = (Math::is_finite(p_vertex_offset_max) && p_vertex_offset_max >= 0.0f) ? p_vertex_offset_max : -1.0f;
+	if (material->vertex_offset_max == sanitized) {
+		return;
+	}
+
+	material->vertex_offset_max = sanitized;
+	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+}
+
+float MaterialStorage::material_get_vertex_offset_max(RID p_material) const {
+	const GLES3::Material *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->vertex_offset_max : -1.0f;
+}
+
 bool MaterialStorage::material_is_animated(RID p_material) {
 	GLES3::Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL_V(material, false);

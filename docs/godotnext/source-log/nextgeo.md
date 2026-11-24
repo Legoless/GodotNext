@@ -155,6 +155,23 @@ in SW compute, HW vertex-pulling, and HW mesh-shader rasterizers), and VSM light
 classification) are original implementations built on GodotNext's #155, #153, #154, #217, and #218
 infrastructure. Copied files: none.
 
+## Vertex offset (WPO) on Nanite (#164)
+
+No outside input. NextGeo vertex offset (#164, plan §21.4 contract N5, GN-3, GN-4, GN-12) —
+`Material.vertex_offset_max` with `rendering/nextgeo/vertex_offset_max_default` inheritance, default
+admission of `VERTEX`-writing spatial shaders into the `VERTEX_OFFSET` programmable raster bin while
+keeping `POSITION`/`MODELVIEW_MATRIX`/`PROJECTION_MATRIX` writes on legacy raster, instance/cluster
+bounds inflation by `vertex_offset_max * instance_max_scale` and per-vertex offset clamping with
+`#277`-safe clamping counters across SW/HW/mesh/VSM/resolve paths, `GeometryInstance3D.vertex_offset_disable_distance`
+demotion to the fixed-function bin in main and VSM views, Stage A visibility-resolve motion vectors
+evaluating `vertex()` at previous `TIME` and previous model transform (following Godot's own
+`scene_forward_clustered.glsl` motion-pass precedent), VSM dynamic invalidation and VSM `VERTEX_OFFSET`
+bins, and opt-in `GeometryInstance3D.rt_evaluate_vertex_offset` proxy compute evaluation
+(`rt_vertex_offset.glsl`) with budgeted BLAS `UPDATE` refit (`#45`) — is an original implementation
+built directly on GodotNext's #155 programmable raster bins, #153 masked/two-sided distance cutoff,
+#154 mesh-shader HW raster, #212/#217 VSM x Nanite, #80/#158 visibility resolve, and #45/#52 NextGI
+RT scene. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

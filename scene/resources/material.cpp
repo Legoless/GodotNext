@@ -118,6 +118,23 @@ float Material::get_displacement_center() const {
 	return displacement_center;
 }
 
+// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+void Material::set_vertex_offset_max(float p_vertex_offset_max) {
+	const float sanitized = (Math::is_finite(p_vertex_offset_max) && p_vertex_offset_max >= 0.0f) ? p_vertex_offset_max : -1.0f;
+	if (vertex_offset_max == sanitized) {
+		return;
+	}
+	vertex_offset_max = sanitized;
+
+	if (material.is_valid()) {
+		RS::get_singleton()->material_set_vertex_offset_max(material, vertex_offset_max);
+	}
+}
+
+float Material::get_vertex_offset_max() const {
+	return vertex_offset_max;
+}
+
 RID Material::get_rid() const {
 	return material;
 }
@@ -127,8 +144,8 @@ void Material::_validate_property(PropertyInfo &p_property) const {
 		p_property.usage = PROPERTY_USAGE_NONE;
 	} else if (!_can_use_render_priority() && p_property.name == "render_priority") {
 		p_property.usage = PROPERTY_USAGE_NONE;
-	} else if (get_shader_mode() != Shader::MODE_SPATIAL && (p_property.name == "displacement_magnitude" || p_property.name == "displacement_center")) {
-		// GodotNext: nextgeo_displacement (#150). Displacement applies only to spatial materials.
+	} else if (get_shader_mode() != Shader::MODE_SPATIAL && (p_property.name == "displacement_magnitude" || p_property.name == "displacement_center" || p_property.name == "vertex_offset_max")) {
+		// GodotNext: nextgeo_displacement (#150) & nextgeo_vertex_offset (#164). Spatial materials only.
 		p_property.usage = PROPERTY_USAGE_NONE;
 	}
 }
@@ -208,6 +225,9 @@ void Material::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_displacement_magnitude"), &Material::get_displacement_magnitude);
 	ClassDB::bind_method(D_METHOD("set_displacement_center", "center"), &Material::set_displacement_center);
 	ClassDB::bind_method(D_METHOD("get_displacement_center"), &Material::get_displacement_center);
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	ClassDB::bind_method(D_METHOD("set_vertex_offset_max", "vertex_offset_max"), &Material::set_vertex_offset_max);
+	ClassDB::bind_method(D_METHOD("get_vertex_offset_max"), &Material::get_vertex_offset_max);
 
 	ClassDB::bind_method(D_METHOD("inspect_native_shader_code"), &Material::inspect_native_shader_code);
 	ClassDB::set_method_flags(get_class_static(), StringName("inspect_native_shader_code"), METHOD_FLAGS_DEFAULT | METHOD_FLAG_EDITOR);
@@ -219,6 +239,8 @@ void Material::_bind_methods() {
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "displacement_magnitude", PROPERTY_HINT_RANGE, "0,16,0.001,or_greater,suffix:m"), "set_displacement_magnitude", "get_displacement_magnitude");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "displacement_center", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_displacement_center", "get_displacement_center");
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "vertex_offset_max", PROPERTY_HINT_RANGE, "-1,64,0.01,or_greater,suffix:m"), "set_vertex_offset_max", "get_vertex_offset_max");
 
 	BIND_CONSTANT(RENDER_PRIORITY_MAX);
 	BIND_CONSTANT(RENDER_PRIORITY_MIN);
@@ -524,6 +546,10 @@ void ShaderMaterial::_check_material_rid() const {
 		// GodotNext: nextgeo_displacement (#150). Forward displacement settings set before lazy RID creation.
 		if (get_displacement_magnitude() != 0.0f || get_displacement_center() != 0.5f) {
 			RS::get_singleton()->material_set_displacement(_get_material(), get_displacement_magnitude(), get_displacement_center());
+		}
+		// GodotNext: nextgeo_vertex_offset (#164). Forward vertex_offset_max set before lazy RID creation.
+		if (get_vertex_offset_max() >= 0.0f) {
+			RS::get_singleton()->material_set_vertex_offset_max(_get_material(), get_vertex_offset_max());
 		}
 
 		for (KeyValue<StringName, Variant> param : param_cache) {
@@ -2203,6 +2229,10 @@ void BaseMaterial3D::_check_material_rid() {
 		// GodotNext: nextgeo_displacement (#150). Forward displacement settings set before lazy RID creation.
 		if (get_displacement_magnitude() != 0.0f || get_displacement_center() != 0.5f) {
 			RS::get_singleton()->material_set_displacement(_get_material(), get_displacement_magnitude(), get_displacement_center());
+		}
+		// GodotNext: nextgeo_vertex_offset (#164). Forward vertex_offset_max set before lazy RID creation.
+		if (get_vertex_offset_max() >= 0.0f) {
+			RS::get_singleton()->material_set_vertex_offset_max(_get_material(), get_vertex_offset_max());
 		}
 
 		for (KeyValue<StringName, Variant> param : pending_params) {

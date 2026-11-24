@@ -400,6 +400,8 @@ public:
 	FUNC2(material_set_next_pass, RID, RID)
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 	FUNC3(material_set_displacement, RID, float, float)
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	FUNC2(material_set_vertex_offset_max, RID, float)
 
 	/* MESH API */
 
@@ -1106,6 +1108,9 @@ public:
 	FUNC2(instance_geometry_set_lod_bias, RID, float)
 	// GodotNext: nextgeo_masked_two_sided (#153).
 	FUNC2(instance_geometry_set_programmable_raster_distance, RID, float)
+	// GodotNext: nextgeo_vertex_offset (#164).
+	FUNC2(instance_geometry_set_vertex_offset_disable_distance, RID, float)
+	FUNC2(instance_geometry_set_rt_evaluate_vertex_offset, RID, bool)
 	FUNC2(instance_geometry_set_transparency, RID, float)
 	FUNC3(instance_geometry_set_shader_parameter, RID, const StringName &, const Variant &)
 	FUNC2RC(Variant, instance_geometry_get_shader_parameter, RID, const StringName &)

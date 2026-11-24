@@ -92,6 +92,8 @@ struct NextGeoRasterBinProgram {
 	uint32_t bin = 0;
 	// GodotNext: nextgeo_masked_two_sided (#153). Raster features of this bin for programmable_raster_distance demotion.
 	uint32_t features = 0;
+	// GodotNext: nextgeo_vertex_offset (#164). Resolved Material.vertex_offset_max clamp bound (meters).
+	float vertex_offset_max = 0.0f;
 	RID sw_shader[2];
 	RID hw_shader[2];
 	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW variant per visibility-buffer storage.
@@ -104,6 +106,8 @@ struct NextGeoRasterBinProgram {
 struct NextGeoVSMBinProgram {
 	uint32_t bin = 0;
 	uint32_t features = 0;
+	// GodotNext: nextgeo_vertex_offset (#164). Resolved Material.vertex_offset_max clamp bound (meters).
+	float vertex_offset_max = 0.0f;
 	RID sw_shader;
 	RID hw_shader;
 	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW depth-only VSM variant.
@@ -247,7 +251,7 @@ private:
 	bool _ensure_raster_bins(RenderingDevice *p_rd);
 	bool _prepare_raster_bins(const NextGeoRasterInputs &p_raster);
 	void _compact_raster_bins(uint32_t p_phase, uint32_t p_list_base);
-	void _draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size);
+	void _draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, RID p_counters, const Size2i &p_internal_size);
 	RID _raster_bin_compute_pipeline(RID p_shader);
 	RID _raster_bin_render_pipeline(RID p_shader, RD::FramebufferFormatID p_format);
 	// GodotNext: vsm_nanite (#217).

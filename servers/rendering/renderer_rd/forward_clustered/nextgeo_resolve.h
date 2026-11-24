@@ -56,11 +56,21 @@ public:
 	static constexpr uint32_t BUCKET_CULL_DISABLED = 1u << 29u;
 	static constexpr uint32_t SURFACES_PER_RECORD = 32u;
 
+	// GodotNext: nextgeo_vertex_offset (#164). Flags carried in ResolvePush::flags.
+	static constexpr uint32_t RESOLVE_FLAG_VERTEX_OFFSET = 1u << 0u;
+	static constexpr uint32_t RESOLVE_FLAG_WRITE_VELOCITY = 1u << 1u;
+	static constexpr uint32_t RESOLVE_FLAG_RESET_VELOCITY = 1u << 2u;
+
 	struct ResolvePush {
 		uint32_t bucket_id = 0;
 		uint32_t material_feedback_index = UINT32_MAX;
 		uint32_t tile_list_base = 0;
 		float cull_sign = 1.0f;
+		// GodotNext: nextgeo_vertex_offset (#164). Per-bucket WPO clamp bound and mode flags.
+		float vertex_offset_max = 0.0f;
+		uint32_t flags = 0;
+		uint32_t pad0 = 0;
+		uint32_t pad1 = 0;
 	};
 
 	struct MaterialBucketKey {
@@ -99,13 +109,13 @@ public:
 	};
 
 	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The compute form's storage images: set 2 bindings
-	// 10 to 14 of resolve_compute_inc.glsl, in its order for each stage.
+	// 10 to 15 of resolve_compute_inc.glsl, in its order for each stage (binding 15: Stage A velocity for #164).
 	static constexpr uint32_t COMPUTE_IMAGE_BINDING_BASE = 10u;
-	static constexpr uint32_t COMPUTE_IMAGE_COUNT = 5u;
+	static constexpr uint32_t COMPUTE_IMAGE_COUNT = 6u;
 	// The formats resolve_compute_inc.glsl declares for those images, per stage (DATA_FORMAT_MAX: no image at
 	// that binding). A target of another format keeps the tile quads (NO_STORAGE).
-	static constexpr RD::DataFormat COMPUTE_STAGE_A_FORMATS[COMPUTE_IMAGE_COUNT] = { RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8_UINT, RD::DATA_FORMAT_R32_UINT };
-	static constexpr RD::DataFormat COMPUTE_STAGE_B_FORMATS[COMPUTE_IMAGE_COUNT] = { RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R16G16_SFLOAT, RD::DATA_FORMAT_MAX, RD::DATA_FORMAT_MAX };
+	static constexpr RD::DataFormat COMPUTE_STAGE_A_FORMATS[COMPUTE_IMAGE_COUNT] = { RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8_UINT, RD::DATA_FORMAT_R32_UINT, RD::DATA_FORMAT_R16G16_SFLOAT };
+	static constexpr RD::DataFormat COMPUTE_STAGE_B_FORMATS[COMPUTE_IMAGE_COUNT] = { RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R16G16_SFLOAT, RD::DATA_FORMAT_MAX, RD::DATA_FORMAT_MAX, RD::DATA_FORMAT_MAX };
 	static constexpr uint32_t COMPUTE_SHADING_BIN_STATE_BINDING = 9u;
 	// ResolvePush.tile_list_base of the compute form (resolve_compute_inc.glsl).
 	static constexpr uint32_t COMPUTE_FLAG_SKIP_VELOCITY = 1u << 0u;
@@ -128,6 +138,8 @@ public:
 	void begin_frame();
 	uint32_t register_bucket(SceneShaderForwardClustered::MaterialData *p_material, SceneShaderForwardClustered::ShaderData *p_shader, RID p_material_uniform_set, uint32_t p_material_feedback_index, SceneShaderForwardClustered::ShaderSpecialization p_specialization);
 	uint32_t get_bucket_count() const { return buckets.size(); }
+	// GodotNext: nextgeo_vertex_offset (#164). True when at least one registered bucket writes VERTEX.
+	bool has_vertex_offset_buckets() const;
 	// GodotNext: nextgeo_shading_bins (#158). Buckets whose material has a compute form (one that has not
 	// failed to compile).
 	uint32_t get_compute_bucket_count() const;
@@ -161,9 +173,9 @@ public:
 	// GodotNext: nextgeo_shading_bins (#158). With p_compute (after bin()), every bucket whose material has a
 	// compute form shades through its bin's indirect dispatch, and the rest draw their tile quads in the
 	// same frame; the returned and r_draws counts include both.
-	uint32_t draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool p_megalights_inputs, bool &r_request_redraw, const ComputeStage *p_compute = nullptr);
+	uint32_t draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool p_megalights_inputs, bool &r_request_redraw, const ComputeStage *p_compute = nullptr, bool p_with_velocity = false, bool p_reset_velocity = false, float p_vertex_offset_default = 0.5f);
 
-	bool draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_colors, RID p_render_base_uniform_set, RID p_rp_uniform_set, uint32_t p_pipeline_color_pass_flags, bool p_zero_velocity_write, bool p_use_directional_soft_shadow, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw, uint32_t &r_draws, const ComputeStage *p_compute = nullptr);
+	bool draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_colors, RID p_render_base_uniform_set, RID p_rp_uniform_set, uint32_t p_pipeline_color_pass_flags, bool p_zero_velocity_write, bool p_use_directional_soft_shadow, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw, uint32_t &r_draws, const ComputeStage *p_compute = nullptr, bool p_reset_velocity = false, float p_vertex_offset_default = 0.5f);
 
 	void free_resources();
 
@@ -181,7 +193,7 @@ private:
 	bool _ensure_binning();
 	void _ensure_bin_buffers(uint32_t p_bin_count, uint32_t p_pixel_capacity);
 	void _prepare_compute_buckets(const ComputeStage &p_compute, RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, SceneShaderForwardClustered::ShaderSpecialization p_stage_a_spec, const SceneShaderForwardClustered::ShaderSpecialization *p_stage_b_spec, bool p_use_directional_soft_shadow, LocalVector<ComputeBucket> &r_compute);
-	uint32_t _dispatch_compute_buckets(const LocalVector<ComputeBucket> &p_compute, bool p_stage_b, uint32_t p_flags, bool p_reverse_cull);
+	uint32_t _dispatch_compute_buckets(const LocalVector<ComputeBucket> &p_compute, bool p_stage_b, uint32_t p_flags, bool p_reverse_cull, bool p_stage_a_motion, bool p_reset_velocity, float p_vertex_offset_default);
 
 	ResolveClassifyShaderRD classify_shader;
 	RID classify_version;

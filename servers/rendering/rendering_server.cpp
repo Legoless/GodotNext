@@ -2614,6 +2614,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("material_set_next_pass", "material", "next_material"), &RenderingServer::material_set_next_pass);
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
 	ClassDB::bind_method(D_METHOD("material_set_displacement", "material", "magnitude", "center"), &RenderingServer::material_set_displacement);
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5).
+	ClassDB::bind_method(D_METHOD("material_set_vertex_offset_max", "material", "vertex_offset_max"), &RenderingServer::material_set_vertex_offset_max);
 
 	ClassDB::bind_method(D_METHOD("material_set_use_debanding", "enable"), &RenderingServer::material_set_use_debanding);
 
@@ -3681,6 +3683,9 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_lod_bias", "instance", "lod_bias"), &RenderingServer::instance_geometry_set_lod_bias);
 	// GodotNext: nextgeo_masked_two_sided (#153).
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_programmable_raster_distance", "instance", "distance"), &RenderingServer::instance_geometry_set_programmable_raster_distance);
+	// GodotNext: nextgeo_vertex_offset (#164).
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_vertex_offset_disable_distance", "instance", "distance"), &RenderingServer::instance_geometry_set_vertex_offset_disable_distance);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_rt_evaluate_vertex_offset", "instance", "enable"), &RenderingServer::instance_geometry_set_rt_evaluate_vertex_offset);
 
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shader_parameter", "instance", "parameter", "value"), &RenderingServer::instance_geometry_set_shader_parameter);
 	ClassDB::bind_method(D_METHOD("instance_geometry_get_shader_parameter", "instance", "parameter"), &RenderingServer::instance_geometry_get_shader_parameter);
@@ -4302,9 +4307,12 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/raster_mode", PROPERTY_HINT_ENUM, "Hybrid,Hardware"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/sw_raster_max_edge_px", PROPERTY_HINT_RANGE, "0,32,0.25,suffix:px"), 8.0);
 	GLOBAL_DEF("rendering/nextgeo/debug_vis64_buffer", false);
-	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Off until #153 and #164 route masked and
-	// vertex-offset materials through the programmable raster bins by default.
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Off; #153 and #164 admit masked and
+	// vertex-offset materials by default on the Nanite tier.
 	GLOBAL_DEF("rendering/nextgeo/debug_programmable_raster", false);
+	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Project default max vertex offset (meters)
+	// inherited by spatial materials whose Material.vertex_offset_max is negative (-1.0).
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/vertex_offset_max_default", PROPERTY_HINT_RANGE, "0,64,0.01,or_greater,suffix:m"), 0.5f);
 	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9, GN-10). Auto keeps the VS HW raster
 	// path until GN-10 passes on a driver in PQ (§22); Mesh selects task/mesh shaders when supported
 	// (Vulkan/D3D12 mesh shaders, Metal Apple9+ indirect mesh draws) and falls back to Vertex otherwise.
