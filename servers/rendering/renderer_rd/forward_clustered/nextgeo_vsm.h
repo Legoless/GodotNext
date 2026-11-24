@@ -144,7 +144,8 @@ struct NextGeoVSMCounters {
 	uint32_t static_clusters = 0u; // 23
 	uint32_t dynamic_clusters = 0u; // 24
 	uint32_t always_layer0_clusters = 0u; // 25
-	uint32_t pad0 = 0u; // 26
+	// GodotNext: nextgeo_masked_two_sided (#153). Clusters demoted from programmable to FIXED bin past programmable_raster_distance.
+	uint32_t distance_fixed_clusters = 0u; // 26
 	uint32_t pad1 = 0u; // 27
 };
 static_assert(sizeof(NextGeoVSMCounters) == 112, "NextGeoVSMCounters must match GLSL layout (112 bytes).");

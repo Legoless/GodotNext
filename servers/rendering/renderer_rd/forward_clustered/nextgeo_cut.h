@@ -85,6 +85,8 @@ struct NextGeoShadowViewDesc {
 // image, buffer) and the material's parameter uniforms for set 3.
 struct NextGeoRasterBinProgram {
 	uint32_t bin = 0;
+	// GodotNext: nextgeo_masked_two_sided (#153). Raster features of this bin for programmable_raster_distance demotion.
+	uint32_t features = 0;
 	RID sw_shader[2];
 	RID hw_shader[2];
 	LocalVector<RD::Uniform> material_uniforms;

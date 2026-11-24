@@ -41,6 +41,16 @@ TEST_FORCE_LINK(test_nextgeo_raster_bins)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_features_inc.glsl.gen.h"
+#include "servers/rendering/rendering_server.h"
+#include "servers/rendering/shader_compiler.h"
+#include "servers/rendering/shader_types.h"
+#ifndef _3D_DISABLED
+#include "scene/3d/visual_instance_3d.h"
+#include "scene/resources/3d/importer_mesh.h"
+#include "scene/resources/material.h"
+#endif
+
+#include <limits>
 
 using namespace RendererRD;
 
@@ -412,4 +422,282 @@ TEST_CASE("[NextGeo][RasterBins] The bin layouts and their GLSL copies agree") {
 	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(1u) % 4u, 0u);
 	// The hardware draw keeps #162's per-cluster vertex count.
 	CHECK_EQ(NEXTGEO_RASTER_VERTEX_COUNT, 384u);
+
+	// GodotNext: nextgeo_masked_two_sided (#153). Feature group masks match virtual_mesh_storage.h.
+	CHECK_EQ(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES"), String("NEXTGEO_RASTER_FEATURE_MASKED | NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET"));
+	CHECK_EQ(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_VERTEX_PROGRAMMABLE_FEATURES"), String("NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET | NEXTGEO_RASTER_FEATURE_DISPLACED"));
+	CHECK_EQ(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_PROGRAM_FEATURES"), String("NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES | NEXTGEO_RASTER_VERTEX_PROGRAMMABLE_FEATURES"));
+	CHECK_EQ(uint32_t(VMS::RASTER_PIXEL_PROGRAMMABLE_FEATURES), uint32_t(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_DEPTH_OFFSET));
+	CHECK_EQ(uint32_t(VMS::RASTER_VERTEX_PROGRAMMABLE_FEATURES), uint32_t(VMS::RASTER_FEATURE_VERTEX_OFFSET | VMS::RASTER_FEATURE_DISPLACED));
+	CHECK_EQ(uint32_t(VMS::RASTER_PROGRAM_FEATURES), uint32_t(VMS::RASTER_PIXEL_PROGRAMMABLE_FEATURES | VMS::RASTER_VERTEX_PROGRAMMABLE_FEATURES));
 }
+
+TEST_CASE("[NextGeo][RasterBins] Default masked admission and programmable raster distance cutoff (#153)") {
+	// admit_masked admits masked surfaces without opening vertex-offset / displacement.
+	NextGeoMaterialFallbackFacts facts;
+	facts.admit_masked = true;
+	facts.masked = true;
+	CHECK_EQ(nextgeo_material_fallback(facts), NEXTGEO_FALLBACK_NONE);
+	facts.writes_vertex = true;
+	CHECK_EQ(nextgeo_material_fallback(facts), NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER);
+	facts.admit_programmable = true;
+	CHECK_EQ(nextgeo_material_fallback(facts), NEXTGEO_FALLBACK_NONE);
+
+	// Alpha blend, screen reads, and raster target rejects remain rejected even with admit_masked.
+	facts = NextGeoMaterialFallbackFacts();
+	facts.admit_masked = true;
+	facts.transparent = true;
+	CHECK_EQ(nextgeo_material_fallback(facts), NEXTGEO_FALLBACK_ALPHA);
+	facts.transparent = false;
+	facts.masked = true;
+	facts.raster_rejects = ShaderCompiler::RASTER_USES_FRAGCOORD;
+	CHECK_EQ(nextgeo_material_fallback(facts), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+
+	// Only pixel-programmable bins without vertex offset / displacement demote past programmable_raster_distance.
+	CHECK_FALSE(nextgeo_raster_bin_can_demote_by_distance(0u));
+	CHECK_FALSE(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_TWO_SIDED));
+	CHECK(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_MASKED));
+	CHECK(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_TWO_SIDED));
+	CHECK(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_DEPTH_OFFSET));
+	CHECK_FALSE(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_VERTEX_OFFSET));
+	CHECK_FALSE(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_DISPLACED));
+	CHECK_FALSE(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_VERTEX_OFFSET));
+	CHECK_FALSE(nextgeo_raster_bin_can_demote_by_distance(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_DISPLACED));
+
+	// Camera-to-AABB distance and cutoff predicate match the GPU cull shaders.
+	const Vector3 aabb_min(-1.0f, -1.0f, -1.0f);
+	const Vector3 aabb_max(1.0f, 1.0f, 1.0f);
+	CHECK_EQ(nextgeo_aabb_camera_distance(Vector3(0.0f, 0.25f, -0.5f), aabb_min, aabb_max), doctest::Approx(0.0f));
+	CHECK_EQ(nextgeo_aabb_camera_distance(Vector3(1.0f, 0.0f, 0.0f), aabb_min, aabb_max), doctest::Approx(0.0f));
+	CHECK_EQ(nextgeo_aabb_camera_distance(Vector3(4.0f, 0.0f, 0.0f), aabb_min, aabb_max), doctest::Approx(3.0f));
+	CHECK_EQ(nextgeo_aabb_camera_distance(Vector3(4.0f, 5.0f, 0.0f), aabb_min, aabb_max), doctest::Approx(5.0f));
+
+	const uint32_t masked_2s = VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_TWO_SIDED;
+	// 0, negative, NaN, and Inf never demote (0 = always programmable).
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(100.0f, 0.0f, 0.0f), aabb_min, aabb_max, 0.0f, masked_2s));
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(100.0f, 0.0f, 0.0f), aabb_min, aabb_max, -5.0f, masked_2s));
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(100.0f, 0.0f, 0.0f), aabb_min, aabb_max, std::numeric_limits<float>::quiet_NaN(), masked_2s));
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(100.0f, 0.0f, 0.0f), aabb_min, aabb_max, std::numeric_limits<float>::infinity(), masked_2s));
+	// Inside or exactly on the cutoff boundary stays programmable; strictly past demotes to FIXED.
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(3.5f, 0.0f, 0.0f), aabb_min, aabb_max, 3.0f, masked_2s));
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(4.0f, 0.0f, 0.0f), aabb_min, aabb_max, 3.0f, masked_2s));
+	CHECK(nextgeo_programmable_raster_cutoff(Vector3(4.01f, 0.0f, 0.0f), aabb_min, aabb_max, 3.0f, masked_2s));
+	// Vertex-programmable features never demote past distance.
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(20.0f, 0.0f, 0.0f), aabb_min, aabb_max, 3.0f, VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_VERTEX_OFFSET));
+	CHECK_FALSE(nextgeo_programmable_raster_cutoff(Vector3(20.0f, 0.0f, 0.0f), aabb_min, aabb_max, 3.0f, VMS::RASTER_FEATURE_DISPLACED));
+
+	// Instance record stores programmable_raster_distance in prev_world_aabb_min[3] and preserves it across updates/flush.
+	class DummyVMS : public RendererVirtualMeshStorage {
+	protected:
+		virtual void _upload_records(uint32_t p_first, uint32_t p_count) override {}
+		virtual void _upload_mesh_records(uint32_t p_first, uint32_t p_count) override {}
+	};
+	DummyVMS storage;
+	const RID mesh_rid = RID::from_uint64(15301);
+	const RID inst_rid = RID::from_uint64(15302);
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	desc.eligible_surface_mask = 1u;
+	desc.ngm_path = "res://test_153.ngm";
+	desc.dag_header.resize(8);
+	desc.root_pages.push_back(Vector<uint8_t>());
+	storage.mesh_set_virtual_geometry(mesh_rid, desc);
+
+	const uint32_t slot = storage.instance_record_allocate(inst_rid, mesh_rid);
+	REQUIRE_NE(slot, UINT32_MAX);
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(0.0f));
+	storage.instance_record_set_programmable_raster_distance(slot, 12.5f);
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(12.5f));
+	const AABB unit_aabb(Vector3(-1, -1, -1), Vector3(2, 2, 2));
+	storage.instance_record_set_transform(slot, Transform3D(Basis(), Vector3(2.0f, 0.0f, 0.0f)), unit_aabb, true, false, 1.0f);
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(12.5f));
+	storage.flush();
+	storage.begin_frame();
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(12.5f));
+	storage.instance_record_set_transform(slot, Transform3D(Basis(), Vector3(5.0f, 0.0f, 0.0f)), unit_aabb, true, true, 1.0f);
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(12.5f));
+	storage.flush();
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(12.5f));
+	// Non-positive and non-finite inputs sanitize to 0.0.
+	storage.instance_record_set_programmable_raster_distance(slot, -4.0f);
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(0.0f));
+	storage.instance_record_set_programmable_raster_distance(slot, std::numeric_limits<float>::quiet_NaN());
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(0.0f));
+	storage.instance_record_set_programmable_raster_distance(slot, std::numeric_limits<float>::infinity());
+	CHECK_EQ(storage.get_record(slot).prev_world_aabb_min[3], doctest::Approx(0.0f));
+	storage.instance_record_free(slot);
+}
+
+#ifndef _3D_DISABLED
+TEST_CASE("[NextGeo][RasterBins] GeometryInstance3D programmable_raster_distance property round-trips (#153)") {
+	GeometryInstance3D *inst = memnew(GeometryInstance3D);
+	CHECK_EQ(inst->get_programmable_raster_distance(), doctest::Approx(0.0f));
+	inst->set_programmable_raster_distance(25.0f);
+	CHECK_EQ(inst->get_programmable_raster_distance(), doctest::Approx(25.0f));
+	inst->set_programmable_raster_distance(0.0f);
+	CHECK_EQ(inst->get_programmable_raster_distance(), doctest::Approx(0.0f));
+	ERR_PRINT_OFF;
+	inst->set_programmable_raster_distance(-1.0f);
+	ERR_PRINT_ON;
+	CHECK_EQ(inst->get_programmable_raster_distance(), doctest::Approx(0.0f));
+	memdelete(inst);
+}
+
+TEST_CASE("[NextGeo][RasterBins] Every BaseMaterial3D transparency and cull mode maps to expected feature bits and routes (#153)") {
+	REQUIRE(RenderingServer::get_singleton() != nullptr);
+	if (ShaderTypes::get_singleton() == nullptr) {
+		memnew(ShaderTypes);
+	}
+	ShaderCompiler compiler;
+	ShaderCompiler::DefaultIdentifierActions defaults;
+	defaults.renames["MODEL_MATRIX"] = "read_model_matrix";
+	defaults.renames["MODEL_NORMAL_MATRIX"] = "model_normal_matrix";
+	defaults.renames["VIEW_MATRIX"] = "read_view_matrix";
+	defaults.renames["INV_VIEW_MATRIX"] = "inv_view_matrix";
+	defaults.renames["PROJECTION_MATRIX"] = "projection_matrix";
+	defaults.renames["INV_PROJECTION_MATRIX"] = "inv_projection_matrix";
+	defaults.renames["MODELVIEW_MATRIX"] = "modelview";
+	defaults.renames["MODELVIEW_NORMAL_MATRIX"] = "modelview_normal";
+	defaults.renames["VERTEX"] = "vertex";
+	defaults.renames["NORMAL"] = "normal_highp";
+	defaults.renames["TANGENT"] = "tangent";
+	defaults.renames["BINORMAL"] = "binormal";
+	defaults.renames["POSITION"] = "position";
+	defaults.renames["UV"] = "uv_interp";
+	defaults.renames["UV2"] = "uv2_interp";
+	defaults.renames["COLOR"] = "color_interp";
+	defaults.renames["ALBEDO"] = "albedo_highp";
+	defaults.renames["ALPHA"] = "alpha_highp";
+	defaults.renames["METALLIC"] = "metallic_highp";
+	defaults.renames["SPECULAR"] = "specular";
+	defaults.renames["ROUGHNESS"] = "roughness_highp";
+	defaults.renames["ALPHA_SCISSOR_THRESHOLD"] = "alpha_scissor_threshold";
+	defaults.renames["ALPHA_HASH_SCALE"] = "alpha_hash_scale";
+	defaults.renames["ALPHA_ANTIALIASING_EDGE"] = "alpha_antialiasing_edge";
+	defaults.renames["ALPHA_TEXTURE_COORDINATE"] = "alpha_texture_coordinate";
+	defaults.renames["FRONT_FACING"] = "gl_FrontFacing";
+	defaults.renames["FRAGCOORD"] = "gl_FragCoord";
+	defaults.renames["SCREEN_UV"] = "screen_uv";
+	defaults.renames["TIME"] = "global_time";
+	defaults.renames["VIEW"] = "view_highp";
+	defaults.base_texture_binding_index = 1;
+	defaults.texture_layout_set = 3;
+	defaults.base_uniform_string = "material.";
+	defaults.base_varying_index = 15;
+	defaults.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
+	defaults.default_repeat = ShaderLanguage::REPEAT_ENABLE;
+	defaults.resolve_builtin_derivatives["VERTEX"] = Pair<String, String>("vertex_interp_ddx", "vertex_interp_ddy");
+	defaults.resolve_builtin_derivatives["UV"] = Pair<String, String>("uv_interp_ddx", "uv_interp_ddy");
+	defaults.resolve_builtin_derivatives["UV2"] = Pair<String, String>("uv2_interp_ddx", "uv2_interp_ddy");
+	defaults.resolve_builtin_derivatives["COLOR"] = Pair<String, String>("color_interp_ddx", "color_interp_ddy");
+	defaults.resolve_builtin_derivatives["VIEW"] = Pair<String, String>("view_ddx", "view_ddy");
+	defaults.resolve_mutable_builtin_derivatives["NORMAL"] = Pair<String, String>("normal_interp_ddx", "normal_interp_ddy");
+	defaults.resolve_renames["FRONT_FACING"] = "_ng_front_facing";
+	defaults.resolve_renames["FRAGCOORD"] = "_ng_fragcoord";
+	compiler.initialize(defaults);
+
+	const BaseMaterial3D::Transparency transparencies[] = {
+		BaseMaterial3D::TRANSPARENCY_DISABLED,
+		BaseMaterial3D::TRANSPARENCY_ALPHA,
+		BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR,
+		BaseMaterial3D::TRANSPARENCY_ALPHA_HASH,
+		BaseMaterial3D::TRANSPARENCY_ALPHA_DEPTH_PRE_PASS,
+	};
+	const BaseMaterial3D::CullMode culls[] = {
+		BaseMaterial3D::CULL_BACK,
+		BaseMaterial3D::CULL_FRONT,
+		BaseMaterial3D::CULL_DISABLED,
+	};
+	const BaseMaterial3D::AlphaAntiAliasing alpha_aas[] = {
+		BaseMaterial3D::ALPHA_ANTIALIASING_OFF,
+		BaseMaterial3D::ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE,
+		BaseMaterial3D::ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE_AND_TO_ONE,
+	};
+
+	for (BaseMaterial3D::Transparency transparency : transparencies) {
+		for (BaseMaterial3D::CullMode cull : culls) {
+			for (BaseMaterial3D::AlphaAntiAliasing alpha_aa : alpha_aas) {
+				Ref<StandardMaterial3D> mat;
+				mat.instantiate();
+				mat->set_transparency(transparency);
+				mat->set_cull_mode(cull);
+				mat->set_alpha_antialiasing(alpha_aa);
+
+				const String code = RenderingServer::get_singleton()->shader_get_code(mat->get_shader_rid());
+				REQUIRE_FALSE(code.is_empty());
+
+				bool uses_alpha = false;
+				bool uses_alpha_scissor = false;
+				bool uses_alpha_hash = false;
+				bool uses_alpha_aa = false;
+				bool uses_depth_prepass_alpha = false;
+				bool uses_discard = false;
+				int shader_cull = RSE::CULL_MODE_BACK;
+
+				HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniforms;
+				ShaderCompiler::IdentifierActions ia;
+				ia.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
+				ia.entry_point_stages["fragment"] = ShaderCompiler::STAGE_FRAGMENT;
+				ia.entry_point_stages["light"] = ShaderCompiler::STAGE_FRAGMENT;
+				ia.uniforms = &uniforms;
+				ia.usage_flag_pointers["ALPHA"] = &uses_alpha;
+				ia.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_scissor;
+				ia.usage_flag_pointers["ALPHA_HASH_SCALE"] = &uses_alpha_hash;
+				ia.usage_flag_pointers["ALPHA_ANTIALIASING_EDGE"] = &uses_alpha_aa;
+				ia.usage_flag_pointers["ALPHA_TEXTURE_COORDINATE"] = &uses_alpha_aa;
+				ia.usage_flag_pointers["DISCARD"] = &uses_discard;
+				ia.render_mode_flags["depth_prepass_alpha"] = &uses_depth_prepass_alpha;
+				ia.render_mode_flags["alpha_to_coverage"] = &uses_alpha_aa;
+				ia.render_mode_flags["alpha_to_coverage_and_one"] = &uses_alpha_aa;
+				ia.render_mode_values["cull_back"] = Pair<int *, int>(&shader_cull, RSE::CULL_MODE_BACK);
+				ia.render_mode_values["cull_front"] = Pair<int *, int>(&shader_cull, RSE::CULL_MODE_FRONT);
+				ia.render_mode_values["cull_disabled"] = Pair<int *, int>(&shader_cull, RSE::CULL_MODE_DISABLED);
+				ia.visibility_resolve = true;
+				ia.raster_target = true;
+
+				ShaderCompiler::GeneratedCode gen;
+				const Error err = compiler.compile(RSE::SHADER_SPATIAL, code, &ia, "base_material_matrix.gdshader", gen);
+				REQUIRE_EQ(err, OK);
+
+				NextGeoRasterFacts rfacts;
+				rfacts.alpha_scissor = uses_alpha_scissor;
+				rfacts.alpha_hash = uses_alpha_hash;
+				rfacts.discard = uses_discard;
+				rfacts.cull_mode = RSE::CullMode(shader_cull);
+				const uint32_t features = nextgeo_raster_features(rfacts);
+
+				const bool is_masked = (transparency == BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR || transparency == BaseMaterial3D::TRANSPARENCY_ALPHA_HASH);
+				const bool is_two_sided = (cull == BaseMaterial3D::CULL_FRONT || cull == BaseMaterial3D::CULL_DISABLED);
+				const bool is_alpha_fallback =
+						transparency == BaseMaterial3D::TRANSPARENCY_ALPHA ||
+						transparency == BaseMaterial3D::TRANSPARENCY_ALPHA_DEPTH_PRE_PASS ||
+						(is_masked && alpha_aa != BaseMaterial3D::ALPHA_ANTIALIASING_OFF);
+
+				uint32_t expected_features = 0u;
+				if (is_masked) {
+					expected_features |= VMS::RASTER_FEATURE_MASKED;
+				}
+				if (is_two_sided) {
+					expected_features |= VMS::RASTER_FEATURE_TWO_SIDED;
+				}
+				CHECK_EQ(features, expected_features);
+
+				// Check both visibility and VSM raster bin resolution.
+				const int32_t expected_bin = is_masked ? int32_t(VMS::RASTER_BIN_PROGRAMMABLE) : int32_t(VMS::RASTER_BIN_FIXED);
+				CHECK_EQ(VMS::resolve_raster_bin(features, VMS::RASTER_PASS_VISIBILITY), expected_bin);
+				CHECK_EQ(VMS::resolve_raster_bin(features, VMS::RASTER_PASS_VSM), expected_bin);
+				CHECK_EQ(nextgeo_raster_bin_can_demote_by_distance(features), is_masked);
+
+				// Check runtime routing with default #153 masked admission (admit_masked = true, admit_programmable = false).
+				NextGeoMaterialFallbackFacts ffacts;
+				const bool uses_alpha_clip = uses_alpha_scissor || uses_alpha_hash;
+				ffacts.transparent = (uses_alpha && !uses_alpha_clip) || uses_alpha_aa || uses_depth_prepass_alpha;
+				ffacts.masked = (features & VMS::RASTER_FEATURE_MASKED) != 0u;
+				ffacts.raster_rejects = nextgeo_raster_rejects(gen.raster_uses, features);
+				ffacts.admit_masked = true;
+				const NextGeoFallback expected_route = is_alpha_fallback ? NEXTGEO_FALLBACK_ALPHA : NEXTGEO_FALLBACK_NONE;
+				CHECK_EQ(nextgeo_material_fallback(ffacts), expected_route);
+			}
+		}
+	}
+}
+#endif // _3D_DISABLED

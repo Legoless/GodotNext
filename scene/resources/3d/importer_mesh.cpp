@@ -1646,11 +1646,24 @@ PackedInt32Array ImporterMesh::get_virtual_geometry_eligibility(bool p_skinned) 
 		}
 		const Ref<BaseMaterial3D> base = material;
 		if (base.is_valid()) {
+			// GodotNext: nextgeo_masked_two_sided (#153). Alpha scissor and alpha hash (without
+			// alpha-to-coverage) route through programmable raster bins; alpha blend, depth-prepass
+			// alpha, alpha-to-coverage, refraction, and depth-less modes stay on legacy ('alpha').
+			const BaseMaterial3D::Transparency tr = base->get_transparency();
+			const bool alpha_masked = (tr == BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR || tr == BaseMaterial3D::TRANSPARENCY_ALPHA_HASH) && base->get_alpha_antialiasing() == BaseMaterial3D::ALPHA_ANTIALIASING_OFF;
+			const bool alpha_blended = (tr != BaseMaterial3D::TRANSPARENCY_DISABLED && !alpha_masked) ||
+					base->get_blend_mode() != BaseMaterial3D::BLEND_MODE_MIX ||
+					base->get_feature(BaseMaterial3D::FEATURE_REFRACTION) ||
+					base->get_depth_draw_mode() == BaseMaterial3D::DEPTH_DRAW_DISABLED ||
+					base->get_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST) ||
+					base->get_depth_test() == BaseMaterial3D::DEPTH_TEST_INVERTED ||
+					base->is_proximity_fade_enabled() ||
+					base->get_distance_fade() == BaseMaterial3D::DISTANCE_FADE_PIXEL_ALPHA;
 			if (base->get_stencil_mode() != BaseMaterial3D::STENCIL_MODE_DISABLED) {
 				reasons.write[i] = NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY;
 			} else if (base->get_shading_mode() == BaseMaterial3D::SHADING_MODE_PER_VERTEX) {
 				reasons.write[i] = NEXTGEO_FALLBACK_VERTEX_LIGHTING;
-			} else if (base->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED || base->get_blend_mode() != BaseMaterial3D::BLEND_MODE_MIX || base->get_feature(BaseMaterial3D::FEATURE_REFRACTION)) {
+			} else if (alpha_blended) {
 				reasons.write[i] = NEXTGEO_FALLBACK_ALPHA;
 			} else {
 				reasons.write[i] = NEXTGEO_FALLBACK_NONE;

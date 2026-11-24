@@ -3,15 +3,21 @@
 // RasterBin in servers/rendering/storage/virtual_mesh_storage.h: change both in the same commit.
 // The VSM page raster (#217) shares it, so each raster feature adds its VSM entry in the same change.
 
-const uint NEXTGEO_RASTER_FEATURE_MASKED = 1u << 0u;
+const uint NEXTGEO_RASTER_FEATURE_MASKED = 1u << 0u; // #153: visibility + VSM depth-only coverage (alpha scissor, alpha hash, discard)
 const uint NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET = 1u << 1u;
 const uint NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET = 1u << 2u;
-const uint NEXTGEO_RASTER_FEATURE_TWO_SIDED = 1u << 3u;
+const uint NEXTGEO_RASTER_FEATURE_TWO_SIDED = 1u << 3u; // #153: visibility + VSM cull_disabled / cull_front (FIXED when opaque, programmable when combined)
 const uint NEXTGEO_RASTER_FEATURE_SKINNED = 1u << 4u;
 const uint NEXTGEO_RASTER_FEATURE_DISPLACED = 1u << 5u;
 const uint NEXTGEO_RASTER_FEATURE_SPLINE = 1u << 6u;
 const uint NEXTGEO_RASTER_FEATURE_VOXEL = 1u << 7u;
 const uint NEXTGEO_RASTER_FEATURE_ASSEMBLY = 1u << 8u;
+
+// GodotNext: nextgeo_masked_two_sided (#153). Pixel-programmable features demote to FIXED bin past
+// programmable_raster_distance unless paired with vertex-programmable features.
+const uint NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES = NEXTGEO_RASTER_FEATURE_MASKED | NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET;
+const uint NEXTGEO_RASTER_VERTEX_PROGRAMMABLE_FEATURES = NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET | NEXTGEO_RASTER_FEATURE_DISPLACED;
+const uint NEXTGEO_RASTER_PROGRAM_FEATURES = NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES | NEXTGEO_RASTER_VERTEX_PROGRAMMABLE_FEATURES;
 
 const uint NEXTGEO_RASTER_PASS_VISIBILITY = 0u;
 const uint NEXTGEO_RASTER_PASS_VSM = 1u;

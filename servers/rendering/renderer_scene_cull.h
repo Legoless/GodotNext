@@ -486,6 +486,8 @@ public:
 		uint32_t virtual_record = UINT32_MAX;
 		// GodotNext: nextgeo_displacement (#150). Last applied max displacement magnitude (meters) for AABB and cluster cull bound inflation.
 		float displacement_bound = 0.0f;
+		// GodotNext: nextgeo_masked_two_sided (#153). Per-instance programmable raster cutoff distance (meters; 0 = always programmable).
+		float programmable_raster_distance = 0.0f;
 
 		Transform3D transform;
 		bool teleported = false;
@@ -1193,6 +1195,8 @@ public:
 
 	virtual void instance_geometry_set_lightmap(RID p_instance, RID p_lightmap, const Rect2 &p_lightmap_uv_scale, int p_slice_index);
 	virtual void instance_geometry_set_lod_bias(RID p_instance, float p_lod_bias);
+	// GodotNext: nextgeo_masked_two_sided (#153).
+	virtual void instance_geometry_set_programmable_raster_distance(RID p_instance, float p_distance);
 
 	virtual void instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value);
 	virtual void instance_geometry_get_shader_parameter_list(RID p_instance, List<PropertyInfo> *p_parameters) const;

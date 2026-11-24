@@ -8,7 +8,7 @@ struct NextGeoInstanceRecord {
 	vec4 prev_transform[3]; // 48, 64, 80
 	vec4 world_aabb_min; // 96, w = max scale
 	vec4 world_aabb_max; // 112, w = lod_bias
-	vec4 prev_world_aabb_min; // 128
+	vec4 prev_world_aabb_min; // 128, w = programmable_raster_distance (#153; 0 = always programmable)
 	vec4 prev_world_aabb_max; // 144, w = displacement_bound (#150)
 	uint virtual_mesh; // 160
 	uint page_table_offset; // 164

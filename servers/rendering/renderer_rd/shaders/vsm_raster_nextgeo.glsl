@@ -113,7 +113,7 @@ void main() {
 	uint vert_count = (desc.z >> 8u) & 0xFFu;
 	uint tri_count = (desc.z >> 16u) & 0xFFu;
 	uint surface_id = desc.w & 0xFFFFu;
-	if (t >= tri_count || stride < 3u || vert_count == 0u || surface_id >= 32u || (record.pad0 & (1u << surface_id)) == 0u) {
+	if (t >= tri_count || stride < 3u || vert_count == 0u || surface_id >= 32u || (record.surface_mask & (1u << surface_id)) == 0u) {
 		collapse_triangle();
 		return;
 	}

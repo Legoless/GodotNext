@@ -417,6 +417,9 @@ public:
 		bool uses_blend_alpha = false;
 		bool nextgi_rt_opaque = false;
 		bool uses_alpha_clip = false;
+		// GodotNext: nextgeo_masked_two_sided (#153). Separate scissor and hash usage flags.
+		bool uses_alpha_scissor = false;
+		bool uses_alpha_hash = false;
 		bool uses_alpha_antialiasing = false;
 		bool uses_depth_prepass_alpha = false;
 		// GodotNext: avboit (#295). The shadow_to_opacity render mode: its alpha comes from lighting.
@@ -465,6 +468,9 @@ public:
 		bool has_displacement = false;
 		bool uses_displacement_time = false;
 		String displacement_code;
+		// GodotNext: nextgeo_masked_two_sided (#153). Fallback when masked programmable bins are admitted
+		// by default on the Nanite device tier (vertex offset still requires debug_programmable_raster).
+		RendererRD::NextGeoFallback nextgeo_masked_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		RendererRD::NextGeoFallback nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		bool raster_target_valid = false;
 		HashMap<String, String> raster_code;

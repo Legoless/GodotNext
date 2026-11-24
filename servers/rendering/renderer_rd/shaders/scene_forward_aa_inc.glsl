@@ -9,17 +9,11 @@ float hash_3d(vec3 p) {
 	return hash_2d(vec2(hash_2d(p.xy), p.z));
 }
 
-half compute_alpha_hash_threshold(vec3 pos, float hash_scale) {
-#ifdef MODE_VISIBILITY_RESOLVE
-	vec3 dx = vec3(0.0);
-	vec3 dy = vec3(0.0);
-#else
-	vec3 dx = dFdx(pos);
-	vec3 dy = dFdy(pos);
-#endif
-
-	float delta_max_sqr = max(length(dx), length(dy));
-	float pix_scale = 1.0 / (hash_scale * delta_max_sqr);
+// GodotNext: nextgeo_masked_two_sided (#153). Explicit-derivative form for visibility resolve and
+// programmable raster bins (HW/SW/VSM), where implicit dFdx/dFdy are unavailable.
+half compute_alpha_hash_threshold_grad(vec3 pos, vec3 dx, vec3 dy, float hash_scale) {
+	float delta_max_sqr = max(max(length(dx), length(dy)), 1e-6);
+	float pix_scale = 1.0 / max(hash_scale * delta_max_sqr, 1e-6);
 
 	vec2 pix_scales =
 			vec2(exp2(floor(log2(pix_scale))), exp2(ceil(log2(pix_scale))));
@@ -41,6 +35,17 @@ half compute_alpha_hash_threshold(vec3 pos, float hash_scale) {
 			(a_interp < (1.0 - min_lerp)) ? ((a_interp < min_lerp) ? cases.x : cases.y) : cases.z;
 
 	return half(clamp(alpha_hash_threshold, 0.00001, 1.0));
+}
+
+half compute_alpha_hash_threshold(vec3 pos, float hash_scale) {
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec3 dx = vec3(0.0);
+	vec3 dy = vec3(0.0);
+#else
+	vec3 dx = dFdx(pos);
+	vec3 dy = dFdy(pos);
+#endif
+	return compute_alpha_hash_threshold_grad(pos, dx, dy, hash_scale);
 }
 
 #endif // ALPHA_HASH_USED

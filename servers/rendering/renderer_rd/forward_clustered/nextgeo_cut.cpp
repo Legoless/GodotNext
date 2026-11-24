@@ -61,8 +61,11 @@ struct CutParams {
 	// GodotNext: nextgeo_sw_raster (#162). The triangle-size switch; zero for shadow views.
 	float raster_forward[4]; // xyz = camera forward axis, w = z_near.
 	float raster_params[4]; // x = T px, y = px scale, z = 1 for an orthographic view.
+	// GodotNext: nextgeo_masked_two_sided (#153). xy = 64-bit mask of pixel-programmable bins (1..64)
+	// that demote to FIXED past GeometryInstance3D.programmable_raster_distance.
+	uint32_t raster_bin_demote_mask[4];
 };
-static_assert(sizeof(CutParams) == 304, "CutParams must match NextGeoCullParamsData (304 bytes).");
+static_assert(sizeof(CutParams) == 320, "CutParams must match NextGeoCullParamsData (320 bytes).");
 
 struct CutCounters {
 	uint32_t phase1;
@@ -88,8 +91,11 @@ struct CutCounters {
 	// GodotNext: nextgeo_raster_bins (#155). Clusters of programmable bins per phase.
 	uint32_t raster_bin_sw[2];
 	uint32_t raster_bin_hw[2];
+	// GodotNext: nextgeo_masked_two_sided (#153). Clusters demoted to FIXED past programmable_raster_distance per phase.
+	uint32_t raster_distance_fixed[2];
+	uint32_t pad_end[2];
 };
-static_assert(sizeof(CutCounters) == 160, "CutCounters must match NextGeoCountersData (160 bytes).");
+static_assert(sizeof(CutCounters) == 176, "CutCounters must match NextGeoCountersData (176 bytes).");
 static_assert(offsetof(CutCounters, raster_sw) == 31 * sizeof(uint32_t), "sw_raster.glsl reads raster_sw at word 31.");
 static_assert(offsetof(CutCounters, raster_sw_writes) == 35 * sizeof(uint32_t), "sw_raster.glsl adds raster_sw_writes at word 35.");
 
@@ -1424,8 +1430,16 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 	info["hw_clusters_phase2"] = int64_t(stats->raster_hw[1]);
 	info["sw_raster_writes"] = int64_t(stats->raster_sw_writes);
 	// GodotNext: nextgeo_raster_bins (#155). Clusters of the programmable bins (0 without any).
-	info["programmable_sw_clusters"] = int64_t(stats->raster_bin_sw[0]) + int64_t(stats->raster_bin_sw[1]);
-	info["programmable_hw_clusters"] = int64_t(stats->raster_bin_hw[0]) + int64_t(stats->raster_bin_hw[1]);
+	const int64_t fixed_sw = int64_t(stats->raster_sw[0]) + int64_t(stats->raster_sw[1]);
+	const int64_t fixed_hw = int64_t(stats->raster_hw[0]) + int64_t(stats->raster_hw[1]);
+	const int64_t prog_sw = int64_t(stats->raster_bin_sw[0]) + int64_t(stats->raster_bin_sw[1]);
+	const int64_t prog_hw = int64_t(stats->raster_bin_hw[0]) + int64_t(stats->raster_bin_hw[1]);
+	info["programmable_sw_clusters"] = prog_sw;
+	info["programmable_hw_clusters"] = prog_hw;
+	// GodotNext: nextgeo_masked_two_sided (#153). Clusters demoted to FIXED past programmable_raster_distance.
+	info["fixed_clusters"] = fixed_sw + fixed_hw;
+	info["programmable_clusters"] = prog_sw + prog_hw;
+	info["programmable_distance_fixed_clusters"] = int64_t(stats->raster_distance_fixed[0]) + int64_t(stats->raster_distance_fixed[1]);
 	info["hiz_tested"] = int64_t(stats->pad[0]);
 	info["hiz_hit"] = int64_t(stats->pad[1]);
 	info["hiz_behind"] = int64_t(stats->cut_lo);
@@ -1694,6 +1708,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	// GodotNext: nextgeo_sw_raster (#162). The triangle-size switch (N2).
 	memset(cut.raster_forward, 0, sizeof(cut.raster_forward));
 	memset(cut.raster_params, 0, sizeof(cut.raster_params));
+	memset(cut.raster_bin_demote_mask, 0, sizeof(cut.raster_bin_demote_mask));
 	if (hybrid) {
 		const Vector3 forward = p_raster->camera_forward.normalized();
 		cut.raster_forward[0] = forward.x;
@@ -1706,6 +1721,13 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_HYBRID_RASTER;
 		if (raster_bins_active) {
 			cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_PROGRAMMABLE_BINS;
+			// GodotNext: nextgeo_masked_two_sided (#153). Mark pixel-programmable bins demotable past programmable_raster_distance.
+			for (const NextGeoRasterBinProgram &prog : p_raster->raster_bin_programs) {
+				if (prog.bin > 0u && prog.bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT && RendererRD::nextgeo_raster_bin_can_demote_by_distance(prog.features)) {
+					const uint32_t bit = prog.bin - 1u;
+					cut.raster_bin_demote_mask[bit >> 5u] |= 1u << (bit & 31u);
+				}
+			}
 		}
 	}
 	rd->buffer_update(params, 0, sizeof(CutParams), &cut);
@@ -3157,6 +3179,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			stats["static_clusters"] = int64_t(dc.static_clusters + lc.static_clusters);
 			stats["dynamic_clusters"] = int64_t(dc.dynamic_clusters + lc.dynamic_clusters);
 			stats["always_layer0_clusters"] = int64_t(dc.always_layer0_clusters + lc.always_layer0_clusters);
+			// GodotNext: nextgeo_masked_two_sided (#153).
+			stats["distance_fixed_clusters"] = int64_t(dc.distance_fixed_clusters + lc.distance_fixed_clusters);
 		}
 		*r_stats = stats;
 	}

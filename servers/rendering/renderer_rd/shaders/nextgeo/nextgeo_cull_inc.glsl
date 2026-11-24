@@ -46,6 +46,7 @@ struct NextGeoCullParamsData {
 	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins)
 	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
 	vec4 raster_params; // #162: x = T px, y = px scale, z = 1 for an orthographic view
+	uvec4 raster_bin_demote_mask; // #153: bits 0..63 mark programmable bins 1..64 eligible for distance demotion to FIXED
 };
 
 struct NextGeoCountersData {
@@ -69,6 +70,8 @@ struct NextGeoCountersData {
 	uint raster_sw_writes; // #162: samples the software rasterizer wrote (debug stats only)
 	uint raster_bin_sw[2]; // #155: software clusters of programmable bins per phase
 	uint raster_bin_hw[2]; // #155: hardware clusters of programmable bins per phase
+	uint raster_distance_fixed[2]; // #153: pixel-programmable clusters demoted to FIXED past programmable_raster_distance
+	uint pad_end[2];
 };
 
 #ifdef SHADOW_VIEW
@@ -86,6 +89,7 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly CullParams {
 	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins)
 	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
 	vec4 raster_params; // #162: x = T px, y = px scale, z = 1 for an orthographic view
+	uvec4 raster_bin_demote_mask; // #153: bits 0..63 mark programmable bins 1..64 eligible for distance demotion to FIXED
 }
 cull;
 #endif
@@ -122,6 +126,8 @@ layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint raster_sw_writes; // #162: samples the software rasterizer wrote (debug stats only)
 	uint raster_bin_sw[2]; // #155: software clusters of programmable bins per phase
 	uint raster_bin_hw[2]; // #155: hardware clusters of programmable bins per phase
+	uint raster_distance_fixed[2]; // #153: pixel-programmable clusters demoted to FIXED past programmable_raster_distance
+	uint pad_end[2];
 }
 counters;
 #endif

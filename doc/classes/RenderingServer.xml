@@ -2014,6 +2014,14 @@
 				Sets a material that will override the material for all surfaces on the mesh associated with this instance. Equivalent to [member GeometryInstance3D.material_override].
 			</description>
 		</method>
+		<method name="instance_geometry_set_programmable_raster_distance">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="distance" type="float" />
+			<description>
+				Sets the distance from the camera in meters past which NextGeo pixel-programmable raster bins (such as masked materials without vertex offset or displacement) switch to the fixed-function raster bin for the given geometry instance. A value of [code]0.0[/code] keeps programmable rasterization enabled at all distances. Equivalent to [member GeometryInstance3D.programmable_raster_distance].
+			</description>
+		</method>
 		<method name="instance_geometry_set_shader_parameter">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />

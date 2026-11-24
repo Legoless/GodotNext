@@ -849,6 +849,8 @@ public:
 	virtual void instance_geometry_set_far_field(RID p_instance, RSE::FarFieldMode p_mode) = 0;
 	virtual void instance_geometry_set_lightmap(RID p_instance, RID p_lightmap, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice) = 0;
 	virtual void instance_geometry_set_lod_bias(RID p_instance, float p_lod_bias) = 0;
+	// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1).
+	virtual void instance_geometry_set_programmable_raster_distance(RID p_instance, float p_distance) = 0;
 	virtual void instance_geometry_set_transparency(RID p_instance, float p_transparency) = 0;
 
 	virtual void instance_geometry_set_shader_parameter(RID p_instance, const StringName &, const Variant &p_value) = 0;

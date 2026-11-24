@@ -108,7 +108,7 @@ layout(set = 0, binding = 5, std430) buffer restrict VSMCounters {
 	uint static_clusters;
 	uint dynamic_clusters;
 	uint always_layer0_clusters;
-	uint pad0;
+	uint distance_fixed_clusters; // #153: pixel-programmable clusters demoted to FIXED past programmable_raster_distance
 	uint pad1;
 }
 vsm_counters;
@@ -778,10 +778,24 @@ void main() {
 		if (prog_enabled) {
 			bin = vsm_raster_bin_of(record, surface_id);
 		}
-		if (bin == NEXTGEO_RASTER_BIN_FIXED && (record.pad0 & (1u << surface_id)) == 0u) {
+		uint bin_features = bin < 68u ? vsm_params.bin_features[bin] : 0u;
+		bool dist_demoted = false;
+		// GodotNext: nextgeo_masked_two_sided (#153). Past programmable_raster_distance, pixel-programmable
+		// bins (without vertex offset / displacement) demote to the FIXED shadow rasterizer.
+		if (bin != NEXTGEO_RASTER_BIN_FIXED &&
+				(bin_features & NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u &&
+				(bin_features & NEXTGEO_RASTER_VERTEX_PROGRAMMABLE_FEATURES) == 0u &&
+				record.prev_world_aabb_min.w > 0.0) {
+			vec3 closest = clamp(vsm_params.camera_position.xyz, record.world_aabb_min.xyz, record.world_aabb_max.xyz);
+			if (length(vsm_params.camera_position.xyz - closest) > record.prev_world_aabb_min.w) {
+				bin = NEXTGEO_RASTER_BIN_FIXED;
+				bin_features = 0u;
+				dist_demoted = true;
+			}
+		}
+		if (bin == NEXTGEO_RASTER_BIN_FIXED && !dist_demoted && (record.pad0 & (1u << surface_id)) == 0u) {
 			continue;
 		}
-		uint bin_features = bin < 68u ? vsm_params.bin_features[bin] : 0u;
 		bool has_wpo = (bin_features & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u;
 		bool has_dynamic_bin = has_wpo || ((bin_features & NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET) != 0u);
 		uint layer = vsm_instance_layer(record, vsm_params.cull_flags, has_dynamic_bin);
@@ -833,6 +847,9 @@ void main() {
 		}
 
 		if (bin == NEXTGEO_RASTER_BIN_FIXED) {
+			if (dist_demoted) {
+				vsm_ng_sink(atomicAdd(vsm_counters.distance_fixed_clusters, 1u));
+			}
 			if (software) {
 				uint s = atomicAdd(vsm_counters.sw_clusters, 1u);
 				if (s < vsm_params.cluster_capacity) {
@@ -1454,6 +1471,19 @@ void main() {
 			uint bin = NEXTGEO_RASTER_BIN_FIXED;
 			if ((cull.cull.w & NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS) != 0u) {
 				bin = raster_bin_of(record, mesh, global_cluster);
+				// GodotNext: nextgeo_masked_two_sided (#153). Past programmable_raster_distance, pixel-programmable
+				// bins demote to the FIXED bin so distant masked clusters skip per-pixel programmable raster.
+				if (bin > NEXTGEO_RASTER_BIN_FIXED && bin < NEXTGEO_RASTER_BIN_LIMIT && record.prev_world_aabb_min.w > 0.0) {
+					uint demote_bit = bin - 1u;
+					uint demote_word = demote_bit < 32u ? cull.raster_bin_demote_mask.x : cull.raster_bin_demote_mask.y;
+					if ((demote_word & (1u << (demote_bit & 31u))) != 0u) {
+						vec3 closest = clamp(cull.camera.xyz, record.world_aabb_min.xyz, record.world_aabb_max.xyz);
+						if (length(cull.camera.xyz - closest) > record.prev_world_aabb_min.w) {
+							bin = NEXTGEO_RASTER_BIN_FIXED;
+							atomicAdd(counters.raster_distance_fixed[params.phase], 1u);
+						}
+					}
+				}
 			}
 			if (bin == NEXTGEO_RASTER_BIN_FIXED) {
 				raster_route(params.list_base + slot, software);

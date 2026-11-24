@@ -3217,7 +3217,15 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 							res.val = "return;";
 						}
 					} else if (cfnode->flow_op == SL::FLOW_OP_DISCARD) {
-						res.val = raster_discard ? "_NG_RASTER_DISCARD;" : "discard;";
+						if (raster_discard) {
+							res.val = "_NG_RASTER_DISCARD;";
+						} else if (is_entry_fragment) {
+							// GodotNext: nextgeo_masked_two_sided (#153). Instances past programmable_raster_distance
+							// rasterized in the FIXED bin skip fragment discard during visibility resolve.
+							res.val = "if (!_ng_skip_masked_discard) { discard; }";
+						} else {
+							res.val = "discard;";
+						}
 					} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
 						res.val = "continue;";
 					} else if (cfnode->flow_op == SL::FLOW_OP_BREAK) {

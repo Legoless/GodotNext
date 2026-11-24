@@ -84,6 +84,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_point_size = false;
 	uses_alpha = false;
 	uses_alpha_clip = false;
+	uses_alpha_scissor = false;
+	uses_alpha_hash = false;
 	uses_alpha_antialiasing = false;
 	uses_blend_alpha = false;
 	uses_depth_prepass_alpha = false;
@@ -120,6 +122,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	has_displacement = false;
 	uses_displacement_time = false;
 	displacement_code = String();
+	nextgeo_masked_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	nextgeo_raster_reject_logged = false;
 
@@ -164,8 +167,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["skip_vertex_transform"] = &uses_skip_vertex_transform;
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
-	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;
-	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &uses_alpha_clip;
+	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_scissor;
+	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &uses_alpha_hash;
 	actions.usage_flag_pointers["ALPHA_ANTIALIASING_EDGE"] = &uses_alpha_antialiasing;
 	actions.usage_flag_pointers["ALPHA_TEXTURE_COORDINATE"] = &uses_alpha_antialiasing;
 	actions.render_mode_flags["depth_prepass_alpha"] = &uses_depth_prepass_alpha;
@@ -235,6 +238,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		_free_resolve_compute(); // GodotNext: nextgeo_shading_bins (#158)
 		raster_features = 0;
 		raster_rejects = 0;
+		nextgeo_masked_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		if (version.is_valid()) {
 			SceneShaderForwardClustered::singleton->shader.version_free(version);
@@ -242,6 +246,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		}
 		ERR_FAIL_MSG("Shader compilation failed.");
 	}
+
+	uses_alpha_clip = uses_alpha_scissor || uses_alpha_hash;
 
 	if (version.is_null()) {
 		version = SceneShaderForwardClustered::singleton->shader.version_create(false);
@@ -359,7 +365,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	// admits them (#153 and #164 turn them on).
 	const bool force_vertex_shading = GLOBAL_GET_CACHED(bool, "rendering/shading/overrides/force_vertex_shading");
 	RendererRD::NextGeoRasterFacts raster_facts;
-	raster_facts.alpha_scissor = uses_alpha_clip;
+	raster_facts.alpha_scissor = uses_alpha_scissor;
+	raster_facts.alpha_hash = uses_alpha_hash;
 	raster_facts.discard = uses_discard;
 	raster_facts.writes_vertex = uses_vertex;
 	raster_facts.cull_mode = cull_mode;
@@ -380,6 +387,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	fallback_facts.unsupported_derivative = uses_unsupported_derivative;
 	fallback_facts.raster_rejects = raster_rejects;
 	nextgeo_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
+	// GodotNext: nextgeo_masked_two_sided (#153). Default routing on the Nanite tier admits masked materials.
+	fallback_facts.admit_masked = true;
+	nextgeo_masked_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
 	fallback_facts.admit_programmable = true;
 	nextgeo_programmable_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
 

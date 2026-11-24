@@ -150,6 +150,8 @@ private:
 	float transparency = 0.0f;
 
 	float lod_bias = 1.0;
+	// GodotNext: nextgeo_masked_two_sided (#153). 0 = always programmable.
+	float programmable_raster_distance = 0.0f;
 
 	mutable HashMap<StringName, Variant> instance_shader_parameters;
 	mutable HashMap<StringName, StringName> instance_shader_parameter_property_remap;
@@ -207,6 +209,10 @@ public:
 
 	void set_extra_cull_margin(float p_margin);
 	float get_extra_cull_margin() const;
+
+	// GodotNext: nextgeo_masked_two_sided (#153).
+	void set_programmable_raster_distance(float p_distance);
+	float get_programmable_raster_distance() const;
 
 	void set_lod_bias(float p_bias);
 	float get_lod_bias() const;

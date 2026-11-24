@@ -177,15 +177,15 @@ void light() {
 }
 
 var _phases: Array[Dictionary] = [
-	{ "name": "legacy", "bins": false, "t": 8.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
-	{ "name": "bins_hw", "bins": true, "t": 0.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
-	{ "name": "bins_sw", "bins": true, "t": 32.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
-	{ "name": "bins_sw_buffer", "bins": true, "t": 32.0, "buffer": true, "vis_only": false, "backface": false, "fill_64": false },
-	{ "name": "bins_vis_only", "bins": true, "t": 32.0, "buffer": false, "vis_only": true, "backface": false, "fill_64": false },
-	{ "name": "bins_backface_hw", "bins": true, "t": 0.0, "buffer": false, "vis_only": false, "backface": true, "fill_64": false },
-	{ "name": "bins_backface_sw", "bins": true, "t": 32.0, "buffer": false, "vis_only": false, "backface": true, "fill_64": false },
-	{ "name": "bins_64", "bins": true, "t": 32.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": true },
-	{ "name": "legacy_again", "bins": false, "t": 8.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "legacy", "bins": false, "raster_mode": 1, "t": 8.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_hw", "bins": true, "raster_mode": 0, "t": 0.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_sw", "bins": true, "raster_mode": 0, "t": 32.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_sw_buffer", "bins": true, "raster_mode": 0, "t": 32.0, "buffer": true, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_vis_only", "bins": true, "raster_mode": 0, "t": 32.0, "buffer": false, "vis_only": true, "backface": false, "fill_64": false },
+	{ "name": "bins_backface_hw", "bins": true, "raster_mode": 0, "t": 0.0, "buffer": false, "vis_only": false, "backface": true, "fill_64": false },
+	{ "name": "bins_backface_sw", "bins": true, "raster_mode": 0, "t": 32.0, "buffer": false, "vis_only": false, "backface": true, "fill_64": false },
+	{ "name": "bins_64", "bins": true, "raster_mode": 0, "t": 32.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": true },
+	{ "name": "legacy_again", "bins": false, "raster_mode": 1, "t": 8.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
 ]
 
 var _probe: CompositorEffect
@@ -387,6 +387,7 @@ func _spawn_extra_bins() -> void:
 
 func _apply_phase() -> void:
 	var phase: Dictionary = _phases[_phase_idx]
+	ProjectSettings.set_setting("rendering/nextgeo/raster_mode", int(phase["raster_mode"]))
 	ProjectSettings.set_setting("rendering/nextgeo/debug_programmable_raster", bool(phase["bins"]))
 	ProjectSettings.set_setting("rendering/nextgeo/sw_raster_max_edge_px", float(phase["t"]))
 	ProjectSettings.set_setting("rendering/nextgeo/debug_vis64_buffer", bool(phase["buffer"]))
@@ -554,9 +555,11 @@ func _check_routes() -> void:
 	for phase in _phases:
 		var phase_name: String = phase["name"]
 		var routes: Dictionary = _routes.get(phase_name, {})
-		var admitted := bool(phase["bins"]) and _expect_bins
+		var debug_admitted := bool(phase["bins"]) and _expect_bins
 		for instance: MeshInstance3D in _programmable:
 			var got: Array = routes.get(instance.name, ["", ""])
+			# #153 admits masked surfaces by default on the Nanite tier; VertexOffset stays behind debug_programmable_raster.
+			var admitted := debug_admitted if instance.name == "VertexOffset" else _expect_bins
 			var expected_route := "virtual" if admitted else "legacy"
 			var expected_reason := "NONE"
 			if not admitted:

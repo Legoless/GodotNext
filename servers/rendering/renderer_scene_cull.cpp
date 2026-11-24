@@ -1727,6 +1727,23 @@ void RendererSceneCull::instance_geometry_set_lod_bias(RID p_instance, float p_l
 	}
 }
 
+// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1).
+void RendererSceneCull::instance_geometry_set_programmable_raster_distance(RID p_instance, float p_distance) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+
+	const float dist = (!Math::is_finite(p_distance) || p_distance < 0.0f) ? 0.0f : p_distance;
+	if (instance->programmable_raster_distance == dist) {
+		return;
+	}
+	instance->programmable_raster_distance = dist;
+	if (RSG::virtual_mesh_storage != nullptr && instance->virtual_record != UINT32_MAX) {
+		RSG::virtual_mesh_storage->instance_record_set_programmable_raster_distance(instance->virtual_record, dist);
+	}
+	// Cached VSM pages covering this instance need to re-rasterize under the new cutoff.
+	_vsm_sync_instance(instance, instance->scenario, false, true);
+}
+
 void RendererSceneCull::instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value) {
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);
@@ -1851,6 +1868,8 @@ void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 	_instance_record_update_state(p_instance);
 	// GodotNext: nextgeo_displacement (#150). Push per-instance displacement bound before transform upload.
 	RSG::virtual_mesh_storage->instance_record_set_displacement_bound(p_instance->virtual_record, p_instance->displacement_bound);
+	// GodotNext: nextgeo_masked_two_sided (#153). Push per-instance programmable raster cutoff distance.
+	RSG::virtual_mesh_storage->instance_record_set_programmable_raster_distance(p_instance->virtual_record, p_instance->programmable_raster_distance);
 	const AABB world = p_instance->transformed_aabb.has_surface() ? p_instance->transformed_aabb : p_instance->transform.xform(p_instance->aabb);
 	_instance_record_set_transform(p_instance, p_instance->transform, world, p_instance->visible);
 }

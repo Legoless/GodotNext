@@ -105,10 +105,47 @@ TEST_CASE("[NextGeo][Import] Eligibility reasons match the fallback codes") {
 	CHECK(reasons.size() == 1);
 	CHECK(reasons[0] == NEXTGEO_FALLBACK_NONE);
 
-	Ref<StandardMaterial3D> alpha = standard_material();
-	alpha->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
-	mesh = grid_mesh(1, "alpha", alpha);
+	// GodotNext: nextgeo_masked_two_sided (#153). Alpha scissor and alpha hash (without alpha-to-coverage)
+	// are eligible for virtualized masked raster bins; alpha blend, depth pre-pass alpha, and alpha-to-coverage stay legacy.
+	Ref<StandardMaterial3D> alpha_blend = standard_material();
+	alpha_blend->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+	mesh = grid_mesh(1, "alpha_blend", alpha_blend);
 	CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_ALPHA);
+
+	Ref<StandardMaterial3D> alpha_depth_prepass = standard_material();
+	alpha_depth_prepass->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_DEPTH_PRE_PASS);
+	mesh = grid_mesh(1, "alpha_depth_prepass", alpha_depth_prepass);
+	CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_ALPHA);
+
+	Ref<StandardMaterial3D> alpha_scissor = standard_material();
+	alpha_scissor->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+	mesh = grid_mesh(1, "alpha_scissor", alpha_scissor);
+	CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_NONE);
+
+	Ref<StandardMaterial3D> alpha_hash = standard_material();
+	alpha_hash->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_HASH);
+	mesh = grid_mesh(1, "alpha_hash", alpha_hash);
+	CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_NONE);
+
+	Ref<StandardMaterial3D> alpha_scissor_a2c = standard_material();
+	alpha_scissor_a2c->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+	alpha_scissor_a2c->set_alpha_antialiasing(BaseMaterial3D::ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE);
+	mesh = grid_mesh(1, "alpha_scissor_a2c", alpha_scissor_a2c);
+	CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_ALPHA);
+
+	Ref<StandardMaterial3D> alpha_hash_a2c1 = standard_material();
+	alpha_hash_a2c1->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_HASH);
+	alpha_hash_a2c1->set_alpha_antialiasing(BaseMaterial3D::ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE_AND_TO_ONE);
+	mesh = grid_mesh(1, "alpha_hash_a2c1", alpha_hash_a2c1);
+	CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_ALPHA);
+
+	for (BaseMaterial3D::CullMode cull : { BaseMaterial3D::CULL_BACK, BaseMaterial3D::CULL_FRONT, BaseMaterial3D::CULL_DISABLED }) {
+		Ref<StandardMaterial3D> mat = standard_material();
+		mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+		mat->set_cull_mode(cull);
+		mesh = grid_mesh(1, "masked_cull", mat);
+		CHECK(mesh->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_NONE);
+	}
 
 	Ref<StandardMaterial3D> blended = standard_material();
 	blended->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);

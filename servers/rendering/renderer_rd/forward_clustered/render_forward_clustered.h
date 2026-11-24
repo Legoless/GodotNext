@@ -110,7 +110,6 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	uint64_t nextgeo_raster_bins_used = 0;
 	bool nextgeo_programmable_view_active = false;
 	bool nextgeo_raster_bins_exhausted_warned = false;
-	bool _nextgeo_programmable_raster_admitted();
 	bool _nextgeo_view_runs_hybrid_raster();
 
 	enum {

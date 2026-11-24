@@ -6227,6 +6227,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							}
 							NextGeoRasterBinProgram program;
 							program.bin = bin;
+							// GodotNext: nextgeo_masked_two_sided (#153). Pass bin features for programmable_raster_distance demotion.
+							program.features = owner.material->get_raster_features();
 							program.sw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(false, buffer);
 							program.hw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(true, buffer);
 							Vector<RD::Uniform> material_uniforms;
@@ -9564,13 +9566,21 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	if (material_displaced && material_raster_rejects != 0u && route_facts.material_fallback == RendererRD::NEXTGEO_FALLBACK_NONE) {
 		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE;
 	}
-	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). rendering/nextgeo/debug_programmable_raster admits
-	// a masked, vertex-offset, or displaced material into a programmable raster bin on the Nanite device tier; by
-	// default these keep their #80 reasons until #153, #163 and #164 turn the features on.
+	// GodotNext: nextgeo_masked_two_sided (#153) & nextgeo_raster_bins (#155, plan §21.4 N3).
+	// Masked surfaces (alpha scissor, alpha hash, fragment discard) route into programmable raster bins
+	// by default on the Nanite device tier. Vertex offset (#164) and displacement (#163) remain behind
+	// rendering/nextgeo/debug_programmable_raster until their issues ship.
 	bool admit_programmable = false;
-	const bool wants_programmable_bin = (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE) || material_displaced;
-	if (wants_programmable_bin && material_raster_rejects == 0u && p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
-			p_material->shader_data->has_raster_target() && route_facts.mesh_has_virtual_geometry && _nextgeo_programmable_raster_admitted() && p_material->shader_data->ensure_raster_target()) {
+	const bool masked_admitted = (material_raster_features & RendererVirtualMeshStorage::RASTER_FEATURE_MASKED) != 0u &&
+			p_material->shader_data->nextgeo_masked_fallback == RendererRD::NEXTGEO_FALLBACK_NONE;
+	const bool wants_debug_programmable = (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE) || material_displaced;
+	const bool debug_admitted = wants_debug_programmable &&
+			p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
+			bool(GLOBAL_GET("rendering/nextgeo/debug_programmable_raster"));
+	if ((masked_admitted || debug_admitted) && material_raster_rejects == 0u &&
+			p_material->shader_data->has_raster_target() && route_facts.mesh_has_virtual_geometry &&
+			RSG::virtual_mesh_storage != nullptr && nextgeo_cut.is_hybrid_raster_available() &&
+			p_material->shader_data->ensure_raster_target()) {
 		admit_programmable = true;
 		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	}
@@ -10418,12 +10428,6 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_lightmap_capt
 		}
 	}
 	_mark_dirty();
-}
-
-// GodotNext: nextgeo_raster_bins (#155). The setting is read first, so a project that never turns it on
-// never builds NextGeo's cut resources from here.
-bool RenderForwardClustered::_nextgeo_programmable_raster_admitted() {
-	return bool(GLOBAL_GET("rendering/nextgeo/debug_programmable_raster")) && RSG::virtual_mesh_storage != nullptr && nextgeo_cut.is_hybrid_raster_available();
 }
 
 bool RenderForwardClustered::_nextgeo_view_runs_hybrid_raster() {

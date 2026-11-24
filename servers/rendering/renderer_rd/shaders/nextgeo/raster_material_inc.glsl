@@ -965,8 +965,12 @@ void _ng_raster_fragment(in SceneData scene_data) {
 #endif
 
 #ifdef ALPHA_HASH_USED
-	vec3 object_pos = (inverse(read_model_matrix) * inv_view_matrix * vec4(vertex, 1.0)).xyz;
-	if (alpha < compute_alpha_hash_threshold(object_pos, alpha_hash_scale)) {
+	mat4 _ng_inv_model = inverse(read_model_matrix);
+	vec3 object_pos = (_ng_inv_model * inv_view_matrix * vec4(vertex, 1.0)).xyz;
+	mat3 _ng_view_to_object = mat3(_ng_inv_model) * mat3(inv_view_matrix);
+	vec3 _ng_object_pos_ddx = _ng_view_to_object * vertex_interp_ddx;
+	vec3 _ng_object_pos_ddy = _ng_view_to_object * vertex_interp_ddy;
+	if (alpha < compute_alpha_hash_threshold_grad(object_pos, _ng_object_pos_ddx, _ng_object_pos_ddy, alpha_hash_scale)) {
 		_ng_raster_covered = false;
 		return;
 	}

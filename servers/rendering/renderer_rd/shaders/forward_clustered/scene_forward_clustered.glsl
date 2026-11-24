@@ -1091,6 +1091,7 @@ vec4 _ng_fragcoord = vec4(0.0, 0.0, 0.0, 1.0);
 vec4 _ng_fragcoord_ddx = vec4(1.0, 0.0, 0.0, 0.0);
 vec4 _ng_fragcoord_ddy = vec4(0.0, 1.0, 0.0, 0.0);
 bool _ng_front_facing = true;
+bool _ng_skip_masked_discard = false;
 uint instance_index_interp = 0u;
 
 int _ng_vertex_id = 0;
@@ -1877,6 +1878,10 @@ void fragment_shader(in SceneData scene_data) {
 	} else {
 		alpha = 1.0;
 	}
+#elif defined(MODE_VISIBILITY_RESOLVE)
+	if (!_ng_skip_masked_discard && alpha < alpha_scissor_threshold) {
+		discard;
+	}
 #else
 	if (alpha < alpha_scissor_threshold) {
 		discard;
@@ -1942,12 +1947,22 @@ void fragment_shader(in SceneData scene_data) {
 
 // alpha hash can be used in unison with alpha antialiasing
 #ifdef ALPHA_HASH_USED
-	vec3 object_pos = (inverse(read_model_matrix) * inv_view_matrix * vec4(vertex, 1.0)).xyz;
+	mat4 _ng_inv_model = inverse(read_model_matrix);
+	vec3 object_pos = (_ng_inv_model * inv_view_matrix * vec4(vertex, 1.0)).xyz;
 #ifdef MODE_RENDER_MATERIAL
 	if (alpha < compute_alpha_hash_threshold(object_pos, alpha_hash_scale)) {
 		alpha = 0.0;
 	} else {
 		alpha = 1.0;
+	}
+#elif defined(MODE_VISIBILITY_RESOLVE)
+	if (!_ng_skip_masked_discard) {
+		mat3 _ng_view_to_object = mat3(_ng_inv_model) * mat3(inv_view_matrix);
+		vec3 _ng_object_pos_ddx = _ng_view_to_object * vertex_interp_ddx;
+		vec3 _ng_object_pos_ddy = _ng_view_to_object * vertex_interp_ddy;
+		if (alpha < compute_alpha_hash_threshold_grad(object_pos, _ng_object_pos_ddx, _ng_object_pos_ddy, alpha_hash_scale)) {
+			discard;
+		}
 	}
 #else
 	if (alpha < compute_alpha_hash_threshold(object_pos, alpha_hash_scale)) {
@@ -4119,6 +4134,19 @@ void main() {
 
 	instance_index_interp = _ng_entry.x;
 	_ng_instance_id = int(_ng_entry.x);
+	// GodotNext: nextgeo_masked_two_sided (#153). Past programmable_raster_distance, masked clusters
+	// were demoted to the FIXED raster bin; skip masked discards in resolve so distant surfaces stay solid.
+	_ng_skip_masked_discard = false;
+	if (_ng_record.prev_world_aabb_min.w > 0.0) {
+		vec3 _ng_cam_pos = vec3(
+				scene_data_block.data.inv_view_matrix[0].w,
+				scene_data_block.data.inv_view_matrix[1].w,
+				scene_data_block.data.inv_view_matrix[2].w);
+		vec3 _ng_closest = clamp(_ng_cam_pos, _ng_record.world_aabb_min.xyz, _ng_record.world_aabb_max.xyz);
+		if (length(_ng_cam_pos - _ng_closest) > _ng_record.prev_world_aabb_min.w) {
+			_ng_skip_masked_discard = true;
+		}
+	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
 #ifdef MOTION_VECTORS
 	mat3x4 _ng_prev_xform = mat3x4(_ng_record.prev_transform[0], _ng_record.prev_transform[1], _ng_record.prev_transform[2]);
@@ -4240,40 +4268,33 @@ void main() {
 		}
 	}
 
-	vec2 _ng_ndc0 = _ng_clip_c[0].xy / _ng_clip_c[0].w;
-	vec2 _ng_ndc1 = _ng_clip_c[1].xy / _ng_clip_c[1].w;
-	vec2 _ng_ndc2 = _ng_clip_c[2].xy / _ng_clip_c[2].w;
-	vec2 _ng_e1 = _ng_ndc1 - _ng_ndc0;
-	vec2 _ng_e2 = _ng_ndc2 - _ng_ndc0;
-	float _ng_det = _ng_e1.x * _ng_e2.y - _ng_e1.y * _ng_e2.x;
+	// GodotNext: nextgeo_masked_two_sided (#153). Homogeneous 2D clip-space barycentrics and
+	// screen-space winding matching raster_material_inc.glsl so near-plane-clipped triangles
+	// (with corner w <= 0) never divide by corner w or flip _ng_front_facing.
+	mat3 _ng_m = mat3(_ng_clip_c[0].xyw, _ng_clip_c[1].xyw, _ng_clip_c[2].xyw);
+	vec3 _ng_u0 = cross(_ng_m[1], _ng_m[2]);
+	vec3 _ng_u1 = cross(_ng_m[2], _ng_m[0]);
+	vec3 _ng_u2 = cross(_ng_m[0], _ng_m[1]);
+	float _ng_det = dot(_ng_m[0], _ng_u0);
 	_ng_front_facing = (_ng_det > 0.0);
 
 	float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
-	vec2 _ng_p = NEXTGEO_FRAG_COORD.xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0;
-	vec2 _ng_dp = _ng_p - _ng_ndc0;
-	float _ng_l1 = (_ng_dp.x * _ng_e2.y - _ng_dp.y * _ng_e2.x) * _ng_inv_det;
-	float _ng_l2 = (_ng_e1.x * _ng_dp.y - _ng_e1.y * _ng_dp.x) * _ng_inv_det;
-	float _ng_l0 = 1.0 - _ng_l1 - _ng_l2;
-	vec3 _ng_l = vec3(_ng_l0, _ng_l1, _ng_l2);
-
-	vec3 _ng_dl_dx = vec3(-(_ng_e2.y - _ng_e1.y), _ng_e2.y, -_ng_e1.y) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.x);
-	vec3 _ng_dl_dy = vec3(-(-_ng_e2.x + _ng_e1.x), -_ng_e2.x, _ng_e1.x) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.y);
-
-	vec3 _ng_inv_w = vec3(1.0 / _ng_clip_c[0].w, 1.0 / _ng_clip_c[1].w, 1.0 / _ng_clip_c[2].w);
-	vec3 _ng_q = _ng_l * _ng_inv_w;
+	vec2 _ng_pixel_size = scene_data_block.data.screen_pixel_size;
+	vec3 _ng_p = vec3(NEXTGEO_FRAG_COORD.xy * _ng_pixel_size * 2.0 - 1.0, 1.0);
+	vec3 _ng_q = vec3(dot(_ng_u0, _ng_p), dot(_ng_u1, _ng_p), dot(_ng_u2, _ng_p)) * _ng_inv_det;
 	float _ng_inv_w_sum = _ng_q.x + _ng_q.y + _ng_q.z;
 	float _ng_w_interp = abs(_ng_inv_w_sum) > 1e-20 ? (1.0 / _ng_inv_w_sum) : 1.0;
-	vec3 _ng_bary = _ng_q * _ng_w_interp;
+	vec3 _ng_bary = abs(_ng_inv_w_sum) > 1e-20 ? (_ng_q * _ng_w_interp) : vec3(1.0, 0.0, 0.0);
 
-	vec3 _ng_dq_dx = _ng_dl_dx * _ng_inv_w;
-	vec3 _ng_dq_dy = _ng_dl_dy * _ng_inv_w;
+	vec3 _ng_dq_dx = vec3(_ng_u0.x, _ng_u1.x, _ng_u2.x) * (_ng_inv_det * 2.0 * _ng_pixel_size.x);
+	vec3 _ng_dq_dy = vec3(_ng_u0.y, _ng_u1.y, _ng_u2.y) * (_ng_inv_det * 2.0 * _ng_pixel_size.y);
 	vec3 _ng_dbary_dx = (_ng_dq_dx - _ng_bary * (_ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z)) * _ng_w_interp;
 	vec3 _ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
 
-	vec3 _ng_z_ndc_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z) * _ng_inv_w;
-	_ng_fragcoord = vec4(NEXTGEO_FRAG_COORD.xy, dot(_ng_l, _ng_z_ndc_c), _ng_inv_w_sum);
-	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dl_dx, _ng_z_ndc_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
-	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dl_dy, _ng_z_ndc_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
+	vec3 _ng_z_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z);
+	_ng_fragcoord = vec4(NEXTGEO_FRAG_COORD.xy, dot(_ng_q, _ng_z_c), _ng_inv_w_sum);
+	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dq_dx, _ng_z_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
+	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dq_dy, _ng_z_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
 
 	vertex_interp = _ng_vtx_c[0] * _ng_bary.x + _ng_vtx_c[1] * _ng_bary.y + _ng_vtx_c[2] * _ng_bary.z;
 	vertex_interp_ddx = _ng_vtx_c[0] * _ng_dbary_dx.x + _ng_vtx_c[1] * _ng_dbary_dx.y + _ng_vtx_c[2] * _ng_dbary_dx.z;

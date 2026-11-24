@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/nextgeo_masked_two_sided/nextgeo_masked_two_sided_check.gd" id="1"]
+
+[node name="NextGeoMaskedTwoSidedCheck" type="Node3D"]
+script = ExtResource("1")

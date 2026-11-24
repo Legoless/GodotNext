@@ -859,10 +859,11 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 				record.prev_transform[row][column] = record.transform[row][column];
 			}
 		}
-		for (int index = 0; index < 4; index++) {
+		// GodotNext: nextgeo_masked_two_sided (#153) & nextgeo_displacement (#150). Preserve
+		// prev_world_aabb_min[3] (programmable_raster_distance) and prev_world_aabb_max[3] (displacement_bound).
+		for (int index = 0; index < 3; index++) {
 			record.prev_world_aabb_min[index] = record.world_aabb_min[index];
 		}
-		// GodotNext: nextgeo_displacement (#150). prev_world_aabb_max[3] carries displacement_bound; preserve it across transform updates.
 		for (int index = 0; index < 3; index++) {
 			record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 		}
@@ -876,10 +877,11 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 				record.prev_transform[row][column] = record.transform[row][column];
 			}
 		}
-		for (int index = 0; index < 4; index++) {
+		// GodotNext: nextgeo_masked_two_sided (#153) & nextgeo_displacement (#150). Preserve
+		// prev_world_aabb_min[3] (programmable_raster_distance) and prev_world_aabb_max[3] (displacement_bound).
+		for (int index = 0; index < 3; index++) {
 			record.prev_world_aabb_min[index] = record.world_aabb_min[index];
 		}
-		// GodotNext: nextgeo_displacement (#150). Preserve prev_world_aabb_max[3] (displacement_bound).
 		for (int index = 0; index < 3; index++) {
 			record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 		}
@@ -924,6 +926,21 @@ void RendererVirtualMeshStorage::instance_record_set_displacement_bound(uint32_t
 		return;
 	}
 	records[p_record].prev_world_aabb_max[3] = bound;
+	_mark_dirty(p_record);
+}
+
+// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1). Stores programmable raster cutoff distance
+// (meters; 0 = always programmable) in prev_world_aabb_min[3] so cluster cull routes clusters past the
+// distance to the FIXED bin.
+void RendererVirtualMeshStorage::instance_record_set_programmable_raster_distance(uint32_t p_record, float p_distance) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const float dist = (!Math::is_finite(p_distance) || p_distance < 0.0f) ? 0.0f : p_distance;
+	if (records[p_record].prev_world_aabb_min[3] == dist) {
+		return;
+	}
+	records[p_record].prev_world_aabb_min[3] = dist;
 	_mark_dirty(p_record);
 }
 
@@ -1100,10 +1117,11 @@ void RendererVirtualMeshStorage::flush() {
 					record.prev_transform[row][column] = record.transform[row][column];
 				}
 			}
-			for (int index = 0; index < 4; index++) {
+			// GodotNext: nextgeo_masked_two_sided (#153) & nextgeo_displacement (#150). Preserve
+			// prev_world_aabb_min[3] (programmable_raster_distance) and prev_world_aabb_max[3] (displacement_bound).
+			for (int index = 0; index < 3; index++) {
 				record.prev_world_aabb_min[index] = record.world_aabb_min[index];
 			}
-			// GodotNext: nextgeo_displacement (#150). Preserve prev_world_aabb_max[3] (displacement_bound).
 			for (int index = 0; index < 3; index++) {
 				record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 			}

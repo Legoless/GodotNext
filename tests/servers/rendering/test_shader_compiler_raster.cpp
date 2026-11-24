@@ -42,6 +42,7 @@ TEST_FORCE_LINK(test_shader_compiler_raster)
 #include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_compiler.h"
 #include "servers/rendering/shader_types.h"
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #include "modules/modules_enabled.gen.h"
 
@@ -273,8 +274,8 @@ void fragment() {
 		const String &raster = res.gen.code["raster_fragment"];
 		CHECK(raster.contains("_NG_RASTER_DISCARD;"));
 		CHECK_FALSE(raster.contains("discard;"));
-		// The resolve keeps its own discard.
-		CHECK(res.gen.code["resolve_fragment"].contains("discard;"));
+		// The resolve wraps fragment() discard in !_ng_skip_masked_discard (#153).
+		CHECK(res.gen.code["resolve_fragment"].contains("if (!_ng_skip_masked_discard) { discard; }"));
 		CHECK_FALSE(res.gen.code["resolve_fragment"].contains("_NG_RASTER_DISCARD"));
 	}
 
@@ -743,5 +744,118 @@ void light() {
 		REQUIRE_EQ(res.err, OK);
 		CHECK_EQ(res.gen.raster_uses & ShaderCompiler::RASTER_USES_FRAGCOORD, 0u);
 		CHECK_EQ(res.rejects(), 0u);
+	}
+}
+
+TEST_CASE("[NextGeo][ShaderCompilerRaster] Alpha hash, custom UVs, two-sided FRONT_FACING, and VSM depth-only variants compile to SPIR-V (#153)") {
+	const char *cases[] = {
+		// Alpha hash + cull_disabled + custom varying UV + modified built-in UV.
+		R"(
+shader_type spatial;
+render_mode cull_disabled;
+uniform sampler2D mask_tex;
+varying vec2 custom_uv;
+void vertex() {
+	UV = UV * 2.0 + vec2(0.1, 0.2);
+	custom_uv = UV * 3.0;
+}
+void fragment() {
+	ALBEDO = FRONT_FACING ? vec3(0.2, 0.8, 0.3) : vec3(0.8, 0.2, 0.3);
+	ALPHA = texture(mask_tex, custom_uv).r * texture(mask_tex, UV).a;
+	ALPHA_HASH_SCALE = 1.0;
+}
+)",
+		// Alpha scissor + cull_front + FRONT_FACING.
+		R"(
+shader_type spatial;
+render_mode cull_front;
+uniform sampler2D mask_tex;
+void fragment() {
+	ALBEDO = FRONT_FACING ? vec3(1.0) : vec3(0.4);
+	ALPHA = texture(mask_tex, UV).a;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+}
+)",
+	};
+
+	RasterMaterialSwShaderRD sw_shader;
+	RasterMaterialHwShaderRD hw_shader;
+	Vector<ShaderRD::VariantDefine> raster_variants;
+	raster_variants.push_back(ShaderRD::VariantDefine(0, "", false));
+	raster_variants.push_back(ShaderRD::VariantDefine(1, "\n#define VIS64_BUFFER\n", false));
+	raster_variants.push_back(ShaderRD::VariantDefine(2, "\n#define NEXTGEO_RASTER_DEPTH_ONLY\n" + RendererVirtualShadowMapStorage::get_glsl_defines(), false));
+	sw_shader.initialize(raster_variants);
+	sw_shader.set_group_int64_atomics(0, true, false);
+	sw_shader.set_group_int64_atomics(1, false, true);
+	hw_shader.initialize(raster_variants);
+	hw_shader.set_group_int64_atomics(0, true, false);
+	hw_shader.set_group_int64_atomics(1, false, true);
+
+	for (int c = 0; c < 2; c++) {
+		const RasterCompileResult res = compile_spatial_raster(cases[c]);
+		REQUIRE_EQ(res.err, OK);
+		CHECK_EQ(res.features(), uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_MASKED | RendererVirtualMeshStorage::RASTER_FEATURE_TWO_SIDED));
+		CHECK_EQ(res.rejects(), 0u);
+		CHECK(res.gen.code["raster_fragment"].contains("_ng_front_facing"));
+		if (c == 0) {
+			CHECK(res.gen.defines.has("#define ALPHA_HASH_USED\n"));
+			CHECK(res.gen.code["resolve_vertex"].contains("uv_interp"));
+			CHECK(res.gen.code["resolve_vertex_store"].contains("_ng_v0_m_custom_uv"));
+		}
+
+		HashMap<String, String> raster_code;
+		raster_code["resolve_vertex"] = res.gen.code.has("resolve_vertex") ? res.gen.code["resolve_vertex"] : String();
+		raster_code["resolve_vertex_store"] = res.gen.code.has("resolve_vertex_store") ? res.gen.code["resolve_vertex_store"] : String();
+		raster_code["resolve_interpolate"] = res.gen.code.has("resolve_interpolate") ? res.gen.code["resolve_interpolate"] : String();
+		raster_code["raster_fragment"] = res.gen.code.has("raster_fragment") ? res.gen.code["raster_fragment"] : String();
+
+		Vector<String> defines = res.gen.defines;
+		defines.push_back("#define DO_SIDE_CHECK\n");
+
+		const String &compute_globals = res.gen.stage_globals[ShaderCompiler::STAGE_COMPUTE];
+		const RID sw_ver = sw_shader.version_create(false);
+		const RID hw_ver = hw_shader.version_create(false);
+		REQUIRE(sw_ver.is_valid());
+		REQUIRE(hw_ver.is_valid());
+		sw_shader.version_set_compute_code(sw_ver, raster_code, res.gen.uniforms, compute_globals, defines);
+		hw_shader.version_set_code(hw_ver, raster_code, res.gen.uniforms, compute_globals, compute_globals, defines);
+
+		for (int variant = 0; variant < 3; variant++) {
+			const Vector<String> sw_sources = sw_shader.version_build_variant_stage_sources(sw_ver, variant);
+			const Vector<String> hw_sources = hw_shader.version_build_variant_stage_sources(hw_ver, variant);
+			REQUIRE_EQ(sw_sources.size(), int(RD::SHADER_STAGE_MAX));
+			REQUIRE_EQ(hw_sources.size(), int(RD::SHADER_STAGE_MAX));
+			if (c == 0) {
+				CHECK(sw_sources[RD::SHADER_STAGE_COMPUTE].contains("compute_alpha_hash_threshold_grad"));
+				CHECK(hw_sources[RD::SHADER_STAGE_FRAGMENT].contains("compute_alpha_hash_threshold_grad"));
+			}
+			CHECK_EQ(sw_sources[RD::SHADER_STAGE_COMPUTE].contains("#define NEXTGEO_RASTER_DEPTH_ONLY"), variant == 2);
+			CHECK_EQ(hw_sources[RD::SHADER_STAGE_FRAGMENT].contains("#define NEXTGEO_RASTER_DEPTH_ONLY"), variant == 2);
+#if defined(MODULE_GLSLANG_ENABLED) && defined(VULKAN_ENABLED)
+			RenderingShaderContainerFormatVulkan vk_format;
+			String err;
+			RDC::ShaderStageSPIRVData sw_spv;
+			sw_spv.shader_stage = RDC::SHADER_STAGE_COMPUTE;
+			sw_spv.spirv = compile_glslang_shader(RDC::SHADER_STAGE_COMPUTE, sw_sources[RD::SHADER_STAGE_COMPUTE], vk_format.get_shader_language_version(), vk_format.get_shader_spirv_version(RDC::SHADER_STAGE_COMPUTE), &err);
+			CHECK_MESSAGE(!sw_spv.spirv.is_empty(), err);
+			Ref<RenderingShaderContainer> sw_container = vk_format.create_container();
+			Vector<RDC::ShaderStageSPIRVData> sw_stages = { sw_spv };
+			CHECK(sw_container->set_code_from_spirv("RasterMaterialSwShaderRD", sw_stages));
+
+			RDC::ShaderStageSPIRVData hw_vs;
+			hw_vs.shader_stage = RDC::SHADER_STAGE_VERTEX;
+			hw_vs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_VERTEX, hw_sources[RD::SHADER_STAGE_VERTEX], vk_format.get_shader_language_version(), vk_format.get_shader_spirv_version(RDC::SHADER_STAGE_VERTEX), &err);
+			CHECK_MESSAGE(!hw_vs.spirv.is_empty(), err);
+			RDC::ShaderStageSPIRVData hw_fs;
+			hw_fs.shader_stage = RDC::SHADER_STAGE_FRAGMENT;
+			hw_fs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, hw_sources[RD::SHADER_STAGE_FRAGMENT], vk_format.get_shader_language_version(), vk_format.get_shader_spirv_version(RDC::SHADER_STAGE_FRAGMENT), &err);
+			CHECK_MESSAGE(!hw_fs.spirv.is_empty(), err);
+			Ref<RenderingShaderContainer> hw_container = vk_format.create_container();
+			Vector<RDC::ShaderStageSPIRVData> hw_stages = { hw_vs, hw_fs };
+			CHECK(hw_container->set_code_from_spirv("RasterMaterialHwShaderRD", hw_stages));
+#endif
+		}
+		CHECK(sw_shader.version_free(sw_ver));
+		CHECK(hw_shader.version_free(hw_ver));
 	}
 }

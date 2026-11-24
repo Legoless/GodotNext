@@ -1083,6 +1083,8 @@ public:
 	FUNC2(instance_geometry_set_far_field, RID, RSE::FarFieldMode)
 	FUNC4(instance_geometry_set_lightmap, RID, RID, const Rect2 &, int)
 	FUNC2(instance_geometry_set_lod_bias, RID, float)
+	// GodotNext: nextgeo_masked_two_sided (#153).
+	FUNC2(instance_geometry_set_programmable_raster_distance, RID, float)
 	FUNC2(instance_geometry_set_transparency, RID, float)
 	FUNC3(instance_geometry_set_shader_parameter, RID, const StringName &, const Variant &)
 	FUNC2RC(Variant, instance_geometry_get_shader_parameter, RID, const StringName &)

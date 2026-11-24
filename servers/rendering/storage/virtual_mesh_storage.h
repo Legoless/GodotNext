@@ -90,7 +90,7 @@ public:
 		float prev_transform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
 		float world_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = max scale.
 		float world_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = lod_bias.
-		float prev_world_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float prev_world_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = programmable_raster_distance (#153).
 		float prev_world_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = displacement_bound (#150).
 		uint32_t virtual_mesh = UINT32_MAX;
 		uint32_t page_table_offset = 0;
@@ -164,7 +164,11 @@ public:
 	// The features that need the material's raster program (vertex(), displacement(), and the coverage subset of
 	// fragment()). TWO_SIDED needs none: every bin flips facing from the per-surface cull bits.
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Include RASTER_FEATURE_DISPLACED.
-	static constexpr uint32_t RASTER_PROGRAM_FEATURES = RASTER_FEATURE_MASKED | RASTER_FEATURE_VERTEX_OFFSET | RASTER_FEATURE_DEPTH_OFFSET | RASTER_FEATURE_DISPLACED;
+	// GodotNext: nextgeo_masked_two_sided (#153). Split pixel-programmable (demotable past programmable_raster_distance)
+	// from vertex-programmable features.
+	static constexpr uint32_t RASTER_PIXEL_PROGRAMMABLE_FEATURES = RASTER_FEATURE_MASKED | RASTER_FEATURE_DEPTH_OFFSET;
+	static constexpr uint32_t RASTER_VERTEX_PROGRAMMABLE_FEATURES = RASTER_FEATURE_VERTEX_OFFSET | RASTER_FEATURE_DISPLACED;
+	static constexpr uint32_t RASTER_PROGRAM_FEATURES = RASTER_PIXEL_PROGRAMMABLE_FEATURES | RASTER_VERTEX_PROGRAMMABLE_FEATURES;
 
 	struct RasterBinEntry {
 		uint32_t features;
@@ -421,6 +425,8 @@ public:
 	void instance_record_set_layer_mask(uint32_t p_record, uint32_t p_layer_mask);
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Per-instance max displacement magnitude in meters.
 	void instance_record_set_displacement_bound(uint32_t p_record, float p_magnitude);
+	// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1). Per-instance programmable raster cutoff distance in meters (0 = always).
+	void instance_record_set_programmable_raster_distance(uint32_t p_record, float p_distance);
 	static _FORCE_INLINE_ AABB inflate_aabb_for_displacement(const AABB &p_aabb, float p_magnitude) {
 		return (Math::is_finite(p_magnitude) && p_magnitude > 0.0f) ? p_aabb.grow(p_magnitude) : p_aabb;
 	}

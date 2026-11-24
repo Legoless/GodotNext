@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "core/math/math_funcs.h"
+#include "core/math/vector3.h"
 #include "core/string/ustring.h"
 #include "core/typedefs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
@@ -148,8 +150,11 @@ struct NextGeoMaterialFallbackFacts {
 	bool other_custom_vertex = false;
 	bool unsupported_derivative = false;
 	uint32_t raster_rejects = 0u; // nextgeo_raster_rejects()
-	// rendering/nextgeo/debug_programmable_raster: masked and vertex-offset surfaces route through
-	// programmable raster bins. Off by default until #153 and #164 turn the features on.
+	// GodotNext: nextgeo_masked_two_sided (#153). Admits masked materials (alpha scissor, alpha hash,
+	// fragment discard) into programmable raster bins on the Nanite device tier by default.
+	bool admit_masked = false;
+	// rendering/nextgeo/debug_programmable_raster: admits masked and vertex-offset materials into
+	// programmable raster bins (vertex offset stays behind this gate until #164).
 	bool admit_programmable = false;
 };
 
@@ -166,7 +171,7 @@ inline NextGeoFallback nextgeo_material_fallback(const NextGeoMaterialFallbackFa
 	if (p_facts.raster_rejects != 0u) {
 		return NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE;
 	}
-	if (p_facts.screen_reads || (p_facts.masked && !p_facts.admit_programmable)) {
+	if (p_facts.screen_reads || (p_facts.masked && !(p_facts.admit_masked || p_facts.admit_programmable))) {
 		return NEXTGEO_FALLBACK_ALPHA;
 	}
 	if (p_facts.other_custom_vertex || (p_facts.writes_vertex && !p_facts.admit_programmable)) {
@@ -176,6 +181,35 @@ inline NextGeoFallback nextgeo_material_fallback(const NextGeoMaterialFallbackFa
 		return NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE;
 	}
 	return NEXTGEO_FALLBACK_NONE;
+}
+
+// GodotNext: nextgeo_masked_two_sided (#153, plan §21.4.1). True when a programmable bin only runs
+// pixel-programmable features (masked, depth offset) and can fall back to the fixed-function bin past
+// GeometryInstance3D.programmable_raster_distance; vertex-programmable bins (vertex offset, displaced)
+// keep their programmable bin.
+inline bool nextgeo_raster_bin_can_demote_by_distance(uint32_t p_features) {
+	return (p_features & RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u &&
+			(p_features & RendererVirtualMeshStorage::RASTER_VERTEX_PROGRAMMABLE_FEATURES) == 0u;
+}
+
+// Distance from p_camera_pos to the closest point on the world AABB [p_aabb_min, p_aabb_max].
+// Matches cluster_cull.glsl and scene_forward_clustered.glsl.
+inline float nextgeo_aabb_camera_distance(const Vector3 &p_camera_pos, const Vector3 &p_aabb_min, const Vector3 &p_aabb_max) {
+	const Vector3 closest(
+			CLAMP(p_camera_pos.x, p_aabb_min.x, p_aabb_max.x),
+			CLAMP(p_camera_pos.y, p_aabb_min.y, p_aabb_max.y),
+			CLAMP(p_camera_pos.z, p_aabb_min.z, p_aabb_max.z));
+	return float((p_camera_pos - closest).length());
+}
+
+// CPU reference for cluster_cull.glsl's programmable_raster_distance cutoff: returns true when the
+// instance's clusters should be routed to NEXTGEO_RASTER_BIN_FIXED instead of their programmable bin.
+// p_distance <= 0 (or non-finite) means always programmable.
+inline bool nextgeo_programmable_raster_cutoff(const Vector3 &p_camera_pos, const Vector3 &p_aabb_min, const Vector3 &p_aabb_max, float p_distance, uint32_t p_bin_features) {
+	if (!Math::is_finite(p_distance) || !(p_distance > 0.0f) || !nextgeo_raster_bin_can_demote_by_distance(p_bin_features)) {
+		return false;
+	}
+	return nextgeo_aabb_camera_distance(p_camera_pos, p_aabb_min, p_aabb_max) > p_distance;
 }
 
 // GodotNext: nextgeo_displacement (#150). When all programmable raster bins are occupied, a surface
