@@ -247,6 +247,10 @@ class Node3DEditorViewport : public Control {
 		VIEW_DISPLAY_VSM_CLIPMAP,
 		// GodotNext: nextgi_world_cache (#294)
 		VIEW_DISPLAY_NEXTGI_WORLD_CACHE,
+		// GodotNext: megalights_denoiser (#135)
+		VIEW_DISPLAY_ML_NOISY,
+		VIEW_DISPLAY_ML_DENOISED,
+		VIEW_DISPLAY_ML_VARIANCE,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 

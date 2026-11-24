@@ -6463,6 +6463,18 @@
 			Displays the NextGI runtime world-space lighting cache cells and their temporally filtered radiance when [member ProjectSettings.rendering/global_illumination/nextgi/world_cache] is active on HWRT Vulkan or Direct3D 12. Shows a labeled fallback tint when the World Cache is inactive.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_ML_NOISY" value="70" enum="ViewportDebugDraw">
+			Displays the tone-mapped noisy demodulated direct diffuse and specular radiance produced by MegaLights sample shading before denoising. Shows the normal image while MegaLights is inactive.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_ML_DENOISED" value="71" enum="ViewportDebugDraw">
+			Displays the tone-mapped demodulated direct diffuse and specular radiance produced by the MegaLights spatio-temporal denoiser (or the noisy passthrough when [member ProjectSettings.rendering/megalights/denoiser] is set to RR Bypass). Shows the normal image while MegaLights is inactive.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_ML_VARIANCE" value="72" enum="ViewportDebugDraw">
+			Displays a false-color heatmap of the MegaLights temporal luminance variance (blue for low converged variance through green and yellow to red for high variance). Shows the normal image while MegaLights is inactive.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

@@ -2954,6 +2954,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			ml_inputs.vsm_sample_view = vsm_sample_view;
 			ml_inputs.surface_thickness = float(GLOBAL_GET("rendering/lights_and_shadows/contact_shadow/surface_thickness"));
 			ml_inputs.quality_level = int(vsm_storage != nullptr && vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality());
+			// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
+			ml_inputs.velocity_enabled = rb->has_velocity_buffer(false);
+			ml_inputs.velocity_texture = ml_inputs.velocity_enabled ? rb->get_velocity_buffer(false) : RID();
+			ml_inputs.reset_temporal_history = view_reset_temporal_history;
+			ml_inputs.debug_draw = get_debug_draw_mode();
 			mega_lights->render_sampling(ml_inputs, rb);
 		}
 	}
@@ -6580,6 +6585,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_debug_mvs = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS;
 	bool using_taa = rb->get_use_taa();
 	const bool reset_temporal_history = !is_reflection_probe && rb_data.is_valid() && rb->consume_temporal_history_reset();
+	view_reset_temporal_history = reset_temporal_history;
 	TemporalUpscaler *external_upscaler = nullptr;
 
 	enum {
@@ -6764,10 +6770,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		} else if (using_taa || ce_needs_motion_vectors) {
 			velocity_mode = NEXTGI_VELOCITY_TAA;
 		}
-		// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone HWRT ray-traced shadows
-		// reuse #37's prepass velocity plan alongside depth and normal-roughness.
+		// GodotNext: rt_shadows (#141, plan §21.3 contract M9) / megalights_denoiser (#135, M5).
+		// Standalone HWRT ray-traced shadows and the MegaLights temporal denoiser reuse #37's
+		// prepass velocity plan alongside depth and normal-roughness (zero cost when both are off).
 		using_rt_shadows = _rt_view_has_lights(p_render_data);
-		prepass_velocity_consumer = using_nextgi || using_rt_shadows;
+		const bool megalights_velocity_consumer = !is_reflection_probe && rb.is_valid() && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && p_render_data->scene_data->view_count == 1 && (RendererRD::MegaLightsInputs::is_requested() || RendererRD::MegaLights::has_pending_check());
+		prepass_velocity_consumer = using_nextgi || using_rt_shadows || megalights_velocity_consumer;
 		velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, prepass_velocity_consumer, using_nextgeo);
 		if (velocity_plan.prepass_writes) {
 			if (!p_render_data->scene_data->calculate_motion_vectors) {
@@ -6982,7 +6990,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// debug draws need the normal-roughness prepass. Do not downgrade a voxel GI prepass.
 		// GodotNext: rr_guides (#205). So does the RR guide pack.
 		// GodotNext: df_shadows (#214) / rt_shadows (#141). DF and standalone RT shadows read prepass normal-roughness.
-		const bool ml_debug_draw = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL;
+		const bool ml_debug_draw = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO ||
+				get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL ||
+				RendererRD::MegaLights::debug_vis_mode_from_viewport(get_debug_draw_mode()) >= 0;
 		if ((megalights_inputs_active || ml_debug_draw || rr_guides_active || using_df_shadows || using_rt_shadows) && depth_pass_mode == PASS_MODE_DEPTH) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
@@ -8277,8 +8287,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	for (uint32_t bin = 0; bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT; bin++) {
 		nextgeo_raster_bin_owners[bin] = {};
 	}
-	// GodotNext: megalights_inputs (#136)
+	// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135)
 	megalights_inputs_active = false;
+	view_reset_temporal_history = false;
 }
 
 void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_render_data, bool p_using_nextgeo, bool p_nextgeo_drew, bool p_use_msaa, RSE::ViewportMSAA p_msaa, bool p_reverse_cull, const Size2i &p_screen_size, uint32_t p_depth_ubo_index, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {
@@ -8457,6 +8468,15 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 		RID tsr_debug = rb->get_texture_slice(RB_SCOPE_TSR_DEBUG, SNAME("debug_view"), 0, 0);
 		Size2i rtsize = texture_storage->render_target_get_size(render_target);
 		copy_effects->copy_to_fb_rect(tsr_debug, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, false, RID(), false, false, false, false, Rect2(), 1.0f, false);
+	}
+
+	// GodotNext: megalights_denoiser (#135). Blit ML_NOISY, ML_DENOISED, or ML_VARIANCE when produced.
+	if (RendererRD::MegaLights::debug_vis_mode_from_viewport(get_debug_draw_mode()) >= 0) {
+		Ref<RendererRD::MegaLightsViewData> ml_view = RendererRD::MegaLights::get_view_data(rb.ptr());
+		if (ml_view.is_valid() && ml_view->get_denoise_debug_texture().is_valid()) {
+			const Size2i rtsize = texture_storage->render_target_get_size(render_target);
+			copy_effects->copy_to_fb_rect(ml_view->get_denoise_debug_texture(), texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false);
+		}
 	}
 
 	// GodotNext: vsm_settings_debug (#221). Without virtual shadow maps the view shows the normal image.

@@ -755,6 +755,10 @@ enum ViewportDebugDraw {
 	VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP,
 	// GodotNext: nextgi_world_cache (#294)
 	VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE,
+	// GodotNext: megalights_denoiser (#135)
+	VIEWPORT_DEBUG_DRAW_ML_NOISY,
+	VIEWPORT_DEBUG_DRAW_ML_DENOISED,
+	VIEWPORT_DEBUG_DRAW_ML_VARIANCE,
 };
 
 enum ViewportVRSMode {

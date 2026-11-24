@@ -34,8 +34,12 @@ TEST_FORCE_LINK(test_megalights)
 
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
+#include "core/object/class_db.h"
 #include "scene/3d/light_3d.h"
+#include "scene/main/viewport.h"
+#include "servers/rendering/renderer_rd/effects/denoise.h"
 #include "servers/rendering/renderer_rd/effects/mega_lights.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/rendering_server.h"
 
 #include <cmath>
@@ -680,5 +684,190 @@ TEST_CASE("[Renderer][MegaLights] Visibility tier gating (HWRT, Mac M2+ Experime
 	CHECK(info.has("vsm_supported"));
 	CHECK(info.has("screen_traces_enabled"));
 	CHECK(info.has("distant_screen_traces_length"));
+	CHECK(info.has("denoiser"));
+	CHECK(info.has("rr_bypass"));
 	CHECK(info.has("reason"));
+}
+
+// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5, GM-1, GM-7, budget M-5).
+
+TEST_CASE("[Renderer][MegaLights] Denoiser settings, RR bypass contract, and shader variants (#135)") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	CHECK(ps->has_setting(ML::SETTING_DENOISER));
+	CHECK_EQ(int(ps->get_setting(ML::SETTING_DENOISER)), int(ML::DENOISER_BUILTIN));
+
+	const ML::Settings defaults = ML::read_settings();
+	CHECK_EQ(defaults.denoiser, ML::DENOISER_BUILTIN);
+
+	CHECK_EQ(ML::parse_denoiser_variant(0), ML::DENOISER_BUILTIN);
+	CHECK_EQ(ML::parse_denoiser_variant(1), ML::DENOISER_RR_BYPASS);
+	CHECK_EQ(ML::parse_denoiser_variant(String("builtin")), ML::DENOISER_BUILTIN);
+	CHECK_EQ(ML::parse_denoiser_variant(String("rr_bypass")), ML::DENOISER_RR_BYPASS);
+	CHECK_EQ(ML::parse_denoiser_variant(String("RR Bypass")), ML::DENOISER_RR_BYPASS);
+	CHECK_EQ(ML::parse_denoiser_variant(String("1")), ML::DENOISER_RR_BYPASS);
+	CHECK_EQ(ML::parse_denoiser_variant(99), ML::DENOISER_BUILTIN);
+
+	ML::Settings invalid;
+	invalid.denoiser = static_cast<ML::DenoiserMode>(77);
+	CHECK_EQ(ML::validate_settings(invalid).denoiser, ML::DENOISER_BUILTIN);
+
+	// Toggling rendering/megalights/denoiser to RR Bypass reflects immediately in read_settings() and get_tier_info().
+	const Variant prev = ps->get_setting(ML::SETTING_DENOISER);
+	ps->set_setting(ML::SETTING_DENOISER, int(ML::DENOISER_RR_BYPASS));
+	CHECK_EQ(ML::read_settings().denoiser, ML::DENOISER_RR_BYPASS);
+	const Dictionary rr_info = RenderingServer::get_singleton()->megalights_get_tier_info();
+	CHECK_EQ(String(rr_info["denoiser"]), String("rr_bypass"));
+	CHECK_EQ(bool(rr_info["rr_bypass"]), true);
+	ps->set_setting(ML::SETTING_DENOISER, prev);
+	const Dictionary builtin_info = RenderingServer::get_singleton()->megalights_get_tier_info();
+	CHECK_EQ(String(builtin_info["denoiser"]), String("builtin"));
+	CHECK_EQ(bool(builtin_info["rr_bypass"]), false);
+
+	// GPU UBO contract and shader variant counts.
+	CHECK_EQ(sizeof(RendererRD::NextGIDenoise::MegaLightsDenoiseParamsGPU), size_t(336));
+	CHECK_EQ(sizeof(RendererRD::NextGIDenoise::MegaLightsDenoiseParamsGPU) % 16, size_t(0));
+	CHECK_EQ(ML::get_shade_samples_shader_variant_defines().size(), 2);
+	CHECK_EQ(RendererRD::NextGIDenoise::get_megalights_temporal_shader_variant_defines().size(), 2);
+	CHECK_EQ(RendererRD::NextGIDenoise::get_megalights_spatial_shader_variant_defines().size(), 2);
+}
+
+TEST_CASE("[Renderer][MegaLights] Denoiser debug visualization enums and bindings (#135)") {
+	// Must sit immediately after VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE (value 69).
+	CHECK_EQ(int(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY), int(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE) + 1);
+	CHECK_EQ(int(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED), int(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY) + 1);
+	CHECK_EQ(int(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE), int(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED) + 1);
+
+	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_NOISY), int(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY));
+	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_DENOISED), int(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED));
+	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_VARIANCE), int(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE));
+
+	bool valid = false;
+	CHECK_EQ(ClassDB::get_integer_constant("RenderingServer", "VIEWPORT_DEBUG_DRAW_ML_NOISY", &valid), int64_t(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("RenderingServer", "VIEWPORT_DEBUG_DRAW_ML_DENOISED", &valid), int64_t(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("RenderingServer", "VIEWPORT_DEBUG_DRAW_ML_VARIANCE", &valid), int64_t(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE));
+	CHECK(valid);
+
+	CHECK_EQ(ClassDB::get_integer_constant("Viewport", "DEBUG_DRAW_ML_NOISY", &valid), int64_t(Viewport::DEBUG_DRAW_ML_NOISY));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("Viewport", "DEBUG_DRAW_ML_DENOISED", &valid), int64_t(Viewport::DEBUG_DRAW_ML_DENOISED));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("Viewport", "DEBUG_DRAW_ML_VARIANCE", &valid), int64_t(Viewport::DEBUG_DRAW_ML_VARIANCE));
+	CHECK(valid);
+
+	CHECK_EQ(ML::debug_vis_mode_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY), 0);
+	CHECK_EQ(ML::debug_vis_mode_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED), 1);
+	CHECK_EQ(ML::debug_vis_mode_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE), 2);
+	CHECK_EQ(ML::debug_vis_mode_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_DISABLED), -1);
+	CHECK_EQ(ML::debug_vis_mode_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO), -1);
+
+	// NextGeo stays active under MegaLights denoiser debug draws.
+	CHECK_FALSE(RendererRD::nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY));
+	CHECK_FALSE(RendererRD::nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED));
+	CHECK_FALSE(RendererRD::nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE));
+}
+
+TEST_CASE("[Renderer][MegaLights] Demodulation, EnvBRDF split-sum, and safe floors (#135)") {
+	// 1. Standard dielectric diffuse round-trip preserves texture detail exactly.
+	const Vector3 alb(0.6f, 0.35f, 0.15f);
+	const Vector3 diff_rad(1.2f, 0.7f, 0.3f);
+	const Vector3 diff_fac = ML::diffuse_demod_factor(alb);
+	CHECK(Math::is_equal_approx(float(diff_fac.x), 0.6f));
+	CHECK(Math::is_equal_approx(float(diff_fac.y), 0.35f));
+	CHECK(Math::is_equal_approx(float(diff_fac.z), 0.15f));
+	const Vector3 diff_demod = ML::demodulate_radiance(diff_rad, diff_fac);
+	const Vector3 diff_remod = ML::remodulate_radiance(diff_demod, diff_fac);
+	CHECK(Math::is_equal_approx(float(diff_remod.x), float(diff_rad.x), 1e-5f));
+	CHECK(Math::is_equal_approx(float(diff_remod.y), float(diff_rad.y), 1e-5f));
+	CHECK(Math::is_equal_approx(float(diff_remod.z), float(diff_rad.z), 1e-5f));
+
+	// 2. Black / pure-metallic diffuse albedo (0, 0, 0) applies safe floor (0.01) so division never produces NaN/Inf.
+	const Vector3 zero_fac = ML::diffuse_demod_factor(Vector3(0.0f, 0.0f, 0.0f));
+	CHECK(Math::is_equal_approx(float(zero_fac.x), ML::DEMOD_ALBEDO_FLOOR));
+	CHECK(Math::is_equal_approx(float(zero_fac.y), ML::DEMOD_ALBEDO_FLOOR));
+	CHECK(Math::is_equal_approx(float(zero_fac.z), ML::DEMOD_ALBEDO_FLOOR));
+	const Vector3 zero_demod = ML::demodulate_radiance(Vector3(0.0f, 0.0f, 0.0f), zero_fac);
+	CHECK(Math::is_finite(float(zero_demod.x)));
+	CHECK_EQ(float(zero_demod.x), 0.0f);
+
+	// 3. Multiscatter EnvBRDF split-sum & approximation sanity across dielectric, conductor, and zero F0.
+	const Vector3 dielectric_f0(0.04f, 0.04f, 0.04f);
+	const Vector3 gold_f0(1.0f, 0.71f, 0.29f);
+	const Vector3 brdf_dielectric_headon = ML::env_brdf_approx(dielectric_f0, 0.5f, 1.0f);
+	const Vector3 brdf_dielectric_grazing = ML::env_brdf_approx(dielectric_f0, 0.2f, 0.05f);
+	const Vector3 brdf_gold = ML::env_brdf_approx(gold_f0, 0.3f, 0.8f);
+	// Fresnel increases toward grazing angles; gold preserves color tint (R > G > B) and stays within [0, 1.1].
+	CHECK(brdf_dielectric_headon.x > 0.02f);
+	CHECK(brdf_dielectric_headon.x < 0.25f);
+	CHECK(brdf_dielectric_grazing.x > brdf_dielectric_headon.x);
+	CHECK(brdf_gold.x > brdf_gold.y);
+	CHECK(brdf_gold.y > brdf_gold.z);
+	CHECK(brdf_gold.x <= 1.05f);
+
+	// Perfect mirror conductor (F0 = 1, 1, 1) with multiscatter energy compensation integrates to 1.0.
+	const Vector3 mirror = ML::env_brdf_split_sum(Vector3(1.0f, 1.0f, 1.0f), 0.1f, 0.75f);
+	CHECK(Math::is_equal_approx(float(mirror.x), 1.0f, 1e-5f));
+	CHECK(Math::is_equal_approx(float(mirror.y), 1.0f, 1e-5f));
+	CHECK(Math::is_equal_approx(float(mirror.z), 1.0f, 1e-5f));
+
+	// Zero F0 applies safe specular floor (0.01) so specular demodulation stays finite.
+	const Vector3 spec_zero_fac = ML::specular_demod_factor(ML::env_brdf_approx(Vector3(0.0f, 0.0f, 0.0f), 0.5f, 1.0f));
+	CHECK(spec_zero_fac.x >= ML::DEMOD_SPECULAR_FLOOR);
+	const Vector3 spec_fac = ML::specular_demod_factor(brdf_gold);
+	const Vector3 spec_rad(2.5f, 1.8f, 0.6f);
+	const Vector3 spec_remod = ML::remodulate_radiance(ML::demodulate_radiance(spec_rad, spec_fac), spec_fac);
+	CHECK(Math::is_equal_approx(float(spec_remod.x), float(spec_rad.x), 1e-4f));
+	CHECK(Math::is_equal_approx(float(spec_remod.y), float(spec_rad.y), 1e-4f));
+	CHECK(Math::is_equal_approx(float(spec_remod.z), float(spec_rad.z), 1e-4f));
+}
+
+TEST_CASE("[Renderer][MegaLights] Firefly clamped-energy math, camera cut, reset regions, and zero-alloc view (#135)") {
+	// 1. Firefly clamp scale and removed-energy accounting.
+	float removed = -1.0f;
+	CHECK(Math::is_equal_approx(ML::firefly_clamp_factor(1.5f, 3.0f, removed), 1.0f));
+	CHECK(Math::is_equal_approx(removed, 0.0f));
+
+	const float scale = ML::firefly_clamp_factor(10.0f, 2.5f, removed);
+	CHECK(Math::is_equal_approx(scale, 0.25f));
+	CHECK(Math::is_equal_approx(removed, 7.5f));
+
+	CHECK_EQ(ML::compute_clamped_energy_ratio(0u, 0u), 0.0);
+	CHECK(Math::is_equal_approx(ML::compute_clamped_energy_ratio(16u, 1600u), 0.01));
+	CHECK(ML::compute_clamped_energy_ratio(16u, 1600u) <= 0.02);
+	CHECK_EQ(ML::compute_clamped_energy_ratio(500u, 100u), 1.0);
+
+	// 2. Camera cut detection triggers history reset on large teleport or sharp orientation snap.
+	const Transform3D cam_a(Basis(), Vector3(0.0f, 1.5f, 5.0f));
+	const Transform3D cam_small_move(Basis(Vector3(0.0f, 1.0f, 0.0f), 0.05f), Vector3(0.2f, 1.5f, 5.0f));
+	const Transform3D cam_teleport(Basis(), Vector3(25.0f, 1.5f, 5.0f));
+	const Transform3D cam_snap_rot(Basis(Vector3(0.0f, 1.0f, 0.0f), Math::PI * 0.6f), Vector3(0.0f, 1.5f, 5.0f));
+	CHECK_FALSE(ML::is_camera_cut(cam_a, cam_small_move));
+	CHECK(ML::is_camera_cut(cam_a, cam_teleport));
+	CHECK(ML::is_camera_cut(cam_a, cam_snap_rot));
+
+	// 3. denoise_reset_regions tile mask selects exact dirty rectangle.
+	Vector<Rect2i> dirty;
+	dirty.push_back(Rect2i(2, 1, 3, 2));
+	const PackedByteArray mask = RendererRD::NextGIDenoise::select_reset_probes(dirty, Size2i(8, 6));
+	REQUIRE_EQ(mask.size(), 48);
+	for (int y = 0; y < 6; y++) {
+		for (int x = 0; x < 8; x++) {
+			const bool inside = (x >= 2 && x < 5 && y >= 1 && y < 3);
+			CHECK_EQ(mask[y * 8 + x], inside ? 1 : 0);
+		}
+	}
+
+	// 4. Default MegaLightsViewData holds zero allocated GPU resources when MegaLights is disabled.
+	Ref<RendererRD::MegaLightsViewData> view;
+	view.instantiate();
+	CHECK_FALSE(view->get_noisy_diffuse_texture().is_valid());
+	CHECK_FALSE(view->get_noisy_specular_texture().is_valid());
+	CHECK_FALSE(view->get_denoised_diffuse_texture().is_valid());
+	CHECK_FALSE(view->get_denoised_specular_texture().is_valid());
+	CHECK_FALSE(view->get_denoise_debug_texture().is_valid());
+	CHECK_FALSE(view->get_denoise_clamp_stats_buffer().is_valid());
+	CHECK_FALSE(view->has_denoise_history());
+	CHECK_EQ(view->get_denoise_stats().clamped_energy_ratio, 0.0);
 }

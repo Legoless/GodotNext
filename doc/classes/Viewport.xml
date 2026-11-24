@@ -976,6 +976,18 @@
 			Displays the NextGI runtime world-space lighting cache cells and their temporally filtered radiance when [member ProjectSettings.rendering/global_illumination/nextgi/world_cache] is active. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE].
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_ML_NOISY" value="70" enum="DebugDraw">
+			Displays the tone-mapped noisy demodulated direct diffuse and specular radiance produced by MegaLights before denoising. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_ML_NOISY].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_ML_DENOISED" value="71" enum="DebugDraw">
+			Displays the tone-mapped demodulated direct diffuse and specular radiance produced by the MegaLights spatio-temporal denoiser. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_ML_DENOISED].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_ML_VARIANCE" value="72" enum="DebugDraw">
+			Displays a false-color heatmap of the MegaLights temporal luminance variance. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_ML_VARIANCE].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

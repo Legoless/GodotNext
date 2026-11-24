@@ -48,6 +48,12 @@
 #define ML_FLAG_USE_SOFT_SHADOWS (1u << 5u)
 
 #define ML_MODEL_FALLBACK 3u
+#define ML_MODEL_SSS 1u
+#define ML_FLAG_TRANSMISSION (1u << 3u)
+
+#define ML_HIT_DIST_MISS 65504.0
+#define ML_DEMOD_ALBEDO_FLOOR 0.01
+#define ML_DEMOD_SPECULAR_FLOOR 0.01
 
 // M1 F0 packing constants matching MegaLightsInputs (megalights_inputs.h).
 #define ML_LUMA_R 0.30
@@ -133,7 +139,9 @@ struct MLSurface {
 	vec3 f0;
 	float roughness;
 	vec3 energy_comp;
+	vec3 spec_env_brdf;
 	uint shading_model;
+	uint model_flags;
 	uint layer_mask;
 };
 
@@ -148,6 +156,26 @@ struct MLLightEval {
 
 float ml_luminance(vec3 p_c) {
 	return dot(p_c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
+// Demodulation factors matching Forward+'s multiscatter split-sum EnvBRDF (rr_specular_albedo)
+// and diffuse albedo with safe floors so black/metallic surfaces never divide by zero and
+// remodulation by the same factors preserves exact direct energy.
+vec3 ml_diffuse_demod_factor(vec3 p_diffuse_albedo) {
+	return max(p_diffuse_albedo, vec3(ML_DEMOD_ALBEDO_FLOOR));
+}
+
+vec3 ml_specular_demod_factor(vec3 p_spec_env_brdf) {
+	return max(p_spec_env_brdf, vec3(ML_DEMOD_SPECULAR_FLOOR));
+}
+
+vec3 ml_unpack_visibility_rgb(uint p_packed) {
+	return vec3(
+				   float(p_packed & 0xFFu),
+				   float((p_packed >> 8u) & 0xFFu),
+				   float((p_packed >> 16u) & 0xFFu)) *
+			(1.0 / 255.0);
 }
 
 uint ml_pack_sample_light(uint p_type, uint p_index) {
@@ -430,6 +458,8 @@ bool ml_unpack_surface(uvec2 p_full_px, uint p_layer_mask, out MLSurface r_s) {
 	float cNdotV = max(dot(normal, view_dir), 1e-4);
 	vec2 env_brdf = textureLod(sampler2D(ml_dfg_lut_tex, ml_sampler_linear_clamp), vec2(cNdotV, 1.0 - roughness), 0.0).rg;
 	vec3 energy_comp = vec3(1.0) + f0 * (1.0 / max(env_brdf.y, 1e-4) - 1.0);
+	float f90 = clamp(dot(f0, vec3(50.0 * 0.33)), 0.0, 1.0);
+	vec3 spec_env_brdf = energy_comp * ((vec3(f90) - f0) * env_brdf.x + f0 * env_brdf.y);
 
 	r_s.view_pos = view_pos;
 	r_s.world_pos = world_pos;
@@ -441,7 +471,9 @@ bool ml_unpack_surface(uvec2 p_full_px, uint p_layer_mask, out MLSurface r_s) {
 	r_s.f0 = f0;
 	r_s.roughness = roughness;
 	r_s.energy_comp = energy_comp;
+	r_s.spec_env_brdf = spec_env_brdf;
 	r_s.shading_model = shading_model;
+	r_s.model_flags = model_byte;
 	r_s.layer_mask = p_layer_mask;
 	return true;
 }

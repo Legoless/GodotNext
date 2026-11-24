@@ -30,9 +30,13 @@
 
 #pragma once
 
+#include "core/math/basis.h"
 #include "core/math/projection.h"
 #include "core/math/vector3.h"
+#include "core/math/vector4.h"
 #include "core/variant/variant.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_denoise_spatial.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_denoise_temporal.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_diffuse.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_specular.glsl.gen.h"
@@ -144,6 +148,102 @@ public:
 	};
 	void shadow_denoise(const ShadowDenoiseParams &p_params);
 	static Vector<String> get_shadow_shader_variant_defines();
+
+	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5, GM-1, GM-7, budget M-5).
+	// Demodulated diffuse & specular temporal accumulation with luminance moments, firefly clamp
+	// + GPU clamped-energy counter, 2-iteration variance-guided à-trous spatial filter (step 1 & 2),
+	// optional on-demand debug visualization (ML_NOISY, ML_DENOISED, ML_VARIANCE), and rr_bypass
+	// handoff for DLSS-RR (PU+).
+	enum MegaLightsDenoiseFlags : uint32_t {
+		ML_DENOISE_FLAG_HAS_HISTORY = 1u << 0u,
+		ML_DENOISE_FLAG_VELOCITY_ENABLED = 1u << 1u,
+		ML_DENOISE_FLAG_RESET_MASK_ENABLED = 1u << 2u,
+		ML_DENOISE_FLAG_ORTHOGONAL = 1u << 3u,
+		ML_DENOISE_FLAG_RR_BYPASS = 1u << 4u,
+	};
+
+	// std140, 336 bytes. Must match MLDenoiseParams in ml_denoise_{temporal,spatial}.glsl.
+	struct MegaLightsDenoiseParamsGPU {
+		float inv_projection[16] = {};
+		float inv_view_proj[16] = {};
+		float prev_view_proj[16] = {};
+		float view_to_world[12] = {};
+		float cur_depth_coeffs[4] = {};
+		float prev_depth_coeffs[4] = {};
+		float camera_pos[4] = {};
+		float prev_camera_pos[4] = {};
+		uint32_t screen_reset_size[4] = {};
+		uint32_t config[4] = {};
+	};
+	static_assert(sizeof(MegaLightsDenoiseParamsGPU) == 336, "NextGIDenoise::MegaLightsDenoiseParamsGPU must match MLDenoiseParams (336 bytes).");
+	static_assert(sizeof(MegaLightsDenoiseParamsGPU) % 16 == 0, "NextGIDenoise::MegaLightsDenoiseParamsGPU must stay 16-byte aligned.");
+
+	struct MegaLightsDenoiseParams {
+		bool rr_bypass = false;
+		bool has_history = false;
+		bool velocity_enabled = false;
+		bool reset_mask_enabled = false;
+		bool orthogonal = false;
+		Size2i screen_size;
+		Size2i reset_tile_dims;
+		Projection inv_projection;
+		Projection inv_view_proj;
+		Projection prev_view_proj;
+		Basis view_to_world;
+		Vector4 cur_depth_coeffs;
+		Vector4 prev_depth_coeffs;
+		Vector3 camera_pos;
+		Vector3 prev_camera_pos;
+		uint32_t frame_index = 0;
+		uint32_t max_history_diffuse = 16;
+		uint32_t max_history_specular = 16;
+
+		// Noisy demodulated render-resolution inputs from ml_shade_samples.glsl.
+		RID noisy_diffuse;
+		RID noisy_specular;
+
+		// Guides (render resolution).
+		RID depth;
+		RID normal_roughness;
+		RID ml_albedo;
+		RID ml_material;
+		RID dfg_lut;
+		RID velocity;
+		RID reset_mask;
+		RID prev_depth_normal;
+
+		// Temporal + spatial working targets (only required when rr_bypass == false).
+		// Note: spatial pass 2 writes final denoised outputs into history_*_prev while history_*_cur
+		// keeps clean pre-spatial temporal accumulation for next frame's history.
+		RID history_diffuse_prev;
+		RID history_diffuse_cur;
+		RID history_specular_prev;
+		RID history_specular_cur;
+		RID spatial_scratch_diffuse;
+		RID spatial_scratch_specular;
+		RID moments_prev;
+		RID moments_cur;
+		RID history_len_prev;
+		RID history_len_cur;
+		RID clamp_stats_buffer;
+		RID params_ubo;
+
+		// Optional debug visualization (-1 = disabled, 0 = ML_NOISY, 1 = ML_DENOISED, 2 = ML_VARIANCE).
+		int debug_vis_mode = -1;
+		RID debug_vis_output;
+	};
+
+	struct MegaLightsDenoiseOutput {
+		RID diffuse;
+		RID specular;
+		RID variance_diffuse;
+		RID variance_specular;
+		bool bypassed = false;
+	};
+
+	MegaLightsDenoiseOutput megalights_denoise(const MegaLightsDenoiseParams &p_params);
+	static Vector<String> get_megalights_temporal_shader_variant_defines();
+	static Vector<String> get_megalights_spatial_shader_variant_defines();
 
 	// GodotNext: nextgi_denoise_specular (#54). Joint-bilateral upsample of the specular trace from
 	// its trace resolution into RB_TEX_REFLECTION.
@@ -277,6 +377,27 @@ private:
 	bool shadow_shader_ready = false;
 	bool shadow_shader_failed = false;
 	bool _ensure_shadow_shader();
+
+	// GodotNext: megalights_denoiser (#135). Lazily initialized on first megalights_denoise() call.
+	enum MegaLightsTemporalMode {
+		ML_TEMPORAL_MODE_ACCUM = 0,
+		ML_TEMPORAL_MODE_COPY_PREV_GUIDE = 1,
+		ML_TEMPORAL_MODE_MAX,
+	};
+	enum MegaLightsSpatialMode {
+		ML_SPATIAL_MODE_ATROUS = 0,
+		ML_SPATIAL_MODE_DEBUG_VIS = 1,
+		ML_SPATIAL_MODE_MAX,
+	};
+	MlDenoiseTemporalShaderRD ml_temporal_shader;
+	RID ml_temporal_version;
+	RID ml_temporal_pipelines[ML_TEMPORAL_MODE_MAX];
+	MlDenoiseSpatialShaderRD ml_spatial_shader;
+	RID ml_spatial_version;
+	RID ml_spatial_pipelines[ML_SPATIAL_MODE_MAX];
+	bool ml_shaders_ready = false;
+	bool ml_shaders_failed = false;
+	bool _ensure_megalights_shaders();
 };
 
 } // namespace RendererRD

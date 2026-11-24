@@ -87,8 +87,9 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	RendererRD::NextGeoDebug nextgeo_debug;
 	bool nextgeo_virtual_active = false;
 	bool nextgeo_visibility_only_active = false;
-	// GodotNext: megalights_inputs (#136). True only when this view writes the input targets.
+	// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135). True only when this view writes the input targets.
 	bool megalights_inputs_active = false;
+	bool view_reset_temporal_history = false;
 	// GodotNext: light_grid (#139, plan §21.3 contract M2). True only when this view builds and shades from the packed light grid.
 	bool packed_light_grid_active = false;
 	bool packed_light_grid_has_depth_prepass = false;

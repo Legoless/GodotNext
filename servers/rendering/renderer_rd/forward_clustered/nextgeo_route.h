@@ -265,6 +265,10 @@ inline bool nextgeo_is_unsupported_debug_draw(RSE::ViewportDebugDraw p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP:
 		// GodotNext: nextgi_world_cache (#294). Drawn from World Cache buffers over depth/normal.
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE:
+		// GodotNext: megalights_denoiser (#135). Drawn from MegaLights denoiser debug target.
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE:
 			return false;
 		default:
 			return true;

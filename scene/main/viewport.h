@@ -258,6 +258,10 @@ public:
 		DEBUG_DRAW_VSM_CLIPMAP,
 		// GodotNext: nextgi_world_cache (#294)
 		DEBUG_DRAW_NEXTGI_WORLD_CACHE,
+		// GodotNext: megalights_denoiser (#135)
+		DEBUG_DRAW_ML_NOISY,
+		DEBUG_DRAW_ML_DENOISED,
+		DEBUG_DRAW_ML_VARIANCE,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

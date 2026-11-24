@@ -239,6 +239,57 @@ Contract decisions for M4:
   `HWRT_INLINE_ONLY` with `experimental = true` and `retrace_supported = false` via
   `RenderingServer.megalights_get_tier_info()`. Forward+ Set 1 bindings remain untouched (reserved for #143).
 
+### MegaLights denoiser (#135, contract M5, GM-1, GM-7, budget M-5), 2026-11-24
+
+- Standard published real-time denoising & PBR split-sum textbook algorithms implemented from first principles:
+  - Spatio-temporal variance-guided filtering (SVGF — Schied et al. 2017: temporal luminance first/second moments
+    feeding per-pixel variance into 2-iteration à-trous edge-stopping spatial filtering with variance propagation).
+  - Multiscatter split-sum specular EnvBRDF demodulation matching Godot's own Forward+ `prefiltered_dfg()` /
+    `get_energy_compensation()` (`scene_forward_clustered.glsl`) and #205 `rr_specular_albedo`, plus Karis 2014 /
+    Lazarov 2013 analytical GGX split-sum polynomial for the CPU `env_brdf_approx()` helper.
+- Everything else — `ml_shade_samples.glsl`, `ml_denoise_temporal.glsl`, `ml_denoise_spatial.glsl`,
+  `NextGIDenoise::megalights_denoise()`, `MegaLights::shade_samples()` / `denoise_samples()`, debug views,
+  and Forward+ prepass velocity wiring — was written from plan §21.3 contract M5, issue #135, and GodotNext's
+  own #136 M1 direct-light inputs, #142 sampling core, #146 visibility chain (`visibility_buffer` +
+  `hit_distance_texture`), #37 prepass velocity plan, #53/#54/#141 `NextGIDenoise` temporal/firefly/reset-region
+  patterns, and `nextgi_view_inc.glsl`. No Unreal Engine source or shaders, UE plugins, NvRTX, or DLSS/Donut
+  source were consulted.
+
+Contract decisions for M5:
+- **Demodulated shading & half-res fill (`ml_shade_samples.glsl`):** `MODE_SHADE` shades `(sample, visibility)`
+  at sampling resolution and divides diffuse radiance by `max(diffuse_albedo, 0.01)` and specular radiance by
+  `max(spec_env_brdf, 0.01)` (the exact multiscatter split-sum EnvBRDF term used by Forward+ and #205
+  `rr_specular_albedo`), writing two `RGBA16F` targets (diffuse RGB + radiance-weighted occluded hit distance;
+  specular RGB + valid flag). In `downsample = half` mode, `MODE_FILL_HALF` keeps each 2×2 block's sampled pixel
+  untouched and fills the remaining 3 pixels via a 2×2 bracketing joint-bilateral stencil guided by plane-distance
+  depth, view normal, roughness, and shading model. Structured with an explicit per-sample hook for #137's SSS
+  back-face transmission.
+- **Temporal accumulation, firefly clamp & moments (`ml_denoise_temporal.glsl`):** Reprojects at render
+  resolution via #37 prepass velocity (on dynamic surfaces) or `prev_view_proj`, applies 2×2 bilinear history
+  fetching with depth & world-normal disocclusion rejection, tracks diffuse and specular luminance moments
+  (`m1, m2 -> variance`) and packed `R32_UINT` sample counts (`diff_len | (spec_len << 8)`), honors
+  `denoise_reset_regions` (16×16 tiles via `NextGIDenoise::select_reset_probes`), resize, camera cuts, and first
+  frame, and applies #54-style firefly clamping with a shared-memory workgroup reduction to a 16-byte GPU
+  clamped-energy counter (`removed_fp`, `total_fp`, `clamped_pixels`, `valid_pixels` in physical direct-radiance
+  units, read back asynchronously for the <= 2% PQ metric).
+- **2-pass variance-guided à-trous spatial filter (`ml_denoise_spatial.glsl`):** Runs 2 iterations (step widths
+  1 and 2) whose edge-stopping luminance tolerance and kernel width follow smoothed temporal variance, guided by
+  plane-distance linear depth, view normal, roughness, shading model, and #146 hit distance (tightening near
+  contact shadows while smoothing soft penumbrae). Spatial pass 2 writes final denoised render-resolution
+  `RGBA16F` targets into the dead previous-history ping-pong slot while `history_*_cur` preserves clean
+  pre-spatial temporal history for the next frame (avoiding 2 redundant full-res `RGBA16F` allocations).
+- **RR Bypass & temporal upscaler handoff (`rendering/megalights/denoiser`):** Default `0` (`Builtin`) runs
+  shade + temporal + 2-pass spatial denoise and outputs render-resolution `RGBA16F` demodulated diffuse and
+  specular targets ready for #143's Forward+ composite before TAA, TSR, FSR2, MetalFX, and DLSS SR. Setting `1`
+  (`RR Bypass`) skips temporal and spatial passes, allocates zero temporal/spatial history textures, and exposes
+  the noisy demodulated diffuse and specular targets directly alongside surface guides for DLSS-RR (PU+).
+- **Debug visualization & zero-cost off path:** Appends `VIEWPORT_DEBUG_DRAW_ML_NOISY` (70),
+  `VIEWPORT_DEBUG_DRAW_ML_DENOISED` (71), and `VIEWPORT_DEBUG_DRAW_ML_VARIANCE` (72) after
+  `VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE` (69); `MODE_DEBUG_VIS` renders on demand into a lazily allocated
+  debug target only when one of the 3 modes is selected. When MegaLights is disabled, zero MegaLights shade,
+  denoise, velocity, or debug buffers are allocated and legacy frames stay byte-identical. Forward+ color-pass
+  Set 1 bindings (`69+`) and `ShaderSpecialization::packed_1` bit `16+` remain untouched (reserved for #143).
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

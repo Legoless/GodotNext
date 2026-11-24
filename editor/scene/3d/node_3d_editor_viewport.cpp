@@ -4710,7 +4710,11 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_VSM_OVERDRAW:
 		case VIEW_DISPLAY_VSM_CLIPMAP:
 		// GodotNext: nextgi_world_cache (#294)
-		case VIEW_DISPLAY_NEXTGI_WORLD_CACHE: {
+		case VIEW_DISPLAY_NEXTGI_WORLD_CACHE:
+		// GodotNext: megalights_denoiser (#135)
+		case VIEW_DISPLAY_ML_NOISY:
+		case VIEW_DISPLAY_ML_DENOISED:
+		case VIEW_DISPLAY_ML_VARIANCE: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4782,6 +4786,10 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_VSM_CLIPMAP,
 				// GodotNext: nextgi_world_cache (#294)
 				VIEW_DISPLAY_NEXTGI_WORLD_CACHE,
+				// GodotNext: megalights_denoiser (#135)
+				VIEW_DISPLAY_ML_NOISY,
+				VIEW_DISPLAY_ML_DENOISED,
+				VIEW_DISPLAY_ML_VARIANCE,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4855,6 +4863,10 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_VSM_CLIPMAP,
 				// GodotNext: nextgi_world_cache (#294)
 				Viewport::DEBUG_DRAW_NEXTGI_WORLD_CACHE,
+				// GodotNext: megalights_denoiser (#135)
+				Viewport::DEBUG_DRAW_ML_NOISY,
+				Viewport::DEBUG_DRAW_ML_DENOISED,
+				Viewport::DEBUG_DRAW_ML_VARIANCE,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7158,6 +7170,13 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Shows the MegaLights albedo target. RGB is the diffuse albedo, albedo times (1 - metallic). A is the direct-light occlusion the clustered loop applies, mix of 1, ambient occlusion, and ambient-occlusion light affect. The view stays on the color image until MegaLights inputs are enabled with GODOTNEXT_MEGALIGHTS_INPUTS=1."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("MegaLights Material"), VIEW_DISPLAY_ML_MATERIAL, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows the packed MegaLights material target: F0 luma, F0 tint, shading model, and layer group. The copy uses nearest filtering so packed fields are not interpolated."));
+	// GodotNext: megalights_denoiser (#135)
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("MegaLights Noisy"), VIEW_DISPLAY_ML_NOISY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the tone-mapped noisy demodulated direct diffuse and specular radiance produced by MegaLights sample shading before denoising."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("MegaLights Denoised"), VIEW_DISPLAY_ML_DENOISED, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the tone-mapped demodulated direct diffuse and specular radiance produced by the MegaLights spatio-temporal denoiser (or the noisy passthrough when rendering/megalights/denoiser is set to RR Bypass)."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("MegaLights Variance"), VIEW_DISPLAY_ML_VARIANCE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the MegaLights temporal luminance variance heatmap (blue for low converged variance through green and yellow to red for high variance)."));
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Shadow Atlas"), VIEW_DISPLAY_DEBUG_SHADOW_ATLAS, SupportedRenderingMethods::ALL,
 			TTRC("Displays the shadow atlas used for positional (omni/spot) shadow mapping.\nRequires a visible OmniLight3D or SpotLight3D node with shadows enabled to have a visible effect."));

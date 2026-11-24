@@ -3494,6 +3494,10 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP);
 	// GodotNext: nextgi_world_cache (#294)
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE);
+	// GodotNext: megalights_denoiser (#135)
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -4290,6 +4294,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/megalights/distant_screen_traces_length", PROPERTY_HINT_RANGE, "0.0,100.0,0.1,or_greater,suffix:m"), 4.0);
 	GLOBAL_DEF("rendering/megalights/far_field", false);
 	GLOBAL_DEF("rendering/megalights/swrt_continuation", false);
+	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5, GM-1, GM-7, budget M-5).
+	// Builtin demodulated spatio-temporal denoiser (default) or RR Bypass handoff for DLSS-RR (PU+).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/denoiser", PROPERTY_HINT_ENUM, "Builtin,RR Bypass"), 0);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);

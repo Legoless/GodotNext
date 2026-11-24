@@ -30,6 +30,7 @@
 
 #include "denoise.h"
 
+#include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
@@ -103,6 +104,26 @@ NextGIDenoise::~NextGIDenoise() {
 		}
 		shadow_shader.version_free(shadow_version);
 		shadow_version = RID();
+	}
+	if (ml_temporal_version.is_valid()) {
+		for (int i = 0; i < ML_TEMPORAL_MODE_MAX; i++) {
+			if (rd != nullptr && ml_temporal_pipelines[i].is_valid()) {
+				rd->free_rid(ml_temporal_pipelines[i]);
+			}
+			ml_temporal_pipelines[i] = RID();
+		}
+		ml_temporal_shader.version_free(ml_temporal_version);
+		ml_temporal_version = RID();
+	}
+	if (ml_spatial_version.is_valid()) {
+		for (int i = 0; i < ML_SPATIAL_MODE_MAX; i++) {
+			if (rd != nullptr && ml_spatial_pipelines[i].is_valid()) {
+				rd->free_rid(ml_spatial_pipelines[i]);
+			}
+			ml_spatial_pipelines[i] = RID();
+		}
+		ml_spatial_shader.version_free(ml_spatial_version);
+		ml_spatial_version = RID();
 	}
 }
 
@@ -252,6 +273,360 @@ void NextGIDenoise::shadow_denoise(const ShadowDenoiseParams &p_params) {
 		rd->compute_list_dispatch_threads(cl, uint32_t(p_params.screen_size.width), uint32_t(p_params.screen_size.height), 1);
 		rd->compute_list_end();
 	}
+}
+
+Vector<String> NextGIDenoise::get_megalights_temporal_shader_variant_defines() {
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_TEMPORAL\n");
+	modes.push_back("\n#define MODE_COPY_PREV_GUIDE\n");
+	return modes;
+}
+
+Vector<String> NextGIDenoise::get_megalights_spatial_shader_variant_defines() {
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_SPATIAL\n");
+	modes.push_back("\n#define MODE_DEBUG_VIS\n");
+	return modes;
+}
+
+bool NextGIDenoise::_ensure_megalights_shaders() {
+	if (ml_shaders_ready) {
+		return true;
+	}
+	if (ml_shaders_failed) {
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+
+	ml_temporal_shader.initialize(get_megalights_temporal_shader_variant_defines());
+	ml_temporal_version = ml_temporal_shader.version_create(false);
+	if (ml_temporal_version.is_null()) {
+		ml_shaders_failed = true;
+		ERR_FAIL_V_MSG(false, "NextGIDenoise: ml_denoise_temporal.glsl failed to create shader version.");
+	}
+	for (int i = 0; i < ML_TEMPORAL_MODE_MAX; i++) {
+		const RID s = ml_temporal_shader.version_get_shader(ml_temporal_version, i);
+		if (s.is_null()) {
+			for (int j = 0; j < i; j++) {
+				if (ml_temporal_pipelines[j].is_valid()) {
+					rd->free_rid(ml_temporal_pipelines[j]);
+					ml_temporal_pipelines[j] = RID();
+				}
+			}
+			ml_temporal_shader.version_free(ml_temporal_version);
+			ml_temporal_version = RID();
+			ml_shaders_failed = true;
+			ERR_FAIL_V_MSG(false, "NextGIDenoise: ml_denoise_temporal.glsl failed to compile.");
+		}
+		ml_temporal_pipelines[i] = rd->compute_pipeline_create(s);
+	}
+
+	ml_spatial_shader.initialize(get_megalights_spatial_shader_variant_defines());
+	ml_spatial_version = ml_spatial_shader.version_create(false);
+	if (ml_spatial_version.is_null()) {
+		for (int j = 0; j < ML_TEMPORAL_MODE_MAX; j++) {
+			if (ml_temporal_pipelines[j].is_valid()) {
+				rd->free_rid(ml_temporal_pipelines[j]);
+				ml_temporal_pipelines[j] = RID();
+			}
+		}
+		ml_temporal_shader.version_free(ml_temporal_version);
+		ml_temporal_version = RID();
+		ml_shaders_failed = true;
+		ERR_FAIL_V_MSG(false, "NextGIDenoise: ml_denoise_spatial.glsl failed to create shader version.");
+	}
+	for (int i = 0; i < ML_SPATIAL_MODE_MAX; i++) {
+		const RID s = ml_spatial_shader.version_get_shader(ml_spatial_version, i);
+		if (s.is_null()) {
+			for (int j = 0; j < i; j++) {
+				if (ml_spatial_pipelines[j].is_valid()) {
+					rd->free_rid(ml_spatial_pipelines[j]);
+					ml_spatial_pipelines[j] = RID();
+				}
+			}
+			ml_spatial_shader.version_free(ml_spatial_version);
+			ml_spatial_version = RID();
+			for (int j = 0; j < ML_TEMPORAL_MODE_MAX; j++) {
+				if (ml_temporal_pipelines[j].is_valid()) {
+					rd->free_rid(ml_temporal_pipelines[j]);
+					ml_temporal_pipelines[j] = RID();
+				}
+			}
+			ml_temporal_shader.version_free(ml_temporal_version);
+			ml_temporal_version = RID();
+			ml_shaders_failed = true;
+			ERR_FAIL_V_MSG(false, "NextGIDenoise: ml_denoise_spatial.glsl failed to compile.");
+		}
+		ml_spatial_pipelines[i] = rd->compute_pipeline_create(s);
+	}
+
+	ml_shaders_ready = true;
+	return true;
+}
+
+NextGIDenoise::MegaLightsDenoiseOutput NextGIDenoise::megalights_denoise(const MegaLightsDenoiseParams &p_params) {
+	MegaLightsDenoiseOutput out;
+	out.diffuse = p_params.noisy_diffuse;
+	out.specular = p_params.noisy_specular;
+	out.bypassed = p_params.rr_bypass;
+
+	ERR_FAIL_COND_V(!p_params.noisy_diffuse.is_valid() || !p_params.noisy_specular.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.depth.is_valid() || !p_params.params_ubo.is_valid(), out);
+	if (p_params.screen_size.width <= 0 || p_params.screen_size.height <= 0) {
+		return out;
+	}
+
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_COND_V(rd == nullptr || uniform_set_cache == nullptr || material_storage == nullptr, out);
+
+	// Fill shared MLDenoiseParams UBO (used by temporal, spatial, and optional debug vis).
+	MegaLightsDenoiseParamsGPU ubo;
+	NextGIViewMath::store(p_params.inv_projection, ubo.inv_projection);
+	NextGIViewMath::store(p_params.inv_view_proj, ubo.inv_view_proj);
+	NextGIViewMath::store(p_params.prev_view_proj, ubo.prev_view_proj);
+	NextGIViewMath::store_basis(p_params.view_to_world, ubo.view_to_world);
+	ubo.cur_depth_coeffs[0] = float(p_params.cur_depth_coeffs.x);
+	ubo.cur_depth_coeffs[1] = float(p_params.cur_depth_coeffs.y);
+	ubo.cur_depth_coeffs[2] = float(p_params.cur_depth_coeffs.z);
+	ubo.cur_depth_coeffs[3] = float(p_params.cur_depth_coeffs.w);
+	ubo.prev_depth_coeffs[0] = float(p_params.prev_depth_coeffs.x);
+	ubo.prev_depth_coeffs[1] = float(p_params.prev_depth_coeffs.y);
+	ubo.prev_depth_coeffs[2] = float(p_params.prev_depth_coeffs.z);
+	ubo.prev_depth_coeffs[3] = float(p_params.prev_depth_coeffs.w);
+	ubo.camera_pos[0] = float(p_params.camera_pos.x);
+	ubo.camera_pos[1] = float(p_params.camera_pos.y);
+	ubo.camera_pos[2] = float(p_params.camera_pos.z);
+	ubo.camera_pos[3] = 1.0f;
+	ubo.prev_camera_pos[0] = float(p_params.prev_camera_pos.x);
+	ubo.prev_camera_pos[1] = float(p_params.prev_camera_pos.y);
+	ubo.prev_camera_pos[2] = float(p_params.prev_camera_pos.z);
+	ubo.prev_camera_pos[3] = 1.0f;
+	ubo.screen_reset_size[0] = uint32_t(p_params.screen_size.width);
+	ubo.screen_reset_size[1] = uint32_t(p_params.screen_size.height);
+	ubo.screen_reset_size[2] = uint32_t(MAX(p_params.reset_tile_dims.width, 0));
+	ubo.screen_reset_size[3] = uint32_t(MAX(p_params.reset_tile_dims.height, 0));
+	uint32_t flags = 0u;
+	if (p_params.has_history) {
+		flags |= ML_DENOISE_FLAG_HAS_HISTORY;
+	}
+	if (p_params.velocity_enabled && p_params.velocity.is_valid()) {
+		flags |= ML_DENOISE_FLAG_VELOCITY_ENABLED;
+	}
+	if (p_params.reset_mask_enabled && p_params.reset_mask.is_valid() && p_params.reset_tile_dims.width > 0 && p_params.reset_tile_dims.height > 0) {
+		flags |= ML_DENOISE_FLAG_RESET_MASK_ENABLED;
+	}
+	if (p_params.orthogonal) {
+		flags |= ML_DENOISE_FLAG_ORTHOGONAL;
+	}
+	if (p_params.rr_bypass) {
+		flags |= ML_DENOISE_FLAG_RR_BYPASS;
+	}
+	ubo.config[0] = p_params.frame_index;
+	ubo.config[1] = flags;
+	ubo.config[2] = MAX(p_params.max_history_diffuse, 1u);
+	ubo.config[3] = MAX(p_params.max_history_specular, 1u);
+
+	const RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	const RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	if (p_params.rr_bypass) {
+		// RR Bypass (DLSS-RR contract, PU+): skip temporal and spatial denoising entirely and
+		// expose the noisy demodulated diffuse & specular targets directly at render resolution.
+		if (p_params.debug_vis_mode >= 0 && p_params.debug_vis_output.is_valid() && _ensure_megalights_shaders()) {
+			rd->buffer_update(p_params.params_ubo, 0, sizeof(ubo), &ubo);
+			const RID vis_shader = ml_spatial_shader.version_get_shader(ml_spatial_version, ML_SPATIAL_MODE_DEBUG_VIS);
+			LocalVector<RD::Uniform> u;
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_params.params_ubo));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.noisy_diffuse })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, p_params.noisy_specular })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.noisy_diffuse })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, p_params.noisy_specular })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.noisy_diffuse })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, p_params.noisy_specular })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ nearest_sampler, p_params.depth })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, Vector<RID>({ p_params.debug_vis_output })));
+			const RID set = uniform_set_cache->get_cache_vec(vis_shader, 0, u);
+			if (set.is_valid()) {
+				struct DebugPush {
+					uint32_t debug_mode = 0;
+					uint32_t rr_bypass = 1;
+					uint32_t pad[2] = {};
+				} push;
+				push.debug_mode = uint32_t(CLAMP(p_params.debug_vis_mode, 0, 2));
+				push.rr_bypass = 1u;
+				const RD::ComputeListID cl = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(cl, ml_spatial_pipelines[ML_SPATIAL_MODE_DEBUG_VIS]);
+				rd->compute_list_bind_uniform_set(cl, set, 0);
+				rd->compute_list_set_push_constant(cl, &push, sizeof(push));
+				rd->compute_list_dispatch_threads(cl, uint32_t(p_params.screen_size.width), uint32_t(p_params.screen_size.height), 1u);
+				rd->compute_list_end();
+			}
+		}
+		return out;
+	}
+
+	ERR_FAIL_COND_V(!p_params.normal_roughness.is_valid() || !p_params.ml_albedo.is_valid() || !p_params.ml_material.is_valid() || !p_params.dfg_lut.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.prev_depth_normal.is_valid() || !p_params.history_diffuse_prev.is_valid() || !p_params.history_diffuse_cur.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.history_specular_prev.is_valid() || !p_params.history_specular_cur.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.spatial_scratch_diffuse.is_valid() || !p_params.spatial_scratch_specular.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.moments_prev.is_valid() || !p_params.moments_cur.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.history_len_prev.is_valid() || !p_params.history_len_cur.is_valid(), out);
+	ERR_FAIL_COND_V(!p_params.clamp_stats_buffer.is_valid() || !p_params.reset_mask.is_valid(), out);
+
+	if (!_ensure_megalights_shaders()) {
+		return out;
+	}
+
+	rd->buffer_update(p_params.params_ubo, 0, sizeof(ubo), &ubo);
+	rd->buffer_clear(p_params.clamp_stats_buffer, 0, 4u * sizeof(uint32_t));
+
+	const RID vel_tex = (p_params.velocity_enabled && p_params.velocity.is_valid()) ? p_params.velocity : p_params.normal_roughness;
+	const uint32_t w = uint32_t(p_params.screen_size.width);
+	const uint32_t h = uint32_t(p_params.screen_size.height);
+
+	rd->draw_command_begin_label("MegaLights Denoiser");
+
+	// 1. Temporal accumulation with velocity reprojection, disocclusion rejection, firefly clamp, and luminance moments.
+	{
+		const RID shader_rid = ml_temporal_shader.version_get_shader(ml_temporal_version, ML_TEMPORAL_MODE_ACCUM);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_params.params_ubo));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.noisy_diffuse })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, p_params.noisy_specular })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.history_diffuse_prev })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, p_params.history_specular_prev })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.moments_prev })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, Vector<RID>({ p_params.history_len_prev })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ nearest_sampler, p_params.depth })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, Vector<RID>({ nearest_sampler, p_params.normal_roughness })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 9, Vector<RID>({ nearest_sampler, vel_tex })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 10, Vector<RID>({ nearest_sampler, p_params.prev_depth_normal })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, Vector<RID>({ nearest_sampler, p_params.ml_albedo })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 12, Vector<RID>({ nearest_sampler, p_params.ml_material })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 13, Vector<RID>({ linear_sampler, p_params.dfg_lut })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, p_params.reset_mask));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 15, Vector<RID>({ p_params.history_diffuse_cur })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, Vector<RID>({ p_params.history_specular_cur })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 17, Vector<RID>({ p_params.moments_cur })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 18, Vector<RID>({ p_params.history_len_cur })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, p_params.clamp_stats_buffer));
+
+		const RID set = uniform_set_cache->get_cache_vec(shader_rid, 0, u);
+		if (set.is_valid()) {
+			const RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, ml_temporal_pipelines[ML_TEMPORAL_MODE_ACCUM]);
+			rd->compute_list_bind_uniform_set(cl, set, 0);
+			rd->compute_list_dispatch_threads(cl, w, h, 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	// 2. Two variance-guided à-trous spatial passes (step widths 1 and 2):
+	//    pass 0 (step = 1): history_*_cur -> spatial_scratch_*
+	//    pass 1 (step = 2): spatial_scratch_* -> history_*_prev (now dead as previous history; becomes final output).
+	{
+		struct SpatialPush {
+			uint32_t step_size = 1;
+			uint32_t pass_index = 0;
+			uint32_t pad[2] = {};
+		};
+		const RID shader_rid = ml_spatial_shader.version_get_shader(ml_spatial_version, ML_SPATIAL_MODE_ATROUS);
+		const RID src_diff[2] = { p_params.history_diffuse_cur, p_params.spatial_scratch_diffuse };
+		const RID src_spec[2] = { p_params.history_specular_cur, p_params.spatial_scratch_specular };
+		const RID dst_diff[2] = { p_params.spatial_scratch_diffuse, p_params.history_diffuse_prev };
+		const RID dst_spec[2] = { p_params.spatial_scratch_specular, p_params.history_specular_prev };
+		const uint32_t steps[2] = { 1u, 2u };
+
+		for (uint32_t pass = 0u; pass < 2u; pass++) {
+			LocalVector<RD::Uniform> u;
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_params.params_ubo));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, src_diff[pass] })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, src_spec[pass] })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.noisy_diffuse })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, p_params.noisy_specular })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.depth })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, p_params.normal_roughness })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ nearest_sampler, p_params.ml_material })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, Vector<RID>({ dst_diff[pass] })));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, Vector<RID>({ dst_spec[pass] })));
+
+			const RID set = uniform_set_cache->get_cache_vec(shader_rid, 0, u);
+			if (set.is_valid()) {
+				SpatialPush push;
+				push.step_size = steps[pass];
+				push.pass_index = pass;
+				const RD::ComputeListID cl = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(cl, ml_spatial_pipelines[ML_SPATIAL_MODE_ATROUS]);
+				rd->compute_list_bind_uniform_set(cl, set, 0);
+				rd->compute_list_set_push_constant(cl, &push, sizeof(push));
+				rd->compute_list_dispatch_threads(cl, w, h, 1u);
+				rd->compute_list_end();
+			}
+		}
+	}
+
+	// 3. Save current world-space normal + linear depth as next frame's disocclusion guide.
+	{
+		const RID shader_rid = ml_temporal_shader.version_get_shader(ml_temporal_version, ML_TEMPORAL_MODE_COPY_PREV_GUIDE);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_params.params_ubo));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.depth })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, p_params.normal_roughness })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, Vector<RID>({ p_params.prev_depth_normal })));
+
+		const RID set = uniform_set_cache->get_cache_vec(shader_rid, 0, u);
+		if (set.is_valid()) {
+			const RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, ml_temporal_pipelines[ML_TEMPORAL_MODE_COPY_PREV_GUIDE]);
+			rd->compute_list_bind_uniform_set(cl, set, 0);
+			rd->compute_list_dispatch_threads(cl, w, h, 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	// 4. Optional on-demand debug visualization (ML_NOISY, ML_DENOISED, ML_VARIANCE).
+	if (p_params.debug_vis_mode >= 0 && p_params.debug_vis_output.is_valid()) {
+		const RID vis_shader = ml_spatial_shader.version_get_shader(ml_spatial_version, ML_SPATIAL_MODE_DEBUG_VIS);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_params.params_ubo));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.noisy_diffuse })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, p_params.noisy_specular })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.history_diffuse_prev })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, p_params.history_specular_prev })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.history_diffuse_cur })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ nearest_sampler, p_params.history_specular_cur })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ nearest_sampler, p_params.depth })));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, Vector<RID>({ p_params.debug_vis_output })));
+
+		const RID set = uniform_set_cache->get_cache_vec(vis_shader, 0, u);
+		if (set.is_valid()) {
+			struct DebugPush {
+				uint32_t debug_mode = 0;
+				uint32_t rr_bypass = 0;
+				uint32_t pad[2] = {};
+			} push;
+			push.debug_mode = uint32_t(CLAMP(p_params.debug_vis_mode, 0, 2));
+			push.rr_bypass = 0u;
+			const RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, ml_spatial_pipelines[ML_SPATIAL_MODE_DEBUG_VIS]);
+			rd->compute_list_bind_uniform_set(cl, set, 0);
+			rd->compute_list_set_push_constant(cl, &push, sizeof(push));
+			rd->compute_list_dispatch_threads(cl, w, h, 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	rd->draw_command_end_label();
+
+	out.diffuse = p_params.history_diffuse_prev;
+	out.specular = p_params.history_specular_prev;
+	out.variance_diffuse = p_params.history_diffuse_cur;
+	out.variance_specular = p_params.history_specular_cur;
+	out.bypassed = false;
+	return out;
 }
 
 void NextGIDenoise::process_specular_temporal(const SpecularTemporalParams &p_params) {

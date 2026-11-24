@@ -30,18 +30,23 @@
 
 #pragma once
 
-// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2, budget M-3)
-// and megalights_visibility (#146, plan §21.3 contract M4, GM-1, GM-8, GM-12, budget M-4).
-// MegaLights sampling core + visibility chain: per-pixel weighted reservoir sampling over the #139
-// packed froxel light grid, Hi-Z screen-space shadow trace, 2x2 block ray deduplication & stream
-// compaction, near-field ray query via #145 trace_shadow() (with alpha cutout + #130 material
-// retrace), optional #126 far-field TLAS continuation, optional #182 SWRT global-SDF continuation
-// on the non-RT tier, per-light VSM-method sampling via #222 vsm_shadow() (SMRT 2 rays), packed
-// RGBA8 transmittance + R16F hit-distance outputs ready for #135 denoiser, and 8x8 tile guiding.
+// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2, budget M-3),
+// megalights_visibility (#146, plan §21.3 contract M4, GM-1, GM-8, GM-12, budget M-4), and
+// megalights_denoiser (#135, plan §21.3 contract M5, GM-1, GM-7, budget M-5).
+// MegaLights sampling core + visibility chain + demodulated spatio-temporal denoiser: per-pixel
+// weighted reservoir sampling over the #139 packed froxel light grid, Hi-Z screen-space shadow
+// trace, 2x2 block ray deduplication & stream compaction, near-field ray query via #145
+// trace_shadow() (with alpha cutout + #130 material retrace), optional #126 far-field TLAS
+// continuation, optional #182 SWRT global-SDF continuation on the non-RT tier, per-light
+// VSM-method sampling via #222 vsm_shadow() (SMRT 2 rays), packed RGBA8 transmittance + R16F
+// hit-distance outputs, 8x8 tile guiding, demodulated diffuse/specular shading (+ 2x2 bilateral
+// half-res fill), temporal accumulation with firefly clamped-energy counter and 2-pass à-trous
+// spatial filter (or rr_bypass handoff for DLSS-RR), and ML_{NOISY,DENOISED,VARIANCE} debug views.
 
 #include "core/math/color.h"
 #include "core/math/math_funcs.h"
 #include "core/math/projection.h"
+#include "core/math/rect2i.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
 #include "core/math/vector2i.h"
@@ -49,6 +54,7 @@
 #include "core/math/vector3i.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -65,6 +71,7 @@ namespace RendererRD {
 
 class LightFunctionAtlas;
 class NextGI;
+class NextGIDenoise;
 
 // Per-view GPU resources owned by RenderSceneBuffersRD under RB_SCOPE_MEGALIGHTS.
 class MegaLightsViewData : public RenderBufferCustomDataRD {
@@ -110,13 +117,74 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 	uint32_t vis_list_capacity = 0;
 	RID vis_retrace_buffer;
 
+	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5). Lazy per-view shade & denoise targets (0 when off).
+	Size2i shade_sample_size;
+	Size2i shade_full_size;
+	RID shade_sample_diffuse;
+	RID shade_sample_specular;
+	RID noisy_diffuse;
+	RID noisy_specular;
+	RID denoise_params_ubo;
+
+	Size2i denoise_size;
+	Size2i denoise_reset_tile_dims;
+	RID denoise_diffuse[2];
+	RID denoise_specular[2];
+	RID denoise_scratch_diffuse;
+	RID denoise_scratch_specular;
+	RID denoise_moments[2];
+	RID denoise_history_len[2];
+	RID denoise_prev_depth_normal;
+	RID denoise_clamp_stats_buffer;
+	RID denoise_reset_mask_buffer;
+	uint32_t denoise_history_index = 0;
+	bool denoise_has_history = false;
+	uint64_t denoise_last_frame = 0;
+	Transform3D denoise_last_cam_transform;
+	bool denoise_has_cam_transform = false;
+
+	Size2i denoise_debug_size;
+	RID denoise_debug_texture;
+
+	RID denoise_output_diffuse;
+	RID denoise_output_specular;
+	bool denoise_last_rr_bypass = false;
+
 	uint32_t frame_index = 0;
 
 	void _free_sampling_buffers();
 	void _free_visibility_buffers();
+	void _free_shade_buffers();
+	void _free_denoise_buffers();
+	void _free_denoise_debug_texture();
 	void _free_reference_buffers();
 	void _free_verify_buffers();
 	void _free_transient_buffers();
+
+public:
+	struct DenoiseStats {
+		uint64_t clamped_energy_removed_fp = 0;
+		uint64_t total_direct_energy_fp = 0;
+		double clamped_energy_ratio = 0.0;
+		uint32_t clamped_pixels = 0;
+		uint32_t valid_pixels = 0;
+		bool rr_bypass = false;
+	};
+
+	struct DenoiseReadbackState {
+		SafeRefCount refs;
+		SafeFlag alive;
+		SafeFlag pending;
+		uint32_t removed_fp = 0;
+		uint32_t total_fp = 0;
+		uint32_t clamped_pixels = 0;
+		uint32_t valid_pixels = 0;
+		bool has_result = false;
+	};
+
+private:
+	DenoiseReadbackState *denoise_readback = nullptr;
+	DenoiseStats last_denoise_stats;
 
 public:
 	virtual void configure(RenderSceneBuffersRD *p_render_buffers) override;
@@ -125,12 +193,16 @@ public:
 	bool ensure_sampling_buffers(const Size2i &p_internal_size, uint32_t p_samples_per_pixel, uint32_t p_downsample_mode);
 	bool ensure_visibility_buffers(uint32_t p_total_samples);
 	bool ensure_retrace_buffer();
+	bool ensure_shade_buffers(const Size2i &p_internal_size, const Size2i &p_sample_size, uint32_t p_downsample_mode);
+	bool ensure_denoise_buffers(const Size2i &p_internal_size, bool p_rr_bypass);
+	bool ensure_denoise_debug_texture(const Size2i &p_internal_size);
 	bool ensure_reference_buffers(const Size2i &p_internal_size);
 	bool ensure_verify_buffers(const Size2i &p_internal_size);
 	bool ensure_layer_group_buffer(uint32_t p_count);
 	bool ensure_light_shadow_policy_buffer(uint32_t p_count);
 
 	void reset_guiding();
+	void reset_denoise_history();
 	void reset_reference();
 
 	Size2i get_internal_size() const { return internal_size; }
@@ -139,7 +211,7 @@ public:
 	uint32_t get_samples_per_pixel() const { return samples_per_pixel; }
 	uint32_t get_downsample_mode() const { return downsample_mode; }
 
-	// Clean buffer contracts for #146 (visibility chain), #135 (denoiser), and #143 (composite).
+	// Clean buffer contracts for #146 (visibility chain), #135 (denoiser), #143 (composite), and #206 (DLSS-RR).
 	RID get_sample_buffer() const { return sample_buffer; }
 	RID get_visibility_buffer() const { return visibility_buffer; }
 	RID get_hit_distance_texture() const { return hit_distance_texture; }
@@ -147,6 +219,42 @@ public:
 	RID get_previous_guiding_buffer() const { return guiding_buffers[1u - guiding_write_index]; }
 	bool has_guiding_history() const { return guiding_has_history; }
 	void advance_guiding_history();
+
+	RID get_shade_sample_diffuse() const { return shade_sample_diffuse; }
+	RID get_shade_sample_specular() const { return shade_sample_specular; }
+	RID get_noisy_diffuse_texture() const { return noisy_diffuse; }
+	RID get_noisy_specular_texture() const { return noisy_specular; }
+	RID get_denoised_diffuse_texture() const { return denoise_output_diffuse; }
+	RID get_denoised_specular_texture() const { return denoise_output_specular; }
+	RID get_denoise_debug_texture() const { return denoise_debug_texture; }
+	RID get_denoise_params_ubo() const { return denoise_params_ubo; }
+	RID get_denoise_diffuse_slot(uint32_t p_slot) const { return denoise_diffuse[p_slot & 1u]; }
+	RID get_denoise_specular_slot(uint32_t p_slot) const { return denoise_specular[p_slot & 1u]; }
+	RID get_denoise_scratch_diffuse() const { return denoise_scratch_diffuse; }
+	RID get_denoise_scratch_specular() const { return denoise_scratch_specular; }
+	RID get_denoise_moments_slot(uint32_t p_slot) const { return denoise_moments[p_slot & 1u]; }
+	RID get_denoise_history_len_slot(uint32_t p_slot) const { return denoise_history_len[p_slot & 1u]; }
+	RID get_denoise_prev_depth_normal() const { return denoise_prev_depth_normal; }
+	RID get_denoise_clamp_stats_buffer() const { return denoise_clamp_stats_buffer; }
+	RID get_denoise_reset_mask_buffer() const { return denoise_reset_mask_buffer; }
+	Size2i get_denoise_reset_tile_dims() const { return denoise_reset_tile_dims; }
+	uint32_t get_denoise_history_index() const { return denoise_history_index; }
+	bool has_denoise_history() const { return denoise_has_history; }
+	uint64_t get_denoise_last_frame() const { return denoise_last_frame; }
+	bool has_denoise_cam_transform() const { return denoise_has_cam_transform; }
+	const Transform3D &get_denoise_last_cam_transform() const { return denoise_last_cam_transform; }
+	bool is_denoise_rr_bypass() const { return denoise_last_rr_bypass; }
+	void set_denoise_output(RID p_diffuse, RID p_specular, bool p_rr_bypass) {
+		denoise_output_diffuse = p_diffuse;
+		denoise_output_specular = p_specular;
+		denoise_last_rr_bypass = p_rr_bypass;
+		last_denoise_stats.rr_bypass = p_rr_bypass;
+	}
+	void advance_denoise_history(uint64_t p_frame, const Transform3D &p_cam_transform, bool p_bypassed);
+	void poll_denoise_stats();
+	void submit_denoise_stats_readback();
+	void record_denoise_stats(uint32_t p_removed_fp, uint32_t p_total_fp, uint32_t p_clamped_pixels, uint32_t p_valid_pixels, bool p_rr_bypass);
+	const DenoiseStats &get_denoise_stats() const { return last_denoise_stats; }
 
 	RID get_reference_accum_texture() const { return reference_accum_texture; }
 	uint32_t get_reference_frame_count() const { return reference_frame_count; }
@@ -177,7 +285,7 @@ public:
 	void set_frame_index(uint32_t p_frame) { frame_index = p_frame; }
 	void advance_frame_index() { frame_index++; }
 
-	MegaLightsViewData() = default;
+	MegaLightsViewData();
 	virtual ~MegaLightsViewData();
 };
 
@@ -194,10 +302,17 @@ public:
 	static constexpr const char *SETTING_DISTANT_SCREEN_TRACES_LENGTH = "rendering/megalights/distant_screen_traces_length";
 	static constexpr const char *SETTING_FAR_FIELD = "rendering/megalights/far_field";
 	static constexpr const char *SETTING_SWRT_CONTINUATION = "rendering/megalights/swrt_continuation";
+	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
+	static constexpr const char *SETTING_DENOISER = "rendering/megalights/denoiser";
 
 	enum DownsampleMode : uint32_t {
 		DOWNSAMPLE_FULL = 0,
 		DOWNSAMPLE_HALF = 1,
+	};
+
+	enum DenoiserMode : uint32_t {
+		DENOISER_BUILTIN = 0,
+		DENOISER_RR_BYPASS = 1,
 	};
 
 	enum LightType : uint32_t {
@@ -229,6 +344,10 @@ public:
 	static constexpr float DEFAULT_DISTANT_SCREEN_TRACE_START_DEPTH = 16.0f;
 	static constexpr bool DEFAULT_FAR_FIELD = false;
 	static constexpr bool DEFAULT_SWRT_CONTINUATION = false;
+	static constexpr DenoiserMode DEFAULT_DENOISER = DENOISER_BUILTIN;
+	static constexpr float DEMOD_ALBEDO_FLOOR = 0.01f;
+	static constexpr float DEMOD_SPECULAR_FLOOR = 0.01f;
+	static constexpr uint32_t DENOISE_RESET_TILE_SIZE = 16u;
 	static constexpr uint32_t VSM_SMRT_RAYS = 2u;
 	static constexpr float HIT_DISTANCE_MISS = 65504.0f;
 
@@ -295,6 +414,7 @@ public:
 		float distant_screen_traces_length = DEFAULT_DISTANT_SCREEN_TRACES_LENGTH;
 		bool far_field = DEFAULT_FAR_FIELD;
 		bool swrt_continuation = DEFAULT_SWRT_CONTINUATION;
+		DenoiserMode denoiser = DEFAULT_DENOISER;
 	};
 
 	// std140, 272 bytes. Must match MLVisParams in ml_screen_trace.glsl / ml_trace_*.glsl.
@@ -445,6 +565,12 @@ public:
 		bool vsm_sample_view = false;
 		float surface_thickness = 0.01f;
 		int quality_level = 2;
+		// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
+		RID velocity_texture;
+		bool velocity_enabled = false;
+		bool reset_temporal_history = false;
+		RSE::ViewportDebugDraw debug_draw = RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
+		Vector<Rect2i> dirty_reset_regions;
 	};
 
 	// --- Pure, device-free helpers (tested by CPU doctests) ---
@@ -454,6 +580,8 @@ public:
 	// Provisional sample count per quality preset (Low=2, Medium=2, High=4, Epic=8; tuned in PQ).
 	static uint32_t samples_for_quality_preset(int p_quality_level);
 	static DownsampleMode parse_downsample_variant(const Variant &p_value);
+	static DenoiserMode parse_denoiser_variant(const Variant &p_value);
+	static int debug_vis_mode_from_viewport(RSE::ViewportDebugDraw p_mode);
 
 	static Vector2i downsample_offset(uint32_t p_frame_index);
 	static Size2i compute_sample_grid_size(const Size2i &p_internal_size, DownsampleMode p_downsample);
@@ -505,11 +633,23 @@ public:
 	static uint32_t pack_visibility_rgba8(float p_r, float p_g, float p_b, float p_a = 1.0f);
 	static Color unpack_visibility_rgba8(uint32_t p_packed);
 
+	// GodotNext: megalights_denoiser (#135). Pure device-free demodulation, firefly clamp, and cut helpers.
+	static Vector3 diffuse_demod_factor(const Vector3 &p_diffuse_albedo);
+	static Vector3 env_brdf_split_sum(const Vector3 &p_f0, float p_dfg_x, float p_dfg_y);
+	static Vector3 env_brdf_approx(const Vector3 &p_f0, float p_roughness, float p_nov);
+	static Vector3 specular_demod_factor(const Vector3 &p_spec_env_brdf);
+	static Vector3 demodulate_radiance(const Vector3 &p_radiance, const Vector3 &p_factor);
+	static Vector3 remodulate_radiance(const Vector3 &p_demod, const Vector3 &p_factor);
+	static double compute_clamped_energy_ratio(uint64_t p_removed_fp, uint64_t p_total_fp);
+	static float firefly_clamp_factor(float p_luma, float p_limit, float &r_removed);
+	static bool is_camera_cut(const Transform3D &p_prev, const Transform3D &p_cur);
+
 	// Shader variant lists for NextGIBakeShaders and runtime compilation.
 	static Vector<String> get_screen_trace_shader_variant_defines();
 	static Vector<String> get_trace_rays_shader_variant_defines();
 	static Vector<String> get_trace_rays_swrt_shader_variant_defines();
 	static Vector<String> get_trace_vsm_shader_variant_defines();
+	static Vector<String> get_shade_samples_shader_variant_defines();
 
 	// Spatio-temporal blue-noise table accessors (64x64x32 RG8 committed data).
 	static const uint8_t *get_stbn_data();
@@ -536,6 +676,8 @@ private:
 	bool _ensure_trace_rays_shaders(NextGI *p_next_gi);
 	bool _ensure_trace_rays_swrt_shader();
 	bool _ensure_trace_vsm_shader();
+	bool _ensure_shade_shaders();
+	NextGIDenoise *_ensure_denoiser();
 	void _ensure_stbn_texture();
 	void _fill_params_ubo(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_frame_index, bool p_has_guiding, bool p_force_visible_one, float p_falloff_override, ParamsUBO &r_ubo) const;
 	void _upload_layer_group_masks(const Ref<MegaLightsViewData> &p_view) const;
@@ -544,6 +686,8 @@ private:
 	void _dispatch_generate(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, bool p_has_guiding, float p_falloff_override);
 	void _dispatch_visibility_chain(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, const VisibilityOptions &p_opts, bool *r_retrace_ran = nullptr);
 	void _dispatch_guiding(const Ref<MegaLightsViewData> &p_view, RID p_visibility_buffer, uint32_t p_frame_index, bool p_force_visible_one);
+	void _dispatch_shade(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, bool p_force_visible_one, float p_falloff_override);
+	void _dispatch_denoise(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, uint32_t p_frame_index, bool p_rr_bypass, int p_debug_vis_mode, bool p_force_reset, const Vector<Rect2i> &p_dirty_regions, bool p_submit_async_readback, bool p_in_check_loop = false);
 	void _dispatch_reference_unshadowed(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_n, float p_falloff_override);
 	void _dispatch_reference_rt(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_n, bool p_force_visible_one, float p_falloff_override);
 	void _dispatch_verify_samples(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_step_n, float p_falloff_override);
@@ -558,6 +702,12 @@ public:
 
 	// Stage 3 (M3, called after #146 visibility): aggregate visible lights per 8x8 tile for next frame.
 	void update_guiding(Ref<RenderSceneBuffersRD> p_rb, RID p_visibility_buffer = RID(), bool p_force_visible_one = false);
+
+	// Stage 4 (M5): shade (sample, visibility) into demodulated diffuse/specular (+ 2x2 bilateral fill if half-res).
+	void shade_samples(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
+
+	// Stage 5 (M5): temporal accumulation + 2-pass variance-guided spatial denoise (or rr_bypass handoff).
+	void denoise_samples(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
 
 	// Reference mode (M3, GM-1): exhaustive per-light shading with trace_shadow() accumulated across frames.
 	void render_reference(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb, bool p_force_visible_one = false);

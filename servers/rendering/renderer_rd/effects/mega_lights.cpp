@@ -31,10 +31,13 @@
 #include "mega_lights.h"
 
 #include "core/config/project_settings.h"
+#include "core/object/callable_mp.h"
 #include "core/os/mutex.h"
 #include "core/os/os.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/sort_array.h"
+#include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/effects/denoise.h"
 #include "servers/rendering/renderer_rd/effects/megalights_stbn.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
@@ -48,6 +51,7 @@
 #include "servers/rendering/renderer_rd/shaders/effects/ml_guiding.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_screen_trace.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_shade_samples.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_trace_vsm.glsl.gen.h"
@@ -60,6 +64,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #include <cmath>
@@ -151,9 +156,53 @@ static void ml_free_rid(RD *p_rd, RID &r_rid) {
 	r_rid = RID();
 }
 
+static void ml_release_denoise_readback(MegaLightsViewData::DenoiseReadbackState *p_state) {
+	if (p_state != nullptr && p_state->refs.unref()) {
+		memdelete(p_state);
+	}
+}
+
+static void ml_denoise_stats_received(const PackedByteArray &p_data, uint64_t p_state_ptr) {
+	MegaLightsViewData::DenoiseReadbackState *state = reinterpret_cast<MegaLightsViewData::DenoiseReadbackState *>(p_state_ptr);
+	if (state == nullptr) {
+		return;
+	}
+	if (state->alive.is_set() && p_data.size() >= int(4u * sizeof(uint32_t))) {
+		uint32_t words[4] = {};
+		memcpy(words, p_data.ptr(), sizeof(words));
+		state->removed_fp = words[0];
+		state->total_fp = words[1];
+		state->clamped_pixels = words[2];
+		state->valid_pixels = words[3];
+		state->has_result = true;
+	}
+	state->pending.clear();
+	ml_release_denoise_readback(state);
+}
+
+static RID ml_create_rgba16f_texture(RD *p_rd, const Size2i &p_size) {
+	RD::TextureFormat tf;
+	tf.texture_type = RD::TEXTURE_TYPE_2D;
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	tf.width = uint32_t(MAX(p_size.x, 1));
+	tf.height = uint32_t(MAX(p_size.y, 1));
+	tf.depth = 1;
+	tf.array_layers = 1;
+	tf.mipmaps = 1;
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	return p_rd->texture_create(tf, RD::TextureView());
+}
+
 } // namespace
 
 /* MegaLightsViewData */
+
+MegaLightsViewData::MegaLightsViewData() {
+	denoise_readback = memnew(DenoiseReadbackState);
+	denoise_readback->refs.init(1);
+	denoise_readback->alive.set();
+	denoise_readback->pending.clear();
+}
 
 void MegaLightsViewData::_free_sampling_buffers() {
 	RD *rd = RD::get_singleton();
@@ -180,6 +229,50 @@ void MegaLightsViewData::_free_visibility_buffers() {
 	ml_free_rid(rd, vis_sample_ray_map_buffer);
 	vis_list_capacity = 0;
 	ml_free_rid(rd, vis_retrace_buffer);
+}
+
+void MegaLightsViewData::_free_shade_buffers() {
+	RD *rd = RD::get_singleton();
+	ml_free_rid(rd, shade_sample_diffuse);
+	ml_free_rid(rd, shade_sample_specular);
+	ml_free_rid(rd, noisy_diffuse);
+	ml_free_rid(rd, noisy_specular);
+	ml_free_rid(rd, denoise_params_ubo);
+	shade_sample_size = Size2i();
+	shade_full_size = Size2i();
+	denoise_output_diffuse = RID();
+	denoise_output_specular = RID();
+}
+
+void MegaLightsViewData::_free_denoise_buffers() {
+	RD *rd = RD::get_singleton();
+	ml_free_rid(rd, denoise_diffuse[0]);
+	ml_free_rid(rd, denoise_diffuse[1]);
+	ml_free_rid(rd, denoise_specular[0]);
+	ml_free_rid(rd, denoise_specular[1]);
+	ml_free_rid(rd, denoise_scratch_diffuse);
+	ml_free_rid(rd, denoise_scratch_specular);
+	ml_free_rid(rd, denoise_moments[0]);
+	ml_free_rid(rd, denoise_moments[1]);
+	ml_free_rid(rd, denoise_history_len[0]);
+	ml_free_rid(rd, denoise_history_len[1]);
+	ml_free_rid(rd, denoise_prev_depth_normal);
+	ml_free_rid(rd, denoise_clamp_stats_buffer);
+	ml_free_rid(rd, denoise_reset_mask_buffer);
+	denoise_size = Size2i();
+	denoise_reset_tile_dims = Size2i();
+	denoise_history_index = 0;
+	denoise_has_history = false;
+	denoise_last_frame = 0;
+	denoise_has_cam_transform = false;
+	denoise_output_diffuse = RID();
+	denoise_output_specular = RID();
+}
+
+void MegaLightsViewData::_free_denoise_debug_texture() {
+	RD *rd = RD::get_singleton();
+	ml_free_rid(rd, denoise_debug_texture);
+	denoise_debug_size = Size2i();
 }
 
 void MegaLightsViewData::_free_reference_buffers() {
@@ -215,6 +308,9 @@ void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
 	if (new_size != internal_size) {
 		_free_sampling_buffers();
 		_free_visibility_buffers();
+		_free_shade_buffers();
+		_free_denoise_buffers();
+		_free_denoise_debug_texture();
 		_free_reference_buffers();
 		_free_verify_buffers();
 		internal_size = new_size;
@@ -225,15 +321,25 @@ void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
 void MegaLightsViewData::free_data() {
 	_free_sampling_buffers();
 	_free_visibility_buffers();
+	_free_shade_buffers();
+	_free_denoise_buffers();
+	_free_denoise_debug_texture();
 	_free_reference_buffers();
 	_free_verify_buffers();
 	_free_transient_buffers();
 	internal_size = Size2i();
 	frame_index = 0;
+	last_denoise_stats = DenoiseStats();
+	denoise_last_rr_bypass = false;
 }
 
 MegaLightsViewData::~MegaLightsViewData() {
 	free_data();
+	if (denoise_readback != nullptr) {
+		denoise_readback->alive.clear();
+		ml_release_denoise_readback(denoise_readback);
+		denoise_readback = nullptr;
+	}
 }
 
 bool MegaLightsViewData::ensure_sampling_buffers(const Size2i &p_internal_size, uint32_t p_samples_per_pixel, uint32_t p_downsample_mode) {
@@ -349,6 +455,139 @@ bool MegaLightsViewData::ensure_retrace_buffer() {
 	return true;
 }
 
+bool MegaLightsViewData::ensure_shade_buffers(const Size2i &p_internal_size, const Size2i &p_sample_size, uint32_t p_downsample_mode) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (p_internal_size.x <= 0 || p_internal_size.y <= 0 || p_sample_size.x <= 0 || p_sample_size.y <= 0) {
+		return false;
+	}
+	if (!denoise_params_ubo.is_valid()) {
+		denoise_params_ubo = rd->uniform_buffer_create(sizeof(NextGIDenoise::MegaLightsDenoiseParamsGPU));
+		ERR_FAIL_COND_V(!denoise_params_ubo.is_valid(), false);
+	}
+
+	const bool half_res = (p_downsample_mode != uint32_t(MegaLights::DOWNSAMPLE_FULL));
+	if (!noisy_diffuse.is_valid() || !noisy_specular.is_valid() || shade_full_size != p_internal_size) {
+		ml_free_rid(rd, noisy_diffuse);
+		ml_free_rid(rd, noisy_specular);
+		noisy_diffuse = ml_create_rgba16f_texture(rd, p_internal_size);
+		noisy_specular = ml_create_rgba16f_texture(rd, p_internal_size);
+		ERR_FAIL_COND_V(!noisy_diffuse.is_valid() || !noisy_specular.is_valid(), false);
+		rd->texture_clear(noisy_diffuse, Color(0, 0, 0, MegaLights::HIT_DISTANCE_MISS), 0, 1, 0, 1);
+		rd->texture_clear(noisy_specular, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		shade_full_size = p_internal_size;
+	}
+
+	if (half_res) {
+		if (!shade_sample_diffuse.is_valid() || !shade_sample_specular.is_valid() || shade_sample_size != p_sample_size) {
+			ml_free_rid(rd, shade_sample_diffuse);
+			ml_free_rid(rd, shade_sample_specular);
+			shade_sample_diffuse = ml_create_rgba16f_texture(rd, p_sample_size);
+			shade_sample_specular = ml_create_rgba16f_texture(rd, p_sample_size);
+			ERR_FAIL_COND_V(!shade_sample_diffuse.is_valid() || !shade_sample_specular.is_valid(), false);
+			rd->texture_clear(shade_sample_diffuse, Color(0, 0, 0, MegaLights::HIT_DISTANCE_MISS), 0, 1, 0, 1);
+			rd->texture_clear(shade_sample_specular, Color(0, 0, 0, 0), 0, 1, 0, 1);
+			shade_sample_size = p_sample_size;
+		}
+	} else {
+		ml_free_rid(rd, shade_sample_diffuse);
+		ml_free_rid(rd, shade_sample_specular);
+		shade_sample_size = Size2i();
+	}
+	return true;
+}
+
+bool MegaLightsViewData::ensure_denoise_buffers(const Size2i &p_internal_size, bool p_rr_bypass) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (p_internal_size.x <= 0 || p_internal_size.y <= 0) {
+		return false;
+	}
+	if (p_rr_bypass) {
+		// RR Bypass allocates zero temporal/spatial history textures or scratch targets.
+		if (denoise_diffuse[0].is_valid() || denoise_clamp_stats_buffer.is_valid()) {
+			_free_denoise_buffers();
+		}
+		return true;
+	}
+	if (denoise_diffuse[0].is_valid() && denoise_size == p_internal_size) {
+		return true;
+	}
+
+	_free_denoise_buffers();
+
+	for (int i = 0; i < 2; i++) {
+		denoise_diffuse[i] = ml_create_rgba16f_texture(rd, p_internal_size);
+		denoise_specular[i] = ml_create_rgba16f_texture(rd, p_internal_size);
+		denoise_moments[i] = ml_create_rgba16f_texture(rd, p_internal_size);
+
+		RD::TextureFormat hlf;
+		hlf.texture_type = RD::TEXTURE_TYPE_2D;
+		hlf.format = RD::DATA_FORMAT_R32_UINT;
+		hlf.width = uint32_t(p_internal_size.x);
+		hlf.height = uint32_t(p_internal_size.y);
+		hlf.depth = 1;
+		hlf.array_layers = 1;
+		hlf.mipmaps = 1;
+		hlf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		denoise_history_len[i] = rd->texture_create(hlf, RD::TextureView());
+
+		if (!denoise_diffuse[i].is_valid() || !denoise_specular[i].is_valid() || !denoise_moments[i].is_valid() || !denoise_history_len[i].is_valid()) {
+			_free_denoise_buffers();
+			ERR_FAIL_V_MSG(false, "MegaLights: failed to allocate temporal history textures.");
+		}
+		rd->texture_clear(denoise_diffuse[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->texture_clear(denoise_specular[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->texture_clear(denoise_moments[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->texture_clear(denoise_history_len[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+
+	denoise_scratch_diffuse = ml_create_rgba16f_texture(rd, p_internal_size);
+	denoise_scratch_specular = ml_create_rgba16f_texture(rd, p_internal_size);
+	denoise_prev_depth_normal = ml_create_rgba16f_texture(rd, p_internal_size);
+	denoise_clamp_stats_buffer = rd->storage_buffer_create(4u * sizeof(uint32_t));
+
+	const int tiles_x = MAX((p_internal_size.x + int(MegaLights::DENOISE_RESET_TILE_SIZE) - 1) / int(MegaLights::DENOISE_RESET_TILE_SIZE), 1);
+	const int tiles_y = MAX((p_internal_size.y + int(MegaLights::DENOISE_RESET_TILE_SIZE) - 1) / int(MegaLights::DENOISE_RESET_TILE_SIZE), 1);
+	const uint32_t reset_bytes = uint32_t(tiles_x * tiles_y) * sizeof(uint32_t);
+	denoise_reset_mask_buffer = rd->storage_buffer_create(reset_bytes);
+
+	if (!denoise_scratch_diffuse.is_valid() || !denoise_scratch_specular.is_valid() || !denoise_prev_depth_normal.is_valid() || !denoise_clamp_stats_buffer.is_valid() || !denoise_reset_mask_buffer.is_valid()) {
+		_free_denoise_buffers();
+		ERR_FAIL_V_MSG(false, "MegaLights: failed to allocate spatial/guide denoise resources.");
+	}
+
+	rd->texture_clear(denoise_scratch_diffuse, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	rd->texture_clear(denoise_scratch_specular, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	rd->texture_clear(denoise_prev_depth_normal, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	rd->buffer_clear(denoise_clamp_stats_buffer, 0, 4u * sizeof(uint32_t));
+	rd->buffer_clear(denoise_reset_mask_buffer, 0, reset_bytes);
+
+	denoise_size = p_internal_size;
+	denoise_reset_tile_dims = Size2i(tiles_x, tiles_y);
+	denoise_history_index = 0;
+	denoise_has_history = false;
+	denoise_has_cam_transform = false;
+	return true;
+}
+
+bool MegaLightsViewData::ensure_denoise_debug_texture(const Size2i &p_internal_size) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (p_internal_size.x <= 0 || p_internal_size.y <= 0) {
+		return false;
+	}
+	if (denoise_debug_texture.is_valid() && denoise_debug_size == p_internal_size) {
+		return true;
+	}
+	_free_denoise_debug_texture();
+	denoise_debug_texture = ml_create_rgba16f_texture(rd, p_internal_size);
+	ERR_FAIL_COND_V(!denoise_debug_texture.is_valid(), false);
+	rd->texture_clear(denoise_debug_texture, Color(0, 0, 0, 1), 0, 1, 0, 1);
+	denoise_debug_size = p_internal_size;
+	return true;
+}
+
 bool MegaLightsViewData::ensure_reference_buffers(const Size2i &p_internal_size) {
 	RD *rd = RD::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
@@ -451,6 +690,63 @@ void MegaLightsViewData::reset_guiding() {
 	guiding_has_history = false;
 }
 
+void MegaLightsViewData::reset_denoise_history() {
+	RD *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		for (int i = 0; i < 2; i++) {
+			if (denoise_history_len[i].is_valid()) {
+				rd->texture_clear(denoise_history_len[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+			}
+		}
+	}
+	denoise_has_history = false;
+	denoise_has_cam_transform = false;
+}
+
+void MegaLightsViewData::advance_denoise_history(uint64_t p_frame, const Transform3D &p_cam_transform, bool p_bypassed) {
+	if (p_bypassed) {
+		denoise_has_history = false;
+	} else {
+		denoise_history_index = 1u - denoise_history_index;
+		denoise_has_history = true;
+	}
+	denoise_last_frame = p_frame;
+	denoise_last_cam_transform = p_cam_transform;
+	denoise_has_cam_transform = true;
+}
+
+void MegaLightsViewData::poll_denoise_stats() {
+	if (denoise_readback != nullptr && !denoise_readback->pending.is_set() && denoise_readback->has_result) {
+		record_denoise_stats(denoise_readback->removed_fp, denoise_readback->total_fp, denoise_readback->clamped_pixels, denoise_readback->valid_pixels, denoise_last_rr_bypass);
+		denoise_readback->has_result = false;
+	}
+}
+
+void MegaLightsViewData::submit_denoise_stats_readback() {
+	RD *rd = RD::get_singleton();
+	if (rd == nullptr || !denoise_clamp_stats_buffer.is_valid() || denoise_readback == nullptr) {
+		return;
+	}
+	if (!denoise_readback->pending.set_if_clear()) {
+		return;
+	}
+	const uint64_t state_ptr = reinterpret_cast<uint64_t>(denoise_readback);
+	denoise_readback->refs.ref();
+	if (rd->buffer_get_data_async(denoise_clamp_stats_buffer, callable_mp_static(&ml_denoise_stats_received).bind(state_ptr), 0, 4u * uint32_t(sizeof(uint32_t))) != OK) {
+		denoise_readback->pending.clear();
+		ml_release_denoise_readback(denoise_readback);
+	}
+}
+
+void MegaLightsViewData::record_denoise_stats(uint32_t p_removed_fp, uint32_t p_total_fp, uint32_t p_clamped_pixels, uint32_t p_valid_pixels, bool p_rr_bypass) {
+	last_denoise_stats.clamped_energy_removed_fp = p_removed_fp;
+	last_denoise_stats.total_direct_energy_fp = p_total_fp;
+	last_denoise_stats.clamped_energy_ratio = MegaLights::compute_clamped_energy_ratio(p_removed_fp, p_total_fp);
+	last_denoise_stats.clamped_pixels = p_clamped_pixels;
+	last_denoise_stats.valid_pixels = p_valid_pixels;
+	last_denoise_stats.rr_bypass = p_rr_bypass;
+}
+
 void MegaLightsViewData::reset_reference() {
 	RD *rd = RD::get_singleton();
 	if (rd != nullptr && reference_accum_texture.is_valid()) {
@@ -478,10 +774,35 @@ MegaLights::DownsampleMode MegaLights::parse_downsample_variant(const Variant &p
 	return int(p_value) == int(DOWNSAMPLE_FULL) ? DOWNSAMPLE_FULL : DOWNSAMPLE_HALF;
 }
 
+MegaLights::DenoiserMode MegaLights::parse_denoiser_variant(const Variant &p_value) {
+	if (p_value.get_type() == Variant::STRING || p_value.get_type() == Variant::STRING_NAME) {
+		const String s = String(p_value).to_lower().strip_edges();
+		if (s == "rr_bypass" || s == "rr bypass" || s == "rr" || s == "bypass" || s == "1") {
+			return DENOISER_RR_BYPASS;
+		}
+		return DENOISER_BUILTIN;
+	}
+	return int(p_value) == int(DENOISER_RR_BYPASS) ? DENOISER_RR_BYPASS : DENOISER_BUILTIN;
+}
+
+int MegaLights::debug_vis_mode_from_viewport(RSE::ViewportDebugDraw p_mode) {
+	switch (p_mode) {
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY:
+			return 0;
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED:
+			return 1;
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE:
+			return 2;
+		default:
+			return -1;
+	}
+}
+
 MegaLights::Settings MegaLights::validate_settings(const Settings &p_settings) {
 	Settings out = p_settings;
 	out.samples_per_pixel = CLAMP(out.samples_per_pixel, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
 	out.downsample = out.downsample == DOWNSAMPLE_FULL ? DOWNSAMPLE_FULL : DOWNSAMPLE_HALF;
+	out.denoiser = out.denoiser == DENOISER_RR_BYPASS ? DENOISER_RR_BYPASS : DENOISER_BUILTIN;
 	if (!Math::is_finite(out.falloff_cull_threshold) || out.falloff_cull_threshold < 0.0f) {
 		out.falloff_cull_threshold = DEFAULT_FALLOFF_CULL_THRESHOLD;
 	}
@@ -525,6 +846,9 @@ MegaLights::Settings MegaLights::read_settings() {
 	}
 	if (ps->has_setting(SETTING_SWRT_CONTINUATION)) {
 		s.swrt_continuation = bool(ps->get_setting(SETTING_SWRT_CONTINUATION));
+	}
+	if (ps->has_setting(SETTING_DENOISER)) {
+		s.denoiser = parse_denoiser_variant(ps->get_setting(SETTING_DENOISER));
 	}
 	return validate_settings(s);
 }
@@ -990,8 +1314,110 @@ Dictionary MegaLights::get_tier_info() {
 	info["screen_traces_enabled"] = in.screen_traces_enabled;
 	info["distant_screen_traces_length"] = double(s.distant_screen_traces_length);
 	info["vsm_supported"] = st.vsm_supported;
+	info["denoiser"] = (s.denoiser == DENOISER_RR_BYPASS) ? String("rr_bypass") : String("builtin");
+	info["rr_bypass"] = (s.denoiser == DENOISER_RR_BYPASS);
 	info["reason"] = String(st.reason);
 	return info;
+}
+
+// GodotNext: megalights_denoiser (#135). Pure device-free demodulation, firefly clamp, and cut helpers.
+
+Vector3 MegaLights::diffuse_demod_factor(const Vector3 &p_diffuse_albedo) {
+	return Vector3(
+			MAX(float(p_diffuse_albedo.x), DEMOD_ALBEDO_FLOOR),
+			MAX(float(p_diffuse_albedo.y), DEMOD_ALBEDO_FLOOR),
+			MAX(float(p_diffuse_albedo.z), DEMOD_ALBEDO_FLOOR));
+}
+
+Vector3 MegaLights::env_brdf_split_sum(const Vector3 &p_f0, float p_dfg_x, float p_dfg_y) {
+	const Vector3 f0(
+			CLAMP(float(p_f0.x), 0.0f, 1.0f),
+			CLAMP(float(p_f0.y), 0.0f, 1.0f),
+			CLAMP(float(p_f0.z), 0.0f, 1.0f));
+	const float dfg_x = MAX(p_dfg_x, 0.0f);
+	const float dfg_y = MAX(p_dfg_y, 1e-4f);
+	const float inv_y = 1.0f / dfg_y - 1.0f;
+	const float f90 = CLAMP((float(f0.x) + float(f0.y) + float(f0.z)) * (50.0f * 0.33f), 0.0f, 1.0f);
+	const Vector3 energy_comp(
+			1.0f + float(f0.x) * inv_y,
+			1.0f + float(f0.y) * inv_y,
+			1.0f + float(f0.z) * inv_y);
+	const Vector3 term(
+			(f90 - float(f0.x)) * dfg_x + float(f0.x) * dfg_y,
+			(f90 - float(f0.y)) * dfg_x + float(f0.y) * dfg_y,
+			(f90 - float(f0.z)) * dfg_x + float(f0.z) * dfg_y);
+	return Vector3(
+			MAX(float(energy_comp.x * term.x), 0.0f),
+			MAX(float(energy_comp.y * term.y), 0.0f),
+			MAX(float(energy_comp.z * term.z), 0.0f));
+}
+
+Vector3 MegaLights::env_brdf_approx(const Vector3 &p_f0, float p_roughness, float p_nov) {
+	const float r = CLAMP(p_roughness, 0.0f, 1.0f);
+	const float nov = CLAMP(p_nov, 0.0f, 1.0f);
+	// Analytical GGX split-sum DFG approximation mapped to Godot's multiscatter (dfg.x, dfg.y) convention.
+	const float rx = -1.0f * r + 1.0f;
+	const float ry = -0.0275f * r + 0.0425f;
+	const float rz = -0.572f * r + 1.04f;
+	const float rw = 0.022f * r - 0.04f;
+	const float a004 = MIN(rx * rx, std::exp2(-9.28f * nov)) * rx + ry;
+	const float ab_x = -1.04f * a004 + rz;
+	const float ab_y = 1.04f * a004 + rw;
+	const float dfg_x = CLAMP(ab_y, 0.0f, 1.0f);
+	const float dfg_y = CLAMP(ab_x + ab_y, 1e-4f, 1.0f);
+	return env_brdf_split_sum(p_f0, dfg_x, dfg_y);
+}
+
+Vector3 MegaLights::specular_demod_factor(const Vector3 &p_spec_env_brdf) {
+	return Vector3(
+			MAX(float(p_spec_env_brdf.x), DEMOD_SPECULAR_FLOOR),
+			MAX(float(p_spec_env_brdf.y), DEMOD_SPECULAR_FLOOR),
+			MAX(float(p_spec_env_brdf.z), DEMOD_SPECULAR_FLOOR));
+}
+
+Vector3 MegaLights::demodulate_radiance(const Vector3 &p_radiance, const Vector3 &p_factor) {
+	return Vector3(
+			MAX(float(p_radiance.x), 0.0f) / MAX(float(p_factor.x), 1e-4f),
+			MAX(float(p_radiance.y), 0.0f) / MAX(float(p_factor.y), 1e-4f),
+			MAX(float(p_radiance.z), 0.0f) / MAX(float(p_factor.z), 1e-4f));
+}
+
+Vector3 MegaLights::remodulate_radiance(const Vector3 &p_demod, const Vector3 &p_factor) {
+	return Vector3(
+			MAX(float(p_demod.x), 0.0f) * MAX(float(p_factor.x), 0.0f),
+			MAX(float(p_demod.y), 0.0f) * MAX(float(p_factor.y), 0.0f),
+			MAX(float(p_demod.z), 0.0f) * MAX(float(p_factor.z), 0.0f));
+}
+
+double MegaLights::compute_clamped_energy_ratio(uint64_t p_removed_fp, uint64_t p_total_fp) {
+	if (p_total_fp == 0u) {
+		return 0.0;
+	}
+	return CLAMP(double(p_removed_fp) / double(p_total_fp), 0.0, 1.0);
+}
+
+float MegaLights::firefly_clamp_factor(float p_luma, float p_limit, float &r_removed) {
+	if (!Math::is_finite(p_luma) || !Math::is_finite(p_limit) || !(p_luma > p_limit) || !(p_luma > 0.0f) || !(p_limit >= 0.0f)) {
+		r_removed = 0.0f;
+		return 1.0f;
+	}
+	const float scale = p_limit / p_luma;
+	r_removed = MAX(p_luma - p_limit, 0.0f);
+	return scale;
+}
+
+bool MegaLights::is_camera_cut(const Transform3D &p_prev, const Transform3D &p_cur) {
+	if (p_prev.origin.distance_squared_to(p_cur.origin) > 100.0f) {
+		return true;
+	}
+	const Vector3 prev_fwd = -p_prev.basis.get_column(2).normalized();
+	const Vector3 cur_fwd = -p_cur.basis.get_column(2).normalized();
+	if (prev_fwd.dot(cur_fwd) < 0.5f) {
+		return true;
+	}
+	const Vector3 prev_up = p_prev.basis.get_column(1).normalized();
+	const Vector3 cur_up = p_cur.basis.get_column(1).normalized();
+	return prev_up.dot(cur_up) < 0.5f;
 }
 
 uint32_t MegaLights::pack_visibility_rgba8(float p_r, float p_g, float p_b, float p_a) {
@@ -1038,6 +1464,13 @@ Vector<String> MegaLights::get_trace_vsm_shader_variant_defines() {
 	Vector<String> variants;
 	variants.push_back("");
 	return variants;
+}
+
+Vector<String> MegaLights::get_shade_samples_shader_variant_defines() {
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_SHADE\n");
+	modes.push_back("\n#define MODE_FILL_HALF\n");
+	return modes;
 }
 
 const uint8_t *MegaLights::get_stbn_data() {
@@ -1174,6 +1607,19 @@ struct MegaLights::GPUState {
 	bool vis_trace_vsm_initialized = false;
 	bool vis_trace_vsm_failed = false;
 
+	// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
+	enum ShadeMode : uint32_t {
+		SHADE_MODE_SHADE = 0,
+		SHADE_MODE_FILL_HALF = 1,
+		SHADE_MODE_MAX = 2,
+	};
+	MlShadeSamplesShaderRD shade_shader;
+	RID shade_version;
+	RID shade_pipelines[SHADE_MODE_MAX];
+	bool shade_initialized = false;
+	bool shade_failed = false;
+	NextGIDenoise *denoiser = nullptr;
+
 	RID stbn_texture;
 	RID dummy_storage_buffer;
 
@@ -1271,8 +1717,21 @@ void MegaLights::free_resources() {
 			gpu->vis_trace_vsm_version = RID();
 		}
 
+		// GodotNext: megalights_denoiser (#135).
+		for (uint32_t i = 0; i < GPUState::SHADE_MODE_MAX; i++) {
+			ml_free_rid(rd, gpu->shade_pipelines[i]);
+		}
+		if (gpu->shade_version.is_valid()) {
+			gpu->shade_shader.version_free(gpu->shade_version);
+			gpu->shade_version = RID();
+		}
+
 		ml_free_rid(rd, gpu->stbn_texture);
 		ml_free_rid(rd, gpu->dummy_storage_buffer);
+	}
+	if (gpu->denoiser != nullptr) {
+		memdelete(gpu->denoiser);
+		gpu->denoiser = nullptr;
 	}
 	gpu->common_initialized = false;
 	gpu->common_failed = false;
@@ -1288,6 +1747,8 @@ void MegaLights::free_resources() {
 	gpu->vis_trace_swrt_failed = false;
 	gpu->vis_trace_vsm_initialized = false;
 	gpu->vis_trace_vsm_failed = false;
+	gpu->shade_initialized = false;
+	gpu->shade_failed = false;
 }
 
 void MegaLights::_ensure_stbn_texture() {
@@ -1545,6 +2006,42 @@ bool MegaLights::_ensure_trace_vsm_shader() {
 	}
 	gpu->vis_trace_vsm_initialized = true;
 	return true;
+}
+
+bool MegaLights::_ensure_shade_shaders() {
+	if (gpu->shade_initialized) {
+		return true;
+	}
+	if (gpu->shade_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	ERR_FAIL_NULL_V(light_storage, false);
+	const String max_dir_def = "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(light_storage->get_max_directional_lights()) + "\n";
+	gpu->shade_shader.initialize(get_shade_samples_shader_variant_defines(), max_dir_def);
+	gpu->shade_version = gpu->shade_shader.version_create(false);
+	if (!gpu->shade_version.is_valid()) {
+		gpu->shade_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_shade_samples.glsl failed to compile.");
+	}
+	for (uint32_t i = 0; i < GPUState::SHADE_MODE_MAX; i++) {
+		gpu->shade_pipelines[i] = rd->compute_pipeline_create(gpu->shade_shader.version_get_shader(gpu->shade_version, int(i)));
+		if (!gpu->shade_pipelines[i].is_valid()) {
+			gpu->shade_failed = true;
+			return false;
+		}
+	}
+	gpu->shade_initialized = true;
+	return true;
+}
+
+NextGIDenoise *MegaLights::_ensure_denoiser() {
+	if (gpu->denoiser == nullptr) {
+		gpu->denoiser = memnew(NextGIDenoise(false));
+	}
+	return gpu->denoiser;
 }
 
 void MegaLights::_fill_params_ubo(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_frame_index, bool p_has_guiding, bool p_force_visible_one, float p_falloff_override, ParamsUBO &r_ubo) const {
@@ -2343,6 +2840,236 @@ void MegaLights::update_guiding(Ref<RenderSceneBuffersRD> p_rb, RID p_visibility
 	view->advance_guiding_history();
 }
 
+void MegaLights::_dispatch_shade(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, bool p_force_visible_one, float p_falloff_override) {
+	RD *rd = RD::get_singleton();
+	UniformSetCacheRD *usc = UniformSetCacheRD::get_singleton();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_COND(rd == nullptr || usc == nullptr || texture_storage == nullptr || material_storage == nullptr);
+
+	if (!_ensure_shade_shaders()) {
+		return;
+	}
+
+	const Size2i full_size = p_view->get_internal_size();
+	const Size2i sample_size = p_view->get_sample_grid_size();
+	const uint32_t ds_mode = uint32_t(p_settings.downsample);
+	if (!p_view->ensure_shade_buffers(full_size, sample_size, ds_mode)) {
+		return;
+	}
+
+	ParamsUBO ubo;
+	_fill_params_ubo(p_inputs, p_view, p_settings, p_frame_index, 0u, p_view->has_guiding_history(), p_force_visible_one, p_falloff_override, ubo);
+	rd->buffer_update(p_view->get_params_ubo(), 0, sizeof(ubo), &ubo);
+
+	const bool half_res = (p_settings.downsample == DOWNSAMPLE_HALF);
+	const RID out_diff = half_res ? p_view->get_shade_sample_diffuse() : p_view->get_noisy_diffuse_texture();
+	const RID out_spec = half_res ? p_view->get_shade_sample_specular() : p_view->get_noisy_specular_texture();
+
+	rd->draw_command_begin_label("MegaLights Shade & Demodulate");
+
+	// Pass 1: Shade samples at sampling resolution and demodulate diffuse (albedo) and specular (EnvBRDF).
+	{
+		Vector<RD::Uniform> uniforms;
+		_build_common_uniforms(p_inputs, p_view, uniforms);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, p_view->get_layer_group_buffer()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, p_view->get_sample_buffer()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, p_view->get_visibility_buffer()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23, p_view->get_hit_distance_texture()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 24, out_diff));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 25, out_spec));
+
+		LocalVector<RD::Uniform> uniform_lv;
+		uniform_lv.resize(uniforms.size());
+		for (int i = 0; i < uniforms.size(); i++) {
+			uniform_lv[i] = uniforms[i];
+		}
+
+		const RID shader_rid = gpu->shade_shader.version_get_shader(gpu->shade_version, GPUState::SHADE_MODE_SHADE);
+		const RID set = usc->get_cache_vec(shader_rid, 0, uniform_lv);
+		if (set.is_valid()) {
+			const RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->shade_pipelines[GPUState::SHADE_MODE_SHADE]);
+			rd->compute_list_bind_uniform_set(cl, set, 0);
+			rd->compute_list_dispatch_threads(cl, uint32_t(sample_size.x), uint32_t(sample_size.y), 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	// Pass 2 (half-res only): 2x2 joint-bilateral fill to render resolution, keeping sampled pixels exact.
+	if (half_res) {
+		const RID default_black = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		const RID default_white = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+		const RID sampler_nearest = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+		LocalVector<RD::Uniform> fu;
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_params_ubo()));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_inputs.depth_texture.is_valid() ? p_inputs.depth_texture : default_black));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_inputs.normal_roughness_texture.is_valid() ? p_inputs.normal_roughness_texture : default_black));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_inputs.ml_albedo_texture.is_valid() ? p_inputs.ml_albedo_texture : default_white));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 4, p_inputs.ml_material_texture.is_valid() ? p_inputs.ml_material_texture : default_black));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 5, p_view->get_shade_sample_diffuse()));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, p_view->get_shade_sample_specular()));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, sampler_nearest));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_view->get_noisy_diffuse_texture()));
+		fu.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, p_view->get_noisy_specular_texture()));
+
+		const RID fill_shader = gpu->shade_shader.version_get_shader(gpu->shade_version, GPUState::SHADE_MODE_FILL_HALF);
+		const RID fset = usc->get_cache_vec(fill_shader, 0, fu);
+		if (fset.is_valid()) {
+			const RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->shade_pipelines[GPUState::SHADE_MODE_FILL_HALF]);
+			rd->compute_list_bind_uniform_set(cl, fset, 0);
+			rd->compute_list_dispatch_threads(cl, uint32_t(full_size.x), uint32_t(full_size.y), 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	rd->draw_command_end_label();
+}
+
+void MegaLights::_dispatch_denoise(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, uint32_t p_frame_index, bool p_rr_bypass, int p_debug_vis_mode, bool p_force_reset, const Vector<Rect2i> &p_dirty_regions, bool p_submit_async_readback, bool p_in_check_loop) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr) {
+		return;
+	}
+	const Size2i full_size = p_view->get_internal_size();
+	if (!p_view->get_noisy_diffuse_texture().is_valid() || !p_view->get_noisy_specular_texture().is_valid() || !p_view->get_denoise_params_ubo().is_valid()) {
+		return;
+	}
+	if (!p_view->ensure_denoise_buffers(full_size, p_rr_bypass)) {
+		return;
+	}
+
+	RID debug_out;
+	if (p_debug_vis_mode >= 0 && p_view->ensure_denoise_debug_texture(full_size)) {
+		debug_out = p_view->get_denoise_debug_texture();
+	}
+
+	NextGIDenoise *denoiser = _ensure_denoiser();
+	ERR_FAIL_NULL(denoiser);
+
+	const RenderSceneDataRD &sd = *p_inputs.render_data->scene_data;
+	const uint64_t cur_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0u;
+	const bool frame_gap = !p_in_check_loop && p_view->has_denoise_history() && cur_frame > 0u && cur_frame != p_view->get_denoise_last_frame() + 1u;
+	const bool cam_cut = !p_in_check_loop && p_view->has_denoise_cam_transform() && is_camera_cut(p_view->get_denoise_last_cam_transform(), sd.cam_transform);
+	const bool has_history = !p_rr_bypass && p_view->has_denoise_history() && !p_force_reset && !frame_gap && !cam_cut;
+
+	const Projection depth_proj = NextGIView::depth_projection(sd);
+	const Projection inv_proj = NextGIView::inv_projection(sd);
+	const Projection inv_view_proj = NextGIView::inv_view_projection(sd);
+	const Projection cur_view_proj = depth_proj * Projection(sd.cam_transform.affine_inverse());
+	const Projection prev_view_proj = (p_in_check_loop && p_frame_index > 0u) ? cur_view_proj : NextGIView::prev_view_projection(sd);
+	const Projection prev_depth_proj = (p_in_check_loop && p_frame_index > 0u) ? depth_proj : NextGIViewMath::depth_projection(sd.prev_cam_projection, sd.flip_y, sd.prev_taa_jitter);
+	const Vector4 cur_depth_coeffs = NextGIViewMath::depth_coefficients(depth_proj);
+	const Vector4 prev_depth_coeffs = NextGIViewMath::depth_coefficients(prev_depth_proj);
+
+	const uint32_t cur_slot = p_view->get_denoise_history_index();
+	const uint32_t prev_slot = 1u - cur_slot;
+
+	bool reset_mask_enabled = false;
+	if (!p_rr_bypass && !p_dirty_regions.is_empty() && p_view->get_denoise_reset_mask_buffer().is_valid()) {
+		const Size2i tile_dims = p_view->get_denoise_reset_tile_dims();
+		const PackedByteArray byte_mask = NextGIDenoise::select_reset_probes(p_dirty_regions, tile_dims);
+		LocalVector<uint32_t> mask_words;
+		mask_words.resize(uint32_t(byte_mask.size()));
+		for (int i = 0; i < byte_mask.size(); i++) {
+			mask_words[uint32_t(i)] = uint32_t(byte_mask[i]);
+		}
+		if (!mask_words.is_empty()) {
+			rd->buffer_update(p_view->get_denoise_reset_mask_buffer(), 0, mask_words.size() * sizeof(uint32_t), mask_words.ptr());
+			reset_mask_enabled = true;
+		}
+	}
+
+	NextGIDenoise::MegaLightsDenoiseParams dp;
+	dp.rr_bypass = p_rr_bypass;
+	dp.has_history = has_history;
+	dp.velocity_enabled = !p_in_check_loop && p_inputs.velocity_enabled && p_inputs.velocity_texture.is_valid();
+	dp.reset_mask_enabled = reset_mask_enabled;
+	dp.orthogonal = sd.cam_orthogonal;
+	dp.screen_size = full_size;
+	dp.reset_tile_dims = p_view->get_denoise_reset_tile_dims();
+	dp.inv_projection = inv_proj;
+	dp.inv_view_proj = inv_view_proj;
+	dp.prev_view_proj = prev_view_proj;
+	dp.view_to_world = sd.cam_transform.basis;
+	dp.cur_depth_coeffs = cur_depth_coeffs;
+	dp.prev_depth_coeffs = prev_depth_coeffs;
+	dp.camera_pos = sd.cam_transform.origin;
+	dp.prev_camera_pos = (p_in_check_loop && p_frame_index > 0u) ? sd.cam_transform.origin : sd.prev_cam_transform.origin;
+	dp.frame_index = p_frame_index;
+	dp.max_history_diffuse = 16u;
+	dp.max_history_specular = 16u;
+	dp.noisy_diffuse = p_view->get_noisy_diffuse_texture();
+	dp.noisy_specular = p_view->get_noisy_specular_texture();
+	dp.depth = p_inputs.depth_texture;
+	dp.normal_roughness = p_inputs.normal_roughness_texture;
+	dp.ml_albedo = p_inputs.ml_albedo_texture;
+	dp.ml_material = p_inputs.ml_material_texture;
+	dp.dfg_lut = p_inputs.dfg_lut_texture;
+	dp.velocity = p_inputs.velocity_texture;
+	dp.reset_mask = p_view->get_denoise_reset_mask_buffer();
+	dp.prev_depth_normal = p_view->get_denoise_prev_depth_normal();
+	dp.history_diffuse_prev = p_view->get_denoise_diffuse_slot(prev_slot);
+	dp.history_diffuse_cur = p_view->get_denoise_diffuse_slot(cur_slot);
+	dp.history_specular_prev = p_view->get_denoise_specular_slot(prev_slot);
+	dp.history_specular_cur = p_view->get_denoise_specular_slot(cur_slot);
+	dp.spatial_scratch_diffuse = p_view->get_denoise_scratch_diffuse();
+	dp.spatial_scratch_specular = p_view->get_denoise_scratch_specular();
+	dp.moments_prev = p_view->get_denoise_moments_slot(prev_slot);
+	dp.moments_cur = p_view->get_denoise_moments_slot(cur_slot);
+	dp.history_len_prev = p_view->get_denoise_history_len_slot(prev_slot);
+	dp.history_len_cur = p_view->get_denoise_history_len_slot(cur_slot);
+	dp.clamp_stats_buffer = p_view->get_denoise_clamp_stats_buffer();
+	dp.params_ubo = p_view->get_denoise_params_ubo();
+	dp.debug_vis_mode = p_debug_vis_mode;
+	dp.debug_vis_output = debug_out;
+
+	if (p_submit_async_readback && !p_rr_bypass) {
+		p_view->poll_denoise_stats();
+	}
+
+	const NextGIDenoise::MegaLightsDenoiseOutput out = denoiser->megalights_denoise(dp);
+	p_view->set_denoise_output(out.diffuse, out.specular, out.bypassed);
+	p_view->advance_denoise_history(cur_frame, sd.cam_transform, out.bypassed);
+
+	if (p_submit_async_readback) {
+		if (out.bypassed) {
+			p_view->record_denoise_stats(0u, 0u, 0u, 0u, true);
+		} else {
+			p_view->submit_denoise_stats_readback();
+		}
+	}
+}
+
+void MegaLights::shade_samples(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb) {
+	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr || p_rb.is_null()) {
+		return;
+	}
+	Ref<MegaLightsViewData> view = get_view_data(p_rb.ptr());
+	if (view.is_null() || !view->get_sample_buffer().is_valid()) {
+		return;
+	}
+	const Settings settings = read_settings();
+	_dispatch_shade(p_inputs, view, settings, view->get_frame_index(), false, -1.0f);
+}
+
+void MegaLights::denoise_samples(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb) {
+	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr || p_rb.is_null()) {
+		return;
+	}
+	Ref<MegaLightsViewData> view = get_view_data(p_rb.ptr());
+	if (view.is_null() || !view->get_noisy_diffuse_texture().is_valid()) {
+		return;
+	}
+	const Settings settings = read_settings();
+	const bool rr_bypass = (settings.denoiser == DENOISER_RR_BYPASS);
+	const int debug_vis_mode = debug_vis_mode_from_viewport(p_inputs.debug_draw);
+	_dispatch_denoise(p_inputs, view, view->get_frame_index(), rr_bypass, debug_vis_mode, p_inputs.reset_temporal_history, p_inputs.dirty_reset_regions, true, false);
+}
+
 void MegaLights::render_reference(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb, bool p_force_visible_one) {
 	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr || p_rb.is_null()) {
 		return;
@@ -2982,6 +3709,378 @@ Dictionary MegaLights::_run_check(const FrameInputs &p_inputs, const Ref<MegaLig
 		return res;
 	}
 
+	if (mode == "denoise") {
+		const uint32_t total_frames = uint32_t(CLAMP(int(p_options.get("frames", 16)), 1, 64));
+		const bool rr_bypass = bool(p_options.get("rr_bypass", cfg.denoiser == DENOISER_RR_BYPASS));
+		const bool use_screen_traces = bool(p_options.get("screen_traces", cfg.screen_traces));
+		const bool use_dedupe = bool(p_options.get("dedupe", true));
+		const bool wait_for_tlas = bool(p_options.get("wait_for_tlas", true));
+		const bool compare_reference = bool(p_options.get("compare_reference", true));
+		const uint32_t ref_frames = uint32_t(CLAMP(int(p_options.get("ref_frames", 16)), 1, 128));
+		const bool test_reset_region = bool(p_options.get("test_reset_region", false));
+		const int debug_vis_mode = CLAMP(int(p_options.get("debug_vis_mode", -1)), -1, 2);
+
+		NextGIRTScene *rt_scene = p_inputs.next_gi != nullptr ? p_inputs.next_gi->get_rt_scene() : nullptr;
+		const bool tlas_ready = rt_scene != nullptr && rt_scene->is_tlas_traceable() && rt_scene->get_tlas().is_valid() &&
+				rt_scene->get_shadow_instance_buffer().is_valid() && rt_scene->get_shadow_alpha_buffer().is_valid();
+		if (wait_for_tlas && !tlas_ready) {
+			st.wait_frames++;
+			if (st.wait_frames < 120u) {
+				Dictionary waiting;
+				waiting["done"] = false;
+				waiting["mode"] = mode;
+				waiting["wait_frames"] = int(st.wait_frames);
+				waiting["tlas_ready"] = tlas_ready;
+				return waiting;
+			}
+			Dictionary err;
+			err["done"] = true;
+			err["mode"] = mode;
+			err["tlas_ready"] = tlas_ready;
+			err["error"] = "Timed out waiting for NextGI TLAS in MegaLights denoise check.";
+			return err;
+		}
+
+		p_view->reset_guiding();
+		p_view->reset_denoise_history();
+
+		Rect2i reset_tile_rect;
+		for (uint32_t f = 0; f < total_frames; f++) {
+			_dispatch_generate(p_inputs, p_view, cfg, f, f > 0u, cfg.falloff_cull_threshold);
+
+			VisibilityOptions vis_opts;
+			vis_opts.override_screen_traces = true;
+			vis_opts.screen_traces = use_screen_traces;
+			vis_opts.dedupe_enabled = use_dedupe;
+			vis_opts.use_explicit_frame_index = true;
+			vis_opts.frame_index = f;
+			_dispatch_visibility_chain(p_inputs, p_view, cfg, vis_opts);
+
+			_dispatch_guiding(p_view, p_view->get_visibility_buffer(), f, false);
+			p_view->advance_guiding_history();
+
+			_dispatch_shade(p_inputs, p_view, cfg, f, false, cfg.falloff_cull_threshold);
+
+			Vector<Rect2i> dirty_regions;
+			const bool is_last = (f + 1u == total_frames);
+			if (is_last && test_reset_region && !rr_bypass) {
+				const int tiles_x = MAX((full_size.x + int(DENOISE_RESET_TILE_SIZE) - 1) / int(DENOISE_RESET_TILE_SIZE), 1);
+				const int tiles_y = MAX((full_size.y + int(DENOISE_RESET_TILE_SIZE) - 1) / int(DENOISE_RESET_TILE_SIZE), 1);
+				reset_tile_rect = Rect2i(tiles_x / 4, tiles_y / 4, MAX(tiles_x / 2, 1), MAX(tiles_y / 2, 1));
+				dirty_regions.push_back(reset_tile_rect);
+			}
+			_dispatch_denoise(p_inputs, p_view, f, rr_bypass, is_last ? debug_vis_mode : -1, f == 0u, dirty_regions, false, true);
+		}
+
+		const RID noisy_diff_rid = p_view->get_noisy_diffuse_texture();
+		const RID noisy_spec_rid = p_view->get_noisy_specular_texture();
+		const RID den_diff_rid = p_view->get_denoised_diffuse_texture();
+		const RID den_spec_rid = p_view->get_denoised_specular_texture();
+		if (!noisy_diff_rid.is_valid() || !noisy_spec_rid.is_valid() || !den_diff_rid.is_valid() || !den_spec_rid.is_valid()) {
+			Dictionary err;
+			err["done"] = true;
+			err["mode"] = mode;
+			err["error"] = "MegaLights shade/denoise output textures were not initialized.";
+			return err;
+		}
+
+		const Vector<uint8_t> nd_bytes = rd->texture_get_data(noisy_diff_rid, 0);
+		const Vector<uint8_t> ns_bytes = rd->texture_get_data(noisy_spec_rid, 0);
+		const Vector<uint8_t> dd_bytes = rd->texture_get_data(den_diff_rid, 0);
+		const Vector<uint8_t> ds_bytes = rd->texture_get_data(den_spec_rid, 0);
+
+		const uint16_t *nd_h = reinterpret_cast<const uint16_t *>(nd_bytes.ptr());
+		const uint16_t *ns_h = reinterpret_cast<const uint16_t *>(ns_bytes.ptr());
+		const uint16_t *dd_h = reinterpret_cast<const uint16_t *>(dd_bytes.ptr());
+		const uint16_t *ds_h = reinterpret_cast<const uint16_t *>(ds_bytes.ptr());
+
+		uint64_t valid_px = 0;
+		uint64_t nf_nd = 0;
+		uint64_t nf_ns = 0;
+		uint64_t nf_dd = 0;
+		uint64_t nf_ds = 0;
+		double sum_nd = 0.0;
+		double sum_ns = 0.0;
+		double sum_dd = 0.0;
+		double sum_ds = 0.0;
+
+		LocalVector<float> noisy_luma;
+		LocalVector<float> den_luma;
+		LocalVector<uint8_t> valid_mask;
+		noisy_luma.resize(uint32_t(pixel_count));
+		den_luma.resize(uint32_t(pixel_count));
+		valid_mask.resize(uint32_t(pixel_count));
+
+		for (uint64_t i = 0; i < pixel_count; i++) {
+			const float nd_r = Math::half_to_float(nd_h[i * 4u + 0u]);
+			const float nd_g = Math::half_to_float(nd_h[i * 4u + 1u]);
+			const float nd_b = Math::half_to_float(nd_h[i * 4u + 2u]);
+			const float ns_r = Math::half_to_float(ns_h[i * 4u + 0u]);
+			const float ns_g = Math::half_to_float(ns_h[i * 4u + 1u]);
+			const float ns_b = Math::half_to_float(ns_h[i * 4u + 2u]);
+			const float ns_a = Math::half_to_float(ns_h[i * 4u + 3u]);
+
+			const float dd_r = Math::half_to_float(dd_h[i * 4u + 0u]);
+			const float dd_g = Math::half_to_float(dd_h[i * 4u + 1u]);
+			const float dd_b = Math::half_to_float(dd_h[i * 4u + 2u]);
+			const float ds_r = Math::half_to_float(ds_h[i * 4u + 0u]);
+			const float ds_g = Math::half_to_float(ds_h[i * 4u + 1u]);
+			const float ds_b = Math::half_to_float(ds_h[i * 4u + 2u]);
+
+			if (!Math::is_finite(nd_r) || !Math::is_finite(nd_g) || !Math::is_finite(nd_b)) {
+				nf_nd++;
+			}
+			if (!Math::is_finite(ns_r) || !Math::is_finite(ns_g) || !Math::is_finite(ns_b)) {
+				nf_ns++;
+			}
+			if (!Math::is_finite(dd_r) || !Math::is_finite(dd_g) || !Math::is_finite(dd_b)) {
+				nf_dd++;
+			}
+			if (!Math::is_finite(ds_r) || !Math::is_finite(ds_g) || !Math::is_finite(ds_b)) {
+				nf_ds++;
+			}
+
+			const bool is_valid = Math::is_finite(ns_a) && ns_a > 0.5f;
+			valid_mask[uint32_t(i)] = is_valid ? 1u : 0u;
+			const float nl_d = ml_cpu_luminance(nd_r, nd_g, nd_b);
+			const float nl_s = ml_cpu_luminance(ns_r, ns_g, ns_b);
+			const float dl_d = ml_cpu_luminance(dd_r, dd_g, dd_b);
+			const float dl_s = ml_cpu_luminance(ds_r, ds_g, ds_b);
+			noisy_luma[uint32_t(i)] = nl_d + nl_s;
+			den_luma[uint32_t(i)] = dl_d + dl_s;
+			if (is_valid) {
+				valid_px++;
+				sum_nd += double(nl_d);
+				sum_ns += double(nl_s);
+				sum_dd += double(dl_d);
+				sum_ds += double(dl_s);
+			}
+		}
+
+		double noisy_spatial_std = 0.0;
+		double denoised_spatial_std = 0.0;
+		uint64_t smooth_interior = 0;
+
+		uint32_t removed_fp = 0u;
+		uint32_t total_fp = 0u;
+		uint32_t clamped_px = 0u;
+		uint32_t clamp_valid_px = 0u;
+		double temporal_var_diff_mean = 0.0;
+		double temporal_var_spec_mean = 0.0;
+		uint32_t max_len_diff = 0u;
+		uint32_t max_len_spec = 0u;
+		double mean_len_diff = 0.0;
+		uint32_t reset_inside_max_len = 0u;
+		uint32_t reset_outside_max_len = 0u;
+		uint64_t reset_inside_px = 0u;
+		uint64_t reset_outside_px = 0u;
+
+		if (!rr_bypass) {
+			const Vector<uint8_t> stats_bytes = rd->buffer_get_data(p_view->get_denoise_clamp_stats_buffer());
+			if (stats_bytes.size() >= int(4u * sizeof(uint32_t))) {
+				const uint32_t *w = reinterpret_cast<const uint32_t *>(stats_bytes.ptr());
+				removed_fp = w[0];
+				total_fp = w[1];
+				clamped_px = w[2];
+				clamp_valid_px = w[3];
+				p_view->record_denoise_stats(removed_fp, total_fp, clamped_px, clamp_valid_px, false);
+			}
+
+			// The temporal pass wrote into cur_slot, and advance_denoise_history() flipped denoise_history_index.
+			const uint32_t written_slot = 1u - p_view->get_denoise_history_index();
+			const Vector<uint8_t> hl_bytes = rd->texture_get_data(p_view->get_denoise_history_len_slot(written_slot), 0);
+			const uint32_t *hl = reinterpret_cast<const uint32_t *>(hl_bytes.ptr());
+			const Vector<uint8_t> td_bytes = rd->texture_get_data(p_view->get_denoise_diffuse_slot(written_slot), 0);
+			const Vector<uint8_t> ts_bytes = rd->texture_get_data(p_view->get_denoise_specular_slot(written_slot), 0);
+			const uint16_t *td_h = reinterpret_cast<const uint16_t *>(td_bytes.ptr());
+			const uint16_t *ts_h = reinterpret_cast<const uint16_t *>(ts_bytes.ptr());
+			const Vector<uint8_t> gn_bytes = rd->texture_get_data(p_view->get_denoise_prev_depth_normal(), 0);
+			const uint16_t *gn_h = reinterpret_cast<const uint16_t *>(gn_bytes.ptr());
+
+			double sum_vd = 0.0;
+			double sum_vs = 0.0;
+			uint64_t sum_len_d = 0;
+			for (int y = 0; y < full_size.y; y++) {
+				for (int x = 0; x < full_size.x; x++) {
+					const uint64_t i = uint64_t(y) * uint64_t(full_size.x) + uint64_t(x);
+					if (!valid_mask[uint32_t(i)]) {
+						continue;
+					}
+					const uint32_t packed = hl[i];
+					const uint32_t ld = packed & 0xFFu;
+					const uint32_t ls = (packed >> 8u) & 0xFFu;
+					max_len_diff = MAX(max_len_diff, ld);
+					max_len_spec = MAX(max_len_spec, ls);
+					sum_len_d += ld;
+					sum_vd += double(MAX(Math::half_to_float(td_h[i * 4u + 3u]), 0.0f));
+					sum_vs += double(MAX(Math::half_to_float(ts_h[i * 4u + 3u]), 0.0f));
+
+					if (test_reset_region) {
+						const Point2i tile(x / int(DENOISE_RESET_TILE_SIZE), y / int(DENOISE_RESET_TILE_SIZE));
+						if (reset_tile_rect.has_point(tile)) {
+							reset_inside_max_len = MAX(reset_inside_max_len, ld);
+							reset_inside_px++;
+						} else {
+							reset_outside_max_len = MAX(reset_outside_max_len, ld);
+							reset_outside_px++;
+						}
+					}
+				}
+			}
+			if (valid_px > 0) {
+				temporal_var_diff_mean = sum_vd / double(valid_px);
+				temporal_var_spec_mean = sum_vs / double(valid_px);
+				mean_len_diff = double(sum_len_d) / double(valid_px);
+			}
+
+			// Spatial noise residual over smooth interior pixels (4-neighbors on same surface plane/normal).
+			double sum_noisy_r2 = 0.0;
+			double sum_den_r2 = 0.0;
+			auto read_guide = [&](uint64_t p_idx, Vector3 &r_n, float &r_z) {
+				r_n = Vector3(Math::half_to_float(gn_h[p_idx * 4u + 0u]), Math::half_to_float(gn_h[p_idx * 4u + 1u]), Math::half_to_float(gn_h[p_idx * 4u + 2u]));
+				r_z = Math::half_to_float(gn_h[p_idx * 4u + 3u]);
+			};
+			for (int y = 1; y < full_size.y - 1; y++) {
+				for (int x = 1; x < full_size.x - 1; x++) {
+					const uint64_t c = uint64_t(y) * uint64_t(full_size.x) + uint64_t(x);
+					const uint64_t nb[4] = { c - 1u, c + 1u, c - uint64_t(full_size.x), c + uint64_t(full_size.x) };
+					if (!valid_mask[uint32_t(c)] || !valid_mask[uint32_t(nb[0])] || !valid_mask[uint32_t(nb[1])] || !valid_mask[uint32_t(nb[2])] || !valid_mask[uint32_t(nb[3])]) {
+						continue;
+					}
+					Vector3 nc;
+					float zc = 0.0f;
+					read_guide(c, nc, zc);
+					if (!(zc > 0.0f)) {
+						continue;
+					}
+					bool same_surface = true;
+					for (int k = 0; k < 4; k++) {
+						Vector3 nq;
+						float zq = 0.0f;
+						read_guide(nb[k], nq, zq);
+						if (!(zq > 0.0f) || Math::abs(zq - zc) > 0.05f * MAX(zc, 0.1f) || nc.dot(nq) < 0.95f) {
+							same_surface = false;
+							break;
+						}
+					}
+					if (!same_surface) {
+						continue;
+					}
+					const double nr = double(noisy_luma[uint32_t(c)]) - 0.25 * (double(noisy_luma[uint32_t(nb[0])]) + double(noisy_luma[uint32_t(nb[1])]) + double(noisy_luma[uint32_t(nb[2])]) + double(noisy_luma[uint32_t(nb[3])]));
+					const double dr = double(den_luma[uint32_t(c)]) - 0.25 * (double(den_luma[uint32_t(nb[0])]) + double(den_luma[uint32_t(nb[1])]) + double(den_luma[uint32_t(nb[2])]) + double(den_luma[uint32_t(nb[3])]));
+					sum_noisy_r2 += nr * nr;
+					sum_den_r2 += dr * dr;
+					smooth_interior++;
+				}
+			}
+			if (smooth_interior > 0) {
+				noisy_spatial_std = std::sqrt(sum_noisy_r2 / double(smooth_interior));
+				denoised_spatial_std = std::sqrt(sum_den_r2 / double(smooth_interior));
+			}
+		}
+
+		uint64_t debug_non_black = 0;
+		uint64_t debug_non_finite = 0;
+		double debug_mean_luma = 0.0;
+		if (debug_vis_mode >= 0 && p_view->get_denoise_debug_texture().is_valid()) {
+			const Vector<uint8_t> dbg_bytes = rd->texture_get_data(p_view->get_denoise_debug_texture(), 0);
+			const uint16_t *dbg_h = reinterpret_cast<const uint16_t *>(dbg_bytes.ptr());
+			double dbg_sum = 0.0;
+			for (uint64_t i = 0; i < pixel_count; i++) {
+				const float r = Math::half_to_float(dbg_h[i * 4u + 0u]);
+				const float g = Math::half_to_float(dbg_h[i * 4u + 1u]);
+				const float b = Math::half_to_float(dbg_h[i * 4u + 2u]);
+				if (!Math::is_finite(r) || !Math::is_finite(g) || !Math::is_finite(b)) {
+					debug_non_finite++;
+					continue;
+				}
+				const float l = ml_cpu_luminance(r, g, b);
+				if (l > 1e-4f) {
+					debug_non_black++;
+				}
+				dbg_sum += double(l);
+			}
+			debug_mean_luma = pixel_count > 0 ? (dbg_sum / double(pixel_count)) : 0.0;
+		}
+
+		double ref_mean_luma = 0.0;
+		double physical_shaded_mean_luma = (clamp_valid_px > 0u) ? (double(total_fp) / (16.0 * double(clamp_valid_px))) : 0.0;
+		double ref_rel_err = 0.0;
+		if (compare_reference) {
+			p_view->reset_reference();
+			_upload_light_shadow_policies(p_inputs, p_view, cfg.directional_lights);
+			for (uint32_t rf = 0; rf < ref_frames; rf++) {
+				_dispatch_reference_rt(p_inputs, p_view, cfg, rf, rf + 1u, !tlas_ready, cfg.falloff_cull_threshold);
+			}
+			const Vector<uint8_t> ref_bytes = rd->texture_get_data(p_view->get_reference_accum_texture(), 0);
+			const float *ref_px = reinterpret_cast<const float *>(ref_bytes.ptr());
+			double ref_sum = 0.0;
+			uint64_t ref_valid = 0;
+			for (uint64_t i = 0; i < pixel_count; i++) {
+				if (!valid_mask[uint32_t(i)]) {
+					continue;
+				}
+				ref_sum += double(ml_cpu_luminance(ref_px[i * 4u + 0u], ref_px[i * 4u + 1u], ref_px[i * 4u + 2u]));
+				ref_valid++;
+			}
+			ref_mean_luma = ref_valid > 0 ? (ref_sum / double(ref_valid)) : 0.0;
+			if (ref_mean_luma > 1e-4 && physical_shaded_mean_luma > 0.0) {
+				ref_rel_err = Math::abs(physical_shaded_mean_luma - ref_mean_luma) / ref_mean_luma;
+			}
+		}
+
+		const bool rr_bypass_identical = rr_bypass &&
+				den_diff_rid == noisy_diff_rid &&
+				den_spec_rid == noisy_spec_rid &&
+				!p_view->get_denoise_diffuse_slot(0).is_valid() &&
+				!p_view->get_denoise_specular_slot(0).is_valid();
+
+		Dictionary res;
+		res["done"] = true;
+		res["mode"] = mode;
+		res["tlas_ready"] = tlas_ready;
+		res["frames"] = int(total_frames);
+		res["samples_per_pixel"] = int(cfg.samples_per_pixel);
+		res["downsample"] = cfg.downsample == DOWNSAMPLE_FULL ? "full" : "half";
+		res["rr_bypass"] = rr_bypass;
+		res["rr_bypass_identical"] = rr_bypass_identical;
+		res["valid_pixels"] = int64_t(valid_px);
+		res["non_finite_noisy_diff"] = int64_t(nf_nd);
+		res["non_finite_noisy_spec"] = int64_t(nf_ns);
+		res["non_finite_denoised_diff"] = int64_t(nf_dd);
+		res["non_finite_denoised_spec"] = int64_t(nf_ds);
+		res["noisy_diff_mean"] = valid_px > 0 ? (sum_nd / double(valid_px)) : 0.0;
+		res["noisy_spec_mean"] = valid_px > 0 ? (sum_ns / double(valid_px)) : 0.0;
+		res["denoised_diff_mean"] = valid_px > 0 ? (sum_dd / double(valid_px)) : 0.0;
+		res["denoised_spec_mean"] = valid_px > 0 ? (sum_ds / double(valid_px)) : 0.0;
+		res["smooth_interior_pixels"] = int64_t(smooth_interior);
+		res["noisy_spatial_std"] = noisy_spatial_std;
+		res["denoised_spatial_std"] = denoised_spatial_std;
+		res["temporal_var_diff_mean"] = temporal_var_diff_mean;
+		res["temporal_var_spec_mean"] = temporal_var_spec_mean;
+		res["max_history_len_diff"] = int(max_len_diff);
+		res["max_history_len_spec"] = int(max_len_spec);
+		res["mean_history_len_diff"] = mean_len_diff;
+		res["clamped_energy_removed_fp"] = int64_t(removed_fp);
+		res["total_direct_energy_fp"] = int64_t(total_fp);
+		res["clamped_energy_ratio"] = compute_clamped_energy_ratio(removed_fp, total_fp);
+		res["clamped_pixels"] = int64_t(clamped_px);
+		res["clamp_valid_pixels"] = int64_t(clamp_valid_px);
+		res["reset_region_tested"] = test_reset_region;
+		res["reset_inside_max_len"] = int(reset_inside_max_len);
+		res["reset_outside_max_len"] = int(reset_outside_max_len);
+		res["reset_inside_pixels"] = int64_t(reset_inside_px);
+		res["reset_outside_pixels"] = int64_t(reset_outside_px);
+		res["debug_vis_mode"] = debug_vis_mode;
+		res["debug_non_black_pixels"] = int64_t(debug_non_black);
+		res["debug_non_finite_count"] = int64_t(debug_non_finite);
+		res["debug_mean_luma"] = debug_mean_luma;
+		res["ref_mean_luma"] = ref_mean_luma;
+		res["physical_shaded_mean_luma"] = physical_shaded_mean_luma;
+		res["ref_rel_err"] = ref_rel_err;
+		return res;
+	}
+
 	if (mode == "falloff_cull") {
 		const float low_thresh = float(p_options.get("low_threshold", 0.0));
 		const float high_thresh = float(p_options.get("high_threshold", 0.2));
@@ -3098,5 +4197,7 @@ void MegaLights::render_sampling(const FrameInputs &p_inputs, Ref<RenderSceneBuf
 	generate_samples(p_inputs, p_rb);
 	trace_visibility(p_inputs, p_rb);
 	update_guiding(p_rb, view->get_visibility_buffer(), false);
+	shade_samples(p_inputs, p_rb);
+	denoise_samples(p_inputs, p_rb);
 	view->advance_frame_index();
 }

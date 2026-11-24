@@ -1073,9 +1073,12 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		case RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS:
 		// Modes that draws a buffer over viewport needs camera effects because if the buffer is not available it will be equivalent to normal draw mode.
 		case RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER:
-		// GodotNext: megalights_inputs (#136)
+		// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135)
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO:
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE:
 		// GodotNext: pt_tsr_stability (#198)
 		case RSE::VIEWPORT_DEBUG_DRAW_TSR:
 		// GodotNext: vsm_settings_debug (#221). Drawn over the final image; without virtual shadow maps the view is the normal image.
