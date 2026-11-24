@@ -18,17 +18,27 @@ void main() {
 
 #VERSION_DEFINES
 
-// GodotNext: nextgeo_exclusive_dispatch (#79, plan §9, §12, §13.4 Q5 & Q14).
+// GodotNext: nextgeo_exclusive_dispatch (#79, plan §9, §12, §13.4 Q5 & Q14),
+// nextgeo_product_surface (#157, plan §21.4.1, GN-14).
 // Fullscreen producer for:
-//   mode 0 = NEXTGEO_CRACKS
-//   mode 1 = NEXTGEO_CLUSTER_ERROR
-//   mode 2 = NEXTGEO_RESIDENCY
-//   mode 3 = NEXTGEO_VISIBILITY_ID
-//   mode 4 = NEXTGEO_FALLBACK
-//   mode 5 = NEXTGEO_TRIANGLE_SIZE
+//   mode  0 = NEXTGEO_CRACKS
+//   mode  1 = NEXTGEO_CLUSTER_ERROR
+//   mode  2 = NEXTGEO_RESIDENCY
+//   mode  3 = NEXTGEO_VISIBILITY_ID
+//   mode  4 = NEXTGEO_FALLBACK
+//   mode  5 = NEXTGEO_TRIANGLE_SIZE
+//   mode  6 = NEXTGEO_RASTER_BINS
+//   mode  7 = NEXTGEO_HW_SW
+//   mode  8 = NEXTGEO_SHADING_BINS
+//   mode  9 = NEXTGEO_PROGRAMMABLE
+//   mode 10 = NEXTGEO_VERTEX_OFFSET
+//   mode 11 = NEXTGEO_SKINNED
+//   mode 12 = NEXTGEO_TESSELLATION
+//   mode 13 = NEXTGEO_VOXELS
 
 // clang-format off
 #include "nextgeo_records_inc.glsl"
+#include "raster_features_inc.glsl"
 #include "tessellation_inc.glsl"
 #include "voxel_inc.glsl"
 // clang-format on
@@ -86,6 +96,10 @@ layout(set = 0, binding = 11, std430) buffer restrict readonly DebugParams {
 	mat4 view_proj;
 	vec4 camera; // xyz, w = max_pixel_error
 	vec4 view_info; // x = width, y = height, z = z_near, w = lod_bias
+	vec4 raster_forward; // xyz = camera_forward, w = z_near
+	vec4 raster_params; // x = sw_raster_max_edge_px, y = px_scale, z = is_orthogonal, w = 0
+	uvec4 debug_flags; // x = flags (bit0=hybrid, bit1=mesh_hw, bit2=foliage_wind, bit3=shading_compute), y = raster_bin_table_words, z = shading_bucket_bins_count, w = wind_mesh_count
+	uint bin_features[68];
 }
 dbg;
 
@@ -105,6 +119,22 @@ layout(set = 0, binding = 14, std430) buffer restrict readonly NextGeoVisibleVox
 	uvec4 data[];
 }
 visible_voxel_bricks;
+
+// GodotNext: nextgeo_product_surface (#157). Per-(instance, surface) raster-bin table, shading-bin lookup, and wind skeletons.
+layout(set = 0, binding = 15, std430) buffer restrict readonly NextGeoRasterBinTable {
+	uint data[];
+}
+raster_bin_table;
+
+layout(set = 0, binding = 16, std430) buffer restrict readonly NextGeoShadingBucketBins {
+	uint data[];
+}
+shading_bucket_bins;
+
+layout(set = 0, binding = 17, std430) buffer restrict readonly NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+wind_meshes;
 
 layout(push_constant, std430) uniform PushParams {
 	vec2 internal_size;
@@ -126,6 +156,14 @@ const uint MODE_RESIDENCY = 2u;
 const uint MODE_VISIBILITY_ID = 3u;
 const uint MODE_FALLBACK = 4u;
 const uint MODE_TRIANGLE_SIZE = 5u;
+const uint MODE_RASTER_BINS = 6u;
+const uint MODE_HW_SW = 7u;
+const uint MODE_SHADING_BINS = 8u;
+const uint MODE_PROGRAMMABLE = 9u;
+const uint MODE_VERTEX_OFFSET = 10u;
+const uint MODE_SKINNED = 11u;
+const uint MODE_TESSELLATION = 12u;
+const uint MODE_VOXELS = 13u;
 
 uint mix32(uint x) {
 	x ^= x >> 16u;
@@ -201,11 +239,20 @@ vec3 fallback_reason_color(uint reason, uint cls, uint rt_excl) {
 		case 13u: // ALPHA
 			base_col = vec3(0.25, 0.88, 0.82);
 			break;
-		case 14u: // MULTIMESH_OR_PARTICLES / VGD_IGNORED
-			base_col = vec3(0.45, 0.72, 0.25);
+		case 14u: // NO_INT64_ATOMICS (#162, #157)
+			base_col = vec3(0.45, 0.35, 0.85);
 			break;
-		case 15u: // UNSUPPORTED_RASTER_FEATURE (#155)
+		case 15u: // UNSUPPORTED_RASTER_FEATURE (#155, #157)
 			base_col = vec3(0.30, 0.45, 0.95);
+			break;
+		case 16u: // SW_RASTER_UNAVAILABLE (#157)
+			base_col = vec3(0.96, 0.56, 0.20);
+			break;
+		case 17u: // BLEND_SHAPES (#157)
+			base_col = vec3(0.88, 0.18, 0.68);
+			break;
+		case 31u: // MULTIMESH_OR_PARTICLES / VGD_IGNORED
+			base_col = vec3(0.45, 0.72, 0.25);
 			break;
 		default:
 			base_col = vec3(0.82, 0.52, 0.22);
@@ -254,6 +301,119 @@ float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p
 	return p_max_parent_error * scale * 0.5 * dbg.view_info.y * abs(dbg.proj[1][1]) / dist * dbg.view_info.w;
 }
 
+// GodotNext: nextgeo_product_surface (#157). Shared helpers for the 8 Nanite visualization modes.
+float debug_sw_instance_scale(NextGeoInstanceRecord p_record) {
+	vec3 c0 = vec3(p_record.transform[0].x, p_record.transform[1].x, p_record.transform[2].x);
+	vec3 c1 = vec3(p_record.transform[0].y, p_record.transform[1].y, p_record.transform[2].y);
+	vec3 c2 = vec3(p_record.transform[0].z, p_record.transform[1].z, p_record.transform[2].z);
+	float r0 = abs(dot(c0, c0)) + abs(dot(c0, c1)) + abs(dot(c0, c2));
+	float r1 = abs(dot(c1, c0)) + abs(dot(c1, c1)) + abs(dot(c1, c2));
+	float r2 = abs(dot(c2, c0)) + abs(dot(c2, c1)) + abs(dot(c2, c2));
+	return sqrt(max(r0, max(r1, r2)));
+}
+
+bool debug_sw_raster_route(NextGeoInstanceRecord p_record, vec4 p_bounds, float p_max_edge) {
+	if ((dbg.debug_flags.x & 1u) == 0u) {
+		return false;
+	}
+	float max_edge_px = dbg.raster_params.x;
+	float scale = debug_sw_instance_scale(p_record);
+	if (!(max_edge_px > 0.0) || !(scale > 0.0) || !(p_max_edge >= 0.0)) {
+		return false;
+	}
+	if (dbg.raster_params.z != 0.0) {
+		return p_max_edge * scale * dbg.raster_params.y < max_edge_px;
+	}
+	vec3 center_w = instance_point(p_record, p_bounds.xyz);
+	float z_min = dot(center_w - dbg.camera.xyz, dbg.raster_forward.xyz) - p_bounds.w * scale;
+	if (!(z_min > dbg.raster_forward.w)) {
+		return false;
+	}
+	return (p_max_edge * scale * dbg.raster_params.y / max(z_min, 1e-20)) < max_edge_px;
+}
+
+float debug_aabb_camera_distance(NextGeoInstanceRecord p_record) {
+	vec3 closest = clamp(dbg.camera.xyz, p_record.world_aabb_min.xyz, p_record.world_aabb_max.xyz);
+	return length(dbg.camera.xyz - closest);
+}
+
+uint debug_lookup_raster_bin(NextGeoInstanceRecord p_record, uint p_surface_id, out uint r_raw_bin, out uint r_features, out bool r_pix_demoted, out bool r_wpo_demoted) {
+	r_raw_bin = NEXTGEO_RASTER_BIN_FIXED;
+	r_features = 0u;
+	r_pix_demoted = false;
+	r_wpo_demoted = false;
+	if (p_surface_id >= 32u || dbg.debug_flags.y == 0u) {
+		return NEXTGEO_RASTER_BIN_FIXED;
+	}
+	uint w = nextgeo_raster_bin_table_word(p_record.bucket_base, p_surface_id);
+	if (w >= dbg.debug_flags.y) {
+		return NEXTGEO_RASTER_BIN_FIXED;
+	}
+	uint raw_bin = (raster_bin_table.data[w] >> nextgeo_raster_bin_table_shift(p_surface_id)) & 0xFFu;
+	if (raw_bin >= NEXTGEO_RASTER_BIN_LIMIT) {
+		return NEXTGEO_RASTER_BIN_FIXED;
+	}
+	r_raw_bin = raw_bin;
+	r_features = dbg.bin_features[raw_bin];
+	uint eff_bin = raw_bin;
+	if (raw_bin > NEXTGEO_RASTER_BIN_FIXED && (r_features & NEXTGEO_RASTER_FEATURE_DISPLACED) == 0u) {
+		bool has_pix = (r_features & NEXTGEO_RASTER_PIXEL_PROGRAMMABLE_FEATURES) != 0u;
+		bool has_wpo = (r_features & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+		float prog_dist = p_record.prev_world_aabb_min.w;
+		float wpo_dist = nextgeo_record_vertex_offset_disable_distance(p_record);
+		if ((has_pix && prog_dist > 0.0) || (has_wpo && wpo_dist > 0.0)) {
+			float cam_dist = debug_aabb_camera_distance(p_record);
+			r_pix_demoted = has_pix && prog_dist > 0.0 && cam_dist > prog_dist;
+			r_wpo_demoted = has_wpo && wpo_dist > 0.0 && cam_dist > wpo_dist;
+			if ((!has_pix || r_pix_demoted) && (!has_wpo || r_wpo_demoted)) {
+				eff_bin = NEXTGEO_RASTER_BIN_FIXED;
+			}
+		}
+	}
+	return eff_bin;
+}
+
+vec3 debug_shading_bin_color(uint p_bucket_id, ivec2 p_ipx) {
+	if (p_bucket_id == NEXTGEO_BUCKET_INVALID) {
+		return vec3(0.42, 0.42, 0.45);
+	}
+	vec3 base = hash_color(p_bucket_id * 0x9e3779b9u ^ 0x85ebca6bu);
+	bool is_compute = (dbg.debug_flags.x & 8u) != 0u && p_bucket_id < dbg.debug_flags.z && shading_bucket_bins.data[p_bucket_id] == p_bucket_id;
+	if (is_compute) {
+		return base;
+	}
+	bool tile_edge = (p_ipx.x & 7) == 0 || (p_ipx.y & 7) == 0;
+	return mix(base, vec3(0.14, 0.16, 0.20), tile_edge ? 0.55 : 0.30);
+}
+
+bool debug_record_has_wind(NextGeoInstanceRecord p_record) {
+	if ((dbg.debug_flags.x & 4u) == 0u) {
+		return false;
+	}
+	if (p_record.virtual_mesh >= dbg.debug_flags.w) {
+		return false;
+	}
+	return wind_meshes.data[p_record.virtual_mesh].header.x > 0u;
+}
+
+vec3 debug_skinned_color(NextGeoInstanceRecord p_record) {
+	if ((p_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u) {
+		return vec3(0.14, 0.88, 0.36); // Skeletal skinned Nanite
+	}
+	if (debug_record_has_wind(p_record)) {
+		return vec3(0.12, 0.84, 0.92); // Procedural foliage wind-skinned Nanite
+	}
+	return vec3(0.24, 0.26, 0.30); // Rigid Nanite
+}
+
+vec3 debug_hw_sw_color(bool p_is_sw) {
+	if (p_is_sw) {
+		return vec3(0.12, 0.86, 0.34); // SW compute raster
+	}
+	bool mesh_hw = (dbg.debug_flags.x & 2u) != 0u;
+	return mesh_hw ? vec3(0.98, 0.62, 0.10) : vec3(0.90, 0.20, 0.22); // HW mesh shader vs HW vertex pulling
+}
+
 void main() {
 	vec2 uv = clamp(gl_FragCoord.xy / max(push_params.output_size, vec2(1.0)), vec2(0.0), vec2(1.0));
 	ivec2 ipx = clamp(ivec2(uv * push_params.internal_size), ivec2(0), ivec2(push_params.internal_size) - ivec2(1));
@@ -281,8 +441,8 @@ void main() {
 	} else {
 		// In all other modes, fb_raw != 0u means a legacy opaque surface won the depth test at ipx.
 		uint fb_cls = fb_raw & 3u;
-		uint fb_reason = (fb_raw >> 2u) & 0xFu;
-		uint fb_rt_excl = (fb_raw >> 6u) & 3u;
+		uint fb_reason = (fb_raw >> 2u) & 0x1Fu;
+		uint fb_rt_excl = (fb_raw >> 7u) & 1u;
 
 		if (push_params.mode == MODE_FALLBACK) {
 			if (fb_cls != 0u) {
@@ -345,6 +505,56 @@ void main() {
 				atomicAdd(histogram.bins[1], 1u);
 			}
 			frag_color = vec4(heat_ramp(1.0 - 1.0 / 15.0), 1.0);
+			return;
+		}
+		// GodotNext: nextgeo_product_surface (#157). Handle all 8 Nanite visualization modes on voxel bricks.
+		if (push_params.mode == MODE_VOXELS) {
+			vec3 vox_col = hash_color(brick_idx * 0x9e3779b9u ^ voxel_idx);
+			frag_color = vec4(mix(vec3(0.10, 0.95, 0.65), vox_col, 0.30), 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_HW_SW) {
+			// Voxel bricks always SW-splat in voxel_raster.glsl.
+			frag_color = vec4(debug_hw_sw_color(true), 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_RASTER_BINS) {
+			frag_color = vec4(0.10, 0.85, 0.78, 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_SHADING_BINS) {
+			uint brick_word = brick_entry.y;
+			uint occ_lo = pages.data[brick_word + 4u];
+			uint occ_hi = pages.data[brick_word + 5u];
+			uint bucket_id = NEXTGEO_BUCKET_INVALID;
+			if (nextgeo_voxel_is_occupied(occ_lo, occ_hi, voxel_idx)) {
+				uint rank = nextgeo_voxel_rank(occ_lo, occ_hi, voxel_idx);
+				uint w1 = pages.data[brick_word + NEXTGEO_VOXEL_BRICK_HEADER_WORDS + rank * NEXTGEO_VOXEL_DATA_WORDS + 1u];
+				uint vox_surface = (w1 >> 24u) & 0xFFu;
+				if (push_params.bucket_table_words > 0u && vox_surface < 32u) {
+					uint bslot = record.bucket_base + vox_surface;
+					if (bslot < push_params.bucket_table_words) {
+						bucket_id = bucket_table.data[bslot] & NEXTGEO_BUCKET_ID_MASK;
+					}
+				}
+			}
+			frag_color = vec4(debug_shading_bin_color(bucket_id, ipx), 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_PROGRAMMABLE) {
+			frag_color = vec4(0.18, 0.32, 0.26, 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_VERTEX_OFFSET) {
+			frag_color = vec4(0.22, 0.28, 0.26, 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_SKINNED) {
+			frag_color = vec4(debug_skinned_color(record), 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_TESSELLATION) {
+			frag_color = vec4(0.18, 0.20, 0.24, 1.0);
 			return;
 		}
 		// MODE_CRACKS: voxel splats are always front-facing neutral gray.
@@ -418,7 +628,136 @@ void main() {
 		return;
 	}
 
-	if (push_params.mode == MODE_CLUSTER_ERROR || push_params.mode == MODE_RESIDENCY) {
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14). The 8 Nanite visualization modes.
+	if (push_params.mode == MODE_VOXELS) {
+		// Regular triangle cluster vs diced patch (voxels handled above).
+		frag_color = vec4(is_patch ? vec3(0.28, 0.24, 0.34) : vec3(0.22, 0.24, 0.30), 1.0);
+		return;
+	}
+
+	if (push_params.mode == MODE_SKINNED) {
+		frag_color = vec4(debug_skinned_color(record), 1.0);
+		return;
+	}
+
+	if (push_params.mode == MODE_TESSELLATION) {
+		if (is_patch) {
+			uint f0 = patch_rec.packed_factors & 0xFFu;
+			uint f1 = (patch_rec.packed_factors >> 8u) & 0xFFu;
+			uint f2 = (patch_rec.packed_factors >> 16u) & 0xFFu;
+			uint max_f = max(f0, max(f1, f2));
+			float t = clamp(log2(float(max(max_f, 1u))) / 6.0, 0.0, 1.0);
+			frag_color = vec4(heat_ramp(t), 1.0);
+		} else {
+			uint raw_bin;
+			uint bin_feats;
+			bool pix_demoted;
+			bool wpo_demoted;
+			debug_lookup_raster_bin(record, surface_id, raw_bin, bin_feats, pix_demoted, wpo_demoted);
+			bool has_disp = (bin_feats & NEXTGEO_RASTER_FEATURE_DISPLACED) != 0u || record.prev_world_aabb_max.w > 0.0;
+			frag_color = vec4(has_disp ? vec3(0.38, 0.26, 0.42) : vec3(0.20, 0.22, 0.28), 1.0);
+		}
+		return;
+	}
+
+	if (push_params.mode == MODE_SHADING_BINS) {
+		uint bucket_id = NEXTGEO_BUCKET_INVALID;
+		if (push_params.bucket_table_words > 0u && surface_id < 32u) {
+			uint bucket_slot = record.bucket_base + surface_id;
+			if (bucket_slot < push_params.bucket_table_words) {
+				bucket_id = bucket_table.data[bucket_slot] & NEXTGEO_BUCKET_ID_MASK;
+			}
+		}
+		frag_color = vec4(debug_shading_bin_color(bucket_id, ipx), 1.0);
+		return;
+	}
+
+	if (push_params.mode == MODE_RASTER_BINS || push_params.mode == MODE_PROGRAMMABLE || push_params.mode == MODE_VERTEX_OFFSET) {
+		uint raw_bin;
+		uint bin_feats;
+		bool pix_demoted;
+		bool wpo_demoted;
+		uint eff_bin = debug_lookup_raster_bin(record, surface_id, raw_bin, bin_feats, pix_demoted, wpo_demoted);
+
+		if (push_params.mode == MODE_RASTER_BINS) {
+			if (eff_bin == NEXTGEO_RASTER_BIN_FIXED) {
+				vec3 col = (raw_bin != NEXTGEO_RASTER_BIN_FIXED) ? vec3(0.32, 0.38, 0.46) : vec3(0.22, 0.36, 0.52);
+				frag_color = vec4(col, 1.0);
+			} else {
+				vec3 col = hash_color(eff_bin * 0x9e3779b9u ^ 0x5bf03635u);
+				if (is_patch) {
+					col = mix(col, vec3(0.95, 0.25, 0.95), 0.25);
+				}
+				frag_color = vec4(col, 1.0);
+			}
+			return;
+		}
+
+		if (push_params.mode == MODE_PROGRAMMABLE) {
+			uint bucket_flags = 0u;
+			if (push_params.bucket_table_words > 0u && surface_id < 32u) {
+				uint bucket_slot = record.bucket_base + surface_id;
+				if (bucket_slot < push_params.bucket_table_words) {
+					bucket_flags = bucket_table.data[bucket_slot];
+				}
+			}
+			bool two_sided = (bucket_flags & (NEXTGEO_BUCKET_CULL_DISABLED | NEXTGEO_BUCKET_CULL_FRONT)) != 0u ||
+					(surface_id < 32u && ((record.pad1[0] | record.pad1[1]) & (1u << surface_id)) != 0u);
+			if (eff_bin == NEXTGEO_RASTER_BIN_FIXED) {
+				if (raw_bin != NEXTGEO_RASTER_BIN_FIXED) {
+					// Demoted to fixed-function bin by distance cutoff.
+					frag_color = vec4(0.52, 0.56, 0.22, 1.0);
+				} else if (two_sided) {
+					frag_color = vec4(0.18, 0.72, 0.85, 1.0);
+				} else {
+					frag_color = vec4(0.18, 0.32, 0.26, 1.0);
+				}
+			} else if (is_patch || (bin_feats & NEXTGEO_RASTER_FEATURE_DISPLACED) != 0u) {
+				frag_color = vec4(0.88, 0.20, 0.92, 1.0); // Displaced / tessellated
+			} else if ((bin_feats & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u && !wpo_demoted) {
+				frag_color = vec4(0.98, 0.58, 0.10, 1.0); // Vertex offset (WPO)
+			} else if ((bin_feats & NEXTGEO_RASTER_FEATURE_DEPTH_OFFSET) != 0u) {
+				frag_color = vec4(0.95, 0.90, 0.14, 1.0); // Pixel depth offset (PDO)
+			} else if ((bin_feats & NEXTGEO_RASTER_FEATURE_MASKED) != 0u) {
+				frag_color = vec4(0.96, 0.22, 0.28, 1.0); // Masked (alpha scissor/hash/discard)
+			} else {
+				frag_color = vec4(0.92, 0.38, 0.72, 1.0); // Other programmable raster
+			}
+			return;
+		}
+
+		// MODE_VERTEX_OFFSET: active WPO (orange-red) vs disabled-by-distance (blue) vs static (dark slate).
+		float wpo_bound = nextgeo_record_vertex_offset_bound(record);
+		bool has_wpo = (bin_feats & NEXTGEO_RASTER_FEATURE_VERTEX_OFFSET) != 0u || wpo_bound > 0.0;
+		if (!has_wpo) {
+			frag_color = vec4(0.22, 0.28, 0.26, 1.0);
+		} else {
+			float wpo_dist = nextgeo_record_vertex_offset_disable_distance(record);
+			bool disabled_by_dist = wpo_demoted || (wpo_dist > 0.0 && debug_aabb_camera_distance(record) > wpo_dist);
+			if (disabled_by_dist) {
+				frag_color = vec4(0.20, 0.65, 0.92, 1.0);
+			} else {
+				float intensity = clamp(wpo_bound / 2.0, 0.0, 1.0);
+				frag_color = vec4(mix(vec3(0.96, 0.44, 0.10), vec3(1.0, 0.16, 0.08), intensity), 1.0);
+			}
+		}
+		return;
+	}
+
+	if (push_params.mode == MODE_CLUSTER_ERROR || push_params.mode == MODE_RESIDENCY || push_params.mode == MODE_HW_SW) {
+		if (push_params.mode == MODE_HW_SW) {
+			if (is_patch) {
+				// Diced patch pad1 bit 0: 1 = bounded HW stream, 0 = SW compute raster.
+				bool is_sw_patch = (patch_rec.pad1 & 1u) == 0u;
+				frag_color = vec4(debug_hw_sw_color(is_sw_patch), 1.0);
+				return;
+			}
+			if ((dbg.debug_flags.x & 1u) == 0u) {
+				// Hybrid raster off -> v2.4 HW vertex-pulling path.
+				frag_color = vec4(debug_hw_sw_color(false), 1.0);
+				return;
+			}
+		}
 		uint mesh_idx = record.virtual_mesh;
 		uint slot_page_size = residency.data[0];
 		uint page_slot = 0xFFFFFFFFu;
@@ -436,26 +775,41 @@ void main() {
 		int parent_lod = -1;
 		int refined_group = -1;
 		bool wanted_finer = false;
+		bool is_sw_cluster = false;
 		if (page_slot != 0xFFFFFFFFu && slot_page_size >= 96u && local_cluster >= page_first_cluster) {
 			uint page_word_base = (page_slot * slot_page_size) >> 2u;
 			uint page_clusters = pages.data[page_word_base];
 			uint in_page = local_cluster - page_first_cluster;
 			if (in_page < page_clusters) {
 				uint rec_word = page_word_base + 4u + in_page * 20u;
-				vec4 own_lod = vec4(
-						uintBitsToFloat(pages.data[rec_word + 5u]),
-						uintBitsToFloat(pages.data[rec_word + 6u]),
-						uintBitsToFloat(pages.data[rec_word + 7u]),
-						uintBitsToFloat(pages.data[rec_word + 8u]));
-				float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
-				parent_lod = int(pages.data[rec_word + 14u]);
-				refined_group = int(pages.data[rec_word + 15u]);
-				px_err = projected_error(record, own_lod, own_error);
-				uint group_count = (mesh.bvh_node_offset > mesh.group_offset) ? ((mesh.bvh_node_offset - mesh.group_offset) / 60u) : 0u;
-				if (refined_group >= 0 && uint(refined_group) < group_count && px_err > dbg.camera.w) {
-					wanted_finer = !mesh_group_refine_ok(mesh_idx, uint(refined_group));
+				if (push_params.mode == MODE_HW_SW) {
+					vec4 bounds = vec4(
+							uintBitsToFloat(pages.data[rec_word + 0u]),
+							uintBitsToFloat(pages.data[rec_word + 1u]),
+							uintBitsToFloat(pages.data[rec_word + 2u]),
+							uintBitsToFloat(pages.data[rec_word + 3u]));
+					float max_edge = unpackHalf2x16(pages.data[rec_word + 16u]).x;
+					is_sw_cluster = debug_sw_raster_route(record, bounds, max_edge);
+				} else {
+					vec4 own_lod = vec4(
+							uintBitsToFloat(pages.data[rec_word + 5u]),
+							uintBitsToFloat(pages.data[rec_word + 6u]),
+							uintBitsToFloat(pages.data[rec_word + 7u]),
+							uintBitsToFloat(pages.data[rec_word + 8u]));
+					float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
+					parent_lod = int(pages.data[rec_word + 14u]);
+					refined_group = int(pages.data[rec_word + 15u]);
+					px_err = projected_error(record, own_lod, own_error);
+					uint group_count = (mesh.bvh_node_offset > mesh.group_offset) ? ((mesh.bvh_node_offset - mesh.group_offset) / 60u) : 0u;
+					if (refined_group >= 0 && uint(refined_group) < group_count && px_err > dbg.camera.w) {
+						wanted_finer = !mesh_group_refine_ok(mesh_idx, uint(refined_group));
+					}
 				}
 			}
+		}
+		if (push_params.mode == MODE_HW_SW) {
+			frag_color = vec4(debug_hw_sw_color(is_sw_cluster), 1.0);
+			return;
 		}
 		if (push_params.mode == MODE_CLUSTER_ERROR) {
 			float norm_err = clamp(px_err / max(dbg.camera.w * 2.0, 0.25), 0.0, 1.0);

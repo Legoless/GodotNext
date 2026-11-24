@@ -433,6 +433,13 @@ void main() {
 #else
 			uint patch_slot = patch_base + sp;
 			if (tid == 0u) {
+				bool emitted_hw = false;
+				if (use_hw) {
+					emitted_hw = _ng_tess_emit_hw_patch(patch_slot, bin_slot);
+					if (!emitted_hw) {
+						s_patch_hw_fallback = 1u;
+					}
+				}
 				NextGeoDicedPatchRecord rec;
 				rec.cluster_slot = vis_cluster;
 				rec.tri_and_sub = nextgeo_tess_pack_tri_and_sub(t, sp, micro_count);
@@ -441,13 +448,9 @@ void main() {
 				rec.disp_magnitude = bin_push.disp_magnitude;
 				rec.disp_center = bin_push.disp_center;
 				rec.pad0 = bin_push.phase;
-				rec.pad1 = 0u;
+				// GodotNext: nextgeo_product_surface (#157). Bit 0 records whether this patch went to the HW stream (1) or SW compute (0).
+				rec.pad1 = emitted_hw ? 1u : 0u;
 				diced_patches.data[patch_slot] = rec;
-				if (use_hw) {
-					if (!_ng_tess_emit_hw_patch(patch_slot, bin_slot)) {
-						s_patch_hw_fallback = 1u;
-					}
-				}
 			}
 			barrier();
 			if (!use_hw || s_patch_hw_fallback != 0u) {

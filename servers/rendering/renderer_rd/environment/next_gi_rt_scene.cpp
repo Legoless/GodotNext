@@ -4235,6 +4235,11 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 	// They are new BLASes, so the TLAS built this frame stays traceable.
 	if (native != nullptr) {
 		native->build(nextgeo_rt_native_build_budget(triangle_budget > scheduled_triangles ? triangle_budget - scheduled_triangles : 0u));
+		if (RSG::virtual_mesh_storage != nullptr) {
+			RSG::virtual_mesh_storage->nextgeo_record_native_rt_rebuilds(native->get_stats().build_count);
+		}
+	} else if (RSG::virtual_mesh_storage != nullptr) {
+		RSG::virtual_mesh_storage->nextgeo_record_native_rt_rebuilds(0);
 	}
 
 	uint64_t frame = 0;

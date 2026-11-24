@@ -3658,8 +3658,11 @@
 		<member name="rendering/nextgeo/debug_backface" type="bool" setter="" getter="" default="false">
 			Disable backface culling in the NextGeo visibility raster so interior and crack diagnostics (Q5) render both sides of virtual clusters.
 		</member>
+		<member name="rendering/nextgeo/debug_no_int64_atomics" type="bool" setter="" getter="" default="false">
+			Simulate a device without 64-bit integer atomics so NextGeo uses its hardware-only visibility raster path and reports [code]NO_INT64_ATOMICS[/code] (and routes tessellation or voxel surfaces to [code]SW_RASTER_UNAVAILABLE[/code]). For testing.
+		</member>
 		<member name="rendering/nextgeo/debug_programmable_raster" type="bool" setter="" getter="" default="false">
-			Route masked (alpha scissor, alpha hash, [code]discard[/code]) and vertex-offset ([code]VERTEX[/code] written in [code]vertex()[/code]) materials on virtual-geometry meshes through NextGeo's programmable raster bins, which run the material's raster program in the hybrid raster's software and hardware paths. It needs the hybrid raster (see [member rendering/nextgeo/raster_mode]); elsewhere these surfaces stay on legacy raster. It is off by default while the masked and vertex-offset features themselves are being built; with it off, such materials keep their legacy fallback reasons. Takes effect when a surface's material is next assigned.
+			Force admission of eligible programmable-raster materials (including displaced materials when [member rendering/nextgeo/experimental/tessellation] is off) into NextGeo's programmable raster bins for testing. Masked, pixel-depth-offset, and vertex-offset materials are admitted by default on the Nanite device tier (see [member rendering/nextgeo/raster_mode]). Takes effect when a surface's material is next assigned.
 		</member>
 		<member name="rendering/nextgeo/debug_shading_bins_no_storage" type="bool" setter="" getter="" default="false">
 			Treat every output target of NextGeo's Stage A and Stage B as one the compute shading bins cannot write, so a view with [member rendering/nextgeo/shading_path] set to [code]Compute Bins[/code] shades through the tile quads with the reason [code]NO_STORAGE[/code], as it does on a device whose target formats lack storage support. For testing.
@@ -3685,7 +3688,7 @@
 		<member name="rendering/nextgeo/experimental/foliage_wind" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite procedural foliage wind skinning.">
 			Enable in-shader procedural wind bone evaluation for virtualized foliage meshes carrying a [VirtualGeometryWind] resource on [member VirtualGeometryData.wind]. Evaluates up to 1 trunk plus 8 branch bones per asset from [World3D] wind parameters and frame time with zero per-instance skin palette arena memory, inflating CPU/GPU cull bounds by [member VirtualGeometryWind.max_sway] and routing active wind instances to the dynamic virtual shadow map layer. Off by default.
 		</member>
-		<member name="rendering/nextgeo/experimental/tessellation" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite runtime displacement tessellation">
+		<member name="rendering/nextgeo/experimental/tessellation" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite runtime displacement tessellation.">
 			Enable experimental runtime displacement tessellation for NextGeo virtual geometry. Displaced materials (spatial shaders with a [code]displacement()[/code] function or [BaseMaterial3D] with [constant BaseMaterial3D.HEIGHTMAP_MODE_DISPLACEMENT] and positive [member Material.displacement_magnitude]) are diced at [member rendering/nextgeo/tessellation/dicing_rate] pixels per edge with crack-free canonical edge factors, rasterized into the 64-bit visibility buffer via software rasterization and a bounded hardware stream, and resolved deterministically during shading. When disabled, zero dicing buffers are allocated and zero dicing passes run.
 		</member>
 		<member name="rendering/nextgeo/experimental/voxels" type="bool" setter="" getter="" default="false" experimental="Nanite Voxels are experimental and off by default.">
@@ -3726,7 +3729,7 @@
 		<member name="rendering/nextgeo/tessellation/debug_max_patches" type="int" setter="" getter="" default="0">
 			Optional test cap on the number of diced tessellation sub-patches allocated per frame ([code]0[/code] uses the full default capacity). Used to exercise patch-buffer overflow coarsening and the [code]dicing_overflow[/code] debug counter.
 		</member>
-		<member name="rendering/nextgeo/tessellation/dicing_rate" type="float" setter="" getter="" default="2.0">
+		<member name="rendering/nextgeo/tessellation/dicing_rate" type="float" setter="" getter="" default="2.0" experimental="Effective only when rendering/nextgeo/experimental/tessellation is enabled.">
 			Target screen-space edge length in pixels for NextGeo runtime displacement tessellation (clamped to [code][0.5, 16.0][/code]). Smaller values subdivide displaced triangles more finely at higher GPU cost; larger values produce coarser micro-triangles. Effective only when [member rendering/nextgeo/experimental/tessellation] is enabled. The default is provisional.
 		</member>
 		<member name="rendering/nextgeo/vertex_offset_max_default" type="float" setter="" getter="" default="0.5">

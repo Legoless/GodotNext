@@ -988,6 +988,38 @@
 			Displays a false-color heatmap of the MegaLights temporal luminance variance. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_ML_VARIANCE].
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_RASTER_BINS" value="73" enum="DebugDraw">
+			Colors each NextGeo pixel by its active raster bin. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_RASTER_BINS].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_HW_SW" value="74" enum="DebugDraw">
+			Distinguishes software-rasterized from hardware-rasterized NextGeo pixels. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_HW_SW].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_SHADING_BINS" value="75" enum="DebugDraw">
+			Colors each NextGeo pixel by its material shading bin (compute bins vs tile quads). See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_SHADING_BINS].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_PROGRAMMABLE" value="76" enum="DebugDraw">
+			Highlights programmable-raster NextGeo pixels vs fixed-function pixels. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_PROGRAMMABLE].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET" value="77" enum="DebugDraw">
+			Highlights NextGeo pixels evaluating vertex offset (WPO), disabled by distance, or static. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_SKINNED" value="78" enum="DebugDraw">
+			Highlights skeletally skinned and foliage wind-skinned NextGeo pixels vs rigid pixels. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_SKINNED].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_TESSELLATION" value="79" enum="DebugDraw">
+			Heatmaps runtime-tessellated NextGeo diced-patch pixels by subdivision density vs regular clusters. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_TESSELLATION].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_VOXELS" value="80" enum="DebugDraw">
+			Highlights Nanite Voxel sparse-brick pixels vs triangle cluster pixels. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_NEXTGEO_VOXELS].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

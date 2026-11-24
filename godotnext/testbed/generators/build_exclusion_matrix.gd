@@ -72,8 +72,8 @@ func _build() -> Node3D:
 	sun.rotation = Vector3(deg_to_rad(-48.0), deg_to_rad(28.0), 0.0)
 	Scaffold.add_owned(root, sun, root)
 
-	var floor_mesh := _box_mesh(_lambert("Floor", Color(0.22, 0.23, 0.24)), Vector3(24.0, 0.2, 16.0))
-	var floor := _mesh_node(root, root, "Floor", floor_mesh, Vector3(8.5, -0.2, 4.5))
+	var floor_mesh := _box_mesh(_lambert("Floor", Color(0.22, 0.23, 0.24)), Vector3(24.0, 0.2, 19.0))
+	var floor := _mesh_node(root, root, "Floor", floor_mesh, Vector3(8.5, -0.2, 6.0))
 
 	var rows: Array = Rules.cells()
 	for index in rows.size():
@@ -81,8 +81,8 @@ func _build() -> Node3D:
 		_add_cell(root, cell, index)
 	floor.set_meta("cell_count", rows.size())
 
-	var center := Vector3(float(COLUMNS - 1) * SPACING_X * 0.5, 0.5, SPACING_Z * 1.5)
-	Scaffold.make_camera(root, root, "CaptureCam", center + Vector3(0.0, 18.0, 16.0), center, 120.0, 70.0, true)
+	var center := Vector3(float(COLUMNS - 1) * SPACING_X * 0.5, 0.5, SPACING_Z * 2.0)
+	Scaffold.make_camera(root, root, "CaptureCam", center + Vector3(0.0, 20.0, 18.0), center, 120.0, 70.0, true)
 	return root
 
 
@@ -209,6 +209,16 @@ func _case_mesh(p_id: String, p_tint: Color) -> ArrayMesh:
 			return _box_mesh(_shader_material("InstanceUniform", _instance_shader()), BOX)
 		"animated_time":
 			return _box_mesh(_shader_material("AnimatedTime", _time_shader()), BOX)
+		"unsupported_raster_feature":
+			return _box_mesh(_shader_material("UnsupportedRasterFeature", _unsupported_raster_shader()), BOX)
+		"blend_shapes":
+			return _blend_shape_arrays(_box_mesh(_lambert("BlendShapes", p_tint), BOX))
+		"sw_raster_unavailable":
+			var disp_mat := _shader_material("DisplacedSwUnavailable", _displaced_shader())
+			disp_mat.displacement_magnitude = 0.15
+			return _box_mesh(disp_mat, BOX)
+		"no_int64_atomics":
+			return _box_mesh(_lambert("NoInt64Atomics", p_tint), BOX)
 		_:
 			return _box_mesh(_lambert(p_id, p_tint), BOX)
 
@@ -381,7 +391,15 @@ func _shader_material(p_name: String, p_code: String) -> ShaderMaterial:
 
 
 func _position_shader() -> String:
-	return "shader_type spatial;\nvoid vertex() {\n\tVERTEX.y += 0.02;\n}\nvoid fragment() {\n\tALBEDO = vec3(0.55, 0.22, 0.18);\n}\n"
+	return "shader_type spatial;\nvoid vertex() {\n\tPOSITION = PROJECTION_MATRIX * MODELVIEW_MATRIX * vec4(VERTEX + vec3(0.0, 0.02, 0.0), 1.0);\n}\nvoid fragment() {\n\tALBEDO = vec3(0.55, 0.22, 0.18);\n}\n"
+
+
+func _unsupported_raster_shader() -> String:
+	return "shader_type spatial;\nvoid fragment() {\n\tif (mod(FRAGCOORD.x, 4.0) < 0.25) {\n\t\tdiscard;\n\t}\n\tALBEDO = vec3(0.75, 0.28, 0.42);\n}\n"
+
+
+func _displaced_shader() -> String:
+	return "shader_type spatial;\nvoid displacement() {\n\tDISPLACEMENT = 0.5;\n}\nvoid fragment() {\n\tALBEDO = vec3(0.72, 0.52, 0.24);\n}\n"
 
 
 func _screen_shader() -> String:
@@ -431,6 +449,25 @@ func _skin_arrays(p_mesh: ArrayMesh) -> ArrayMesh:
 	skinned.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	skinned.surface_set_material(0, p_mesh.surface_get_material(0))
 	return skinned
+
+
+func _blend_shape_arrays(p_mesh: ArrayMesh) -> ArrayMesh:
+	var arrays := p_mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var morphed_verts := PackedVector3Array()
+	morphed_verts.resize(vertices.size())
+	for index in vertices.size():
+		morphed_verts[index] = vertices[index] + Vector3(0.0, 0.04, 0.0)
+	var bs_arrays := []
+	bs_arrays.resize(Mesh.ARRAY_MAX)
+	bs_arrays[Mesh.ARRAY_VERTEX] = morphed_verts
+	bs_arrays[Mesh.ARRAY_NORMAL] = arrays[Mesh.ARRAY_NORMAL]
+	bs_arrays[Mesh.ARRAY_TANGENT] = arrays[Mesh.ARRAY_TANGENT]
+	var morphed := ArrayMesh.new()
+	morphed.add_blend_shape("morph")
+	morphed.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [bs_arrays])
+	morphed.surface_set_material(0, p_mesh.surface_get_material(0))
+	return morphed
 
 
 func _mesh_node(p_root: Node, p_parent: Node, p_name: String, p_mesh: ArrayMesh, p_position: Vector3) -> MeshInstance3D:

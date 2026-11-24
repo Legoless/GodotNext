@@ -1,10 +1,10 @@
-# Exclusion Matrix (#74)
+# Exclusion Matrix (#74, #157)
 
-Twenty-two labeled cells. Each case sits beside a non-virtualized twin.
+Twenty-six labeled cells. Each case sits beside a non-virtualized twin.
 `exclusion_rules.gd` is the route and reason contract. #79 fills
-`RenderingServer.virtual_geometry_get_debug_stats`. Until that method
-exists, `check_exclusion.gd` reports the authored scene and the report
-tool records `counters_source: absent`.
+`RenderingServer.virtual_geometry_get_debug_stats`. #157 updates PN-admitted
+cases and adds the four PN fallback reasons (`NO_INT64_ATOMICS`,
+`UNSUPPORTED_RASTER_FEATURE`, `SW_RASTER_UNAVAILABLE`, `BLEND_SHAPES`).
 
 ```
 godot --headless --path godotnext/testbed --script res://generators/build_exclusion_matrix.gd
@@ -22,13 +22,15 @@ The generator is seed stream 74 (`0x6E657874`). Do not edit
 | Glass surface of the mixed mesh | legacy | `alpha` |
 | `next_pass`, `material_overlay`, stencil reader | legacy, whole chain | `NEXT_PASS_OR_OVERLAY` |
 | Vertex lighting | legacy | `VERTEX_LIGHTING` |
-| Position-altering `vertex()` | legacy | `UNSUPPORTED_CUSTOM_SHADER` |
-| Screen texture, alpha scissor, alpha hash | legacy | `alpha` |
+| Position-altering `vertex()` (`POSITION` write) | legacy | `UNSUPPORTED_CUSTOM_SHADER` |
+| Screen texture | legacy | `alpha` |
+| Alpha scissor, alpha hash | virtual (hybrid tier); legacy `alpha` below tier | `NONE` |
 | Non-varying `dFdx` | legacy | `UNSUPPORTED_DERIVATIVE` |
-| Skinning | legacy | `SKINNING` |
+| Skinning (non-opted-in) | legacy | `SKINNING` |
 | Instance uniforms | legacy | `INSTANCE_UNIFORMS` |
-| MultiMesh and particles | legacy | `MULTIMESH_OR_PARTICLES` (counted warning) |
+| MultiMesh | virtual | `NONE` |
 | Octant GridMap | legacy | `VGD_IGNORED` (counted warning; not a Fallback enum value) |
+| Particles | legacy | `MULTIMESH_OR_PARTICLES` (counted warning) |
 | Baked GridMap (`make_baked_meshes`) | legacy | `BAKED_GRIDMAP` |
 | Heightfield capture | `auxiliary_proxy` | `COARSE_OR_RT_PROXY` (policy name, not a Fallback enum value) |
 | Animated `TIME` | virtual | `NONE`, excluded from static SRC caching |
@@ -36,6 +38,10 @@ The generator is seed stream 74 (`0x6E657874`). Do not edit
 | MSAA viewport | legacy | `MSAA` |
 | Multiview viewport (`use_xr`) | legacy | `MULTIVIEW` |
 | Moving virtual instance | virtual | `NONE`, plus the G5-7 track |
+| Unsupported raster feature (`discard` + `FRAGCOORD`) | legacy | `UNSUPPORTED_RASTER_FEATURE` |
+| Blend shapes (morph target) | legacy | `BLEND_SHAPES` |
+| SW raster unavailable (displaced with SW raster off) | legacy | `SW_RASTER_UNAVAILABLE` |
+| No int64 atomics (N1 hardware-raster fallback) | virtual (HW raster) | `NO_INT64_ATOMICS` |
 
 `VGD_IGNORED` and `COARSE_OR_RT_PROXY` are the strings #79 should report.
 They are not members of `NextGeoFallback`.

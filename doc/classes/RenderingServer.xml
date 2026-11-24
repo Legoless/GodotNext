@@ -5067,7 +5067,7 @@
 			<return type="Dictionary" />
 			<param index="0" name="viewport" type="RID" default="RID()" />
 			<description>
-				Returns the NextGeo cut and resolve counters for the main view (plus [code]view_route[/code] and [code]view_reason[/code] when [param viewport] is a viewport [RID]), or per-surface routing ([code]route[/code], [code]reason[/code], [code]record_index[/code], [code]surfaces[/code]) when [param viewport] is a visual instance [RID]. View counters include [code]phase1_instances[/code], [code]phase2_instances[/code], [code]hiz_tested[/code], [code]hiz_hit[/code], [code]bvh_levels[/code], [code]groups[/code], [code]clusters[/code], [code]phase1_clusters[/code], [code]phase2_clusters[/code], [code]raster_indirect_draws[/code], [code]resolve_active_buckets[/code], [code]resolve_stage_a_draws[/code], [code]resolve_stage_b_draws[/code], [code]resolve_stage_b_wrote[/code], [code]double_dispatch[/code], [code]missing[/code], [code]overflow[/code], the GPU [code]cut_hash[/code] and, when [code]rendering/nextgeo/debug_stats[/code] is on, the CPU reference [code]cpu_cut_hash[/code], [code]cpu_clusters[/code] and [code]cut_match[/code]. [code]tick[/code] identifies each published sample; the sample describes the frame before the one the readback happens in.
+				Returns the NextGeo cut, raster, shading-bin, and ray-tracing counters for the main view (plus [code]view_route[/code] and [code]view_reason[/code] when [param viewport] is a viewport [RID]), or per-surface routing ([code]route[/code], [code]reason[/code], [code]record_index[/code], [code]surfaces[/code]) when [param viewport] is a visual instance [RID]. View counters include [code]phase1_instances[/code], [code]phase2_instances[/code], [code]hiz_tested[/code], [code]hiz_hit[/code], [code]bvh_levels[/code], [code]groups[/code], [code]clusters[/code], [code]phase1_clusters[/code], [code]phase2_clusters[/code], [code]sw_clusters[/code], [code]hw_clusters[/code], [code]sw_clusters_phase1[/code], [code]sw_clusters_phase2[/code], [code]hw_clusters_phase1[/code], [code]hw_clusters_phase2[/code], [code]programmable_sw_clusters[/code], [code]programmable_hw_clusters[/code], [code]programmable_bins[/code], [code]shading_bins[/code], [code]shading_compute_buckets[/code], [code]vertex_offset_clamped[/code], [code]dicing_overflow[/code], [code]voxel_bricks[/code], [code]native_rt_rebuilds[/code], [code]native_rt_rebuilds_total[/code], [code]ray_tracing_mode[/code], [code]raster_mode[/code], [code]raster_reason[/code], [code]hw_raster_path[/code], [code]raster_indirect_draws[/code], [code]resolve_active_buckets[/code], [code]resolve_stage_a_draws[/code], [code]resolve_stage_b_draws[/code], [code]resolve_stage_b_wrote[/code], [code]double_dispatch[/code], [code]missing[/code], [code]overflow[/code], the GPU [code]cut_hash[/code] and, when [code]rendering/nextgeo/debug_stats[/code] is on, the CPU reference [code]cpu_cut_hash[/code], [code]cpu_clusters[/code] and [code]cut_match[/code]. [code]tick[/code] identifies each published sample; the sample describes the frame before the one the readback happens in.
 			</description>
 		</method>
 		<method name="virtual_geometry_get_memory_report">
@@ -6533,6 +6533,38 @@
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_ML_VARIANCE" value="72" enum="ViewportDebugDraw">
 			Displays a false-color heatmap of the MegaLights temporal luminance variance (blue for low converged variance through green and yellow to red for high variance). Shows the normal image while MegaLights is inactive.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_RASTER_BINS" value="73" enum="ViewportDebugDraw">
+			Colors each NextGeo pixel by its active raster bin (fixed-function bin vs per-material programmable raster bins, tessellation patches, and voxel bricks).
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_HW_SW" value="74" enum="ViewportDebugDraw">
+			Distinguishes software-rasterized NextGeo pixels (green) from hardware-rasterized pixels (red for vertex-pulling, orange for mesh shaders).
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_SHADING_BINS" value="75" enum="ViewportDebugDraw">
+			Colors each NextGeo pixel by its material shading bin, using vibrant smooth colors for compute shading bins and an 8x8 tile-grid overlay for tile-quad fallback buckets.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_PROGRAMMABLE" value="76" enum="ViewportDebugDraw">
+			Highlights programmable-raster NextGeo pixels (masked, two-sided, vertex offset, pixel depth offset, displaced) against fixed-function pixels and distance-demoted surfaces.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET" value="77" enum="ViewportDebugDraw">
+			Highlights NextGeo pixels actively evaluating vertex offset (WPO) in orange-red, pixels disabled past [member GeometryInstance3D.vertex_offset_disable_distance] in blue, and static pixels in dark slate.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_SKINNED" value="78" enum="ViewportDebugDraw">
+			Highlights skeletally skinned NextGeo pixels in green, procedural foliage wind-skinned pixels in cyan, and rigid pixels in dark slate.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_TESSELLATION" value="79" enum="ViewportDebugDraw">
+			Heatmaps NextGeo runtime-tessellated diced micro-triangle patches by subdivision density (blue low to red high) against regular clusters.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_VOXELS" value="80" enum="ViewportDebugDraw">
+			Highlights distant Nanite Voxel sparse-brick pixels in bright lime-cyan against triangle cluster pixels.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">

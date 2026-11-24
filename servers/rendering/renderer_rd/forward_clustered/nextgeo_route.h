@@ -60,6 +60,12 @@ enum NextGeoFallback : uint32_t {
 	// with a raster program (masked or vertex offset): it reads FRAGCOORD, the screen, depth or
 	// normal-roughness texture, or writes the absolute DEPTH. The surface stays on legacy raster.
 	NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE,
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4 N1). A PN feature that needs the SW raster
+	// path (tessellation or voxels) falls back per instance when SW raster is unavailable.
+	NEXTGEO_FALLBACK_SW_RASTER_UNAVAILABLE,
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4 N8). Meshes with blend shapes (morph targets)
+	// stay on legacy raster, matching Unreal Engine.
+	NEXTGEO_FALLBACK_BLEND_SHAPES,
 	NEXTGEO_FALLBACK_MAX,
 };
 
@@ -82,6 +88,9 @@ struct NextGeoSurfaceFacts {
 	bool mutated = false;
 	bool baked_gridmap = false;
 	NextGeoFallback material_fallback = NEXTGEO_FALLBACK_NONE;
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4 N1). True when this instance/surface uses a
+	// PN feature requiring the SW raster path (tessellation or voxels) and SW raster is unavailable.
+	bool sw_raster_required_unavailable = false;
 	bool msaa = false;
 	bool multiview = false;
 	bool unsupported_debug_draw = false;
@@ -123,7 +132,10 @@ inline NextGeoSurfaceRoute nextgeo_resolve_surface_route(const NextGeoSurfaceFac
 	if (view != NEXTGEO_FALLBACK_NONE) {
 		return { false, view };
 	}
-	if ((p_facts.skeleton && !p_facts.mesh_skinned_virtual_geometry) || p_facts.blend_shapes) {
+	if (p_facts.blend_shapes) {
+		return { false, NEXTGEO_FALLBACK_BLEND_SHAPES };
+	}
+	if (p_facts.skeleton && !p_facts.mesh_skinned_virtual_geometry) {
 		return { false, NEXTGEO_FALLBACK_SKINNING };
 	}
 	if (p_facts.instance_uniforms) {
@@ -140,6 +152,9 @@ inline NextGeoSurfaceRoute nextgeo_resolve_surface_route(const NextGeoSurfaceFac
 	}
 	if (!p_facts.surface_in_mask) {
 		return { false, NEXTGEO_FALLBACK_NONE };
+	}
+	if (p_facts.sw_raster_required_unavailable) {
+		return { false, NEXTGEO_FALLBACK_SW_RASTER_UNAVAILABLE };
 	}
 	if (!p_facts.draw_ready) {
 		return { false, NEXTGEO_FALLBACK_NONE };
@@ -181,6 +196,10 @@ inline const char *nextgeo_fallback_name(NextGeoFallback p_reason) {
 			return "NO_INT64_ATOMICS";
 		case NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE:
 			return "UNSUPPORTED_RASTER_FEATURE";
+		case NEXTGEO_FALLBACK_SW_RASTER_UNAVAILABLE:
+			return "SW_RASTER_UNAVAILABLE";
+		case NEXTGEO_FALLBACK_BLEND_SHAPES:
+			return "BLEND_SHAPES";
 		case NEXTGEO_FALLBACK_MAX:
 			break;
 	}
@@ -196,6 +215,15 @@ inline bool nextgeo_is_debug_view(RSE::ViewportDebugDraw p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VISIBILITY_ID:
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_FALLBACK:
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE:
+		// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RASTER_BINS:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_HW_SW:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SHADING_BINS:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_PROGRAMMABLE:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SKINNED:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TESSELLATION:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VOXELS:
 			return true;
 		default:
 			return false;
@@ -269,6 +297,15 @@ inline bool nextgeo_is_unsupported_debug_draw(RSE::ViewportDebugDraw p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY:
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED:
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE:
+		// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14). Drawn from NextGeo buffers.
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RASTER_BINS:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_HW_SW:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SHADING_BINS:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_PROGRAMMABLE:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SKINNED:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TESSELLATION:
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VOXELS:
 			return false;
 		default:
 			return true;

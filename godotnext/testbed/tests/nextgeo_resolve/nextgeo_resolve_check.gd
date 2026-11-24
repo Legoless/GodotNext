@@ -373,6 +373,29 @@ func _build_virtual_mesh(p_mesh: Mesh, p_tag: String, p_skinned: bool, p_force_v
 	for s in surf_count:
 		orig_mats.append(p_mesh.surface_get_material(s))
 
+	var has_blend_shapes := (p_mesh is ArrayMesh) and (p_mesh as ArrayMesh).get_blend_shape_count() > 0
+	var needs_rigid_vgd_attach := has_blend_shapes or (p_tag == "skinning" and not p_skinned)
+	if needs_rigid_vgd_attach and p_mesh is ArrayMesh:
+		var clean := ArrayMesh.new()
+		for s in surf_count:
+			var arr := p_mesh.surface_get_arrays(s)
+			arr[Mesh.ARRAY_BONES] = null
+			arr[Mesh.ARRAY_WEIGHTS] = null
+			clean.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		var clean_imp := ImporterMesh.from_mesh(clean)
+		var clean_err := clean_imp.build_virtual_geometry(_alloc_temp_path("m_" + p_tag.validate_filename(), "ngm"), false)
+		if clean_err != OK:
+			_failures.append("build_virtual_geometry failed for %s (err=%d)" % [p_tag, clean_err])
+			return null
+		var clean_vmesh := clean_imp.get_mesh()
+		var clean_vgd: VirtualGeometryData = clean_vmesh.get_virtual_geometry() if clean_vmesh != null else null
+		if clean_vgd == null:
+			_failures.append("build_virtual_geometry produced null VGD for %s" % p_tag)
+			return null
+		var copy := p_mesh.duplicate(true) as ArrayMesh
+		copy.set_virtual_geometry(clean_vgd)
+		return copy
+
 	var imp := ImporterMesh.from_mesh(p_mesh)
 	var stripped_single := false
 	if p_force_vgd_on_base_fallbacks and surf_count == 1 and orig_mats[0] is BaseMaterial3D:
@@ -539,10 +562,10 @@ func _start_phase_3() -> void:
 		var cid := String(cell["id"])
 		var kind := String(cell["kind"])
 		var cand := _find_named_first(_p3_matrix.get_node_or_null(cid), "Candidate")
-		if cand is MeshInstance3D and kind in ["mesh", "moving"]:
+		if cand is MeshInstance3D and kind in ["mesh", "moving", "sw_raster_unavailable", "no_int64_atomics"]:
 			var mi := cand as MeshInstance3D
 			if mi.mesh != null:
-				var vmesh := _build_virtual_mesh(mi.mesh, cid, mi.skin != null, true)
+				var vmesh := _build_virtual_mesh(mi.mesh, cid, false, true)
 				if vmesh != null:
 					mi.mesh = vmesh
 		elif cand is MultiMeshInstance3D:
@@ -579,8 +602,16 @@ func _tick_p3_exclusion() -> void:
 	if _phase_frame == ExclusionRules.MUTATE_FRAME and _p3_matrix != null and not bool(_p3_matrix.get("_mutated")):
 		_p3_matrix.call("_mutate")
 		return
-	if _phase_frame >= ExclusionRules.MUTATE_FRAME + 4:
+	if _phase_frame == ExclusionRules.MUTATE_FRAME + 4:
 		_verify_p3_matrix(true)
+		# Exercise the N1 NO_INT64_ATOMICS + SW_RASTER_UNAVAILABLE fallback cells on GPU (#157).
+		ProjectSettings.set_setting("rendering/nextgeo/experimental/tessellation", true)
+		ProjectSettings.set_setting("rendering/nextgeo/debug_no_int64_atomics", true)
+		return
+	if _phase_frame >= ExclusionRules.MUTATE_FRAME + 9:
+		_verify_p3_no_int64()
+		ProjectSettings.set_setting("rendering/nextgeo/debug_no_int64_atomics", false)
+		ProjectSettings.set_setting("rendering/nextgeo/experimental/tessellation", false)
 		_start_phase_4()
 
 
@@ -612,7 +643,15 @@ func _verify_p3_matrix(p_post_mutate: bool) -> void:
 					if cid == "mutated_mesh" and p_post_mutate:
 						exp_route = ExclusionRules.ROUTE_LEGACY
 						exp_reason = ExclusionRules.REASON_MUTATED
+					elif bool(s_def.get("hybrid_only", false)) and String(vp_stats.get("raster_mode", "")) != "hybrid":
+						exp_route = ExclusionRules.ROUTE_LEGACY
+						exp_reason = String(s_def.get("legacy_fallback", ExclusionRules.REASON_ALPHA))
 					_assert_instance_surface(cand as VisualInstance3D, s_idx, exp_route, exp_reason, "p3_%s/%s" % [label, cid])
+			"sw_raster_unavailable":
+				# Verified under debug_no_int64_atomics in _verify_p3_no_int64(); with tessellation off it routes virtual.
+				_assert_instance_surface(cand as VisualInstance3D, 0, "virtual", "NONE", "p3_%s/%s" % [label, cid])
+			"no_int64_atomics":
+				_assert_instance_surface(cand as VisualInstance3D, 0, "virtual", "NONE", "p3_%s/%s" % [label, cid])
 			"multimesh":
 				# GodotNext: nextgeo_foliage_instancing (#151). Eligible 3D MultiMeshInstance3D routes virtual.
 				_assert_instance_surface(cand as VisualInstance3D, 0, "virtual", "NONE", "p3_%s/%s" % [label, cid])
@@ -653,6 +692,21 @@ func _verify_p3_matrix(p_post_mutate: bool) -> void:
 		"missing": int(vp_stats.get("missing", -1)),
 	}
 	_check_shading_bins("p3_" + label, vp_stats, false, false)
+
+
+func _verify_p3_no_int64() -> void:
+	var vp_stats: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(get_viewport().get_viewport_rid())
+	if String(vp_stats.get("view_route", "")) != "virtual" or String(vp_stats.get("raster_mode", "")) != "hardware" or String(vp_stats.get("raster_reason", "")) != ExclusionRules.REASON_NO_INT64_ATOMICS:
+		_failures.append("p3_no_int64: expected virtual/hardware/NO_INT64_ATOMICS, got %s/%s/%s" % [
+			String(vp_stats.get("view_route", "")), String(vp_stats.get("raster_mode", "")), String(vp_stats.get("raster_reason", ""))])
+	var sw_cand := _find_named_first(_p3_matrix.get_node_or_null("sw_raster_unavailable"), "Candidate") as VisualInstance3D
+	_assert_instance_surface(sw_cand, 0, ExclusionRules.ROUTE_LEGACY, ExclusionRules.REASON_SW_RASTER_UNAVAILABLE, "p3_no_int64/sw_raster_unavailable")
+	var scissor_cand := _find_named_first(_p3_matrix.get_node_or_null("alpha_scissor"), "Candidate") as VisualInstance3D
+	_assert_instance_surface(scissor_cand, 0, ExclusionRules.ROUTE_LEGACY, ExclusionRules.REASON_ALPHA, "p3_no_int64/alpha_scissor")
+	_summary["p3_no_int64"] = {
+		"raster_mode": String(vp_stats.get("raster_mode", "")),
+		"raster_reason": String(vp_stats.get("raster_reason", "")),
+	}
 
 
 # With --nextgeo-shading-path=1 (#158): the main view's Stage A and B shaded their buckets with a compute

@@ -62,6 +62,20 @@ struct NextGeoDebugSceneParams {
 	RID diced_patches_buf;
 	// GodotNext: nextgeo_voxels (#165). Visible voxel brick records (invalid when voxels are off).
 	RID voxel_bricks_buf;
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14). Metadata for the 8 Nanite visualization modes.
+	Vector3 cam_forward = Vector3(0.0f, 0.0f, -1.0f);
+	float z_near = 0.05f;
+	float sw_raster_max_edge_px = 0.0f;
+	float sw_raster_px_scale = 0.0f;
+	bool hybrid_raster_active = false;
+	bool mesh_hw_active = false;
+	bool foliage_wind_enabled = false;
+	bool shading_compute_active = false;
+	RID raster_bin_table_buf;
+	uint32_t raster_bin_table_words = 0;
+	RID shading_bucket_bins_buf;
+	uint32_t shading_bucket_bins_count = 0;
+	uint32_t bin_features[68] = {};
 };
 
 // GodotNext: nextgeo_exclusive_dispatch (#79, plan §9, §12, §13.4 Q5 & Q14).

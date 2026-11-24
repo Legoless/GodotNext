@@ -543,7 +543,7 @@ TEST_CASE("[NextGeo][Import] Importer option names and defaults match the plan")
 	List<ResourceImporter::ImportOption> mesh_options;
 	scene->get_internal_import_options(ResourceImporterScene::INTERNAL_IMPORT_CATEGORY_MESH, &mesh_options);
 	CHECK(option_is(mesh_options, "generate/virtual_geometry", 0, "Default,Enable,Disable"));
-	CHECK(option_is(mesh_options, "virtual_geometry/voxels", 0, "Default,Enable,Disable"));
+	CHECK(option_is(mesh_options, "virtual_geometry/voxels", 0, "Default,Enable (Experimental),Disable"));
 
 	Ref<ResourceImporterOBJ> obj;
 	obj.instantiate();

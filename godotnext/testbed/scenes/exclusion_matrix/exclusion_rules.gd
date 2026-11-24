@@ -32,6 +32,10 @@ const REASON_PROXY := "COARSE_OR_RT_PROXY"
 const REASON_MUTATED := "MUTATED_MESH"
 const REASON_MSAA := "MSAA"
 const REASON_MULTIVIEW := "MULTIVIEW"
+const REASON_NO_INT64_ATOMICS := "NO_INT64_ATOMICS"
+const REASON_UNSUPPORTED_RASTER_FEATURE := "UNSUPPORTED_RASTER_FEATURE"
+const REASON_SW_RASTER_UNAVAILABLE := "SW_RASTER_UNAVAILABLE"
+const REASON_BLEND_SHAPES := "BLEND_SHAPES"
 
 ## RendererViewport draws a use_xr SubViewport only when XRServer has a
 ## primary interface. This machine has none, so the multiview cell does not
@@ -77,10 +81,10 @@ static func cells() -> Array:
 			_surface(0, "surface", ROUTE_LEGACY, REASON_ALPHA),
 		]),
 		_cell("alpha_scissor", "Alpha scissor", "mesh", [
-			_surface(0, "surface", ROUTE_LEGACY, REASON_ALPHA),
+			_surface(0, "surface", ROUTE_VIRTUAL, REASON_NONE, {"hybrid_only": true, "legacy_fallback": REASON_ALPHA}),
 		]),
 		_cell("alpha_hash", "Alpha hash", "mesh", [
-			_surface(0, "surface", ROUTE_LEGACY, REASON_ALPHA),
+			_surface(0, "surface", ROUTE_VIRTUAL, REASON_NONE, {"hybrid_only": true, "legacy_fallback": REASON_ALPHA}),
 		]),
 		_cell("unsupported_derivative", "Non-varying dFdx", "mesh", [
 			_surface(0, "surface", ROUTE_LEGACY, REASON_DERIVATIVE),
@@ -92,7 +96,7 @@ static func cells() -> Array:
 			_surface(0, "surface", ROUTE_LEGACY, REASON_INSTANCE),
 		]),
 		_cell("multimesh", "MultiMesh", "multimesh", [
-			_surface(0, "instances", ROUTE_LEGACY, REASON_MULTIMESH, {"counted_warning": true}),
+			_surface(0, "instances", ROUTE_VIRTUAL, REASON_NONE),
 		]),
 		_cell("gridmap_octant", "Octant GridMap", "gridmap", [
 			_surface(0, "octant", ROUTE_LEGACY, REASON_VGD, {"counted_warning": true}),
@@ -125,6 +129,18 @@ static func cells() -> Array:
 		], {"draw_limit": MULTIVIEW_DRAW_LIMIT}),
 		_cell("moving_instance", "Moving virtual instance", "moving", [
 			_surface(0, "surface", ROUTE_VIRTUAL, REASON_NONE, {"g57": true}),
+		]),
+		_cell("unsupported_raster_feature", "Unsupported raster feature", "mesh", [
+			_surface(0, "surface", ROUTE_LEGACY, REASON_UNSUPPORTED_RASTER_FEATURE),
+		]),
+		_cell("blend_shapes", "Blend shapes", "mesh", [
+			_surface(0, "surface", ROUTE_LEGACY, REASON_BLEND_SHAPES),
+		]),
+		_cell("sw_raster_unavailable", "SW raster unavailable", "sw_raster_unavailable", [
+			_surface(0, "surface", ROUTE_LEGACY, REASON_SW_RASTER_UNAVAILABLE, {"requires_no_sw_raster": true}),
+		]),
+		_cell("no_int64_atomics", "No int64 atomics", "no_int64_atomics", [
+			_surface(0, "view", ROUTE_VIRTUAL, REASON_NO_INT64_ATOMICS, {"whole_view": true, "raster_fallback": true, "requires_no_int64_atomics": true}),
 		]),
 	]
 
@@ -205,8 +221,11 @@ static func dlss_status() -> Dictionary:
 static func contract_error() -> String:
 	var seen := {}
 	var rows := cells()
-	if rows.size() < 22:
-		return "exclusion matrix needs every §13.3 case, found %d." % rows.size()
+	if rows.size() < 26:
+		return "exclusion matrix needs every §13.3 + §21.4 PN case, found %d." % rows.size()
+	for required_id in ["unsupported_raster_feature", "blend_shapes", "sw_raster_unavailable", "no_int64_atomics"]:
+		if cell_by_id(required_id).is_empty():
+			return "missing PN fallback cell %s." % required_id
 	for cell_value in rows:
 		var cell: Dictionary = cell_value
 		var id := String(cell["id"])

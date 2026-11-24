@@ -3729,6 +3729,11 @@ bool RendererVirtualMeshStorage::mesh_has_wind(RID p_mesh) const {
 	return mesh_index_has_wind(*idx);
 }
 
+bool RendererVirtualMeshStorage::mesh_has_voxels(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return info != nullptr && info->has_voxels;
+}
+
 bool RendererVirtualMeshStorage::mesh_index_has_wind(uint32_t p_mesh_index) const {
 	if (p_mesh_index >= wind_meshes.size()) {
 		return false;

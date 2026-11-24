@@ -168,6 +168,7 @@ static_assert(sizeof(ShadowRasterParams) == 160, "ShadowRasterParams must stay 1
 Mutex s_stats_mutex;
 Dictionary s_last_stats;
 uint32_t s_resolve_active_buckets = 0;
+uint32_t s_resolve_compute_buckets = 0;
 uint32_t s_resolve_stage_a_draws = 0;
 uint32_t s_resolve_stage_b_draws = 0;
 bool s_resolve_stage_b_wrote = false;
@@ -794,6 +795,9 @@ bool NextGeoCut::_ensure_hybrid(RenderingDevice *p_rd) {
 }
 
 bool NextGeoCut::is_hybrid_raster_available() {
+	if (bool(GLOBAL_GET("rendering/nextgeo/debug_no_int64_atomics"))) {
+		return false;
+	}
 	return _ensure() && hybrid_ready;
 }
 
@@ -1150,6 +1154,7 @@ bool NextGeoCut::_prepare_raster_bins(const NextGeoRasterInputs &p_raster) {
 		}
 	}
 	rd->buffer_update(raster_bin_table_buffer, 0, p_raster.raster_bin_table_words * sizeof(uint32_t), p_raster.raster_bin_table);
+	raster_bin_table_last_words = p_raster.raster_bin_table_words;
 	rd->buffer_clear(raster_bin_state, 0, RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t));
 	rd->buffer_clear(raster_bin_args, 0, RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t));
 	rd->buffer_clear(raster_bin_hw_counts, 0, RendererRD::NEXTGEO_RASTER_BIN_HW_COUNTS_WORDS * sizeof(uint32_t));
@@ -2179,6 +2184,8 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 	{
 		MutexLock lock(s_stats_mutex);
 		info["resolve_active_buckets"] = int64_t(s_resolve_active_buckets);
+		info["shading_bins"] = int64_t(s_resolve_active_buckets);
+		info["shading_compute_buckets"] = int64_t(s_resolve_compute_buckets);
 		info["resolve_stage_a_draws"] = int64_t(s_resolve_stage_a_draws);
 		info["resolve_stage_b_draws"] = int64_t(s_resolve_stage_b_draws);
 		info["resolve_stage_b_wrote"] = s_resolve_stage_b_wrote;
@@ -2763,7 +2770,8 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	const bool can_raster = p_raster != nullptr && p_raster->visibility.is_valid() && p_raster->instance_id.is_valid() && p_raster->depth.is_valid();
 	// GodotNext: nextgeo_sw_raster (#162). The hybrid raster runs when the caller passes a visibility
 	// buffer in a storage form this device built; otherwise the view keeps the v2.4 raster.
-	const bool hybrid = can_raster && hybrid_ready && p_raster->vis64.is_valid() &&
+	const bool debug_no_int64 = bool(GLOBAL_GET("rendering/nextgeo/debug_no_int64_atomics"));
+	const bool hybrid = can_raster && hybrid_ready && !debug_no_int64 && p_raster->vis64.is_valid() &&
 			((p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_IMAGE && vis64_image_ready) || (p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER && vis64_buffer_ready));
 	const float sw_raster_switch_px = hybrid ? RendererRD::nextgeo_sw_raster_switch_px(p_raster->sw_raster_max_edge_px) : 0.0f;
 	const bool mesh_hw_active = hybrid && p_raster->use_mesh_hw_raster &&
@@ -2771,9 +2779,13 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	const RendererRD::NextGeoHWRasterReason hw_reason = mesh_hw_active
 			? RendererRD::NEXTGEO_HW_RASTER_REASON_NONE
 			: ((hybrid && p_raster->use_mesh_hw_raster) ? RendererRD::NEXTGEO_HW_RASTER_REASON_SHADER_UNAVAILABLE : (p_raster != nullptr ? p_raster->hw_raster_reason : RendererRD::NEXTGEO_HW_RASTER_REASON_AUTO_PENDING_PQ));
+	const RendererRD::NextGeoFallback effective_raster_reason = debug_no_int64 ? RendererRD::NEXTGEO_FALLBACK_NO_INT64_ATOMICS : raster_tier.reason;
 	if (p_is_main_view) {
+		last_view_hybrid_active = hybrid;
+		last_view_mesh_hw_active = mesh_hw_active;
 		MutexLock lock(s_stats_mutex);
 		s_raster_mode = RendererRD::nextgeo_raster_mode_name(hybrid ? RendererRD::NEXTGEO_RASTER_MODE_HYBRID : RendererRD::NEXTGEO_RASTER_MODE_HARDWARE);
+		s_raster_reason = RendererRD::nextgeo_fallback_name(effective_raster_reason);
 		s_vis64_storage = !hybrid ? "none" : (p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER ? "buffer" : "image");
 		s_sw_raster_max_edge_px = sw_raster_switch_px;
 		s_hw_raster_path = RendererRD::nextgeo_hw_raster_path_name(mesh_hw_active);
@@ -5267,13 +5279,16 @@ void NextGeoCut::free_resources() {
 	initialized = false;
 }
 
-void NextGeoCut::set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote) {
+void NextGeoCut::set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote, uint32_t p_compute_buckets) {
 	MutexLock lock(s_stats_mutex);
 	s_resolve_active_buckets = p_active_buckets;
+	s_resolve_compute_buckets = p_compute_buckets;
 	s_resolve_stage_a_draws = p_stage_a_draws;
 	s_resolve_stage_b_draws = p_stage_b_draws;
 	s_resolve_stage_b_wrote = p_stage_b_wrote;
 	s_last_stats["resolve_active_buckets"] = int64_t(p_active_buckets);
+	s_last_stats["shading_bins"] = int64_t(p_active_buckets);
+	s_last_stats["shading_compute_buckets"] = int64_t(p_compute_buckets);
 	s_last_stats["resolve_stage_a_draws"] = int64_t(p_stage_a_draws);
 	s_last_stats["resolve_stage_b_draws"] = int64_t(p_stage_b_draws);
 	s_last_stats["resolve_stage_b_wrote"] = p_stage_b_wrote;
@@ -5291,6 +5306,35 @@ void NextGeoCut::set_shading_stats(const Dictionary &p_stats) {
 Dictionary NextGeoCut::get_last_stats() {
 	MutexLock lock(s_stats_mutex);
 	Dictionary stats = s_last_stats.duplicate();
+	// GodotNext: nextgeo_product_surface (#157). Ensure per-frame cluster, bin, WPO, dicing, and voxel
+	// stat keys are always present with consistent integer types even before the first async GPU readback.
+	if (!stats.has("sw_clusters")) {
+		stats["sw_clusters"] = int64_t(0);
+	}
+	if (!stats.has("hw_clusters")) {
+		stats["hw_clusters"] = int64_t(0);
+	}
+	if (!stats.has("sw_clusters_phase1")) {
+		stats["sw_clusters_phase1"] = int64_t(0);
+	}
+	if (!stats.has("sw_clusters_phase2")) {
+		stats["sw_clusters_phase2"] = int64_t(0);
+	}
+	if (!stats.has("hw_clusters_phase1")) {
+		stats["hw_clusters_phase1"] = int64_t(0);
+	}
+	if (!stats.has("hw_clusters_phase2")) {
+		stats["hw_clusters_phase2"] = int64_t(0);
+	}
+	if (!stats.has("programmable_sw_clusters")) {
+		stats["programmable_sw_clusters"] = int64_t(0);
+	}
+	if (!stats.has("programmable_hw_clusters")) {
+		stats["programmable_hw_clusters"] = int64_t(0);
+	}
+	if (!stats.has("vertex_offset_clamped")) {
+		stats["vertex_offset_clamped"] = int64_t(0);
+	}
 	// GodotNext: nextgeo_sw_raster (#162). The raster path of the last main view, with or without
 	// debug_stats: "hybrid" or "hardware", and why the device is below the Nanite tier (N1).
 	stats["raster_mode"] = s_raster_mode;
@@ -5298,6 +5342,10 @@ Dictionary NextGeoCut::get_last_stats() {
 	stats["vis64_storage"] = s_vis64_storage;
 	stats["sw_raster_max_edge_px"] = s_sw_raster_max_edge_px;
 	stats["programmable_bins"] = int64_t(s_programmable_bins);
+	stats["shading_bins"] = int64_t(s_resolve_active_buckets);
+	if (!stats.has("shading_compute_buckets")) {
+		stats["shading_compute_buckets"] = int64_t(s_resolve_compute_buckets);
+	}
 	stats["hw_raster_path"] = s_hw_raster_path;
 	stats["hw_raster_reason"] = s_hw_raster_reason;
 	// GodotNext: nextgeo_tessellation (#163).

@@ -613,11 +613,11 @@ TEST_CASE("[NextGeo][Skinned] Route admission, RASTER_FEATURE_SKINNED bins, VSM 
 	CHECK(nextgeo_resolve_surface_route(facts).virtual_geometry);
 	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_NONE);
 
-	// Skinned VGD with blend shapes must still fall back cleanly.
+	// Skinned VGD with blend shapes must still fall back cleanly with BLEND_SHAPES (#157).
 	NextGeoSurfaceFacts with_bs = facts;
 	with_bs.blend_shapes = true;
 	CHECK_FALSE(nextgeo_resolve_surface_route(with_bs).virtual_geometry);
-	CHECK_EQ(nextgeo_resolve_surface_route(with_bs).reason, NEXTGEO_FALLBACK_SKINNING);
+	CHECK_EQ(nextgeo_resolve_surface_route(with_bs).reason, NEXTGEO_FALLBACK_BLEND_SHAPES);
 
 	// Unskinned VGD with a skeleton attached must still fall back cleanly.
 	NextGeoSurfaceFacts unskinned_vgd = facts;

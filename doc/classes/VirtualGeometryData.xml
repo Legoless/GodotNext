@@ -10,7 +10,7 @@
 	<tutorials>
 	</tutorials>
 	<members>
-		<member name="assembly" type="VirtualGeometryAssembly" setter="set_assembly" getter="get_assembly">
+		<member name="assembly" type="VirtualGeometryAssembly" setter="set_assembly" getter="get_assembly" experimental="Nanite Assemblies are experimental and off by default.">
 			Optional experimental Nanite assembly payload describing up to two levels of instanced virtualized part meshes and child assemblies. Expanded on the GPU when [member ProjectSettings.rendering/nextgeo/experimental/assemblies] is enabled.
 		</member>
 		<member name="card_descriptors" type="PackedByteArray" setter="set_card_descriptors" getter="get_card_descriptors" default="PackedByteArray()">
@@ -76,7 +76,7 @@
 		<member name="rt_proxy_uvs" type="PackedFloat32Array" setter="set_rt_proxy_uvs" getter="get_rt_proxy_uvs" default="PackedFloat32Array()">
 			Primary UV coordinates of the ray-tracing proxy, tightly packed 32-bit pairs parallel to [member rt_proxy_positions], including in double-precision builds.
 		</member>
-		<member name="skin_influences" type="int" setter="set_skin_influences" getter="get_skin_influences" default="0">
+		<member name="skin_influences" type="int" setter="set_skin_influences" getter="get_skin_influences" default="0" experimental="Skinned virtual geometry is experimental and off by default.">
 			Bone influences stored per vertex in the page file skinning section: 0 for an unskinned mesh, otherwise 4 or 8.
 		</member>
 		<member name="source_triangle_count" type="int" setter="set_source_triangle_count" getter="get_source_triangle_count" default="0">
@@ -91,10 +91,10 @@
 		<member name="surface_fallback_reasons" type="PackedInt32Array" setter="set_surface_fallback_reasons" getter="get_surface_fallback_reasons" default="PackedInt32Array()">
 			One value per source surface. [code]0[/code] means the surface was virtualized, or that import has not recorded a reason yet.
 		</member>
-		<member name="voxel_brick_count" type="int" setter="set_voxel_brick_count" getter="get_voxel_brick_count" default="0">
+		<member name="voxel_brick_count" type="int" setter="set_voxel_brick_count" getter="get_voxel_brick_count" default="0" experimental="Nanite Voxels are experimental and off by default.">
 			Number of sparse 4x4x4 Nanite Voxel bricks stored across the [code].ngm[/code] pages ([code]0[/code] when built without [code]virtual_geometry/voxels[/code]).
 		</member>
-		<member name="wind" type="VirtualGeometryWind" setter="set_wind" getter="get_wind">
+		<member name="wind" type="VirtualGeometryWind" setter="set_wind" getter="get_wind" experimental="Nanite procedural foliage wind is experimental and off by default.">
 			Optional procedural foliage wind skeleton (one trunk bone plus up to 8 branch bones) evaluated directly in NextGeo shaders when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled, using zero bytes of per-instance skin palette memory.
 		</member>
 	</members>

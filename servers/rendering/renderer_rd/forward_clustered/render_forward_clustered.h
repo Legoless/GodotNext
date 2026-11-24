@@ -125,8 +125,11 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	uint64_t nextgeo_raster_bins_used = 0;
 	bool nextgeo_programmable_view_active = false;
 	bool nextgeo_raster_bins_exhausted_warned = false;
-	// GodotNext: nextgeo_tessellation (#163). Track live setting toggles to re-bin displaced surfaces and invalidate VSM pages.
+	// GodotNext: nextgeo_tessellation (#163), nextgeo_voxels (#165), nextgeo_product_surface (#157).
+	// Track live setting toggles to re-bin displaced/voxel surfaces and invalidate VSM pages.
 	bool nextgeo_last_tessellation_enabled = false;
+	bool nextgeo_last_voxels_enabled = false;
+	bool nextgeo_last_sw_raster_available = true;
 	bool vsm_last_tessellation_enabled = false;
 	bool vsm_last_tess_directional = true;
 	bool vsm_last_tess_local = false;

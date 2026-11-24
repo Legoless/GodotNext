@@ -106,10 +106,12 @@
 			"label": "Alpha scissor",
 			"surfaces": [
 				{
+					"hybrid_only": true,
 					"index": 0,
+					"legacy_fallback": "alpha",
 					"name": "surface",
-					"reason": "alpha",
-					"route": "legacy"
+					"reason": "NONE",
+					"route": "virtual"
 				}
 			]
 		},
@@ -119,10 +121,12 @@
 			"label": "Alpha hash",
 			"surfaces": [
 				{
+					"hybrid_only": true,
 					"index": 0,
+					"legacy_fallback": "alpha",
 					"name": "surface",
-					"reason": "alpha",
-					"route": "legacy"
+					"reason": "NONE",
+					"route": "virtual"
 				}
 			]
 		},
@@ -171,11 +175,10 @@
 			"label": "MultiMesh",
 			"surfaces": [
 				{
-					"counted_warning": true,
 					"index": 0,
 					"name": "instances",
-					"reason": "MULTIMESH_OR_PARTICLES",
-					"route": "legacy"
+					"reason": "NONE",
+					"route": "virtual"
 				}
 			]
 		},
@@ -304,6 +307,62 @@
 					"name": "surface",
 					"reason": "NONE",
 					"route": "virtual"
+				}
+			]
+		},
+		{
+			"id": "unsupported_raster_feature",
+			"kind": "mesh",
+			"label": "Unsupported raster feature",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "UNSUPPORTED_RASTER_FEATURE",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "blend_shapes",
+			"kind": "mesh",
+			"label": "Blend shapes",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "BLEND_SHAPES",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "sw_raster_unavailable",
+			"kind": "sw_raster_unavailable",
+			"label": "SW raster unavailable",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "SW_RASTER_UNAVAILABLE",
+					"requires_no_sw_raster": true,
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "no_int64_atomics",
+			"kind": "no_int64_atomics",
+			"label": "No int64 atomics",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "view",
+					"raster_fallback": true,
+					"reason": "NO_INT64_ATOMICS",
+					"requires_no_int64_atomics": true,
+					"route": "virtual",
+					"whole_view": true
 				}
 			]
 		}

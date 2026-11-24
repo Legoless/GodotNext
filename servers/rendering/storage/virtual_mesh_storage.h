@@ -648,6 +648,8 @@ public:
 	bool mesh_is_stripped_to_coarse(RID p_mesh) const;
 	// GodotNext: nextgeo_skinned_runtime (#160). True when the mesh's VGD stores 4- or 8-influence skinning data.
 	bool mesh_is_skinned_virtual_geometry(RID p_mesh) const;
+	// GodotNext: nextgeo_product_surface (#157). True when the mesh's VGD stores sparse voxel bricks.
+	bool mesh_has_voxels(RID p_mesh) const;
 	// 0 while the mesh still has VGD or never had it; the clear reason after
 	// a mesh_clear_virtual_geometry.
 	uint32_t mesh_clear_reason(RID p_mesh) const;
@@ -671,6 +673,13 @@ public:
 	uint64_t nextgeo_get_auxiliary_authored_virtual_draws() const { return nextgeo_auxiliary_authored_virtual_draws; }
 	uint64_t nextgeo_get_uv2_authored_draws() const { return nextgeo_uv2_authored_draws; }
 	uint64_t nextgeo_get_uv2_proxy_draws() const { return nextgeo_uv2_proxy_draws; }
+	// GodotNext: nextgeo_product_surface (#157). Per-frame and cumulative native Nanite RT BLAS rebuild counters.
+	void nextgeo_record_native_rt_rebuilds(uint64_t p_frame_rebuilds) {
+		nextgeo_native_rt_rebuilds_last = p_frame_rebuilds;
+		nextgeo_native_rt_rebuilds_total += p_frame_rebuilds;
+	}
+	uint64_t nextgeo_get_native_rt_rebuilds() const { return nextgeo_native_rt_rebuilds_last; }
+	uint64_t nextgeo_get_native_rt_rebuilds_total() const { return nextgeo_native_rt_rebuilds_total; }
 	// GodotNext: nextgeo_raster_bins (#155). The programmable raster bins (render thread only).
 	uint32_t raster_bin_acquire(const RasterBinKey &p_key) { return raster_bins.acquire(p_key); }
 	void raster_bin_release(uint32_t p_bin) { raster_bins.release(p_bin); }
@@ -1235,6 +1244,8 @@ protected:
 	uint64_t nextgeo_auxiliary_authored_virtual_draws = 0;
 	uint64_t nextgeo_uv2_authored_draws = 0;
 	uint64_t nextgeo_uv2_proxy_draws = 0;
+	uint64_t nextgeo_native_rt_rebuilds_last = 0;
+	uint64_t nextgeo_native_rt_rebuilds_total = 0;
 	LocalVector<RID> mesh_rids;
 	LocalVector<uint8_t> mesh_record_dirty;
 

@@ -4714,7 +4714,16 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		// GodotNext: megalights_denoiser (#135)
 		case VIEW_DISPLAY_ML_NOISY:
 		case VIEW_DISPLAY_ML_DENOISED:
-		case VIEW_DISPLAY_ML_VARIANCE: {
+		case VIEW_DISPLAY_ML_VARIANCE:
+		// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+		case VIEW_DISPLAY_NEXTGEO_RASTER_BINS:
+		case VIEW_DISPLAY_NEXTGEO_HW_SW:
+		case VIEW_DISPLAY_NEXTGEO_SHADING_BINS:
+		case VIEW_DISPLAY_NEXTGEO_PROGRAMMABLE:
+		case VIEW_DISPLAY_NEXTGEO_VERTEX_OFFSET:
+		case VIEW_DISPLAY_NEXTGEO_SKINNED:
+		case VIEW_DISPLAY_NEXTGEO_TESSELLATION:
+		case VIEW_DISPLAY_NEXTGEO_VOXELS: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4790,6 +4799,15 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_ML_NOISY,
 				VIEW_DISPLAY_ML_DENOISED,
 				VIEW_DISPLAY_ML_VARIANCE,
+				// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+				VIEW_DISPLAY_NEXTGEO_RASTER_BINS,
+				VIEW_DISPLAY_NEXTGEO_HW_SW,
+				VIEW_DISPLAY_NEXTGEO_SHADING_BINS,
+				VIEW_DISPLAY_NEXTGEO_PROGRAMMABLE,
+				VIEW_DISPLAY_NEXTGEO_VERTEX_OFFSET,
+				VIEW_DISPLAY_NEXTGEO_SKINNED,
+				VIEW_DISPLAY_NEXTGEO_TESSELLATION,
+				VIEW_DISPLAY_NEXTGEO_VOXELS,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4867,6 +4885,15 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_ML_NOISY,
 				Viewport::DEBUG_DRAW_ML_DENOISED,
 				Viewport::DEBUG_DRAW_ML_VARIANCE,
+				// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+				Viewport::DEBUG_DRAW_NEXTGEO_RASTER_BINS,
+				Viewport::DEBUG_DRAW_NEXTGEO_HW_SW,
+				Viewport::DEBUG_DRAW_NEXTGEO_SHADING_BINS,
+				Viewport::DEBUG_DRAW_NEXTGEO_PROGRAMMABLE,
+				Viewport::DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET,
+				Viewport::DEBUG_DRAW_NEXTGEO_SKINNED,
+				Viewport::DEBUG_DRAW_NEXTGEO_TESSELLATION,
+				Viewport::DEBUG_DRAW_NEXTGEO_VOXELS,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7288,6 +7315,23 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Colors opaque surfaces by virtual vs legacy route, per-surface fallback reason, and ray-tracing exclusion reason, and updates fallback coverage."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Triangle Size"), VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Colors visible triangles by log2 screen-space pixel area and publishes the 16-bin triangle_size_histogram."));
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Raster Bins"), VIEW_DISPLAY_NEXTGEO_RASTER_BINS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors each NextGeo pixel by its active raster bin (fixed-function bin vs per-material programmable raster bins, tessellation patches, and voxel bricks)."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo HW / SW Raster"), VIEW_DISPLAY_NEXTGEO_HW_SW, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Distinguishes software-rasterized pixels (green) from hardware-rasterized pixels (red for vertex-pulling, orange for mesh shaders)."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Shading Bins"), VIEW_DISPLAY_NEXTGEO_SHADING_BINS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors each NextGeo pixel by its material shading bin, showing smooth vibrant colors for compute shading bins and an 8x8 tile grid for tile-quad fallback buckets."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Programmable Raster"), VIEW_DISPLAY_NEXTGEO_PROGRAMMABLE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Highlights programmable-raster pixels (masked, two-sided, vertex offset, pixel depth offset, displaced) against fixed-function pixels and distance-demoted surfaces."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Evaluate Vertex Offset"), VIEW_DISPLAY_NEXTGEO_VERTEX_OFFSET, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Highlights pixels evaluating vertex offset (WPO) in orange-red, instances disabled past vertex_offset_disable_distance in blue, and static geometry in dark slate."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Skinned"), VIEW_DISPLAY_NEXTGEO_SKINNED, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Highlights skeletally skinned NextGeo pixels in green, procedural foliage wind-skinned pixels in cyan, and rigid geometry in dark slate."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Tessellation"), VIEW_DISPLAY_NEXTGEO_TESSELLATION, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Heatmaps runtime-tessellated diced micro-triangle patches by edge subdivision density (blue low to red high) against regular clusters."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Voxels"), VIEW_DISPLAY_NEXTGEO_VOXELS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Highlights distant Nanite Voxel sparse-brick pixels in bright lime-cyan against triangle cluster pixels."));
 	// GodotNext: vsm_settings_debug (#221). Virtual shadow maps (Project Settings > Rendering > Lights and Shadows > Shadow Method).
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Mask"), VIEW_DISPLAY_VSM_MASK, SupportedRenderingMethods::FORWARD_PLUS,

@@ -108,7 +108,7 @@ func _check_kind(p_id: String, p_kind: String, p_candidates: Array, p_cell: Dict
 		return
 	var candidate: Node = p_candidates[0]
 	match p_kind:
-		"mesh", "moving":
+		"mesh", "moving", "sw_raster_unavailable", "no_int64_atomics":
 			_ok(candidate is MeshInstance3D, "%s Candidate must be a MeshInstance3D." % p_id)
 			_ok(candidate.visible, "%s Candidate must be visible." % p_id)
 			_ok(candidate.get_parent().get_node_or_null("StandIn") == null, "%s must not hide the candidate behind a stand-in." % p_id)
@@ -177,7 +177,7 @@ func _check_material(p_id: String, p_candidate: Node) -> void:
 			var vertex := _first_material(p_candidate) as BaseMaterial3D
 			_ok(vertex != null and vertex.shading_mode == BaseMaterial3D.SHADING_MODE_PER_VERTEX, "vertex lighting shading mode.")
 		"position_vertex":
-			_ok(_shader_code(p_candidate).contains("VERTEX.y"), "position-altering vertex() must write VERTEX.")
+			_ok(_shader_code(p_candidate).contains("POSITION"), "projection-altering vertex() must write POSITION.")
 		"screen_texture":
 			_ok(_shader_code(p_candidate).contains("hint_screen_texture"), "screen-texture cell must sample the screen texture.")
 			var screen_twin := p_candidate.get_parent().get_node_or_null("Twin")
@@ -216,6 +216,19 @@ func _check_material(p_id: String, p_candidate: Node) -> void:
 			if moving != null:
 				var offset := Rules.moving_offset(0)
 				_ok(moving.position.distance_to(offset) < 1e-4, "moving candidate must start on the seeded path.")
+		"unsupported_raster_feature":
+			var code := _shader_code(p_candidate)
+			_ok(code.contains("FRAGCOORD") and code.contains("discard"), "unsupported_raster_feature must use FRAGCOORD with discard.")
+		"blend_shapes":
+			var bs_inst := p_candidate as MeshInstance3D
+			var bs_mesh := bs_inst.mesh as ArrayMesh if bs_inst != null else null
+			_ok(bs_mesh != null and bs_mesh.get_blend_shape_count() > 0, "blend_shapes cell needs at least one blend shape.")
+		"sw_raster_unavailable":
+			var disp_mat := _first_material(p_candidate) as ShaderMaterial
+			_ok(disp_mat != null and disp_mat.displacement_magnitude > 0.0, "sw_raster_unavailable needs displacement_magnitude > 0.")
+			_ok(_shader_code(p_candidate).contains("displacement()"), "sw_raster_unavailable shader needs displacement().")
+		"no_int64_atomics":
+			_ok(p_candidate is MeshInstance3D, "no_int64_atomics Candidate must be a mesh.")
 
 
 func _check_track() -> void:

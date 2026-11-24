@@ -51,8 +51,13 @@ struct DebugParamsGPU {
 	float view_proj[16];
 	float camera[4];
 	float view_info[4];
+	// GodotNext: nextgeo_product_surface (#157). Hybrid/bin/wind parameters for Nanite visualization modes.
+	float raster_forward[4];
+	float raster_params[4];
+	uint32_t debug_flags[4];
+	uint32_t bin_features[68];
 };
-static_assert(sizeof(DebugParamsGPU) == 224, "DebugParamsGPU must stay 224 bytes.");
+static_assert(sizeof(DebugParamsGPU) == 544, "DebugParamsGPU must stay 544 bytes.");
 
 struct DebugPushGPU {
 	float internal_size[2];
@@ -134,9 +139,9 @@ bool NextGeoDebug::_ensure() {
 	debug_params_buffer = rd->storage_buffer_create(sizeof(DebugParamsGPU), zero_params);
 
 	Vector<uint8_t> zero_dummy;
-	zero_dummy.resize(64);
+	zero_dummy.resize(512);
 	zero_dummy.fill(0);
-	dummy_buffer = rd->storage_buffer_create(64, zero_dummy);
+	dummy_buffer = rd->storage_buffer_create(512, zero_dummy);
 
 	Vector<uint8_t> zero_q14;
 	zero_q14.resize(16);
@@ -295,6 +300,34 @@ void NextGeoDebug::record_scene_params(const NextGeoDebugSceneParams &p_params) 
 	dp.view_info[1] = float(MAX(p_params.internal_size.height, 1));
 	dp.view_info[2] = float(MAX(p_params.proj.get_z_near(), 1e-4));
 	dp.view_info[3] = p_params.lod_bias;
+	dp.raster_forward[0] = float(p_params.cam_forward.x);
+	dp.raster_forward[1] = float(p_params.cam_forward.y);
+	dp.raster_forward[2] = float(p_params.cam_forward.z);
+	dp.raster_forward[3] = MAX(p_params.z_near, 1e-4f);
+	dp.raster_params[0] = p_params.sw_raster_max_edge_px;
+	dp.raster_params[1] = p_params.sw_raster_px_scale;
+	dp.raster_params[2] = p_params.proj.is_orthogonal() ? 1.0f : 0.0f;
+	dp.raster_params[3] = 0.0f;
+	uint32_t dflags = 0u;
+	if (p_params.hybrid_raster_active) {
+		dflags |= 1u << 0u;
+	}
+	if (p_params.mesh_hw_active) {
+		dflags |= 1u << 1u;
+	}
+	if (p_params.foliage_wind_enabled) {
+		dflags |= 1u << 2u;
+	}
+	if (p_params.shading_compute_active) {
+		dflags |= 1u << 3u;
+	}
+	RendererVirtualMeshStorage *vms = RSG::virtual_mesh_storage;
+	const bool has_wind_buf = vms != nullptr && vms->get_wind_meshes_buffer().is_valid();
+	dp.debug_flags[0] = dflags;
+	dp.debug_flags[1] = p_params.raster_bin_table_buf.is_valid() ? p_params.raster_bin_table_words : 0u;
+	dp.debug_flags[2] = p_params.shading_bucket_bins_buf.is_valid() ? p_params.shading_bucket_bins_count : 0u;
+	dp.debug_flags[3] = has_wind_buf ? vms->get_mesh_record_count() : 0u;
+	memcpy(dp.bin_features, p_params.bin_features, sizeof(dp.bin_features));
 	RD::get_singleton()->buffer_update(debug_params_buffer, 0, sizeof(DebugParamsGPU), &dp);
 }
 
@@ -393,6 +426,31 @@ bool NextGeoDebug::draw_debug_view(RSE::ViewportDebugDraw p_mode, RID p_visibili
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE:
 			shader_mode = 5u;
 			break;
+		// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RASTER_BINS:
+			shader_mode = 6u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_HW_SW:
+			shader_mode = 7u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SHADING_BINS:
+			shader_mode = 8u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_PROGRAMMABLE:
+			shader_mode = 9u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET:
+			shader_mode = 10u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SKINNED:
+			shader_mode = 11u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TESSELLATION:
+			shader_mode = 12u;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VOXELS:
+			shader_mode = 13u;
+			break;
 		default:
 			return false;
 	}
@@ -427,9 +485,12 @@ bool NextGeoDebug::draw_debug_view(RSE::ViewportDebugDraw p_mode, RID p_visibili
 	const RID residency_buf = (using_nextgeo && vms->get_residency_buffer().is_valid()) ? vms->get_residency_buffer() : dummy_buffer;
 	const RID patches_buf = (using_nextgeo && last_scene_params.diced_patches_buf.is_valid()) ? last_scene_params.diced_patches_buf : dummy_buffer;
 	const RID voxels_buf = (using_nextgeo && last_scene_params.voxel_bricks_buf.is_valid()) ? last_scene_params.voxel_bricks_buf : dummy_buffer;
+	const RID raster_bin_buf = (using_nextgeo && last_scene_params.raster_bin_table_buf.is_valid()) ? last_scene_params.raster_bin_table_buf : dummy_buffer;
+	const RID shading_bins_buf = (using_nextgeo && last_scene_params.shading_bucket_bins_buf.is_valid()) ? last_scene_params.shading_bucket_bins_buf : dummy_buffer;
+	const RID wind_meshes_buf = (using_nextgeo && vms->get_wind_meshes_buffer().is_valid()) ? vms->get_wind_meshes_buffer() : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
-	uniforms.reserve(15);
+	uniforms.reserve(18);
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, vis_tex })));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_depth_tex })));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, fb_tex })));
@@ -445,6 +506,9 @@ bool NextGeoDebug::draw_debug_view(RSE::ViewportDebugDraw p_mode, RID p_visibili
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, active_hist_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, patches_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, voxels_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, raster_bin_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, shading_bins_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, wind_meshes_buf));
 
 	RID shader = debug_shader.version_get_shader(debug_version, 0);
 	RID set = uniform_set_cache->get_cache_vec(shader, 0, uniforms);

@@ -249,6 +249,24 @@ and `NEXTGEO_VOXEL_PROVISIONAL_SCREEN_THRESHOLD_PX = 8.0`. Copied files: none.
 
 No outside input. Experimental GPU per-bone dynamic wind for skinned NextGeo foliage (#296, plan §25 / §21.4) — `rendering/nextgeo/experimental/dynamic_wind` (default `false`) and `rendering/nextgeo/experimental/dynamic_wind_mode` (`0 = Force Based`, `1 = Parametric`), the hardware/feature floor check (`NextGeoDynamicWindSim::evaluate_floor`) with one-time session reason logging (`FloorLogger`), import-time per-bone `mass` and `wind_catch` calculation from bind-pose triangle surface area and vertex distribution in `VirtualGeometryWind` (`compute_bone_physics_from_geometry`) and `modules/nextgeo/nextgeo_import.cpp`, the dedicated ping-pong GPU compute pass (`servers/rendering/renderer_rd/shaders/nextgeo/nextgeo_dynamic_wind.glsl`) simulating per-bone damped harmonic slow sway plus high-frequency flutter clamped within `max_sway` and writing current and previous `mat3x4` palettes directly into `#160`'s skin palette arena (zero new bindings in NextGeo cull/raster/resolve/VSM shaders), shared simulation pooling (`4` phase-varied shared slots per wind mesh), local spherical directional/radial wind force scenario API (`RenderingServer.scenario_{add,update,remove,clear}_wind_force` and `World3D` wrappers) with seamless warm-started promotion of overlapping foliage instances to dedicated per-instance slots and settled demotion back to the shared pool, CPU mirror parity for `CPU_cut_hash`, and Parametric mode routing through `#152`'s procedural shader bones with zero palette memory — is an original clean-room implementation built directly on GodotNext's #152 foliage wind, #160 skinned Nanite runtime, #151 MultiMesh instancing, and #212/#217 VSM pipeline. Copied files: none.
 
+## Nanite parity product surface, fallback reasons, and visualization modes (#157)
+
+No outside input. The Nanite parity product surface (#157, plan §21.4, §21.4.1, N1, N3, GN-14) —
+auditing all §21.4.1 project settings and defaults, attaching XML `experimental` attributes to
+Experimental PN settings, classes, and properties (`VirtualGeometryAssembly`, `VirtualGeometryWind`,
+`VirtualGeometryData`, `ResourceImporterScene`, `ResourceImporterOBJ`, `ProjectSettings`), wiring
+all four §6.3 PN fallback reasons (`NO_INT64_ATOMICS`, `UNSUPPORTED_RASTER_FEATURE`,
+`SW_RASTER_UNAVAILABLE`, `BLEND_SHAPES`) into `NextGeoFallback`, `nextgeo_route.h`,
+`virtual_geometry_fallback.h`, the 5-bit `fallback_class_tex` packing, and the P5 Exclusion Matrix,
+implementing all eight Nanite visualization `ViewportDebugDraw` modes (`RASTER_BINS`, `HW_SW`,
+`SHADING_BINS`, `PROGRAMMABLE`, `VERTEX_OFFSET`, `SKINNED`, `TESSELLATION`, `VOXELS`) in
+`nextgeo_debug.{h,cpp}`, `nextgeo_debug.glsl`, and the 3D editor Display menu, and exposing
+consistent per-frame NextGeo stats (`sw_clusters`, `hw_clusters`, per-phase counts,
+`programmable_bins`, `shading_bins`, `vertex_offset_clamped`, `dicing_overflow`, `native_rt_rebuilds`,
+`voxel_bricks`) in `RenderingServer.virtual_geometry_get_debug_stats()` — is an original clean-room
+implementation built directly on GodotNext's #74, #79, #80, #151, #152, #154, #155, #156, #158, #160,
+#162, #163, #164, and #165 infrastructure. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

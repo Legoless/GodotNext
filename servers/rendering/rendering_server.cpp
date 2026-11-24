@@ -2323,6 +2323,10 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 			stats["dynamic_wind_floor_reason"] = DW_REASON_NAMES[ridx];
 		}
 	}
+	// GodotNext: nextgeo_product_surface (#157). Native Nanite RT BLAS rebuild counters & mode.
+	stats["native_rt_rebuilds"] = RSG::virtual_mesh_storage != nullptr ? int64_t(RSG::virtual_mesh_storage->nextgeo_get_native_rt_rebuilds()) : int64_t(0);
+	stats["native_rt_rebuilds_total"] = RSG::virtual_mesh_storage != nullptr ? int64_t(RSG::virtual_mesh_storage->nextgeo_get_native_rt_rebuilds_total()) : int64_t(0);
+	stats["ray_tracing_mode"] = int(GLOBAL_GET("rendering/nextgeo/ray_tracing_mode")) == 1 ? String("native") : String("fallback");
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 	RendererRD::NextGeoDebug::fill_debug_stats(stats);
 #endif
@@ -3529,6 +3533,15 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_NOISY);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_DENOISED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_VARIANCE);
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14)
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RASTER_BINS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_HW_SW);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SHADING_BINS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_PROGRAMMABLE);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VERTEX_OFFSET);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_SKINNED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TESSELLATION);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VOXELS);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -4443,6 +4456,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/raster_mode", PROPERTY_HINT_ENUM, "Hybrid,Hardware"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/sw_raster_max_edge_px", PROPERTY_HINT_RANGE, "0,32,0.25,suffix:px"), 8.0);
 	GLOBAL_DEF("rendering/nextgeo/debug_vis64_buffer", false);
+	// GodotNext: nextgeo_product_surface (#157). Test override simulating a device without int64 atomics
+	// so NO_INT64_ATOMICS and SW_RASTER_UNAVAILABLE fallbacks can be exercised on Nanite-tier GPUs.
+	GLOBAL_DEF("rendering/nextgeo/debug_no_int64_atomics", false);
 	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Off; #153 and #164 admit masked and
 	// vertex-offset materials by default on the Nanite tier.
 	GLOBAL_DEF("rendering/nextgeo/debug_programmable_raster", false);

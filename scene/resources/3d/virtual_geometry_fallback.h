@@ -63,4 +63,9 @@ enum NextGeoFallback {
 	// Blend shapes stay on legacy raster (issue #159); skinning alone no longer
 	// implies this or NEXTGEO_FALLBACK_SKINNING when skinned virtual geometry is on.
 	NEXTGEO_FALLBACK_BLEND_SHAPES = 22,
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4 N1, N4). Runtime fallback reasons
+	// mirrored in RendererRD::NextGeoFallback (nextgeo_route.h).
+	NEXTGEO_FALLBACK_NO_INT64_ATOMICS = 23,
+	NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE = 24,
+	NEXTGEO_FALLBACK_SW_RASTER_UNAVAILABLE = 25,
 };

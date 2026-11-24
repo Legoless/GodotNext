@@ -274,11 +274,16 @@ public:
 	void free_resources();
 
 	RID get_clusters_buffer() const { return clusters; }
+	// GodotNext: nextgeo_product_surface (#157). Active per-(instance, surface) raster-bin table & raster flags for debug views.
+	RID get_raster_bin_table_buffer() const { return raster_bins_active ? raster_bin_table_buffer : RID(); }
+	uint32_t get_raster_bin_table_words() const { return raster_bins_active ? raster_bin_table_last_words : 0u; }
+	bool is_last_view_hybrid_active() const { return last_view_hybrid_active; }
+	bool is_last_view_mesh_hw_active() const { return last_view_mesh_hw_active; }
 	// GodotNext: nextgeo_tessellation (#163). Invalid when experimental/tessellation is off (zero buffers allocated).
 	RID get_diced_patches_buffer() const { return tess_active ? tess_diced_patches : RID(); }
 	// GodotNext: nextgeo_voxels (#165). Invalid when experimental/voxels is off (zero buffers allocated).
 	RID get_voxel_bricks_buffer() const { return voxels_active ? voxel_bricks : RID(); }
-	static void set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote);
+	static void set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote, uint32_t p_compute_buckets = 0u);
 	// GodotNext: nextgeo_shading_bins (#158). The shading path of the last main view's Stage A/B (keys
 	// shading_*), merged into the stats.
 	static void set_shading_stats(const Dictionary &p_stats);
@@ -421,6 +426,9 @@ private:
 	RID raster_bin_lists;
 	RID raster_bin_table_buffer;
 	uint32_t raster_bin_table_capacity = 0; // Words.
+	uint32_t raster_bin_table_last_words = 0; // Active words uploaded this frame.
+	bool last_view_hybrid_active = false;
+	bool last_view_mesh_hw_active = false;
 	HashMap<RID, RID> raster_bin_compute_pipelines; // Shader -> pipeline.
 	HashMap<RID, RID> raster_bin_render_pipelines; // Shader -> pipeline, for the vis64 framebuffer format.
 	RD::FramebufferFormatID raster_bin_render_format = RD::INVALID_ID;

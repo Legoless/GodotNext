@@ -171,6 +171,8 @@ public:
 	// The bin state (per bin uvec4: count, offset, cursor, unused) and the indirect arguments of the last
 	// bin(), for #157's stats and visualization; invalid before the first bin().
 	RID get_shading_bin_state_buffer() const { return shading_bin_state_buffer; }
+	RID get_shading_bucket_bins_buffer() const { return binned ? shading_bucket_bins_buffer : RID(); }
+	uint32_t get_shading_bucket_bins_count() const { return binned ? shading_bucket_bins.size() : 0u; }
 	static uint32_t get_last_published_stage_a_compute();
 	static uint32_t get_last_published_stage_b_compute();
 

@@ -6931,30 +6931,49 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	nextgeo_virtual_active = using_nextgeo;
 	nextgeo_visibility_only_active = visibility_only;
-	// GodotNext: nextgeo_tessellation (#163). Re-bin displaced virtual surfaces immediately when
-	// experimental/tessellation toggles at runtime.
+	// GodotNext: nextgeo_tessellation (#163), nextgeo_product_surface (#157). Re-bin displaced or voxelized
+	// virtual surfaces immediately when experimental/tessellation, experimental/voxels, or SW raster
+	// availability toggles at runtime (updating SW_RASTER_UNAVAILABLE routes cleanly).
 	{
 		const bool tess_enabled_now = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
-		if (tess_enabled_now != nextgeo_last_tessellation_enabled) {
+		const bool voxels_enabled_now = bool(GLOBAL_GET("rendering/nextgeo/experimental/voxels"));
+		const bool sw_raster_now = _nextgeo_view_runs_hybrid_raster();
+		const bool tess_changed = tess_enabled_now != nextgeo_last_tessellation_enabled;
+		const bool voxels_changed = voxels_enabled_now != nextgeo_last_voxels_enabled;
+		const bool sw_raster_changed = sw_raster_now != nextgeo_last_sw_raster_available;
+		if (tess_changed || voxels_changed || sw_raster_changed) {
 			nextgeo_last_tessellation_enabled = tess_enabled_now;
+			nextgeo_last_voxels_enabled = voxels_enabled_now;
+			nextgeo_last_sw_raster_available = sw_raster_now;
 			bool marked_any = false;
+			auto inst_needs_rebin = [sw_raster_changed](const GeometryInstanceForwardClustered *p_inst) -> bool {
+				if (p_inst == nullptr) {
+					return false;
+				}
+				if (p_inst->data != nullptr && p_inst->data->base_type == RSE::INSTANCE_MESH && RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_voxels(p_inst->data->base)) {
+					return true;
+				}
+				for (GeometryInstanceSurfaceDataCache *surf = p_inst->surface_caches; surf != nullptr; surf = surf->next) {
+					if (sw_raster_changed && (surf->nextgeo_raster_bin != 0u || (surf->material != nullptr && surf->material->get_raster_features() != 0u))) {
+						return true;
+					}
+					if (surf->material != nullptr && (surf->material->get_raster_features() & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u) {
+						return true;
+					}
+				}
+				return false;
+			};
 			if (p_render_data->instances != nullptr) {
 				for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
 					GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
-					if (inst == nullptr) {
-						continue;
-					}
-					for (GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf != nullptr; surf = surf->next) {
-						if (surf->material != nullptr && (surf->material->get_raster_features() & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u) {
-							inst->_mark_dirty();
-							marked_any = true;
-							break;
-						}
+					if (inst_needs_rebin(inst)) {
+						inst->_mark_dirty();
+						marked_any = true;
 					}
 				}
 			}
 			for (GeometryInstanceSurfaceDataCache &surf : geometry_surface_compilation_all_list) {
-				if (surf.owner != nullptr && surf.material != nullptr && (surf.material->get_raster_features() & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u) {
+				if (surf.owner != nullptr && inst_needs_rebin(surf.owner)) {
 					surf.owner->_mark_dirty();
 					marked_any = true;
 				}
@@ -7752,7 +7771,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 						(!visibility_only && nextgeo_drew) ? nextgeo_resolve.get_last_published_bucket_count() : 0,
 						(!visibility_only && nextgeo_drew) ? nextgeo_resolve.get_last_published_stage_a_draws() : 0,
 						stage_b_draws,
-						stage_b_wrote);
+						stage_b_wrote,
+						(!visibility_only && nextgeo_drew && nextgeo_resolve.get_bucket_count() > 0) ? nextgeo_resolve.get_compute_bucket_count() : 0u);
 			}
 			// GodotNext: nextgeo_shading_bins (#158). With rendering/nextgeo/debug_stats, as the cut's counters:
 			// which path shaded Stage A/B, and why the tile quads stayed.
@@ -8391,6 +8411,28 @@ void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_
 	scene_params.visible_capacity = NextGeoCut::CLUSTER_CAPACITY;
 	scene_params.bucket_table_buf = nextgeo_resolve.get_bucket_table_buffer();
 	scene_params.bucket_table_words = nextgeo_bucket_table.size();
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4.1, GN-14). Pass hybrid/bin/shading/wind state to debug views.
+	scene_params.cam_forward = -scene_data->cam_transform.basis.get_column(2);
+	scene_params.z_near = scene_data->z_near;
+	scene_params.hybrid_raster_active = p_nextgeo_drew && nextgeo_cut.is_last_view_hybrid_active();
+	scene_params.mesh_hw_active = p_nextgeo_drew && nextgeo_cut.is_last_view_mesh_hw_active();
+	scene_params.sw_raster_max_edge_px = scene_params.hybrid_raster_active ? RendererRD::nextgeo_sw_raster_switch_px(float(GLOBAL_GET("rendering/nextgeo/sw_raster_max_edge_px"))) : 0.0f;
+	scene_params.sw_raster_px_scale = RendererRD::nextgeo_sw_raster_px_scale(scene_data->get_cam_projection(), float(MAX(p_screen_size.width, 1)), float(MAX(p_screen_size.height, 1)), scene_data->cam_orthogonal);
+	scene_params.foliage_wind_enabled = RendererVirtualMeshStorage::is_foliage_wind_enabled();
+	scene_params.shading_compute_active = nextgeo_shading_compute_active && nextgeo_resolve.is_binned();
+	scene_params.raster_bin_table_buf = nextgeo_cut.get_raster_bin_table_buffer();
+	scene_params.raster_bin_table_words = nextgeo_cut.get_raster_bin_table_words();
+	scene_params.shading_bucket_bins_buf = nextgeo_resolve.get_shading_bucket_bins_buffer();
+	scene_params.shading_bucket_bins_count = nextgeo_resolve.get_shading_bucket_bins_count();
+	memset(scene_params.bin_features, 0, sizeof(scene_params.bin_features));
+	if (nextgeo_programmable_view_active && nextgeo_raster_bins_used != 0u) {
+		for (uint32_t bin = 1; bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT && bin < 68u; bin++) {
+			const NextGeoRasterBinOwner &owner = nextgeo_raster_bin_owners[bin];
+			if ((nextgeo_raster_bins_used & (uint64_t(1) << (bin - 1u))) != 0u && owner.material != nullptr) {
+				scene_params.bin_features[bin] = owner.material->get_raster_features();
+			}
+		}
+	}
 	nextgeo_debug.record_scene_params(scene_params);
 
 	if (mode == RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RT_PROXY) {
@@ -8479,7 +8521,7 @@ void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_
 				const uint32_t cls = vgd_candidate ? 1u : 2u;
 				uint32_t reason = uint32_t(surf->nextgeo_fallback_reason);
 				if (base_type == RSE::INSTANCE_MULTIMESH || base_type == RSE::INSTANCE_PARTICLES) {
-					reason = 14u;
+					reason = 31u;
 				} else if (!p_using_nextgeo && reason == 0u) {
 					reason = view_fb;
 				}
@@ -8489,7 +8531,7 @@ void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_
 						(surf->owner->nextgeo_record_index != UINT32_MAX && RSG::virtual_mesh_storage != nullptr &&
 								surf->owner->nextgeo_record_index < RSG::virtual_mesh_storage->get_record_count() &&
 								(RSG::virtual_mesh_storage->get_record(surf->owner->nextgeo_record_index).flags & RendererVirtualMeshStorage::RECORD_RT_FAR) != 0u);
-				codes[k] = (cls & 3u) | ((reason & 0xFu) << 2u) | ((rt_excl ? 1u : 0u) << 6u);
+				codes[k] = (cls & 3u) | ((reason & 0x1Fu) << 2u) | ((rt_excl ? 1u : 0u) << 7u);
 			}
 			RenderListParameters mark_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), elem_count, p_reverse_cull, PASS_MODE_DEPTH_MATERIAL, 0, true, false, rp_uset, false, Vector2(), scene_data->lod_distance_multiplier, scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization, false);
 			mark_params.nextgeo_fallback_mark = true;
@@ -10922,9 +10964,17 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	bool admit_programmable = false;
 	const bool default_prog_admitted = (material_raster_features & (RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES | RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET)) != 0u &&
 			p_material->shader_data->nextgeo_masked_fallback == RendererRD::NEXTGEO_FALLBACK_NONE;
+	const bool tess_enabled = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
+	const bool voxels_enabled = bool(GLOBAL_GET("rendering/nextgeo/experimental/voxels"));
+	const bool sw_raster_available = _nextgeo_view_runs_hybrid_raster();
+	const bool mesh_has_voxels = route_facts.mesh_has_virtual_geometry && RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_voxels(p_mesh);
+	// GodotNext: nextgeo_product_surface (#157, plan §21.4 N1). PN features requiring the SW raster
+	// path (tessellation, voxels) fall back per instance with SW_RASTER_UNAVAILABLE when SW raster is off.
+	route_facts.sw_raster_required_unavailable = !sw_raster_available &&
+			((tess_enabled && material_displaced && p_material->shader_data->has_displacement) || (voxels_enabled && mesh_has_voxels));
 	const bool tess_admitted = material_displaced &&
 			p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
-			bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
+			tess_enabled;
 	const bool wants_debug_programmable = (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE) || material_displaced;
 	const bool debug_admitted = wants_debug_programmable &&
 			p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&

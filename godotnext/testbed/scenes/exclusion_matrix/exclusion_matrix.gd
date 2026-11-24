@@ -48,10 +48,10 @@ func _virtualize_candidates() -> void:
 		var kind := String(cell["kind"])
 		var cand := _find_named_first(get_node_or_null(cid), "Candidate")
 		match kind:
-			"mesh", "moving":
+			"mesh", "moving", "sw_raster_unavailable", "no_int64_atomics":
 				var mi := cand as MeshInstance3D
 				if mi != null and mi.mesh != null and mi.mesh.get_virtual_geometry() == null:
-					var vmesh := _build_virtual_mesh(mi.mesh, cid, mi.skin != null, true)
+					var vmesh := _build_virtual_mesh(mi.mesh, cid, false, true)
 					if vmesh != null:
 						mi.mesh = vmesh
 			"multimesh":
@@ -98,6 +98,33 @@ func _build_virtual_mesh(p_mesh: Mesh, p_tag: String, p_skinned: bool, p_force_v
 	var orig_mats: Array[Material] = []
 	for s in surf_count:
 		orig_mats.append(p_mesh.surface_get_material(s))
+
+	# Blend-shape and non-opted-in skinned meshes are rejected offline by ImporterMesh; build VGD from
+	# a stripped rigid copy and attach it to a copy of the original mesh so the runtime fallback route
+	# (BLEND_SHAPES / SKINNING) is exercised directly.
+	var has_blend_shapes := (p_mesh is ArrayMesh) and (p_mesh as ArrayMesh).get_blend_shape_count() > 0
+	var needs_rigid_vgd_attach := has_blend_shapes or (p_tag == "skinning" and not p_skinned)
+	if needs_rigid_vgd_attach and p_mesh is ArrayMesh:
+		var clean := ArrayMesh.new()
+		for s in surf_count:
+			var arr := p_mesh.surface_get_arrays(s)
+			arr[Mesh.ARRAY_BONES] = null
+			arr[Mesh.ARRAY_WEIGHTS] = null
+			clean.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		var clean_imp := ImporterMesh.from_mesh(clean)
+		_ngm_counter += 1
+		var clean_ngm := "user://excl_matrix_%d_%s_%d.ngm" % [OS.get_process_id(), p_tag.validate_filename(), _ngm_counter]
+		_temp_ngm_files.append(clean_ngm)
+		if clean_imp.build_virtual_geometry(clean_ngm, false) != OK:
+			return null
+		var clean_vmesh := clean_imp.get_mesh()
+		var clean_vgd: VirtualGeometryData = clean_vmesh.get_virtual_geometry() if clean_vmesh != null else null
+		if clean_vgd == null:
+			return null
+		var copy := p_mesh.duplicate(true) as ArrayMesh
+		copy.set_virtual_geometry(clean_vgd)
+		return copy
+
 	var imp := ImporterMesh.from_mesh(p_mesh)
 	var stripped_single := false
 	if p_force_vgd_on_base_fallbacks and surf_count == 1 and orig_mats[0] is BaseMaterial3D:
@@ -240,13 +267,15 @@ func _observed_cells(p_vp_stats: Dictionary) -> Array:
 		var cand := _find_named_first(get_node_or_null(cid), "Candidate")
 		var surfaces: Array = []
 		match kind:
-			"mesh", "moving", "multimesh", "particles":
+			"mesh", "moving", "multimesh", "particles", "sw_raster_unavailable":
 				var vi := cand as VisualInstance3D
 				if vi != null:
 					var st: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(vi.get_instance())
 					surfaces = st.get("surfaces", [])
 					if surfaces.is_empty():
 						surfaces = [{"index": 0, "route": String(st.get("route", "")), "reason": String(st.get("reason", ""))}]
+			"no_int64_atomics":
+				surfaces = [{"index": 0, "route": String(p_vp_stats.get("view_route", "virtual")), "reason": String(p_vp_stats.get("raster_reason", "NONE"))}]
 			"baked_gridmap":
 				var bgm := cand as GridMap
 				if bgm != null and _baked_count(bgm) > 0:
