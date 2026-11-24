@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/crypto/crypto_core.h"
+#include "core/object/class_db.h"
 #include "editor/export/editor_export.h"
 #include "editor/gui/editor_about.h"
 #include "editor/gui/editor_toaster.h"
@@ -145,4 +146,10 @@ DLSSEditorPlugin::DLSSEditorPlugin() {
 DLSSEditorPlugin::~DLSSEditorPlugin() {
 	_unregister_export_plugin();
 	export_plugin.unref();
+}
+
+void dlss_register_editor_plugins() {
+	GDREGISTER_CLASS(DLSSEditorExportPlugin);
+	GDREGISTER_CLASS(DLSSEditorPlugin);
+	EditorPlugins::add_by_type<DLSSEditorPlugin>();
 }

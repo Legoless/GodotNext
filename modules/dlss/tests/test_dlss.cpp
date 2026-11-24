@@ -89,6 +89,10 @@ TEST_CASE("[DLSS][Mock] Vendor-gated Vulkan device extensions and object-attribu
 	provider.set_driver_version_for_tests("595.99.02");
 	provider.set_loaded_dll_sha256("11223344");
 	CHECK(provider.filter_validation_message(&cb) == VulkanExtensionProvider::VALIDATION_DEFAULT);
+
+	// Companion runtime SHA-256 (e.g. DLSS-RR alongside DLSS-SR) matches when added.
+	provider.add_loaded_dll_sha256("AABBCCDD");
+	CHECK(provider.filter_validation_message(&cb) == VulkanExtensionProvider::VALIDATION_ALLOWLISTED);
 }
 #endif // VULKAN_ENABLED
 

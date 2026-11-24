@@ -43,10 +43,16 @@ DLSSBackendMock::DLSSBackendMock() {
 void DLSSBackendMock::reset_script() {
 	scripted_init_status = OK;
 	scripted_availability_status = OK;
+	scripted_rr_availability_status = OK;
 	scripted_create_status = OK;
 	scripted_evaluate_status = OK;
 	scripted_result_code = 1;
 	per_feature_memory_bytes = 64u * 1024u * 1024u;
+	scripted_streamline_init_ok = true;
+	scripted_reflex_available = true;
+	scripted_reflex_applied_mode = 0;
+	scripted_reflex_frame_limit_us = 0;
+	marker_records.clear();
 	scripted_instance_extensions.clear();
 	scripted_device_extensions.clear();
 	scripted_runtime_info = LoadedRuntimeInfo();
@@ -56,6 +62,13 @@ void DLSSBackendMock::reset_script() {
 	next_feature_handle = 1;
 	active_features.clear();
 	evaluate_records.clear();
+}
+
+void DLSSBackendMock::record_latency_marker(int p_marker, uint64_t p_frame_id) {
+	MarkerRecord rec;
+	rec.marker = p_marker;
+	rec.frame_id = p_frame_id;
+	marker_records.push_back(rec);
 }
 
 Vector<CharString> DLSSBackendMock::get_instance_extensions() {

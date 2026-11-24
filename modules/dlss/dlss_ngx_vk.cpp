@@ -33,6 +33,7 @@
 // NVIDIA NGX SDK headers (resolved from dlss_sdk_path at build time).
 
 #include "dlss_backend.h"
+#include "dlss_ngx_rr.h"
 
 #ifdef DLSS_BACKEND_NGX
 
@@ -43,7 +44,8 @@
 #include "core/os/mutex.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
-#include "core/templates/hash_set.h"
+#include "core/templates/hash_map.h"
+#include "core/templates/pair.h"
 #include "core/version.h"
 
 #include <drivers/vulkan/godot_vulkan.h>
@@ -275,6 +277,7 @@ struct ManifestRuntimeEntry {
 	String basename;
 	String sha256;
 	String sdk_tag;
+	Vector<Pair<String, String>> all_files;
 };
 
 ManifestRuntimeEntry read_sr_runtime_from_manifest(const String &p_search_dir) {
@@ -310,13 +313,18 @@ ManifestRuntimeEntry read_sr_runtime_from_manifest(const String &p_search_dir) {
 			}
 			const Dictionary item = files[i];
 			const String name = item.get("name", String());
-			const String sha = item.get("sha256", String());
-			// Prefer the SR runtime (does not carry "dlssd" or "dlssg" suffix).
-			if (!name.is_empty() && !name.contains("dlssd") && !name.contains("dlssg") && !name.begins_with("sl.")) {
-				entry.basename = name;
-				entry.sha256 = sha.to_lower();
-				return entry;
+			const String sha = String(item.get("sha256", String())).to_lower();
+			if (!name.is_empty()) {
+				entry.all_files.push_back(Pair<String, String>(name, sha));
 			}
+			// Prefer the SR runtime (does not carry "dlssd" or "dlssg" suffix).
+			if (entry.basename.is_empty() && !name.is_empty() && !name.contains("dlssd") && !name.contains("dlssg") && !name.begins_with("sl.")) {
+				entry.basename = name;
+				entry.sha256 = sha;
+			}
+		}
+		if (!entry.basename.is_empty()) {
+			return entry;
 		}
 	}
 
@@ -326,10 +334,13 @@ ManifestRuntimeEntry read_sr_runtime_from_manifest(const String &p_search_dir) {
 		const Array keys = sha_map.keys();
 		for (int i = 0; i < keys.size(); i++) {
 			const String name = keys[i];
-			if (!name.is_empty() && !name.contains("dlssd") && !name.contains("dlssg") && !name.begins_with("sl.")) {
+			const String sha = String(sha_map[name]).to_lower();
+			if (!name.is_empty()) {
+				entry.all_files.push_back(Pair<String, String>(name, sha));
+			}
+			if (entry.basename.is_empty() && !name.is_empty() && !name.contains("dlssd") && !name.contains("dlssg") && !name.begins_with("sl.")) {
 				entry.basename = name;
-				entry.sha256 = String(sha_map[name]).to_lower();
-				return entry;
+				entry.sha256 = sha;
 			}
 		}
 	}
@@ -390,6 +401,7 @@ class DLSSBackendNGXVulkan : public DLSSBackend {
 	bool initialized = false;
 	bool ota_updates_allowed = false;
 	bool ota_update_attempted = false;
+	bool ota_rr_update_attempted = false;
 	VkDevice vk_device = VK_NULL_HANDLE;
 	NVSDK_NGX_Parameter *capability_params = nullptr;
 	NVSDK_NGX_Parameter *eval_params = nullptr;
@@ -402,12 +414,13 @@ class DLSSBackendNGXVulkan : public DLSSBackend {
 	NVSDK_NGX_FeatureCommonInfo common_info = {};
 	String runtime_search_dir;
 
-	HashSet<uint64_t> live_handles;
+	// Maps NVSDK_NGX_Handle* -> true when the handle is a Ray Reconstruction (DLSSD) feature.
+	HashMap<uint64_t, bool> live_handles;
 	uint64_t cached_memory_bytes = 0;
 	int32_t last_result = static_cast<int32_t>(NVSDK_NGX_Result_Success);
 	LoadedRuntimeInfo loaded_runtime;
 
-	void _prepare_discovery_locked(NVSDK_NGX_FeatureDiscoveryInfo &r_info, std::wstring &r_app_data, std::wstring &r_search_dir, const wchar_t *&r_search_ptr, NVSDK_NGX_FeatureCommonInfo &r_common) const {
+	void _prepare_discovery_locked(NVSDK_NGX_FeatureDiscoveryInfo &r_info, std::wstring &r_app_data, std::wstring &r_search_dir, const wchar_t *&r_search_ptr, NVSDK_NGX_FeatureCommonInfo &r_common, NVSDK_NGX_Feature p_feature = NVSDK_NGX_Feature_SuperSampling) const {
 		String user_dir;
 		String exe_dir;
 		if (OS::get_singleton() != nullptr) {
@@ -429,7 +442,7 @@ class DLSSBackendNGXVulkan : public DLSSBackend {
 
 		r_info = {};
 		r_info.SDKVersion = NVSDK_NGX_Version_API;
-		r_info.FeatureID = NVSDK_NGX_Feature_SuperSampling;
+		r_info.FeatureID = p_feature;
 		r_info.Identifier.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Project_Id;
 		r_info.Identifier.v.ProjectDesc.ProjectId = "00000000-0000-0000-0000-000000000000";
 		r_info.Identifier.v.ProjectDesc.EngineType = NVSDK_NGX_ENGINE_TYPE_CUSTOM;
@@ -443,19 +456,34 @@ class DLSSBackendNGXVulkan : public DLSSBackend {
 			cached_memory_bytes = 0;
 			return;
 		}
-		void *callback = nullptr;
-		NVSDK_NGX_Parameter_GetVoidPointer(capability_params, NVSDK_NGX_Parameter_DLSSGetStatsCallback, &callback);
-		if (callback == nullptr) {
-			return;
-		}
-		PFN_NVSDK_NGX_DLSS_GetStatsCallback fn = reinterpret_cast<PFN_NVSDK_NGX_DLSS_GetStatsCallback>(callback);
-		const NVSDK_NGX_Result res = fn(capability_params);
-		if (NVSDK_NGX_SUCCEED(res)) {
-			unsigned long long vram_bytes = 0;
-			if (NVSDK_NGX_SUCCEED(NVSDK_NGX_Parameter_GetULL(capability_params, NVSDK_NGX_Parameter_SizeInBytes, &vram_bytes))) {
-				cached_memory_bytes = static_cast<uint64_t>(vram_bytes);
+		bool has_sr = false;
+		bool has_rr = false;
+		for (const KeyValue<uint64_t, bool> &E : live_handles) {
+			if (E.value) {
+				has_rr = true;
+			} else {
+				has_sr = true;
 			}
 		}
+		uint64_t total_bytes = 0;
+		if (has_sr) {
+			void *callback = nullptr;
+			NVSDK_NGX_Parameter_GetVoidPointer(capability_params, NVSDK_NGX_Parameter_DLSSGetStatsCallback, &callback);
+			if (callback != nullptr) {
+				PFN_NVSDK_NGX_DLSS_GetStatsCallback fn = reinterpret_cast<PFN_NVSDK_NGX_DLSS_GetStatsCallback>(callback);
+				const NVSDK_NGX_Result res = fn(capability_params);
+				if (NVSDK_NGX_SUCCEED(res)) {
+					unsigned long long vram_bytes = 0;
+					if (NVSDK_NGX_SUCCEED(NVSDK_NGX_Parameter_GetULL(capability_params, NVSDK_NGX_Parameter_SizeInBytes, &vram_bytes))) {
+						total_bytes += static_cast<uint64_t>(vram_bytes);
+					}
+				}
+			}
+		}
+		if (has_rr) {
+			total_bytes += dlss_ngx_vk_rr_get_vram_bytes(capability_params);
+		}
+		cached_memory_bytes = total_bytes;
 	}
 
 	void _refresh_loaded_runtime_info_locked() {
@@ -480,14 +508,36 @@ class DLSSBackendNGXVulkan : public DLSSBackend {
 		} else {
 			print_verbose(vformat("DLSS runtime lookup miss: dir=%s manifest_basename=%s found=%s", runtime_search_dir, manifest.basename, found));
 		}
+
+		// Record SHA-256 hashes of companion NGX runtimes (e.g. DLSS-RR) verified on disk
+		// so the Vulkan validation allowlist matches exact loaded runtime binaries.
+		loaded_runtime.additional_sha256s.clear();
+		for (const Pair<String, String> &file_entry : manifest.all_files) {
+			if (file_entry.first == manifest.basename) {
+				continue;
+			}
+			String extra_found = find_loaded_module_by_basename(file_entry.first);
+			if (extra_found.is_empty() && !file_entry.first.is_empty()) {
+				const String candidate = runtime_search_dir.path_join(file_entry.first);
+				if (FileAccess::exists(candidate)) {
+					extra_found = candidate;
+				}
+			}
+			if (!extra_found.is_empty() && FileAccess::exists(extra_found)) {
+				const String disk_sha = FileAccess::get_sha256(extra_found).to_lower();
+				if (!disk_sha.is_empty() && !loaded_runtime.additional_sha256s.has(disk_sha)) {
+					loaded_runtime.additional_sha256s.push_back(disk_sha);
+				}
+			}
+		}
 	}
 
 	void _cleanup_locked() {
 		if (vk_device != VK_NULL_HANDLE && (initialized || !live_handles.is_empty())) {
 			vkDeviceWaitIdle(vk_device);
 		}
-		for (uint64_t handle_val : live_handles) {
-			NVSDK_NGX_Handle *handle = reinterpret_cast<NVSDK_NGX_Handle *>(handle_val);
+		for (const KeyValue<uint64_t, bool> &E : live_handles) {
+			NVSDK_NGX_Handle *handle = reinterpret_cast<NVSDK_NGX_Handle *>(E.key);
 			if (handle != nullptr) {
 				NVSDK_NGX_VULKAN_ReleaseFeature(handle);
 			}
@@ -509,6 +559,7 @@ class DLSSBackendNGXVulkan : public DLSSBackend {
 		vk_device = VK_NULL_HANDLE;
 		cached_memory_bytes = 0;
 		ota_update_attempted = false;
+		ota_rr_update_attempted = false;
 	}
 
 public:
@@ -521,21 +572,39 @@ public:
 	Vector<CharString> get_instance_extensions() override {
 		MutexLock lock(mutex);
 		Vector<CharString> result;
-		NVSDK_NGX_FeatureDiscoveryInfo discovery = {};
-		std::wstring app_data;
-		std::wstring search_dir;
-		const wchar_t *search_ptr = nullptr;
-		NVSDK_NGX_FeatureCommonInfo common = {};
-		_prepare_discovery_locked(discovery, app_data, search_dir, search_ptr, common);
+		const NVSDK_NGX_Feature features_to_query[2] = {
+			NVSDK_NGX_Feature_SuperSampling,
+			NVSDK_NGX_Feature_RayReconstruction,
+		};
+		for (NVSDK_NGX_Feature feat : features_to_query) {
+			NVSDK_NGX_FeatureDiscoveryInfo discovery = {};
+			std::wstring app_data;
+			std::wstring search_dir;
+			const wchar_t *search_ptr = nullptr;
+			NVSDK_NGX_FeatureCommonInfo common = {};
+			_prepare_discovery_locked(discovery, app_data, search_dir, search_ptr, common, feat);
 
-		uint32_t ext_count = 0;
-		VkExtensionProperties *ext_props = nullptr;
-		const NVSDK_NGX_Result ngx_res = NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements(&discovery, &ext_count, &ext_props);
-		last_result = static_cast<int32_t>(ngx_res);
-		if (NVSDK_NGX_SUCCEED(ngx_res) && ext_props != nullptr) {
-			for (uint32_t i = 0; i < ext_count; i++) {
-				if (ext_props[i].extensionName[0] != '\0') {
-					result.push_back(CharString(ext_props[i].extensionName));
+			uint32_t ext_count = 0;
+			VkExtensionProperties *ext_props = nullptr;
+			const NVSDK_NGX_Result ngx_res = NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements(&discovery, &ext_count, &ext_props);
+			if (feat == NVSDK_NGX_Feature_SuperSampling) {
+				last_result = static_cast<int32_t>(ngx_res);
+			}
+			if (NVSDK_NGX_SUCCEED(ngx_res) && ext_props != nullptr) {
+				for (uint32_t i = 0; i < ext_count; i++) {
+					if (ext_props[i].extensionName[0] != '\0') {
+						const CharString name(ext_props[i].extensionName);
+						bool duplicate = false;
+						for (const CharString &existing : result) {
+							if (std::strcmp(existing.get_data(), name.get_data()) == 0) {
+								duplicate = true;
+								break;
+							}
+						}
+						if (!duplicate) {
+							result.push_back(name);
+						}
+					}
 				}
 			}
 		}
@@ -551,22 +620,40 @@ public:
 			return result;
 		}
 
-		NVSDK_NGX_FeatureDiscoveryInfo discovery = {};
-		std::wstring app_data;
-		std::wstring search_dir;
-		const wchar_t *search_ptr = nullptr;
-		NVSDK_NGX_FeatureCommonInfo common = {};
-		_prepare_discovery_locked(discovery, app_data, search_dir, search_ptr, common);
+		const NVSDK_NGX_Feature features_to_query[2] = {
+			NVSDK_NGX_Feature_SuperSampling,
+			NVSDK_NGX_Feature_RayReconstruction,
+		};
+		for (NVSDK_NGX_Feature feat : features_to_query) {
+			NVSDK_NGX_FeatureDiscoveryInfo discovery = {};
+			std::wstring app_data;
+			std::wstring search_dir;
+			const wchar_t *search_ptr = nullptr;
+			NVSDK_NGX_FeatureCommonInfo common = {};
+			_prepare_discovery_locked(discovery, app_data, search_dir, search_ptr, common, feat);
 
-		uint32_t ext_count = 0;
-		VkExtensionProperties *ext_props = nullptr;
-		const NVSDK_NGX_Result ngx_res = NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements(inst, phys, &discovery, &ext_count, &ext_props);
-		last_result = static_cast<int32_t>(ngx_res);
-		print_verbose(vformat("DLSS NGX GetFeatureDeviceExtensionRequirements: res=0x%08x count=%d", uint32_t(ngx_res), int(ext_count)));
-		if (NVSDK_NGX_SUCCEED(ngx_res) && ext_props != nullptr) {
-			for (uint32_t i = 0; i < ext_count; i++) {
-				if (ext_props[i].extensionName[0] != '\0') {
-					result.push_back(CharString(ext_props[i].extensionName));
+			uint32_t ext_count = 0;
+			VkExtensionProperties *ext_props = nullptr;
+			const NVSDK_NGX_Result ngx_res = NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements(inst, phys, &discovery, &ext_count, &ext_props);
+			if (feat == NVSDK_NGX_Feature_SuperSampling) {
+				last_result = static_cast<int32_t>(ngx_res);
+				print_verbose(vformat("DLSS NGX GetFeatureDeviceExtensionRequirements: res=0x%08x count=%d", uint32_t(ngx_res), int(ext_count)));
+			}
+			if (NVSDK_NGX_SUCCEED(ngx_res) && ext_props != nullptr) {
+				for (uint32_t i = 0; i < ext_count; i++) {
+					if (ext_props[i].extensionName[0] != '\0') {
+						const CharString name(ext_props[i].extensionName);
+						bool duplicate = false;
+						for (const CharString &existing : result) {
+							if (std::strcmp(existing.get_data(), name.get_data()) == 0) {
+								duplicate = true;
+								break;
+							}
+						}
+						if (!duplicate) {
+							result.push_back(name);
+						}
+					}
 				}
 			}
 		}
@@ -621,6 +708,14 @@ public:
 			return EXTENSION_MISSING;
 		}
 		return OK;
+	}
+
+	Status query_rr_availability() override {
+		MutexLock lock(mutex);
+		if (!initialized || capability_params == nullptr) {
+			return RUNTIME_MISSING;
+		}
+		return dlss_ngx_vk_rr_query_availability(capability_params, last_result);
 	}
 
 	Status init(const InitParams &p_params) override {
@@ -803,6 +898,29 @@ public:
 			return FEATURE_CREATE_FAILED;
 		}
 
+		if (p_params.ray_reconstruction) {
+			if (ota_updates_allowed && !ota_rr_update_attempted) {
+				ota_rr_update_attempted = true;
+				const NVSDK_NGX_Result ota_res = NVSDK_NGX_UpdateFeature(&app_identifier, NVSDK_NGX_Feature_RayReconstruction);
+				print_verbose(vformat("DLSS NGX UpdateFeature(RayReconstruction): 0x%08x", uint32_t(ota_res)));
+			}
+			uint64_t rr_handle = 0;
+			const Status rr_st = dlss_ngx_vk_rr_create_feature(
+					reinterpret_cast<uint64_t>(vk_device),
+					p_params.command_buffer_handle,
+					p_params,
+					rr_handle,
+					last_result);
+			if (rr_st != OK || rr_handle == 0) {
+				return rr_st != OK ? rr_st : FEATURE_CREATE_FAILED;
+			}
+			live_handles[rr_handle] = true;
+			r_feature_handle = rr_handle;
+			_refresh_vram_locked();
+			_refresh_loaded_runtime_info_locked();
+			return OK;
+		}
+
 		if (ota_updates_allowed && !ota_update_attempted) {
 			ota_update_attempted = true;
 			const NVSDK_NGX_Result ota_res = NVSDK_NGX_UpdateFeature(&app_identifier, NVSDK_NGX_Feature_SuperSampling);
@@ -837,7 +955,7 @@ public:
 		}
 
 		const uint64_t handle_val = reinterpret_cast<uint64_t>(ngx_handle);
-		live_handles.insert(handle_val);
+		live_handles[handle_val] = false;
 		r_feature_handle = handle_val;
 
 		_refresh_vram_locked();
@@ -847,8 +965,17 @@ public:
 
 	Status evaluate(const EvaluateParams &p_params) override {
 		MutexLock lock(mutex);
-		if (!initialized || eval_params == nullptr || p_params.feature_handle == 0 || !live_handles.has(p_params.feature_handle)) {
+		const bool *is_rr_ptr = live_handles.getptr(p_params.feature_handle);
+		if (!initialized || eval_params == nullptr || p_params.feature_handle == 0 || is_rr_ptr == nullptr) {
 			return FEATURE_CREATE_FAILED;
+		}
+		if (*is_rr_ptr) {
+			return dlss_ngx_vk_rr_evaluate(
+					p_params.command_buffer_handle,
+					p_params.feature_handle,
+					eval_params,
+					p_params,
+					last_result);
 		}
 		VkCommandBuffer cmd_buf = reinterpret_cast<VkCommandBuffer>(p_params.command_buffer_handle);
 		if (cmd_buf == VK_NULL_HANDLE) {

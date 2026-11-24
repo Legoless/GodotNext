@@ -140,6 +140,20 @@ const char *to_ngx_sr_preset_param(DLSSBackend::QualityMode p_mode) {
 	}
 }
 
+NVSDK_NGX_RayReconstruction_Hint_Render_Preset to_ngx_rr_preset(DLSSBackend::RRPreset p_preset) {
+	switch (p_preset) {
+		case DLSSBackend::RR_PRESET_D:
+			return NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D;
+		case DLSSBackend::RR_PRESET_E:
+			return NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E;
+		case DLSSBackend::RR_PRESET_F:
+			return NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F;
+		case DLSSBackend::RR_PRESET_DEFAULT:
+		default:
+			return NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+	}
+}
+
 const char *to_ngx_rr_preset_param(DLSSBackend::QualityMode p_mode) {
 	switch (p_mode) {
 		case DLSSBackend::QUALITY_DLAA:
@@ -602,7 +616,7 @@ public:
 		NVSDK_NGX_Parameter_GetUI(capability_params, NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &min_driver_major);
 		NVSDK_NGX_Parameter_GetUI(capability_params, NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &min_driver_minor);
 		if (NVSDK_NGX_SUCCEED(res_driver) && needs_updated_driver != 0) {
-			print_verbose(vformat("DLSS D3D12: NVIDIA driver update required (minimum %u.%u).", min_driver_major, min_driver_minor));
+			print_verbose(vformat("DLSS D3D12: NVIDIA driver update required (minimum %d.%02d).", int(min_driver_major), int(min_driver_minor)));
 			return DRIVER_TOO_OLD;
 		}
 
@@ -637,6 +651,40 @@ public:
 		}
 
 		_discover_loaded_runtime_locked(false);
+		return OK;
+	}
+
+	Status query_rr_availability() override {
+		MutexLock lock(ngx_mutex);
+		if (!initialized || capability_params == nullptr) {
+			return RUNTIME_MISSING;
+		}
+		int rr_needs_driver = 0;
+		const NVSDK_NGX_Result res_rr_drv = NVSDK_NGX_Parameter_GetI(
+				capability_params,
+				NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver,
+				&rr_needs_driver);
+		if (NVSDK_NGX_SUCCEED(res_rr_drv) && rr_needs_driver != 0) {
+			return DRIVER_TOO_OLD;
+		}
+		int rr_available = 0;
+		const NVSDK_NGX_Result res_rr_avail = NVSDK_NGX_Parameter_GetI(
+				capability_params,
+				NVSDK_NGX_Parameter_SuperSamplingDenoising_Available,
+				&rr_available);
+		if (NVSDK_NGX_FAILED(res_rr_avail) || rr_available == 0) {
+			int rr_init_code_i = 0;
+			if (NVSDK_NGX_SUCCEED(NVSDK_NGX_Parameter_GetI(
+						capability_params,
+						NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult,
+						&rr_init_code_i)) &&
+					rr_init_code_i != 0) {
+				const NVSDK_NGX_Result rr_init_code = static_cast<NVSDK_NGX_Result>(static_cast<uint32_t>(rr_init_code_i));
+				last_result = ngx_result_to_i32(rr_init_code);
+				return map_ngx_error(rr_init_code, RUNTIME_MISSING);
+			}
+			return _has_runtime_file_on_disk_locked("nvngx_dlssd.dll") ? NOT_NVIDIA_RTX : RUNTIME_MISSING;
+		}
 		return OK;
 	}
 
@@ -810,7 +858,7 @@ public:
 			NVSDK_NGX_Parameter_SetUI(
 					feature_params,
 					to_ngx_rr_preset_param(p_params.quality_mode),
-					static_cast<unsigned int>(NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default));
+					static_cast<unsigned int>(to_ngx_rr_preset(p_params.rr_preset)));
 
 			NVSDK_NGX_DLSSD_Create_Params dlssd_create = {};
 			dlssd_create.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;

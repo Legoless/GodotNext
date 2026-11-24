@@ -17,3 +17,5 @@ Object-attributed validation allowlist for NVIDIA NGX internal Vulkan objects (p
 
 | VUID | DLL SHA-256 | Driver | Notes |
 |---|---|---|---|
+| `SYNC-HAZARD-WRITE-AFTER-WRITE` | `a5d59de18841f15779039dda567a15dd723ba737915f489271fdb5f109fbfb96` | `595.99.02` | NGX internal `vkCmdClearColorImage` on `nv.ngx.dlssd.resource` inside `nv.ngx.dlssd.Evaluate` (0 GodotNext objects; absent in mock; persists under `GODOT_RG_FULL_BARRIERS=1 GODOT_RG_REORDER=0`). |
+| `VUID-vkCmdDraw-None-09600` | `a5d59de18841f15779039dda567a15dd723ba737915f489271fdb5f109fbfb96` | `595.99.02` | NGX internal `nv.ngx.dlssd.resource` first-frame layout inside `nv.ngx.dlssd.Evaluate` (0 GodotNext objects; absent in mock; persists under `GODOT_RG_FULL_BARRIERS=1 GODOT_RG_REORDER=0`). |

@@ -1085,6 +1085,7 @@ public:
 	// GodotNext: pu_core_rd_native_interop (#102). Vendor interop metadata. The base defaults return
 	// no handle and ERR_UNAVAILABLE; the Vulkan driver fills them for NGX image-view resources.
 	struct TextureNativeInfo {
+		TextureID driver_id;
 		uint64_t image = 0;
 		uint64_t view = 0;
 		uint64_t format = 0;

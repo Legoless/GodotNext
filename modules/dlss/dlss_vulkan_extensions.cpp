@@ -72,6 +72,24 @@ void DLSSVulkanExtensionProvider::set_device_destroying_callback(DeviceDestroyin
 void DLSSVulkanExtensionProvider::set_loaded_dll_sha256(const String &p_sha256) {
 	MutexLock lock(mutex);
 	loaded_dll_sha256 = p_sha256.to_lower();
+	loaded_dll_sha256s.clear();
+	if (!loaded_dll_sha256.is_empty()) {
+		loaded_dll_sha256s.push_back(loaded_dll_sha256);
+	}
+}
+
+void DLSSVulkanExtensionProvider::add_loaded_dll_sha256(const String &p_sha256) {
+	const String lower = p_sha256.to_lower();
+	if (lower.is_empty()) {
+		return;
+	}
+	MutexLock lock(mutex);
+	if (loaded_dll_sha256.is_empty()) {
+		loaded_dll_sha256 = lower;
+	}
+	if (!loaded_dll_sha256s.has(lower)) {
+		loaded_dll_sha256s.push_back(lower);
+	}
 }
 
 void DLSSVulkanExtensionProvider::set_driver_version_for_tests(const String &p_driver_version) {
@@ -253,17 +271,22 @@ VulkanExtensionProvider::ValidationFilterResult DLSSVulkanExtensionProvider::fil
 		return VALIDATION_DEFAULT;
 	}
 	const String vuid = String::utf8(p_callback_data->pMessageIdName);
-	String sha;
+	Vector<String> shas;
 	String drv;
 	Vector<AllowlistRow> extra;
 	{
 		MutexLock lock(mutex);
-		sha = loaded_dll_sha256;
+		shas = loaded_dll_sha256s;
+		if (shas.is_empty() && !loaded_dll_sha256.is_empty()) {
+			shas.push_back(loaded_dll_sha256);
+		}
 		drv = driver_version;
 		extra = test_allowlist_rows;
 	}
-	if (matches_allowlist(vuid, sha, drv, extra)) {
-		return VALIDATION_ALLOWLISTED;
+	for (const String &sha : shas) {
+		if (matches_allowlist(vuid, sha, drv, extra)) {
+			return VALIDATION_ALLOWLISTED;
+		}
 	}
 	return VALIDATION_DEFAULT;
 }

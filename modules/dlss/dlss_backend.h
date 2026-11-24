@@ -71,6 +71,13 @@ public:
 		PRESET_M = 4,
 	};
 
+	enum RRPreset {
+		RR_PRESET_DEFAULT = 0,
+		RR_PRESET_D = 1,
+		RR_PRESET_E = 2,
+		RR_PRESET_F = 3,
+	};
+
 	struct TextureResource {
 		uint64_t image_handle = 0;
 		uint64_t image_view_handle = 0;
@@ -113,6 +120,7 @@ public:
 		Size2i output_size;
 		QualityMode quality_mode = QUALITY_MAX_QUALITY;
 		Preset preset = PRESET_DEFAULT;
+		RRPreset rr_preset = RR_PRESET_DEFAULT;
 		bool is_hdr = true;
 		bool depth_inverted = true;
 		bool mv_low_res = true;
@@ -150,6 +158,7 @@ public:
 		String version;
 		String sha256;
 		String manifest_sha256;
+		Vector<String> additional_sha256s;
 		bool sha256_matches = false;
 	};
 
@@ -161,6 +170,7 @@ public:
 
 	virtual Status init(const InitParams &p_params) = 0;
 	virtual Status query_availability(uint32_t p_vendor_id, bool p_extensions_satisfied) = 0;
+	virtual Status query_rr_availability() { return OK; }
 	virtual Status get_optimal_settings(const Size2i &p_output_size, QualityMode p_quality_mode, OptimalSettings &r_settings) = 0;
 	virtual Status create_feature(const FeatureCreateParams &p_params, uint64_t &r_feature_handle) = 0;
 	virtual Status evaluate(const EvaluateParams &p_params) = 0;

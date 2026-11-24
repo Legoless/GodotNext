@@ -37,7 +37,9 @@ namespace {
 
 struct DenoiserBypassState {
 	Mutex mutex;
-	Vector<StringName> registered;
+	// Store plain Strings rather than StringNames so process-exit static destruction
+	// after StringName::cleanup() never reports orphan StringNames.
+	Vector<String> registered;
 	HashSet<const RenderSceneBuffersRD *> bypassed;
 };
 
@@ -52,17 +54,23 @@ void DenoiserBypass::register_denoiser(const StringName &p_name) {
 	if (p_name == StringName()) {
 		return;
 	}
+	const String name_str = String(p_name);
 	DenoiserBypassState &state = denoiser_bypass_state();
 	MutexLock lock(state.mutex);
-	if (!state.registered.has(p_name)) {
-		state.registered.push_back(p_name);
+	if (!state.registered.has(name_str)) {
+		state.registered.push_back(name_str);
 	}
 }
 
 Vector<StringName> DenoiserBypass::get_registered_denoisers() {
 	DenoiserBypassState &state = denoiser_bypass_state();
 	MutexLock lock(state.mutex);
-	return state.registered;
+	Vector<StringName> out;
+	out.resize(state.registered.size());
+	for (int i = 0; i < state.registered.size(); i++) {
+		out.write[i] = StringName(state.registered[i]);
+	}
+	return out;
 }
 
 void DenoiserBypass::set_bypassed(const RenderSceneBuffersRD *p_rb, bool p_bypassed) {

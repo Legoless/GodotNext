@@ -69,6 +69,7 @@ private:
 	uint32_t vendor_id = 0;
 	String driver_version;
 	String loaded_dll_sha256;
+	Vector<String> loaded_dll_sha256s;
 	bool device_created = false;
 	bool extensions_satisfied = true;
 
@@ -83,6 +84,7 @@ public:
 	void set_backend(DLSSBackend *p_backend);
 	void set_device_destroying_callback(DeviceDestroyingCallback p_cb, void *p_userdata);
 	void set_loaded_dll_sha256(const String &p_sha256);
+	void add_loaded_dll_sha256(const String &p_sha256);
 	void set_driver_version_for_tests(const String &p_driver_version);
 	void set_test_allowlist(const Vector<AllowlistRow> &p_rows);
 

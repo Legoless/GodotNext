@@ -47,13 +47,26 @@ public:
 		bool ray_reconstruction = false;
 	};
 
+	struct MarkerRecord {
+		int marker = 0;
+		uint64_t frame_id = 0;
+	};
+
 private:
 	Status scripted_init_status = OK;
 	Status scripted_availability_status = OK;
+	Status scripted_rr_availability_status = OK;
 	Status scripted_create_status = OK;
 	Status scripted_evaluate_status = OK;
 	int32_t scripted_result_code = 1;
 	uint64_t per_feature_memory_bytes = 64u * 1024u * 1024u;
+
+	// Mock hooks for Streamline/Reflex testing (#209 step 6).
+	bool scripted_streamline_init_ok = true;
+	bool scripted_reflex_available = true;
+	int scripted_reflex_applied_mode = 0;
+	uint32_t scripted_reflex_frame_limit_us = 0;
+	Vector<MarkerRecord> marker_records;
 
 	Vector<CharString> scripted_instance_extensions;
 	Vector<CharString> scripted_device_extensions;
@@ -74,6 +87,7 @@ public:
 	void reset_script();
 	void set_scripted_init_status(Status p_status) { scripted_init_status = p_status; }
 	void set_scripted_availability_status(Status p_status) { scripted_availability_status = p_status; }
+	void set_scripted_rr_availability_status(Status p_status) { scripted_rr_availability_status = p_status; }
 	void set_scripted_create_status(Status p_status) { scripted_create_status = p_status; }
 	void set_scripted_evaluate_status(Status p_status) { scripted_evaluate_status = p_status; }
 	void set_scripted_result_code(int32_t p_code) { scripted_result_code = p_code; }
@@ -81,6 +95,21 @@ public:
 	void set_scripted_instance_extensions(const Vector<CharString> &p_exts) { scripted_instance_extensions = p_exts; }
 	void set_scripted_device_extensions(const Vector<CharString> &p_exts) { scripted_device_extensions = p_exts; }
 	void set_scripted_runtime_info(const LoadedRuntimeInfo &p_info) { scripted_runtime_info = p_info; }
+
+	// Streamline & Reflex mock script controls (#209).
+	void set_scripted_streamline_init_ok(bool p_ok) { scripted_streamline_init_ok = p_ok; }
+	bool get_scripted_streamline_init_ok() const { return scripted_streamline_init_ok; }
+	void set_scripted_reflex_available(bool p_available) { scripted_reflex_available = p_available; }
+	bool get_scripted_reflex_available() const { return scripted_reflex_available; }
+	void record_latency_marker(int p_marker, uint64_t p_frame_id);
+	const Vector<MarkerRecord> &get_marker_records() const { return marker_records; }
+	void clear_marker_records() { marker_records.clear(); }
+	void record_reflex_options(int p_mode, uint32_t p_frame_limit_us) {
+		scripted_reflex_applied_mode = p_mode;
+		scripted_reflex_frame_limit_us = p_frame_limit_us;
+	}
+	int get_recorded_reflex_mode() const { return scripted_reflex_applied_mode; }
+	uint32_t get_recorded_reflex_frame_limit_us() const { return scripted_reflex_frame_limit_us; }
 
 	bool is_initialized() const { return initialized; }
 	uint32_t get_init_call_count() const { return init_call_count; }
@@ -96,6 +125,7 @@ public:
 
 	Status init(const InitParams &p_params) override;
 	Status query_availability(uint32_t p_vendor_id, bool p_extensions_satisfied) override;
+	Status query_rr_availability() override { return scripted_rr_availability_status; }
 	Status get_optimal_settings(const Size2i &p_output_size, QualityMode p_quality_mode, OptimalSettings &r_settings) override;
 	Status create_feature(const FeatureCreateParams &p_params, uint64_t &r_feature_handle) override;
 	Status evaluate(const EvaluateParams &p_params) override;

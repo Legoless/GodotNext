@@ -3615,7 +3615,11 @@ Error RenderingDevice::texture_get_native_info(RID p_texture, RDD::TextureNative
 	if (texture == nullptr) {
 		return ERR_INVALID_PARAMETER;
 	}
-	return driver->texture_get_native_info(texture->driver_id, r_info);
+	const Error err = driver->texture_get_native_info(texture->driver_id, r_info);
+	if (err == OK) {
+		r_info.driver_id = texture->driver_id;
+	}
+	return err;
 }
 
 RenderingDevice::TextureFormat RenderingDevice::texture_get_format(RID p_texture) {

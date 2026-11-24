@@ -5,8 +5,9 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 
-from methods import print_warning
+from methods import print_error, print_warning
 
 Import("env")
 Import("env_modules")
@@ -78,10 +79,16 @@ module_obj = []
 env_dlss.add_source_files(module_obj, "register_types.cpp")
 env_dlss.add_source_files(module_obj, "dlss_backend_mock.cpp")
 env_dlss.add_source_files(module_obj, "dlss_upscaler.cpp")
+env_dlss.add_source_files(module_obj, "dlss_streamline_d3d12.cpp")
+env_dlss.add_source_files(module_obj, "dlss_frame_generation.cpp")
 
 if env["vulkan"]:
     vk_ext_obj = env_dlss.add_source_files(module_obj, "dlss_vulkan_extensions.cpp")
     env_dlss.Depends(vk_ext_obj, allowlist_header)
+
+if env.editor_build:
+    env_dlss.add_source_files(module_obj, "editor/dlss_export_plugin.cpp")
+    env_dlss.add_source_files(module_obj, "editor/dlss_editor_plugin.cpp")
 
 if env["tests"]:
     env_dlss.Append(CPPDEFINES=["TESTS_ENABLED"])
@@ -97,20 +104,65 @@ if env["dlss_backend"] == "ngx":
 
     if env["vulkan"]:
         env_dlss.add_source_files(module_obj, "dlss_ngx_vk.cpp")
+        env_dlss.add_source_files(module_obj, "dlss_ngx_rr.cpp")
+
+    if env.get("d3d12", False):
+        env_dlss.add_source_files(module_obj, "dlss_ngx_d3d12.cpp")
 
     lib_path = env["dlss_resolved_lib"]
     env.Append(LIBS=[env.File(lib_path)])
 
+    sl_lib = env.get("dlss_resolved_streamline_lib", "")
+    sl_include = env.get("dlss_resolved_streamline_include", "")
+    if sl_lib and sl_include and env.get("d3d12", False):
+        env_dlss.Append(CPPDEFINES=["DLSS_STREAMLINE_ENABLED"])
+        env_dlss.Prepend(CPPPATH=[sl_include])
+        env.Append(LIBS=[env.File(sl_lib)])
+        if env.msvc:
+            # Delay-load sl.interposer.dll so runs with FG and Reflex disabled never load Streamline (#209).
+            env.Append(LIBS=["delayimp"])
+            env.Append(LINKFLAGS=["/DELAYLOAD:sl.interposer.dll"])
+
     # Copy runtime libraries unmodified into #bin/ and write bin/dlss_runtime.json.
     sdk_root = env["dlss_resolved_sdk"]
+    sl_root = env.get("dlss_resolved_streamline_sdk", "")
+    license_src = env.get("dlss_resolved_license", "")
+    notices_src = env.get("dlss_resolved_notices", "")
+    interposer_name = env.get("dlss_resolved_interposer_name", "")
     runtime_files = env.get("dlss_resolved_runtime_files", [])
+
     copied_targets = []
     for src_path, _variant in runtime_files:
         basename = os.path.basename(src_path)
+        if "nvperf" in basename.lower():
+            print_error(f"modules/dlss: refusing to copy excluded runtime '{basename}' (U6, #208).")
+            sys.exit(255)
         copied_targets.append(
             env.CommandNoCache(
                 "#bin/" + basename,
                 env.File(src_path),
+                Copy("$TARGET", "$SOURCE"),
+            )
+        )
+
+    license_manifest_name = ""
+    if license_src and os.path.isfile(license_src):
+        license_manifest_name = os.path.basename(license_src)
+        copied_targets.append(
+            env.CommandNoCache(
+                "#bin/" + license_manifest_name,
+                env.File(license_src),
+                Copy("$TARGET", "$SOURCE"),
+            )
+        )
+
+    notices_manifest_name = ""
+    if notices_src and os.path.isfile(notices_src):
+        notices_manifest_name = os.path.basename(notices_src)
+        copied_targets.append(
+            env.CommandNoCache(
+                "#bin/" + notices_manifest_name,
+                env.File(notices_src),
                 Copy("$TARGET", "$SOURCE"),
             )
         )
@@ -135,7 +187,7 @@ if env["dlss_backend"] == "ngx":
                 return res.stdout.strip()
         except OSError:
             pass
-        return "unknown"
+        return os.path.basename(path) if path else "unknown"
 
     def _sha256_file(path):
         h = hashlib.sha256()
@@ -145,7 +197,7 @@ if env["dlss_backend"] == "ngx":
         return h.hexdigest()
 
     def _write_dlss_manifest(target, source, env):
-        from modules.dlss.config import DLSS_SDK_TAG
+        from modules.dlss.config import DLSS_SDK_TAG, STREAMLINE_SDK_TAG
 
         detected_tag = _describe_sdk_tag(sdk_root)
         if detected_tag != DLSS_SDK_TAG:
@@ -157,6 +209,8 @@ if env["dlss_backend"] == "ngx":
         files_list = []
         for src_path, file_variant in runtime_files:
             basename = os.path.basename(src_path)
+            if "nvperf" in basename.lower():
+                raise RuntimeError(f"modules/dlss: excluded runtime '{basename}' must not appear in dlss_runtime.json.")
             digest = _sha256_file(src_path)
             sha_map[basename] = digest
             files_list.append(
@@ -172,7 +226,15 @@ if env["dlss_backend"] == "ngx":
             "variant": variant,
             "sha256": sha_map,
             "files": files_list,
+            "license": license_manifest_name,
+            "notices": notices_manifest_name,
         }
+        if sl_root:
+            manifest["streamline_tag"] = _describe_sdk_tag(sl_root)
+            manifest["streamline_pinned_tag"] = STREAMLINE_SDK_TAG
+        if interposer_name:
+            manifest["interposer"] = interposer_name
+
         out_path = str(target[0])
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -182,6 +244,10 @@ if env["dlss_backend"] == "ngx":
     manifest_sig = env.Value(
         (
             sdk_root,
+            sl_root,
+            license_manifest_name,
+            notices_manifest_name,
+            interposer_name,
             bool(env["dlss_dev_runtime"]),
             tuple((os.path.basename(p), v) for p, v in runtime_files),
         )
