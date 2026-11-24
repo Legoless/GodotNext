@@ -90,6 +90,9 @@ private:
 	// GodotNext: rd_feature_mock
 	bool feature_mock_enabled = false;
 	uint64_t feature_mock_supported = 0;
+	// GodotNext: nextgeo_mesh_raster (#154)
+	bool mesh_shader_limits_mock_enabled = false;
+	RDD::MeshShaderLimits mesh_shader_limits_mock;
 
 	bool local_device_processing = false;
 	bool is_main_instance = false;
@@ -1073,6 +1076,10 @@ public:
 	// Unit tests mock the device capabilities of a RenderingDevice that has no driver: has_feature()
 	// then reports bit (1 << feature) of p_supported_features. Fails on a device with a driver.
 	void set_feature_mock(bool p_enabled, uint64_t p_supported_features = 0);
+	// GodotNext: nextgeo_mesh_raster (#154). Unit tests mock mesh shader limits on a driverless
+	// RenderingDevice so shader-side validation is tested without a GPU. Fails on a device with a driver.
+	void set_mesh_shader_limits_mock(bool p_enabled, const RDD::MeshShaderLimits &p_limits = RDD::MeshShaderLimits());
+	RDD::MeshShaderLimits get_mesh_shader_limits() const;
 	// GodotNext: rd_atomics64 (#175)
 	// The RDAtomics64::Usage bits in p_usage whose feature this device lacks.
 	uint32_t get_missing_int64_atomics(uint32_t p_usage) const;

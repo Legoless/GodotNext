@@ -4374,6 +4374,12 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 		return;
 	}
 
+	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Select mesh vs VS HW path for VSM.
+	const RendererRD::NextGeoHWRasterPath vsm_hw_setting = RendererRD::nextgeo_hw_raster_path_from_variant(GLOBAL_GET("rendering/nextgeo/hw_raster_path"));
+	const RendererRD::NextGeoHWRasterSelection vsm_hw_sel = nextgeo_cut.select_hw_raster_path(vsm_hw_setting, false);
+	inputs.use_mesh_hw_raster = vsm_hw_sel.use_mesh;
+	inputs.hw_raster_reason = vsm_hw_sel.reason;
+
 	// Step 7: Share #155's programmable raster bins and material raster targets (group 2 depth-only).
 	if (nextgeo_programmable_view_active && p_render_data->render_buffers.is_valid()) {
 		Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
@@ -4476,6 +4482,7 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 				}
 				const RID sw_sh = owner.shader->get_raster_target_vsm_shader(false);
 				const RID hw_sh = owner.shader->get_raster_target_vsm_shader(true);
+				const RID hw_mesh_sh = vsm_hw_sel.use_mesh ? owner.shader->get_raster_target_vsm_mesh_shader() : RID();
 				if (sw_sh.is_null() && hw_sh.is_null()) {
 					continue;
 				}
@@ -4485,6 +4492,7 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 				program.features = owner.material->get_raster_features();
 				program.sw_shader = sw_sh;
 				program.hw_shader = hw_sh;
+				program.hw_mesh_shader = hw_mesh_sh;
 				Vector<RD::Uniform> material_uniforms;
 				// GodotNext: nextgeo_texture_cache_refresh (#305) x vsm_nanite (#217). Guard VSM programmable bins against freed textures mid-frame.
 				bool uniforms_valid = owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
@@ -6216,6 +6224,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					raster_inputs.z_near = scene_data->z_near;
 					raster_inputs.orthographic = scene_data->cam_orthogonal;
 					raster_inputs.sw_raster_max_edge_px = float(GLOBAL_GET("rendering/nextgeo/sw_raster_max_edge_px"));
+					// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9, GN-10). Select mesh vs VS HW path.
+					const RendererRD::NextGeoHWRasterPath hw_raster_setting = RendererRD::nextgeo_hw_raster_path_from_variant(GLOBAL_GET("rendering/nextgeo/hw_raster_path"));
+					const RendererRD::NextGeoHWRasterSelection hw_raster_sel = nextgeo_cut.select_hw_raster_path(hw_raster_setting, scene_data->view_count > 1);
+					raster_inputs.use_mesh_hw_raster = hw_raster_sel.use_mesh;
+					raster_inputs.hw_raster_reason = hw_raster_sel.reason;
 					// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). This frame's programmable bins:
 					// each bin's raster target and material parameters, and the scene environment.
 					if (nextgeo_programmable_view_active && nextgeo_raster_bins_used != 0u && !nextgeo_raster_bin_table.is_empty()) {
@@ -6231,6 +6244,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							program.features = owner.material->get_raster_features();
 							program.sw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(false, buffer);
 							program.hw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(true, buffer);
+							if (hw_raster_sel.use_mesh) {
+								program.hw_mesh_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_mesh_shader(buffer);
+							}
 							Vector<RD::Uniform> material_uniforms;
 							// GodotNext: nextgeo_texture_cache_refresh (#305). Streaming swaps refresh texture_cache in
 							// place; this guards against a texture freed mid-frame before update_dirty_resources().

@@ -3317,6 +3317,39 @@
 		<constant name="LIMIT_MAX_STORAGE_BUFFER_RANGE" value="66" enum="Limit">
 			Maximum byte range of a single storage buffer descriptor ([code]VkPhysicalDeviceLimits::maxStorageBufferRange[/code] on Vulkan). Storage buffers larger than this limit cannot be bound as a single descriptor.
 		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS" value="67" enum="Limit">
+			Maximum total number of invocations (local_size_x * local_size_y * local_size_z) in a single task shader workgroup. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_SIZE_X" value="68" enum="Limit">
+			Maximum local workgroup size along the X axis of a task shader. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_SIZE_Y" value="69" enum="Limit">
+			Maximum local workgroup size along the Y axis of a task shader. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_SIZE_Z" value="70" enum="Limit">
+			Maximum local workgroup size along the Z axis of a task shader. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS" value="71" enum="Limit">
+			Maximum total number of invocations (local_size_x * local_size_y * local_size_z) in a single mesh shader workgroup. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_SIZE_X" value="72" enum="Limit">
+			Maximum local workgroup size along the X axis of a mesh shader. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_SIZE_Y" value="73" enum="Limit">
+			Maximum local workgroup size along the Y axis of a mesh shader. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_SIZE_Z" value="74" enum="Limit">
+			Maximum local workgroup size along the Z axis of a mesh shader. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_OUTPUT_VERTICES" value="75" enum="Limit">
+			Maximum number of output vertices a mesh shader workgroup can emit. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_OUTPUT_PRIMITIVES" value="76" enum="Limit">
+			Maximum number of output primitives a mesh shader workgroup can emit. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_PAYLOAD_SIZE" value="77" enum="Limit">
+			Maximum size in bytes of the task payload shared between a task shader workgroup and the mesh shader workgroups it launches. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.
 		</constant>

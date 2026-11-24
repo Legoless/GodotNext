@@ -1065,6 +1065,20 @@ public:
 		// GodotNext: vsm_max_storage_buffer_range (#306). Maximum byte range of a single storage-buffer
 		// descriptor (VkPhysicalDeviceLimits::maxStorageBufferRange on Vulkan).
 		LIMIT_MAX_STORAGE_BUFFER_RANGE,
+		// GodotNext: nextgeo_mesh_raster (#154, plan §21.1 C2, §21.4 N9). The remaining mesh shader limits left by #178:
+		// per-workgroup invocation and axis size caps, mesh output vertex and primitive caps, and task payload bytes.
+		// 0 without SUPPORTS_MESH_SHADER.
+		LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS,
+		LIMIT_MAX_TASK_WORKGROUP_SIZE_X,
+		LIMIT_MAX_TASK_WORKGROUP_SIZE_Y,
+		LIMIT_MAX_TASK_WORKGROUP_SIZE_Z,
+		LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS,
+		LIMIT_MAX_MESH_WORKGROUP_SIZE_X,
+		LIMIT_MAX_MESH_WORKGROUP_SIZE_Y,
+		LIMIT_MAX_MESH_WORKGROUP_SIZE_Z,
+		LIMIT_MAX_MESH_OUTPUT_VERTICES,
+		LIMIT_MAX_MESH_OUTPUT_PRIMITIVES,
+		LIMIT_MAX_TASK_PAYLOAD_SIZE,
 	};
 
 	enum Features {

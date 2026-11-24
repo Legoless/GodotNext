@@ -3579,6 +3579,9 @@
 		<member name="rendering/nextgeo/hiz_debug" type="bool" setter="" getter="" default="false">
 			Read the previous and current Hi-Z chains back with the cut debug stats and report their center depth. It is a debug-only readback and stalls the GPU.
 		</member>
+		<member name="rendering/nextgeo/hw_raster_path" type="int" setter="" getter="" default="0">
+			Hardware rasterization path for NextGeo's visibility and VSM hardware bins: [code]Auto[/code] ([code]0[/code]) keeps the vertex-pulling path until GN-10 passes on the driver in PQ; [code]Vertex[/code] ([code]1[/code]) forces the vertex-pulling path; [code]Mesh[/code] ([code]2[/code]) selects task and mesh shaders on devices supporting indirect mesh-shader draws within NextGeo's limits (Vulkan, Direct3D 12, Metal Apple9+) and falls back to [code]Vertex[/code] otherwise.
+		</member>
 		<member name="rendering/nextgeo/max_pixel_error" type="float" setter="" getter="" default="1.0">
 			The projected-error budget in pixels at the internal resolution for NextGeo's instance and cluster cuts. A cut is accepted when its projected error is at most this value; it applies on the next frame.
 		</member>

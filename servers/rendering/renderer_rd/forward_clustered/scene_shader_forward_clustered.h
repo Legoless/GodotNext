@@ -34,6 +34,8 @@
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_hw.glsl.gen.h"
+// GodotNext: nextgeo_mesh_raster (#154)
+#include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_hw_mesh.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_sw.glsl.gen.h"
 // GodotNext: nextgeo_shading_bins (#158)
 #include "servers/rendering/renderer_rd/shaders/nextgeo/resolve_compute.glsl.gen.h"
@@ -479,6 +481,8 @@ public:
 		Vector<String> raster_defines;
 		RID raster_sw_version;
 		RID raster_hw_version;
+		// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader form of the HW material raster target.
+		RID raster_hw_mesh_version;
 		bool nextgeo_raster_reject_logged = false;
 		// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The Stage A/B resolve's compute form: whether
 		// the material has one (a material NextGeo resolves, and whose code cannot discard or write DEPTH),
@@ -558,6 +562,10 @@ public:
 		RID get_raster_target_shader(bool p_hardware, bool p_buffer) const;
 		// GodotNext: vsm_nanite (#217). Depth-only VSM form (group 2): 32-bit imageAtomicMax, no 64-bit atomics.
 		RID get_raster_target_vsm_shader(bool p_hardware) const;
+		// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Mesh-shader forms of the HW
+		// material raster target (groups 0/1 = VIS64 image/buffer, group 2 = VSM depth-only).
+		RID get_raster_target_mesh_shader(bool p_buffer) const;
+		RID get_raster_target_vsm_mesh_shader() const;
 		void _free_raster_target();
 		// GodotNext: nextgeo_shading_bins (#158). The compute form's shader and pipeline for one variant and
 		// specialization; invalid when the material has no compute form or it did not compile, which also
@@ -626,6 +634,8 @@ public:
 	// enable on demand on devices with matching 64-bit atomic support.
 	RasterMaterialSwShaderRD raster_sw_shader;
 	RasterMaterialHwShaderRD raster_hw_shader;
+	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader form of the HW material raster target.
+	RasterMaterialHwMeshShaderRD raster_hw_mesh_shader;
 	// GodotNext: nextgeo_shading_bins (#158). The Stage A/B resolve's compute form, one group per
 	// ResolveComputeVariant; groups enable when a shading bin first uses them.
 	ResolveComputeShaderRD resolve_compute_shader;
@@ -634,6 +644,8 @@ public:
 	bool raster_buffer_int64_supported = false;
 	// GodotNext: vsm_nanite (#217). Group 2 needs only 32-bit image atomics.
 	bool raster_vsm_supported = false;
+	// GodotNext: nextgeo_mesh_raster (#154). Device supports indirect mesh-shader HW raster.
+	bool raster_mesh_supported = false;
 	bool emulate_point_size = false;
 	bool depth_prepass_enabled = false;
 

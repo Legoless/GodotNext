@@ -50,6 +50,12 @@ layout(set = 0, binding = 3, std430) buffer restrict writeonly RasterBinArgs {
 }
 bin_args;
 
+// GodotNext: nextgeo_mesh_raster (#154). Per-(phase, bin) indirect-count words (0 or 1) for mesh tasks.
+layout(set = 0, binding = 4, std430) buffer restrict writeonly RasterBinHWCounts {
+	uint data[];
+}
+bin_hw_counts;
+
 void main() {
 	if (gl_GlobalInvocationID.x != 0u) {
 		return;
@@ -76,6 +82,13 @@ void main() {
 				bin_args.data[args + 1u] = count;
 				bin_args.data[args + 2u] = 0u;
 				bin_args.data[args + 3u] = 0u;
+				// GodotNext: nextgeo_mesh_raster (#154). VkDrawMeshTasksIndirectCommandEXT: 1 task group per 32 clusters.
+				uint mesh_args = nextgeo_raster_bin_hw_mesh_args_word(params.phase, bin);
+				bin_args.data[mesh_args + 0u] = count == 0u ? 0u : (count - 1u) / 32u + 1u;
+				bin_args.data[mesh_args + 1u] = 1u;
+				bin_args.data[mesh_args + 2u] = 1u;
+				bin_args.data[mesh_args + 3u] = 0u;
+				bin_hw_counts.data[nextgeo_raster_bin_hw_count_word(params.phase, bin)] = count > 0u ? 1u : 0u;
 			}
 			total += count;
 		}

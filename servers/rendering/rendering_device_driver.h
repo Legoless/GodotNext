@@ -1197,24 +1197,34 @@ public:
 	static constexpr uint32_t D3D12_MESH_SHADER_TIER_1 = 10;
 	static MeshShaderCaps d3d12_mesh_shader_caps(uint32_t p_mesh_shader_tier, bool p_dxil_mesh_stages, String &r_log_line);
 
-	// GodotNext: rd_mesh_shaders (#178)
-	// The group counts a mesh task draw may launch, which a driver reports through limit_get(): task workgroups (from
-	// a draw whose pipeline has a task stage) and mesh workgroups (from a draw without one, or from one task
-	// workgroup). Every field is 0 on a device without SUPPORTS_MESH_SHADER.
+	// GodotNext: rd_mesh_shaders (#178), nextgeo_mesh_raster (#154)
+	// The mesh shader limits a driver reports through limit_get(): task and mesh workgroup counts,
+	// local workgroup invocation/axis limits, mesh output vertex/primitive caps, and task payload
+	// byte size. Every field is 0 on a device without SUPPORTS_MESH_SHADER.
 	struct MeshShaderLimits {
 		uint64_t max_task_workgroup_count[3] = {};
 		uint64_t max_task_workgroup_total_count = 0;
 		uint64_t max_mesh_workgroup_count[3] = {};
 		uint64_t max_mesh_workgroup_total_count = 0;
+		// GodotNext: nextgeo_mesh_raster (#154, plan §21.1 C2, §21.4 N9).
+		uint64_t max_task_workgroup_invocations = 0;
+		uint64_t max_task_workgroup_size[3] = {};
+		uint64_t max_mesh_workgroup_invocations = 0;
+		uint64_t max_mesh_workgroup_size[3] = {};
+		uint64_t max_mesh_output_vertices = 0;
+		uint64_t max_mesh_output_primitives = 0;
+		uint64_t max_task_payload_size = 0;
 	};
-	// Writes r_value and returns true when p_limit is one of the eight mesh task group-count limits.
+	// Writes r_value and returns true when p_limit is one of the mesh shader limits.
 	static bool mesh_shader_limit_get(Limit p_limit, const MeshShaderLimits &p_limits, uint64_t &r_value);
-	// Metal Feature Set Tables: no limit on the threadgroups of an object shader grid (reported as UINT32_MAX, the
-	// most a draw can ask for, as the driver reports its compute counts); threadgroups per mesh shader grid 1024 on
-	// Apple7 and Apple8, 1,048,575 on Apple9 and 4,194,303 from Apple10.
+	// Metal Feature Set Tables and MSL 3.x specification: no limit on the threadgroups of an object shader grid
+	// (reported as UINT32_MAX, the most a draw can ask for, as the driver reports its compute counts); threadgroups
+	// per mesh shader grid 1024 on Apple7 and Apple8, 1,048,575 on Apple9 and 4,194,303 from Apple10; up to 1024
+	// threads per object/mesh threadgroup; up to 256 vertices and 512 primitives per mesh; 16,384-byte task payload.
 	static MeshShaderLimits metal_mesh_shader_limits(uint32_t p_apple_family, bool p_mesh_shader);
-	// The Direct3D 12 mesh shader specification: each DispatchMesh() group count below 64k, and their product at most
-	// 2^22, from the command list and from an amplification shader alike.
+	// The Direct3D 12 mesh shader specification: each DispatchMesh() group count below 64k, their product at most
+	// 2^22, at most 128 threads per amplification/mesh threadgroup, at most 256 output vertices and 256 output
+	// primitives, and a 16,384-byte payload.
 	static MeshShaderLimits d3d12_mesh_shader_limits(bool p_mesh_shader);
 
 	// The acceleration-structure limits a driver reports through limit_get(). Every field is 0 on

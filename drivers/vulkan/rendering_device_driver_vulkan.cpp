@@ -1440,15 +1440,23 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			}
 			print_verbose(vformat("- Vulkan bindless tables: %d textures, %d samplers, %d storage buffers per table.", bindless_capabilities.max_textures, bindless_capabilities.max_samplers, bindless_capabilities.max_storage_buffers));
 		}
-		// GodotNext: rd_mesh_shaders (#178). The group counts draw_list_draw_mesh_tasks() checks; 0 without mesh shaders.
+		// GodotNext: rd_mesh_shaders (#178), nextgeo_mesh_raster (#154). Mesh shader workgroup, output and payload
+		// limits; 0 without mesh shaders.
 		mesh_shader_limits = MeshShaderLimits();
 		if (mesh_shader_support) {
 			for (uint32_t i = 0; i < 3; i++) {
 				mesh_shader_limits.max_task_workgroup_count[i] = mesh_shader_properties.maxTaskWorkGroupCount[i];
 				mesh_shader_limits.max_mesh_workgroup_count[i] = mesh_shader_properties.maxMeshWorkGroupCount[i];
+				mesh_shader_limits.max_task_workgroup_size[i] = mesh_shader_properties.maxTaskWorkGroupSize[i];
+				mesh_shader_limits.max_mesh_workgroup_size[i] = mesh_shader_properties.maxMeshWorkGroupSize[i];
 			}
 			mesh_shader_limits.max_task_workgroup_total_count = mesh_shader_properties.maxTaskWorkGroupTotalCount;
 			mesh_shader_limits.max_mesh_workgroup_total_count = mesh_shader_properties.maxMeshWorkGroupTotalCount;
+			mesh_shader_limits.max_task_workgroup_invocations = mesh_shader_properties.maxTaskWorkGroupInvocations;
+			mesh_shader_limits.max_mesh_workgroup_invocations = mesh_shader_properties.maxMeshWorkGroupInvocations;
+			mesh_shader_limits.max_mesh_output_vertices = mesh_shader_properties.maxMeshOutputVertices;
+			mesh_shader_limits.max_mesh_output_primitives = mesh_shader_properties.maxMeshOutputPrimitives;
+			mesh_shader_limits.max_task_payload_size = mesh_shader_properties.maxTaskPayloadSize;
 		}
 
 		subgroup_capabilities.size = subgroup_properties.subgroupSize;

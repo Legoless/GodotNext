@@ -26,10 +26,15 @@ const uint NEXTGEO_RASTER_PASS_VSM = 1u;
 const uint NEXTGEO_RASTER_BIN_FIXED = 0u;
 const uint NEXTGEO_RASTER_BIN_COUNT = 1u;
 
-// raster_args: per phase and bin, one software dispatch (uvec4: x and y groups, 1, 0) and one hardware
-// draw record (VkDrawIndirectCommand). raster_counts: the hardware draw count of each phase.
+// raster_args: per phase and bin, one software dispatch (uvec4: x and y groups, 1, 0), one hardware
+// VS draw record (VkDrawIndirectCommand), and one hardware mesh-task dispatch record
+// (VkDrawMeshTasksIndirectCommandEXT: ceil(hw_clusters / 32), 1, 1, 0; #154).
+// raster_counts: the hardware draw count of each phase (shared by VS and mesh indirect-count draws).
 const uint NEXTGEO_RASTER_ARGS_SW = 0u;
 const uint NEXTGEO_RASTER_ARGS_HW = 1u;
+// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9).
+const uint NEXTGEO_RASTER_ARGS_HW_MESH = 2u;
+const uint NEXTGEO_RASTER_ARGS_KINDS = 3u;
 // Software dispatches split their workgroup count over x and y to stay under the portable limit.
 const uint NEXTGEO_SW_DISPATCH_WIDTH = 32768u;
 
@@ -38,7 +43,7 @@ const uint NEXTGEO_SW_DISPATCH_WIDTH = 32768u;
 // region base and hardware entries grow down from its top; the phase never compacts more clusters
 // than the region holds.
 uint nextgeo_raster_args_word(uint p_phase, uint p_bin, uint p_kind) {
-	return ((p_phase * NEXTGEO_RASTER_BIN_COUNT + p_bin) * 2u + p_kind) * 4u;
+	return ((p_phase * NEXTGEO_RASTER_BIN_COUNT + p_bin) * NEXTGEO_RASTER_ARGS_KINDS + p_kind) * 4u;
 }
 
 // GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). Programmable raster bins: bin 0 is the
@@ -64,6 +69,10 @@ const uint NEXTGEO_RASTER_BIN_STATE_FILL = 512u; // [phase][bin - 1][kind] scatt
 const uint NEXTGEO_RASTER_BIN_STATE_APPENDED = 768u; // [phase] appended entries
 const uint NEXTGEO_RASTER_BIN_ARGS_BINS = 0u; // [phase][bin - 1] SW uvec4 dispatch, then HW uvec4 draw
 const uint NEXTGEO_RASTER_BIN_ARGS_SCATTER = 1024u; // [phase] uvec4 scatter dispatch
+// GodotNext: nextgeo_mesh_raster (#154). [phase][bin - 1] HW mesh-task uvec4 indirect dispatch.
+const uint NEXTGEO_RASTER_BIN_ARGS_HW_MESH = 1032u;
+const uint NEXTGEO_RASTER_BIN_ARGS_WORDS = 1544u;
+const uint NEXTGEO_RASTER_BIN_HW_COUNTS_WORDS = 128u; // [phase][bin - 1] indirect draw count (0 or 1)
 
 uint nextgeo_raster_bin_table_word(uint p_bucket_base, uint p_surface) {
 	return (p_bucket_base + p_surface) >> 2u;
@@ -91,6 +100,14 @@ uint nextgeo_raster_bin_args_word(uint p_phase, uint p_bin, uint p_kind) {
 
 uint nextgeo_raster_bin_scatter_args_word(uint p_phase) {
 	return NEXTGEO_RASTER_BIN_ARGS_SCATTER + p_phase * 4u;
+}
+
+uint nextgeo_raster_bin_hw_mesh_args_word(uint p_phase, uint p_bin) {
+	return NEXTGEO_RASTER_BIN_ARGS_HW_MESH + (p_phase * NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 4u;
+}
+
+uint nextgeo_raster_bin_hw_count_word(uint p_phase, uint p_bin) {
+	return p_phase * NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u);
 }
 
 uint nextgeo_raster_bin_pack_entry(uint p_visible_index, uint p_bin, uint p_kind) {

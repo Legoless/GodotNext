@@ -98,11 +98,14 @@ void ShaderRD::_add_stage(const char *p_code, StageType p_stage_type) {
 				case STAGE_TYPE_INTERSECTION:
 					chunk.type = StageTemplate::Chunk::TYPE_INTERSECTION_GLOBALS;
 					break;
-				// GodotNext: rd_mesh_shaders (#178). Versions carry no globals for these stages, so the line adds no
-				// code (the chunk type is otherwise left unset).
+				// GodotNext: rd_mesh_shaders (#178), nextgeo_mesh_raster (#154). Mesh shaders replace vertex
+				// stages in a raster pipeline, so #GLOBALS expands vertex_globals (empty for non-material
+				// shaders); task shaders carry no material globals.
 				case STAGE_TYPE_TASK:
-				case STAGE_TYPE_MESH:
 					chunk.type = StageTemplate::Chunk::TYPE_TEXT;
+					break;
+				case STAGE_TYPE_MESH:
+					chunk.type = StageTemplate::Chunk::TYPE_VERTEX_GLOBALS;
 					break;
 				default: {
 				}
@@ -595,7 +598,29 @@ RenderingServerTypes::ShaderNativeSourceCode ShaderRD::version_get_native_source
 	source_code.versions.resize(variant_defines.size());
 
 	for (int i = 0; i < source_code.versions.size(); i++) {
-		if (pipeline_type == RD::PIPELINE_TYPE_RASTERIZATION) {
+		if (pipeline_type == RD::PIPELINE_TYPE_RASTERIZATION && mesh_shader_required) {
+			if (!stage_templates[STAGE_TYPE_TASK].chunks.is_empty()) {
+				StringBuilder builder;
+				_build_variant_code(builder, i, version, stage_templates[STAGE_TYPE_TASK]);
+
+				RenderingServerTypes::ShaderNativeSourceCode::Version::Stage stage;
+				stage.name = "task";
+				stage.code = builder.as_string();
+
+				source_code.versions.write[i].stages.push_back(stage);
+			}
+
+			{
+				StringBuilder builder;
+				_build_variant_code(builder, i, version, stage_templates[STAGE_TYPE_MESH]);
+
+				RenderingServerTypes::ShaderNativeSourceCode::Version::Stage stage;
+				stage.name = "mesh";
+				stage.code = builder.as_string();
+
+				source_code.versions.write[i].stages.push_back(stage);
+			}
+		} else if (pipeline_type == RD::PIPELINE_TYPE_RASTERIZATION) {
 			// Vertex stage.
 
 			StringBuilder builder;

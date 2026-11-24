@@ -47,6 +47,7 @@ TEST_FORCE_LINK(test_rd_mesh_shaders)
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_device_graph.h"
+#include "servers/rendering/rendering_device_mesh_shader.h"
 #include "servers/rendering/rendering_shader_container.h"
 
 #include "modules/modules_enabled.gen.h" // For glslang.
@@ -596,5 +597,313 @@ TEST_CASE("[RD][MeshShader] The shader baker bakes mesh-shader versions only for
 #endif
 }
 #endif // TOOLS_ENABLED
+
+// GodotNext: nextgeo_mesh_raster (#154, plan §21.1 C2, §21.4 N9). Remaining mesh shader limits and validation.
+TEST_CASE("[RD][MeshShader] Workgroup invocation, output and payload limits: bound, mapped, and 0 without mesh shaders") {
+	const RenderingDevice::Limit limits[] = {
+		RenderingDevice::LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS,
+		RenderingDevice::LIMIT_MAX_TASK_WORKGROUP_SIZE_X,
+		RenderingDevice::LIMIT_MAX_TASK_WORKGROUP_SIZE_Y,
+		RenderingDevice::LIMIT_MAX_TASK_WORKGROUP_SIZE_Z,
+		RenderingDevice::LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS,
+		RenderingDevice::LIMIT_MAX_MESH_WORKGROUP_SIZE_X,
+		RenderingDevice::LIMIT_MAX_MESH_WORKGROUP_SIZE_Y,
+		RenderingDevice::LIMIT_MAX_MESH_WORKGROUP_SIZE_Z,
+		RenderingDevice::LIMIT_MAX_MESH_OUTPUT_VERTICES,
+		RenderingDevice::LIMIT_MAX_MESH_OUTPUT_PRIMITIVES,
+		RenderingDevice::LIMIT_MAX_TASK_PAYLOAD_SIZE,
+	};
+	CHECK_EQ(int(limits[0]), int(RenderingDevice::LIMIT_MAX_STORAGE_BUFFER_RANGE) + 1);
+	const char *names[] = {
+		"LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS",
+		"LIMIT_MAX_TASK_WORKGROUP_SIZE_X",
+		"LIMIT_MAX_TASK_WORKGROUP_SIZE_Y",
+		"LIMIT_MAX_TASK_WORKGROUP_SIZE_Z",
+		"LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS",
+		"LIMIT_MAX_MESH_WORKGROUP_SIZE_X",
+		"LIMIT_MAX_MESH_WORKGROUP_SIZE_Y",
+		"LIMIT_MAX_MESH_WORKGROUP_SIZE_Z",
+		"LIMIT_MAX_MESH_OUTPUT_VERTICES",
+		"LIMIT_MAX_MESH_OUTPUT_PRIMITIVES",
+		"LIMIT_MAX_TASK_PAYLOAD_SIZE",
+	};
+
+	RenderingDeviceDriver::MeshShaderLimits mapped;
+	mapped.max_task_workgroup_invocations = 128;
+	mapped.max_task_workgroup_size[0] = 128;
+	mapped.max_task_workgroup_size[1] = 64;
+	mapped.max_task_workgroup_size[2] = 32;
+	mapped.max_mesh_workgroup_invocations = 256;
+	mapped.max_mesh_workgroup_size[0] = 256;
+	mapped.max_mesh_workgroup_size[1] = 128;
+	mapped.max_mesh_workgroup_size[2] = 64;
+	mapped.max_mesh_output_vertices = 256;
+	mapped.max_mesh_output_primitives = 512;
+	mapped.max_task_payload_size = 16384;
+	const uint64_t expected[] = { 128, 128, 64, 32, 256, 256, 128, 64, 256, 512, 16384 };
+
+	RenderingDevice *rd = memnew(RenderingDevice);
+	rd->set_feature_mock(true, feature_bit(RenderingDevice::SUPPORTS_MESH_SHADER));
+	rd->set_mesh_shader_limits_mock(true, mapped);
+	for (uint32_t i = 0; i < std_size(limits); i++) {
+		CHECK_EQ(int(limits[i]), int(limits[0]) + int(i));
+		bool valid = false;
+		CHECK_EQ(ClassDB::get_integer_constant("RenderingDevice", names[i], &valid), int64_t(limits[i]));
+		CHECK_MESSAGE(valid, names[i]);
+		uint64_t value = 0;
+		CHECK(RenderingDeviceDriver::mesh_shader_limit_get(limits[i], mapped, value));
+		CHECK_EQ(value, expected[i]);
+		CHECK_EQ(rd->limit_get(limits[i]), expected[i]);
+
+		// Without mesh shaders every driver reports 0.
+		CHECK(RenderingDeviceDriver::mesh_shader_limit_get(limits[i], RenderingDeviceDriver::metal_mesh_shader_limits(1010, false), value));
+		CHECK_EQ(value, 0u);
+		CHECK(RenderingDeviceDriver::mesh_shader_limit_get(limits[i], RenderingDeviceDriver::d3d12_mesh_shader_limits(false), value));
+		CHECK_EQ(value, 0u);
+	}
+	// Without SUPPORTS_MESH_SHADER, limit_get reports 0 for every mesh shader limit.
+	rd->set_feature_mock(true, 0);
+	for (RenderingDevice::Limit lim : limits) {
+		CHECK_EQ(rd->limit_get(lim), 0u);
+	}
+	memdelete(rd);
+
+	// D3D12 mesh shader specification limits when enabled.
+	const RenderingDeviceDriver::MeshShaderLimits d3d12 = RenderingDeviceDriver::d3d12_mesh_shader_limits(true);
+	CHECK_EQ(d3d12.max_task_workgroup_invocations, 128u);
+	CHECK_EQ(d3d12.max_task_workgroup_size[0], 128u);
+	CHECK_EQ(d3d12.max_task_workgroup_size[1], 128u);
+	CHECK_EQ(d3d12.max_task_workgroup_size[2], 128u);
+	CHECK_EQ(d3d12.max_mesh_workgroup_invocations, 128u);
+	CHECK_EQ(d3d12.max_mesh_workgroup_size[0], 128u);
+	CHECK_EQ(d3d12.max_mesh_workgroup_size[1], 128u);
+	CHECK_EQ(d3d12.max_mesh_workgroup_size[2], 128u);
+	CHECK_EQ(d3d12.max_mesh_output_vertices, 256u);
+	CHECK_EQ(d3d12.max_mesh_output_primitives, 256u);
+	CHECK_EQ(d3d12.max_task_payload_size, 16384u);
+
+	// Metal Feature Set Tables / MSL 3.x limits when enabled (Apple7+).
+	for (uint32_t family : { 1007u, 1008u, 1009u, 1010u, 1011u }) {
+		const RenderingDeviceDriver::MeshShaderLimits metal = RenderingDeviceDriver::metal_mesh_shader_limits(family, true);
+		CHECK_EQ(metal.max_task_workgroup_invocations, 1024u);
+		CHECK_EQ(metal.max_task_workgroup_size[0], 1024u);
+		CHECK_EQ(metal.max_task_workgroup_size[1], 1024u);
+		CHECK_EQ(metal.max_task_workgroup_size[2], 1024u);
+		CHECK_EQ(metal.max_mesh_workgroup_invocations, 1024u);
+		CHECK_EQ(metal.max_mesh_workgroup_size[0], 1024u);
+		CHECK_EQ(metal.max_mesh_workgroup_size[1], 1024u);
+		CHECK_EQ(metal.max_mesh_workgroup_size[2], 1024u);
+		CHECK_EQ(metal.max_mesh_output_vertices, 256u);
+		CHECK_EQ(metal.max_mesh_output_primitives, 512u);
+		CHECK_EQ(metal.max_task_payload_size, 16384u);
+	}
+}
+
+#ifdef MODULE_GLSLANG_ENABLED
+TEST_CASE("[RD][MeshShader] Task and mesh shaders exceeding device limits are rejected with one named error") {
+	auto compile_stage = [](RDC::ShaderStage p_stage, const String &p_source) -> Vector<uint8_t> {
+		String error;
+		const Vector<uint8_t> spirv = compile_glslang_shader(p_stage, p_source, RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_4, &error);
+		REQUIRE_MESSAGE(!spirv.is_empty(), error);
+		return spirv;
+	};
+
+	const String valid_task_src = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+struct Payload { uint clusters[32]; };
+taskPayloadSharedEXT Payload payload;
+void main() {
+	payload.clusters[gl_LocalInvocationIndex] = gl_LocalInvocationIndex;
+	barrier();
+	EmitMeshTasksEXT(32u, 1u, 1u);
+}
+)";
+	const String valid_mesh_src = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 128, max_primitives = 128) out;
+struct Payload { uint clusters[32]; };
+taskPayloadSharedEXT Payload payload;
+void main() {
+	SetMeshOutputsEXT(0u, 0u);
+}
+)";
+	const Vector<uint8_t> valid_task_spv = compile_stage(RDC::SHADER_STAGE_TASK, valid_task_src);
+	const Vector<uint8_t> valid_mesh_spv = compile_stage(RDC::SHADER_STAGE_MESH, valid_mesh_src);
+
+	// SPIR-V inspection reads exact local sizes, output counts, and payload size.
+	const RDMeshShader::StageProperties task_props = RDMeshShader::inspect_spirv(valid_task_spv.ptr(), uint64_t(valid_task_spv.size()));
+	REQUIRE(task_props.valid_spirv);
+	CHECK_EQ(task_props.local_size[0], 32u);
+	CHECK_EQ(task_props.local_size[1], 1u);
+	CHECK_EQ(task_props.local_size[2], 1u);
+	CHECK_EQ(task_props.task_payload_size, 128u);
+
+	const RDMeshShader::StageProperties mesh_props = RDMeshShader::inspect_spirv(valid_mesh_spv.ptr(), uint64_t(valid_mesh_spv.size()));
+	REQUIRE(mesh_props.valid_spirv);
+	CHECK_EQ(mesh_props.local_size[0], 128u);
+	CHECK_EQ(mesh_props.local_size[1], 1u);
+	CHECK_EQ(mesh_props.local_size[2], 1u);
+	CHECK_EQ(mesh_props.output_vertices, 128u);
+	CHECK_EQ(mesh_props.output_primitives, 128u);
+	CHECK_EQ(mesh_props.task_payload_size, 128u);
+
+	// Valid NextGeo-sized task+mesh shader passes against both D3D12 and Metal limits.
+	Vector<RDC::ShaderStageSPIRVData> valid_stages;
+	{
+		RDC::ShaderStageSPIRVData t;
+		t.shader_stage = RDC::SHADER_STAGE_TASK;
+		t.spirv = valid_task_spv;
+		valid_stages.push_back(t);
+		RDC::ShaderStageSPIRVData m;
+		m.shader_stage = RDC::SHADER_STAGE_MESH;
+		m.spirv = valid_mesh_spv;
+		valid_stages.push_back(m);
+	}
+	String err_msg;
+	CHECK(RDMeshShader::validate_shader("valid_nextgeo", valid_stages, RenderingDeviceDriver::d3d12_mesh_shader_limits(true), err_msg));
+	CHECK(err_msg.is_empty());
+	CHECK(RDMeshShader::validate_shader("valid_nextgeo", valid_stages, RenderingDeviceDriver::metal_mesh_shader_limits(1009, true), err_msg));
+	CHECK(err_msg.is_empty());
+
+	// RenderingDevice rejects each violation with exactly one named error before reaching the driver.
+	RenderingDevice *rd = memnew(RenderingDevice);
+	rd->set_feature_mock(true, feature_bit(RenderingDevice::SUPPORTS_MESH_SHADER) | feature_bit(RenderingDevice::SUPPORTS_MESH_SHADER_INDIRECT));
+	const RenderingDeviceDriver::MeshShaderLimits base_limits = RenderingDeviceDriver::d3d12_mesh_shader_limits(true);
+
+	SUBCASE("Task local workgroup invocations exceed LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS") {
+		RenderingDeviceDriver::MeshShaderLimits tight = base_limits;
+		tight.max_task_workgroup_invocations = 16;
+		rd->set_mesh_shader_limits_mock(true, tight);
+		MeshErrorCapture errors;
+		ERR_PRINT_OFF;
+		const Vector<uint8_t> bin = rd->shader_compile_binary_from_spirv(valid_stages, "task_inv_test");
+		ERR_PRINT_ON;
+		CHECK(bin.is_empty());
+		CHECK_EQ(errors.count, 1);
+		CHECK(errors.last_message.contains("LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS"));
+	}
+
+	SUBCASE("Task payload size exceeds LIMIT_MAX_TASK_PAYLOAD_SIZE") {
+		RenderingDeviceDriver::MeshShaderLimits tight = base_limits;
+		tight.max_task_payload_size = 64;
+		rd->set_mesh_shader_limits_mock(true, tight);
+		MeshErrorCapture errors;
+		ERR_PRINT_OFF;
+		const RID sh = rd->shader_create_from_spirv(valid_stages, "task_payload_test");
+		ERR_PRINT_ON;
+		CHECK_FALSE(sh.is_valid());
+		CHECK_EQ(errors.count, 1);
+		CHECK(errors.last_message.contains("LIMIT_MAX_TASK_PAYLOAD_SIZE"));
+	}
+
+	SUBCASE("Mesh local workgroup invocations exceed LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS") {
+		RenderingDeviceDriver::MeshShaderLimits tight = base_limits;
+		tight.max_mesh_workgroup_invocations = 64;
+		rd->set_mesh_shader_limits_mock(true, tight);
+		MeshErrorCapture errors;
+		ERR_PRINT_OFF;
+		const Vector<uint8_t> bin = rd->shader_compile_binary_from_spirv(valid_stages, "mesh_inv_test");
+		ERR_PRINT_ON;
+		CHECK(bin.is_empty());
+		CHECK_EQ(errors.count, 1);
+		CHECK(errors.last_message.contains("LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS"));
+	}
+
+	SUBCASE("Mesh output vertices exceed LIMIT_MAX_MESH_OUTPUT_VERTICES") {
+		RenderingDeviceDriver::MeshShaderLimits tight = base_limits;
+		tight.max_mesh_output_vertices = 64;
+		rd->set_mesh_shader_limits_mock(true, tight);
+		MeshErrorCapture errors;
+		ERR_PRINT_OFF;
+		const RID sh = rd->shader_create_from_spirv(valid_stages, "mesh_verts_test");
+		ERR_PRINT_ON;
+		CHECK_FALSE(sh.is_valid());
+		CHECK_EQ(errors.count, 1);
+		CHECK(errors.last_message.contains("LIMIT_MAX_MESH_OUTPUT_VERTICES"));
+	}
+
+	SUBCASE("Mesh output primitives exceed LIMIT_MAX_MESH_OUTPUT_PRIMITIVES") {
+		RenderingDeviceDriver::MeshShaderLimits tight = base_limits;
+		tight.max_mesh_output_primitives = 64;
+		rd->set_mesh_shader_limits_mock(true, tight);
+		MeshErrorCapture errors;
+		ERR_PRINT_OFF;
+		const Vector<uint8_t> bin = rd->shader_compile_binary_from_spirv(valid_stages, "mesh_prims_test");
+		ERR_PRINT_ON;
+		CHECK(bin.is_empty());
+		CHECK_EQ(errors.count, 1);
+		CHECK(errors.last_message.contains("LIMIT_MAX_MESH_OUTPUT_PRIMITIVES"));
+	}
+
+	SUBCASE("Oversized 20 KiB payload fails even against D3D12/Metal 16 KiB limit") {
+		const String big_payload_src = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+struct BigPayload { uint words[5120]; };
+taskPayloadSharedEXT BigPayload payload;
+void main() {
+	payload.words[gl_LocalInvocationIndex] = gl_LocalInvocationIndex;
+	barrier();
+	EmitMeshTasksEXT(1u, 1u, 1u);
+}
+)";
+		Vector<RDC::ShaderStageSPIRVData> big_stages;
+		RDC::ShaderStageSPIRVData t;
+		t.shader_stage = RDC::SHADER_STAGE_TASK;
+		t.spirv = compile_stage(RDC::SHADER_STAGE_TASK, big_payload_src);
+		big_stages.push_back(t);
+
+		rd->set_mesh_shader_limits_mock(true, base_limits);
+		MeshErrorCapture errors;
+		ERR_PRINT_OFF;
+		const Vector<uint8_t> bin = rd->shader_compile_binary_from_spirv(big_stages, "big_payload");
+		ERR_PRINT_ON;
+		CHECK(bin.is_empty());
+		CHECK_EQ(errors.count, 1);
+		CHECK(errors.last_message.contains("LIMIT_MAX_TASK_PAYLOAD_SIZE"));
+	}
+
+	memdelete(rd);
+}
+#endif // MODULE_GLSLANG_ENABLED
+
+TEST_CASE("[RD][MeshShader] ShaderRD injects #GLOBALS into #[mesh] and exposes task/mesh native source") {
+	static const char *MESH_WITH_GLOBALS = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+#VERSION_DEFINES
+layout(local_size_x = 32) in;
+layout(triangles, max_vertices = 3, max_primitives = 1) out;
+#GLOBALS
+void main() {
+	SetMeshOutputsEXT(0, 0);
+}
+)";
+	class GlobalsMeshShaderRD : public ShaderRD {
+	public:
+		GlobalsMeshShaderRD() {
+			setup_mesh(SHADER_RD_TASK, MESH_WITH_GLOBALS, SHADER_RD_FRAGMENT, "GlobalsMeshShaderRD");
+		}
+	};
+	GlobalsMeshShaderRD shader;
+	Vector<ShaderRD::VariantDefine> defines;
+	defines.push_back(ShaderRD::VariantDefine(0, "\n#define MESH_GROUPS 1\n", false));
+	shader.initialize(defines);
+	const RID version = shader.version_create(false);
+	REQUIRE(version.is_valid());
+	shader.version_set_code(version, HashMap<String, String>(), "", "float custom_mesh_global = 1.0;\n", "", Vector<String>());
+	const Vector<String> sources = shader.version_build_variant_stage_sources(version, 0);
+	REQUIRE_EQ(sources.size(), int(RDC::SHADER_STAGE_MAX));
+	CHECK(sources[RDC::SHADER_STAGE_MESH].contains("float custom_mesh_global = 1.0;"));
+	const RenderingServerTypes::ShaderNativeSourceCode native = shader.version_get_native_source_code(version);
+	REQUIRE_EQ(native.versions.size(), 1);
+	REQUIRE_EQ(native.versions[0].stages.size(), 3);
+	CHECK_EQ(native.versions[0].stages[0].name, String("task"));
+	CHECK_EQ(native.versions[0].stages[1].name, String("mesh"));
+	CHECK_EQ(native.versions[0].stages[2].name, String("fragment"));
+	CHECK(native.versions[0].stages[1].code.contains("float custom_mesh_global = 1.0;"));
+	CHECK(shader.version_free(version));
+}
 
 #endif // RD_ENABLED

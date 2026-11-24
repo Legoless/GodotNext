@@ -403,9 +403,12 @@ TEST_CASE("[NextGeo][RasterBins] The bin layouts and their GLSL copies agree") {
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_APPENDED")), int64_t(NEXTGEO_RASTER_BIN_STATE_APPENDED));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ARGS_BINS")), int64_t(NEXTGEO_RASTER_BIN_ARGS_BINS));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ARGS_SCATTER")), int64_t(NEXTGEO_RASTER_BIN_ARGS_SCATTER));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ARGS_HW_MESH")), int64_t(NEXTGEO_RASTER_BIN_ARGS_HW_MESH));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ARGS_WORDS")), int64_t(NEXTGEO_RASTER_BIN_ARGS_WORDS));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_HW_COUNTS_WORDS")), int64_t(NEXTGEO_RASTER_BIN_HW_COUNTS_WORDS));
 
 	// State and indirect-argument buffers stay disjoint (no dual-usage hazard), and regions do not overlap:
-	// 2 phases of 64 programmable bins (IDs 1..64) of 2 kinds.
+	// 2 phases of 64 programmable bins (IDs 1..64) of 2 kinds, plus HW mesh-task indirect records (#154).
 	CHECK_EQ(nextgeo_raster_bin_count_word(0u, 1u, 0u), NEXTGEO_RASTER_BIN_STATE_COUNTS);
 	CHECK_EQ(nextgeo_raster_bin_count_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_CURSORS);
 	CHECK_EQ(nextgeo_raster_bin_cursor_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_FILL);
@@ -414,12 +417,18 @@ TEST_CASE("[NextGeo][RasterBins] The bin layouts and their GLSL copies agree") {
 	CHECK_EQ(nextgeo_raster_bin_args_word(0u, 1u, 0u), NEXTGEO_RASTER_BIN_ARGS_BINS);
 	CHECK_EQ(nextgeo_raster_bin_args_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 4u, NEXTGEO_RASTER_BIN_ARGS_SCATTER);
 	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(0u), NEXTGEO_RASTER_BIN_ARGS_SCATTER);
-	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(1u) + 4u, NEXTGEO_RASTER_BIN_ARGS_WORDS);
+	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(1u) + 4u, NEXTGEO_RASTER_BIN_ARGS_HW_MESH);
+	CHECK_EQ(nextgeo_raster_bin_hw_mesh_args_word(0u, 1u), NEXTGEO_RASTER_BIN_ARGS_HW_MESH);
+	CHECK_EQ(nextgeo_raster_bin_hw_mesh_args_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX) + 4u, NEXTGEO_RASTER_BIN_ARGS_WORDS);
+	CHECK_EQ(nextgeo_raster_bin_hw_count_word(0u, 1u), 0u);
+	CHECK_EQ(nextgeo_raster_bin_hw_count_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX) + 1u, NEXTGEO_RASTER_BIN_HW_COUNTS_WORDS);
 	// Indirect arguments sit on 16-byte boundaries.
 	CHECK_EQ(nextgeo_raster_bin_args_word(0u, 5u, 1u) % 4u, 0u);
 	CHECK_EQ(nextgeo_raster_bin_args_word(1u, 64u, 1u) % 4u, 0u);
 	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(0u) % 4u, 0u);
 	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(1u) % 4u, 0u);
+	CHECK_EQ(nextgeo_raster_bin_hw_mesh_args_word(0u, 1u) % 4u, 0u);
+	CHECK_EQ(nextgeo_raster_bin_hw_mesh_args_word(1u, 64u) % 4u, 0u);
 	// The hardware draw keeps #162's per-cluster vertex count.
 	CHECK_EQ(NEXTGEO_RASTER_VERTEX_COUNT, 384u);
 

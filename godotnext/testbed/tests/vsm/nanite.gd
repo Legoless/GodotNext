@@ -129,7 +129,16 @@ func _ready() -> void:
 	var vsm_setting := int(ProjectSettings.get_setting("rendering/lights_and_shadows/shadow_method", 0))
 	var default_mode := "vsm" if (OS.get_environment("GODOT_DEV_VSM") != "" or vsm_setting == 1) else "atlas"
 	_mode = SceneArgs.value("--shadows", default_mode)
+	var hw_raster_arg := SceneArgs.value("--hw_raster_path", "").strip_edges().to_lower()
+	if hw_raster_arg != "":
+		var hw_raster_enum := 0
+		if hw_raster_arg == "vertex" or hw_raster_arg == "vs":
+			hw_raster_enum = 1
+		elif hw_raster_arg == "mesh":
+			hw_raster_enum = 2
+		ProjectSettings.set_setting("rendering/nextgeo/hw_raster_path", hw_raster_enum)
 	_result["shadows"] = _mode
+	_result["hw_raster_path_arg"] = hw_raster_arg if hw_raster_arg != "" else "default"
 	_result["driver"] = RenderingServer.get_current_rendering_driver_name()
 	_result["device"] = RenderingServer.get_video_adapter_name()
 
@@ -433,6 +442,8 @@ func _settle_and_collect(p_count: int) -> Dictionary:
 		"overflow": 0,
 		"sink": 0,
 		"programmable_bins": 0,
+		"hw_raster_path": "",
+		"hw_raster_reason": "",
 	}
 	var last_info := {}
 	for _i in p_count:
@@ -444,6 +455,10 @@ func _settle_and_collect(p_count: int) -> Dictionary:
 			peak["directional_chains"] = maxi(int(peak["directional_chains"]), int(n.get("directional_chains", 0)))
 			peak["local_chains"] = maxi(int(peak["local_chains"]), int(n.get("local_chains", 0)))
 			peak["programmable_bins"] = maxi(int(peak["programmable_bins"]), int(n.get("programmable_bins", 0)))
+			if n.has("hw_raster_path"):
+				peak["hw_raster_path"] = String(n.get("hw_raster_path", ""))
+			if n.has("hw_raster_reason"):
+				peak["hw_raster_reason"] = String(n.get("hw_raster_reason", ""))
 			if bool(n.get("gpu_counters_valid", false)):
 				peak["gpu_counters_valid"] = true
 				for k in ["directional_clusters", "local_clusters", "sw_clusters", "hw_clusters", "prog_sw_clusters", "prog_hw_clusters", "sw_writes", "hiz_pages_built", "hiz_culled_nodes", "hiz_culled_clusters", "overflow", "sink"]:

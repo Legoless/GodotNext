@@ -43,6 +43,8 @@
 #include "servers/rendering/rendering_device_binds.h"
 // GodotNext: rd_atomics64 (#175)
 #include "servers/rendering/rendering_device_atomics64.h"
+// GodotNext: nextgeo_mesh_raster (#154)
+#include "servers/rendering/rendering_device_mesh_shader.h"
 // GodotNext: rd_ray_query_api
 #include "servers/rendering/rendering_device_ray_query.h"
 // GodotNext: rd_rt_pipelines (#179)
@@ -371,6 +373,20 @@ static bool _spirv_has_mesh_stages(const Vector<RenderingDeviceCommons::ShaderSt
 	return false;
 }
 
+// GodotNext: nextgeo_mesh_raster (#154, plan §21.1 C2, §21.4 N9). Validates every task and mesh stage's
+// local workgroup size, output vertex/primitive caps, and task payload size against the device limits
+// with one named error before native translation.
+static bool _mesh_shader_limits_supported(const RenderingDevice *p_device, const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	if (!_spirv_has_mesh_stages(p_spirv)) {
+		return true;
+	}
+	String error;
+	if (!RDMeshShader::validate_shader(p_shader_name, p_spirv, p_device->get_mesh_shader_limits(), error)) {
+		ERR_FAIL_V_MSG(false, error);
+	}
+	return true;
+}
+
 RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name, bool p_base_instance_native) {
 	// GodotNext: rd_atomics64 (#175). shader_compile_binary_from_spirv() checks too; checking here as well
 	// keeps it to the one error, without the empty-bytecode error below.
@@ -391,6 +407,10 @@ RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData>
 	}
 	// GodotNext: rd_mesh_shaders (#178). Likewise.
 	if (!_mesh_stages_supported(this, _spirv_has_mesh_stages(p_spirv), p_shader_name)) {
+		return RID();
+	}
+	// GodotNext: nextgeo_mesh_raster (#154). Check task/mesh workgroup, output and payload limits once.
+	if (!_mesh_shader_limits_supported(this, p_spirv, p_shader_name)) {
 		return RID();
 	}
 
@@ -4899,6 +4919,10 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	if (!_mesh_stages_supported(this, _spirv_has_mesh_stages(p_spirv), p_shader_name)) {
 		return Vector<uint8_t>();
 	}
+	// GodotNext: nextgeo_mesh_raster (#154)
+	if (!_mesh_shader_limits_supported(this, p_spirv, p_shader_name)) {
+		return Vector<uint8_t>();
+	}
 
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
@@ -4950,6 +4974,11 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 	}
 	if (!_mesh_stages_supported(this, has_mesh_stages, String::utf8(shader_container->shader_name.get_data()))) {
 		return RID();
+	}
+	// GodotNext: nextgeo_mesh_raster (#154). Also verify cached/baked task and mesh local workgroup sizes.
+	if (has_mesh_stages) {
+		String mesh_limit_error;
+		ERR_FAIL_COND_V_MSG(!RDMeshShader::validate_reflection_local_sizes(String::utf8(shader_container->shader_name.get_data()), shader_container->get_shader_reflection(), get_mesh_shader_limits(), mesh_limit_error), RID(), mesh_limit_error);
 	}
 
 	Vector<RDD::ImmutableSampler> driver_immutable_samplers;
@@ -10726,6 +10755,16 @@ String RenderingDevice::get_captured_timestamp_name(uint32_t p_index) const {
 }
 
 uint64_t RenderingDevice::limit_get(Limit p_limit) const {
+	// GodotNext: nextgeo_mesh_raster (#154). Unit tests mock mesh shader limits on a driverless RenderingDevice.
+	if (unlikely(mesh_shader_limits_mock_enabled)) {
+		uint64_t mocked_value = 0;
+		if (RDD::mesh_shader_limit_get(p_limit, mesh_shader_limits_mock, mocked_value)) {
+			return has_feature(SUPPORTS_MESH_SHADER) ? mocked_value : 0;
+		}
+	}
+	if (unlikely(driver == nullptr)) {
+		return 0;
+	}
 	// GodotNext: rd_rt_pipelines (#179). Drivers without SER return their default for unknown limits.
 	if (p_limit == LIMIT_RAYTRACING_REORDER_EXTENSIONS && !has_feature(SUPPORTS_RAYTRACING_REORDER)) {
 		return 0;
@@ -10953,6 +10992,9 @@ bool RenderingDevice::has_feature(const Features p_feature) const {
 	if (unlikely(feature_mock_enabled)) {
 		return (feature_mock_supported & (uint64_t(1) << p_feature)) != 0;
 	}
+	if (unlikely(driver == nullptr)) {
+		return false;
+	}
 
 	// Some features can be deduced from the capabilities without querying the driver and looking at the capabilities.
 	switch (p_feature) {
@@ -10977,6 +11019,40 @@ void RenderingDevice::set_feature_mock(bool p_enabled, uint64_t p_supported_feat
 	ERR_FAIL_COND_MSG(driver != nullptr, "Device features can only be mocked on a RenderingDevice without a driver.");
 	feature_mock_enabled = p_enabled;
 	feature_mock_supported = p_enabled ? p_supported_features : 0;
+}
+
+// GodotNext: nextgeo_mesh_raster (#154)
+void RenderingDevice::set_mesh_shader_limits_mock(bool p_enabled, const RDD::MeshShaderLimits &p_limits) {
+	ERR_FAIL_COND_MSG(driver != nullptr, "Mesh shader limits can only be mocked on a RenderingDevice without a driver.");
+	mesh_shader_limits_mock_enabled = p_enabled;
+	mesh_shader_limits_mock = p_enabled ? p_limits : RDD::MeshShaderLimits();
+}
+
+RDD::MeshShaderLimits RenderingDevice::get_mesh_shader_limits() const {
+	RDD::MeshShaderLimits limits;
+	if (!has_feature(SUPPORTS_MESH_SHADER)) {
+		return limits;
+	}
+	limits.max_task_workgroup_count[0] = limit_get(LIMIT_MAX_TASK_WORKGROUP_COUNT_X);
+	limits.max_task_workgroup_count[1] = limit_get(LIMIT_MAX_TASK_WORKGROUP_COUNT_Y);
+	limits.max_task_workgroup_count[2] = limit_get(LIMIT_MAX_TASK_WORKGROUP_COUNT_Z);
+	limits.max_task_workgroup_total_count = limit_get(LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT);
+	limits.max_mesh_workgroup_count[0] = limit_get(LIMIT_MAX_MESH_WORKGROUP_COUNT_X);
+	limits.max_mesh_workgroup_count[1] = limit_get(LIMIT_MAX_MESH_WORKGROUP_COUNT_Y);
+	limits.max_mesh_workgroup_count[2] = limit_get(LIMIT_MAX_MESH_WORKGROUP_COUNT_Z);
+	limits.max_mesh_workgroup_total_count = limit_get(LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT);
+	limits.max_task_workgroup_invocations = limit_get(LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS);
+	limits.max_task_workgroup_size[0] = limit_get(LIMIT_MAX_TASK_WORKGROUP_SIZE_X);
+	limits.max_task_workgroup_size[1] = limit_get(LIMIT_MAX_TASK_WORKGROUP_SIZE_Y);
+	limits.max_task_workgroup_size[2] = limit_get(LIMIT_MAX_TASK_WORKGROUP_SIZE_Z);
+	limits.max_mesh_workgroup_invocations = limit_get(LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS);
+	limits.max_mesh_workgroup_size[0] = limit_get(LIMIT_MAX_MESH_WORKGROUP_SIZE_X);
+	limits.max_mesh_workgroup_size[1] = limit_get(LIMIT_MAX_MESH_WORKGROUP_SIZE_Y);
+	limits.max_mesh_workgroup_size[2] = limit_get(LIMIT_MAX_MESH_WORKGROUP_SIZE_Z);
+	limits.max_mesh_output_vertices = limit_get(LIMIT_MAX_MESH_OUTPUT_VERTICES);
+	limits.max_mesh_output_primitives = limit_get(LIMIT_MAX_MESH_OUTPUT_PRIMITIVES);
+	limits.max_task_payload_size = limit_get(LIMIT_MAX_TASK_PAYLOAD_SIZE);
+	return limits;
 }
 
 // GodotNext: rd_atomics64 (#175)
@@ -11873,6 +11949,18 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT);
 	// GodotNext: vsm_max_storage_buffer_range (#306)
 	BIND_ENUM_CONSTANT(LIMIT_MAX_STORAGE_BUFFER_RANGE);
+	// GodotNext: nextgeo_mesh_raster (#154)
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_SIZE_X);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_SIZE_Y);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_SIZE_Z);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_SIZE_X);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_SIZE_Y);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_SIZE_Z);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_OUTPUT_VERTICES);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_OUTPUT_PRIMITIVES);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_PAYLOAD_SIZE);
 
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);

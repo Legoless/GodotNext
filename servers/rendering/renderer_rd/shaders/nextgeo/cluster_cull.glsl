@@ -862,6 +862,8 @@ void main() {
 				if (h < vsm_params.cluster_capacity) {
 					vsm_raster_lists.data[vsm_params.cluster_capacity - 1u - h] = cslot;
 					vsm_ng_sink(atomicAdd(vsm_raster_args.data[4u + 1u], 1u));
+					// GodotNext: nextgeo_mesh_raster (#154). Indirect mesh-task X group count (1 per 32 clusters).
+					vsm_ng_sink(atomicMax(vsm_raster_args.data[8u + 0u], (h >> 5u) + 1u));
 					vsm_ng_sink(atomicMax(vsm_raster_counts.data[0], 1u));
 				}
 			}
@@ -1255,6 +1257,9 @@ void raster_route(uint p_vis_index, bool p_software) {
 		raster_lists.data[region_base + params.output_capacity - 1u - slot] = p_vis_index;
 		uint word = nextgeo_raster_args_word(params.phase, NEXTGEO_RASTER_BIN_FIXED, NEXTGEO_RASTER_ARGS_HW);
 		atomicAdd(raster_args.data[word + 1u], 1u);
+		// GodotNext: nextgeo_mesh_raster (#154). Indirect mesh-task X group count (1 per 32 clusters).
+		uint mesh_word = nextgeo_raster_args_word(params.phase, NEXTGEO_RASTER_BIN_FIXED, NEXTGEO_RASTER_ARGS_HW_MESH);
+		atomicMax(raster_args.data[mesh_word + 0u], (slot >> 5u) + 1u);
 		atomicMax(raster_counts.data[params.phase], NEXTGEO_RASTER_BIN_FIXED + 1u);
 	}
 }

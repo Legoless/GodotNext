@@ -41,6 +41,7 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_mesh_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 // GodotNext: vsm_nanite (#217).
@@ -53,8 +54,12 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/sw_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_export.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
+// GodotNext: nextgeo_mesh_raster (#154).
+#include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster_mesh.glsl.gen.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/renderer_rd/shaders/vsm_raster_nextgeo.glsl.gen.h"
+// GodotNext: nextgeo_mesh_raster (#154).
+#include "servers/rendering/renderer_rd/shaders/vsm_raster_nextgeo_mesh.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_raster_sw.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
@@ -89,6 +94,8 @@ struct NextGeoRasterBinProgram {
 	uint32_t features = 0;
 	RID sw_shader[2];
 	RID hw_shader[2];
+	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW variant per visibility-buffer storage.
+	RID hw_mesh_shader[2];
 	LocalVector<RD::Uniform> material_uniforms;
 };
 
@@ -99,6 +106,8 @@ struct NextGeoVSMBinProgram {
 	uint32_t features = 0;
 	RID sw_shader;
 	RID hw_shader;
+	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW depth-only VSM variant.
+	RID hw_mesh_shader;
 	LocalVector<RD::Uniform> material_uniforms;
 };
 
@@ -121,6 +130,9 @@ struct NextGeoVSMInputs {
 	bool hiz_enabled = true;
 	bool dynamic_layer_hook = false;
 	bool count_sw_writes = false;
+	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW raster path selection for VSM.
+	bool use_mesh_hw_raster = false;
+	RendererRD::NextGeoHWRasterReason hw_raster_reason = RendererRD::NEXTGEO_HW_RASTER_REASON_AUTO_PENDING_PQ;
 	LocalVector<RendererRD::NextGeoVSMMapMeta> map_meta;
 	const uint32_t *raster_bin_table = nullptr;
 	uint32_t raster_bin_table_words = 0;
@@ -164,6 +176,9 @@ struct NextGeoRasterInputs {
 	uint32_t raster_bin_table_words = 0;
 	LocalVector<NextGeoRasterBinProgram> raster_bin_programs;
 	LocalVector<RD::Uniform> environment_uniforms;
+	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Mesh-shader HW raster path selection.
+	bool use_mesh_hw_raster = false;
+	RendererRD::NextGeoHWRasterReason hw_raster_reason = RendererRD::NEXTGEO_HW_RASTER_REASON_AUTO_PENDING_PQ;
 };
 
 // GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
@@ -190,6 +205,8 @@ public:
 	bool is_hybrid_raster_available();
 	RendererRD::NextGeoVis64Storage get_vis64_storage(bool p_prefer_buffer) const;
 	const RendererRD::NextGeoRasterTier &get_raster_tier() const { return raster_tier; }
+	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9, GN-10). Selects mesh-shader vs VS HW path.
+	RendererRD::NextGeoHWRasterSelection select_hw_raster_path(RendererRD::NextGeoHWRasterPath p_setting, bool p_multiview = false) const;
 
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
 	bool dispatch_shadows(RendererVirtualMeshStorage *p_storage, const NextGeoShadowViewDesc *p_views, uint32_t p_view_count, bool p_debug_stats);
@@ -299,6 +316,12 @@ private:
 	PipelineCacheRD vis64_raster_pipelines[4]; // (buffer ? 2 : 0) | (back-face debug ? 1 : 0).
 	VisibilityRasterShaderRD vis64_raster_shader; // visibility_raster.glsl's MODE_VIS64 variants.
 	RID vis64_raster_version;
+	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Task/mesh HW visibility path.
+	bool vis64_mesh_image_ready = false;
+	bool vis64_mesh_buffer_ready = false;
+	VisibilityRasterMeshShaderRD vis64_mesh_shader;
+	RID vis64_mesh_version;
+	PipelineCacheRD vis64_mesh_pipelines[4]; // (buffer ? 2 : 0) | (back-face debug ? 1 : 0).
 	RID raster_args;
 	RID raster_counts;
 	RID raster_lists;
@@ -314,6 +337,7 @@ private:
 	RID raster_bin_scatter_pipeline;
 	RID raster_bin_state; // nextgeo_raster_bins.h's state words.
 	RID raster_bin_args; // Dedicated indirect dispatch/draw arguments (written only in PREFIX).
+	RID raster_bin_hw_counts; // [phase][bin - 1] indirect-count words (0 or 1) for mesh tasks (#154).
 	RID raster_bin_append;
 	RID raster_bin_lists;
 	RID raster_bin_table_buffer;
@@ -405,6 +429,12 @@ private:
 	VsmRasterNextgeoShaderRD vsm_hw_shader;
 	RID vsm_hw_version;
 	PipelineCacheRD vsm_hw_pipeline;
+	// GodotNext: nextgeo_mesh_raster (#154). VSM fixed-function HW task/mesh variant.
+	bool vsm_hw_mesh_ready = false;
+	VsmRasterNextgeoMeshShaderRD vsm_hw_mesh_shader;
+	RID vsm_hw_mesh_version;
+	PipelineCacheRD vsm_hw_mesh_pipeline;
+	RID vsm_hw_count_buf; // Readonly copy of vsm_counters[chain].hw_clusters for VSM task stage.
 	VsmRasterSwShaderRD vsm_sw_shader;
 	RID vsm_sw_version;
 	RID vsm_sw_pipeline;
@@ -439,6 +469,7 @@ private:
 	RID vsm_bin_state;
 	RID vsm_bin_args;
 	RID vsm_bin_draw_count;
+	RID vsm_bin_hw_counts; // [phase][bin - 1] indirect-count words (0 or 1) for VSM mesh tasks (#154).
 	RID vsm_bin_append;
 	RID vsm_bin_lists;
 	RID vsm_bin_table_buffer;

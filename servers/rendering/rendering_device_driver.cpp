@@ -203,7 +203,7 @@ RenderingDeviceDriver::MeshShaderCaps RenderingDeviceDriver::d3d12_mesh_shader_c
 	return caps;
 }
 
-// GodotNext: rd_mesh_shaders (#178)
+// GodotNext: rd_mesh_shaders (#178), nextgeo_mesh_raster (#154)
 bool RenderingDeviceDriver::mesh_shader_limit_get(Limit p_limit, const MeshShaderLimits &p_limits, uint64_t &r_value) {
 	switch (p_limit) {
 		case LIMIT_MAX_TASK_WORKGROUP_COUNT_X:
@@ -222,12 +222,38 @@ bool RenderingDeviceDriver::mesh_shader_limit_get(Limit p_limit, const MeshShade
 		case LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT:
 			r_value = p_limits.max_mesh_workgroup_total_count;
 			return true;
+		// GodotNext: nextgeo_mesh_raster (#154, plan §21.1 C2, §21.4 N9).
+		case LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS:
+			r_value = p_limits.max_task_workgroup_invocations;
+			return true;
+		case LIMIT_MAX_TASK_WORKGROUP_SIZE_X:
+		case LIMIT_MAX_TASK_WORKGROUP_SIZE_Y:
+		case LIMIT_MAX_TASK_WORKGROUP_SIZE_Z:
+			r_value = p_limits.max_task_workgroup_size[p_limit - LIMIT_MAX_TASK_WORKGROUP_SIZE_X];
+			return true;
+		case LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS:
+			r_value = p_limits.max_mesh_workgroup_invocations;
+			return true;
+		case LIMIT_MAX_MESH_WORKGROUP_SIZE_X:
+		case LIMIT_MAX_MESH_WORKGROUP_SIZE_Y:
+		case LIMIT_MAX_MESH_WORKGROUP_SIZE_Z:
+			r_value = p_limits.max_mesh_workgroup_size[p_limit - LIMIT_MAX_MESH_WORKGROUP_SIZE_X];
+			return true;
+		case LIMIT_MAX_MESH_OUTPUT_VERTICES:
+			r_value = p_limits.max_mesh_output_vertices;
+			return true;
+		case LIMIT_MAX_MESH_OUTPUT_PRIMITIVES:
+			r_value = p_limits.max_mesh_output_primitives;
+			return true;
+		case LIMIT_MAX_TASK_PAYLOAD_SIZE:
+			r_value = p_limits.max_task_payload_size;
+			return true;
 		default:
 			return false;
 	}
 }
 
-// GodotNext: rd_mesh_shaders (#178)
+// GodotNext: rd_mesh_shaders (#178), nextgeo_mesh_raster (#154)
 RenderingDeviceDriver::MeshShaderLimits RenderingDeviceDriver::metal_mesh_shader_limits(uint32_t p_apple_family, bool p_mesh_shader) {
 	MeshShaderLimits limits;
 	if (!p_mesh_shader) {
@@ -247,10 +273,21 @@ RenderingDeviceDriver::MeshShaderLimits RenderingDeviceDriver::metal_mesh_shader
 		count = mesh_grid;
 	}
 	limits.max_mesh_workgroup_total_count = mesh_grid;
+	// Metal Feature Set Tables & MSL 3.x specification (Apple7+): 1024 threads per object/mesh threadgroup,
+	// 256 vertices and 512 primitives per mesh, 16,384-byte task payload.
+	limits.max_task_workgroup_invocations = 1024;
+	limits.max_mesh_workgroup_invocations = 1024;
+	for (uint32_t i = 0; i < 3; i++) {
+		limits.max_task_workgroup_size[i] = 1024;
+		limits.max_mesh_workgroup_size[i] = 1024;
+	}
+	limits.max_mesh_output_vertices = 256;
+	limits.max_mesh_output_primitives = 512;
+	limits.max_task_payload_size = 16384;
 	return limits;
 }
 
-// GodotNext: rd_mesh_shaders (#178)
+// GodotNext: rd_mesh_shaders (#178), nextgeo_mesh_raster (#154)
 RenderingDeviceDriver::MeshShaderLimits RenderingDeviceDriver::d3d12_mesh_shader_limits(bool p_mesh_shader) {
 	MeshShaderLimits limits;
 	if (!p_mesh_shader) {
@@ -259,9 +296,18 @@ RenderingDeviceDriver::MeshShaderLimits RenderingDeviceDriver::d3d12_mesh_shader
 	for (uint32_t i = 0; i < 3; i++) {
 		limits.max_task_workgroup_count[i] = 65535;
 		limits.max_mesh_workgroup_count[i] = 65535;
+		limits.max_task_workgroup_size[i] = 128;
+		limits.max_mesh_workgroup_size[i] = 128;
 	}
 	limits.max_task_workgroup_total_count = uint64_t(1) << 22;
 	limits.max_mesh_workgroup_total_count = uint64_t(1) << 22;
+	// DirectX Mesh Shader functional specification: 128 threads per AS/MS threadgroup,
+	// 256 output vertices, 256 output primitives, 16,384-byte payload.
+	limits.max_task_workgroup_invocations = 128;
+	limits.max_mesh_workgroup_invocations = 128;
+	limits.max_mesh_output_vertices = 256;
+	limits.max_mesh_output_primitives = 256;
+	limits.max_task_payload_size = 16384;
 	return limits;
 }
 

@@ -4238,6 +4238,10 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Off until #153 and #164 route masked and
 	// vertex-offset materials through the programmable raster bins by default.
 	GLOBAL_DEF("rendering/nextgeo/debug_programmable_raster", false);
+	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9, GN-10). Auto keeps the VS HW raster
+	// path until GN-10 passes on a driver in PQ (§22); Mesh selects task/mesh shaders when supported
+	// (Vulkan/D3D12 mesh shaders, Metal Apple9+ indirect mesh draws) and falls back to Vertex otherwise.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/hw_raster_path", PROPERTY_HINT_ENUM, "Auto,Vertex,Mesh"), 0);
 	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Auto keeps the tile quads through the build; where
 	// GN-11 passes in PQ (§22), auto selects compute bins for that GPU class (Appendix A).
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/shading_path", PROPERTY_HINT_ENUM, "Auto,Compute Bins,Tile Quads"), 0);

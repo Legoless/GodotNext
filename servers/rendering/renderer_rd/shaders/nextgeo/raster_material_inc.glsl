@@ -605,6 +605,121 @@ bool _ng_raster_cluster(uint p_vis_cluster, out uvec2 r_entry, out uvec4 r_desc,
 #endif
 }
 
+#ifdef NEXTGEO_RASTER_HW_MESH
+// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Evaluates vertex() once per cluster
+// vertex in the mesh stage (1 thread per vertex, <= 128 vertices), matching _ng_raster_load_triangle().
+bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 r_clip_pos) {
+	uint _ng_stride = p_desc.z & 0xFFu;
+	uint _ng_vert_count = (p_desc.z >> 8u) & 0xFFu;
+	uint _ng_layout = (p_desc.z >> 24u) & 0xFFu;
+	if (p_v_idx >= _ng_vert_count) {
+		r_clip_pos = vec4(0.0, 0.0, -2.0, 1.0);
+		return false;
+	}
+	if (_ng_layout == 0u) {
+		if (_ng_stride == 3u) {
+			_ng_layout = 0x01u;
+		} else if (_ng_stride == 5u) {
+			_ng_layout = 0x09u;
+		} else if (_ng_stride == 6u) {
+			_ng_layout = 0x03u;
+		} else if (_ng_stride == 7u) {
+			_ng_layout = 0x21u;
+		} else if (_ng_stride == 8u) {
+			_ng_layout = 0x0Bu;
+		} else if (_ng_stride == 10u) {
+			_ng_layout = 0x07u;
+		} else if (_ng_stride == 12u) {
+			_ng_layout = 0x0Fu;
+		} else if (_ng_stride == 14u) {
+			_ng_layout = 0x1Fu;
+		} else if (_ng_stride == 16u) {
+			_ng_layout = 0x2Fu;
+		} else if (_ng_stride >= 18u) {
+			_ng_layout = 0x3Fu;
+		}
+	}
+
+	NextGeoInstanceRecord _ng_record = nextgeo_records.data[p_entry.x];
+	instance_index_interp = p_entry.x;
+	_ng_instance_id = int(p_entry.x);
+	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+
+	uint _ng_w = p_desc.x + p_v_idx * _ng_stride;
+	vec3 _ng_c_pos = vec3(
+			uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+			uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+			uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
+	_ng_w += 3u;
+
+	vec3 _ng_c_nrm = vec3(0.0, 0.0, 1.0);
+	if ((_ng_layout & 0x02u) != 0u) {
+		_ng_c_nrm = vec3(
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
+		_ng_w += 3u;
+	}
+
+	vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
+	vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
+	if ((_ng_layout & 0x04u) != 0u) {
+		vec4 _ng_tan4 = vec4(
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
+		_ng_w += 4u;
+		_ng_c_tan = _ng_tan4.xyz;
+		_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan4.w, vec3(0.0, 1.0, 0.0));
+	}
+
+	vec2 _ng_c_uv = vec2(0.0);
+	if ((_ng_layout & 0x08u) != 0u) {
+		_ng_c_uv = vec2(
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
+		_ng_w += 2u;
+	}
+
+	vec2 _ng_c_uv2 = vec2(0.0);
+	if ((_ng_layout & 0x10u) != 0u) {
+		_ng_c_uv2 = vec2(
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
+		_ng_w += 2u;
+	}
+
+	vec4 _ng_c_col = vec4(1.0);
+	if ((_ng_layout & 0x20u) != 0u) {
+		_ng_c_col = vec4(
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
+		_ng_w += 4u;
+	}
+
+	_ng_vertex_id = int(p_v_idx);
+	uv_attrib = _ng_c_uv;
+	uv2_attrib = _ng_c_uv2;
+	color_attrib = _ng_c_col;
+
+	_ng_resolve_vertex_corner(
+			_ng_c_pos,
+			_ng_c_nrm,
+			_ng_c_tan,
+			_ng_c_bin,
+			p_entry.x,
+			scene_data_block.data,
+			_ng_cur_xform,
+#ifdef USE_DOUBLE_PRECISION
+			_ng_record.model_precision.xyz,
+#endif
+			r_clip_pos);
+	return true;
+}
+#else
 // Loads triangle p_tri of the visible cluster and runs vertex() at its three corners: _ng_clip_c and
 // the corner attributes, as the resolve does.
 bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
@@ -740,6 +855,7 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 	}
 	return true;
 }
+#endif
 
 #ifndef NEXTGEO_RASTER_HW_VERTEX
 // The interpolants at framebuffer position p_frag_xy (a pixel center), evaluated in homogeneous 2D

@@ -128,6 +128,18 @@ default, is the plan's parity row (§21.4), which cites UE's public documentatio
 page is recorded as read for this issue. The card choice follows GodotNext's own #77
 card layers (`modules/nextgeo/nextgeo_rt_proxy.cpp`). Copied files: none.
 
+## Mesh-shader HW rasterizer (#154)
+
+No outside input beyond the public graphics API specifications recorded in
+`docs/godotnext/source-log/rhi-mesh-shaders.md`. The task/mesh HW raster path for NextGeo (#154, plan
+§21.4 contract N9, GN-10) — one 32-thread task workgroup per 32 compacted HW clusters with a 128-byte
+payload, one 128-thread mesh workgroup per cluster capped at 128 vertices and 128 primitives with
+per-primitive visibility IDs (`visibility_raster_mesh.glsl`, `raster_material_hw_mesh.glsl`, and the VSM
+variant `vsm_raster_nextgeo_mesh.glsl`), indirect-count task dispatch per bin, and
+`rendering/nextgeo/hw_raster_path` (`auto` | `vertex` | `mesh`, keeping VS intact until GN-10 passes per
+driver in PQ) — is an original implementation built directly on GodotNext's #178 RHI mesh shaders, #162
+hybrid visibility raster, #155 programmable raster bins, and #217 VSM x Nanite pass. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

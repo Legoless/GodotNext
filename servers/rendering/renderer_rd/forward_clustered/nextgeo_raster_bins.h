@@ -282,7 +282,10 @@ static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_WORDS = 772u;
 
 static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_BINS = 0u; // [phase][bin - 1] SW uvec4 dispatch, HW uvec4 draw
 static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_SCATTER = 1024u; // [phase] uvec4 scatter dispatch
-static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_WORDS = 1032u;
+// GodotNext: nextgeo_mesh_raster (#154). [phase][bin - 1] HW mesh-task uvec4 indirect dispatch.
+static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_HW_MESH = 1032u;
+static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_WORDS = 1544u;
+static constexpr uint32_t NEXTGEO_RASTER_BIN_HW_COUNTS_WORDS = 128u; // [phase][bin - 1] indirect draw count (0 or 1)
 
 inline uint32_t nextgeo_raster_bin_count_word(uint32_t p_phase, uint32_t p_bin, uint32_t p_kind) {
 	return NEXTGEO_RASTER_BIN_STATE_COUNTS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
@@ -302,6 +305,14 @@ inline uint32_t nextgeo_raster_bin_args_word(uint32_t p_phase, uint32_t p_bin, u
 
 inline uint32_t nextgeo_raster_bin_scatter_args_word(uint32_t p_phase) {
 	return NEXTGEO_RASTER_BIN_ARGS_SCATTER + p_phase * 4u;
+}
+
+inline uint32_t nextgeo_raster_bin_hw_mesh_args_word(uint32_t p_phase, uint32_t p_bin) {
+	return NEXTGEO_RASTER_BIN_ARGS_HW_MESH + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 4u;
+}
+
+inline uint32_t nextgeo_raster_bin_hw_count_word(uint32_t p_phase, uint32_t p_bin) {
+	return p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u);
 }
 
 // The prefix pass for one phase: p_counts[(bin - 1) * 2 + kind] in, the range starts out. Returns the total.

@@ -35,6 +35,7 @@
 // GodotNext: megalights_inputs (#136)
 #include "core/config/engine.h"
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_mesh_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
 // GodotNext: nextgeo_shading_bins (#158)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_shading_bins.h"
@@ -396,7 +397,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	// The raster target's code, for a material a programmable bin can take. Its versions are made only
 	// when a bin or the shader baker first requests them (ensure_raster_target()), so materials that
 	// never route through a programmable bin compile nothing more.
-	const bool had_raster_versions = raster_sw_version.is_valid() || raster_hw_version.is_valid();
+	const bool had_raster_versions = raster_sw_version.is_valid() || raster_hw_version.is_valid() || raster_hw_mesh_version.is_valid();
 	_free_raster_target();
 	// GodotNext: nextgeo_displacement (#150). Shaders defining displacement() also prepare the raster target
 	// (including for shader baker) even when shader-level raster_features == 0, because displacement_magnitude
@@ -528,7 +529,7 @@ bool SceneShaderForwardClustered::ShaderData::ensure_raster_target() {
 	if (!raster_target_valid || SceneShaderForwardClustered::singleton == nullptr) {
 		return false;
 	}
-	if (raster_sw_version.is_valid() && raster_hw_version.is_valid()) {
+	if (raster_sw_version.is_valid() && raster_hw_version.is_valid() && raster_hw_mesh_version.is_valid()) {
 		return true;
 	}
 	MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
@@ -540,7 +541,11 @@ bool SceneShaderForwardClustered::ShaderData::ensure_raster_target() {
 		raster_hw_version = SceneShaderForwardClustered::singleton->raster_hw_shader.version_create(false);
 		SceneShaderForwardClustered::singleton->raster_hw_shader.version_set_code(raster_hw_version, raster_code, raster_uniforms, raster_globals, raster_globals, raster_defines);
 	}
-	return raster_sw_version.is_valid() && raster_hw_version.is_valid();
+	if (raster_hw_mesh_version.is_null()) {
+		raster_hw_mesh_version = SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.version_create(false);
+		SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.version_set_code(raster_hw_mesh_version, raster_code, raster_uniforms, raster_globals, raster_globals, raster_defines);
+	}
+	return raster_sw_version.is_valid() && raster_hw_version.is_valid() && raster_hw_mesh_version.is_valid();
 }
 
 void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
@@ -559,6 +564,10 @@ void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
 	if (raster_hw_version.is_valid()) {
 		SceneShaderForwardClustered::singleton->raster_hw_shader.version_free(raster_hw_version);
 		raster_hw_version = RID();
+	}
+	if (raster_hw_mesh_version.is_valid()) {
+		SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.version_free(raster_hw_mesh_version);
+		raster_hw_mesh_version = RID();
 	}
 }
 
@@ -602,10 +611,40 @@ RID SceneShaderForwardClustered::ShaderData::get_raster_target_vsm_shader(bool p
 	return SceneShaderForwardClustered::singleton->raster_sw_shader.version_get_shader(raster_sw_version, group);
 }
 
+// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Mesh-shader HW raster target
+// (group 0 = VIS64 image, group 1 = VIS64 buffer); stays disabled on devices without mesh support.
+RID SceneShaderForwardClustered::ShaderData::get_raster_target_mesh_shader(bool p_buffer) const {
+	if (raster_hw_mesh_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_target_ready || !SceneShaderForwardClustered::singleton->raster_mesh_supported) {
+		return RID();
+	}
+	const bool supported = p_buffer ? SceneShaderForwardClustered::singleton->raster_buffer_int64_supported : SceneShaderForwardClustered::singleton->raster_image_int64_supported;
+	if (!supported) {
+		return RID();
+	}
+	const int group = p_buffer ? 1 : 0;
+	if (!SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.version_get_shader(raster_hw_mesh_version, group);
+}
+
+// GodotNext: nextgeo_mesh_raster (#154) x vsm_nanite (#217). Depth-only VSM mesh-shader HW raster target (group 2).
+RID SceneShaderForwardClustered::ShaderData::get_raster_target_vsm_mesh_shader() const {
+	if (raster_hw_mesh_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_vsm_supported || !SceneShaderForwardClustered::singleton->raster_mesh_supported) {
+		return RID();
+	}
+	constexpr int group = 2;
+	if (!SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->raster_hw_mesh_shader.version_get_shader(raster_hw_mesh_version, group);
+}
+
 void SceneShaderForwardClustered::ShaderData::get_extra_native_shader_and_versions(LocalVector<Pair<ShaderRD *, RID>> &r_versions) {
 	if (raster_target_valid && ensure_raster_target()) {
 		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_sw_shader, raster_sw_version });
 		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_hw_shader, raster_hw_version });
+		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_hw_mesh_shader, raster_hw_mesh_version });
 	}
 }
 
@@ -1694,12 +1733,18 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		raster_hw_shader.initialize(raster_variants, raster_defines);
 		raster_hw_shader.set_group_int64_atomics(0, true, false);
 		raster_hw_shader.set_group_int64_atomics(1, false, true);
+		// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader form of the HW material raster target.
+		raster_hw_mesh_shader.initialize(raster_variants, raster_defines);
+		raster_hw_mesh_shader.set_group_int64_atomics(0, true, false);
+		raster_hw_mesh_shader.set_group_int64_atomics(1, false, true);
 
 		const RendererRD::NextGeoRasterTier tier = RendererRD::nextgeo_raster_tier(RD::get_singleton());
 		raster_target_ready = tier.hybrid;
 		raster_image_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
 		raster_buffer_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
 		raster_vsm_supported = RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT);
+		const RendererRD::NextGeoHWRasterCapabilities mesh_caps = RendererRD::nextgeo_hw_raster_capabilities_from_device(RD::get_singleton());
+		raster_mesh_supported = RendererRD::nextgeo_select_hw_raster_path(RendererRD::NEXTGEO_HW_RASTER_PATH_MESH, mesh_caps).use_mesh;
 	}
 
 	{

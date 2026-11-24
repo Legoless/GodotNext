@@ -164,3 +164,29 @@ specification (https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html). T
 data and the specialization constants is `godotnext/testbed/tests/rd_parity/meshlets.gd`'s grid cases:
 `gl_NumWorkGroups` in a mesh shader without a task stage and in a task shader (direct draws), constants
 read by the task, mesh and fragment stages, and `gl_CullPrimitiveEXT`, each against a CPU image.
+
+## Task/mesh workgroup invocation, output and payload limits (#154)
+
+Issue #154 completes the remaining mesh shader limits left by #178 on `RenderingDeviceCommons::Limit`
+(`LIMIT_MAX_TASK_WORKGROUP_INVOCATIONS`, `LIMIT_MAX_TASK_WORKGROUP_SIZE_{X,Y,Z}`,
+`LIMIT_MAX_MESH_WORKGROUP_INVOCATIONS`, `LIMIT_MAX_MESH_WORKGROUP_SIZE_{X,Y,Z}`,
+`LIMIT_MAX_MESH_OUTPUT_VERTICES`, `LIMIT_MAX_MESH_OUTPUT_PRIMITIVES`, `LIMIT_MAX_TASK_PAYLOAD_SIZE`)
+and validates every task and mesh shader's SPIR-V against those limits at shader creation time with one
+named error.
+
+| Field | Value |
+|---|---|
+| What | Vulkan `VK_EXT_mesh_shader` (`VkPhysicalDeviceMeshShaderPropertiesEXT`: `maxTaskWorkGroupInvocations`, `maxTaskWorkGroupSize[3]`, `maxMeshWorkGroupInvocations`, `maxMeshWorkGroupSize[3]`, `maxMeshOutputVertices`, `maxMeshOutputPrimitives`, `maxTaskPayloadSize`); DirectX Mesh Shader specification (128 max threads per AS/MS threadgroup, 256 max vertices, 256 max primitives, 16,384 B max payload); Metal Feature Set Tables / MSL 3.x (1024 max threads per object/mesh threadgroup, 256 max vertices, 512 max primitives, 16,384 B max payload); public SPIR-V 1.4 specification opcodes (`OpExecutionMode` `LocalSize` / `OutputVertices` / `OutputPrimitivesEXT`, `OpVariable` `StorageClass TaskPayloadWorkgroupEXT`, `OpTypeArray` / `OpTypeStruct` / `OpTypeVector` / `OpTypeMatrix`) |
+| Upstream | https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceMeshShaderPropertiesEXT.html; https://microsoft.github.io/DirectX-Specs/d3d/MeshShader.html; https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf; https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html; vendored `thirdparty/vulkan` headers |
+| Version | Vendored `thirdparty/vulkan` headers; public specifications as cited above |
+| License | Vulkan headers: Apache-2.0; Vulkan/DirectX/SPIR-V specs: CC-BY-4.0 / Khronos; Apple documentation: consulted, not copied |
+| Read on | 2026-11-23, for issue #154 |
+| Consulted by | The #154 implementer |
+| Used in | `servers/rendering/rendering_device_commons.h`, `servers/rendering/rendering_device_driver.{h,cpp}`, `servers/rendering/rendering_device_mesh_shader.{h,cpp}`, `servers/rendering/rendering_device.{h,cpp}`, `drivers/vulkan/rendering_device_driver_vulkan.cpp`, `doc/classes/RenderingDevice.xml`, `tests/servers/rendering/test_rd_mesh_shaders.cpp` |
+| Copied files | None |
+
+How it was used: Vulkan copies the 11 fields directly from `VkPhysicalDeviceMeshShaderPropertiesEXT`;
+Direct3D 12 and Metal populate the specification constants above when `SUPPORTS_MESH_SHADER` is true and
+report 0 otherwise. `RDMeshShader::inspect_spirv` parses the SPIR-V word stream directly using the public
+SPIR-V binary encoding to extract task/mesh local sizes, output vertex/primitive caps, and task payload
+byte size before rejecting any shader that exceeds the device's limits with one named error.
