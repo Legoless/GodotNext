@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  Environment.xml                                                       */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="Environment" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
@@ -214,6 +244,9 @@
 		</member>
 		<member name="nextgi_max_roughness_to_trace" type="float" setter="set_nextgi_max_roughness_to_trace" getter="get_nextgi_max_roughness_to_trace" default="0.4">
 			The maximum surface roughness that NextGI traces a specular reflection for; rougher surfaces use the radiance cache instead. This is an upper bound on the quality preset's value, so Medium keeps its [code]0.25[/code] and a lower value refines any preset.
+		</member>
+		<member name="nextgi_ray_lighting_mode" type="int" setter="set_nextgi_ray_lighting_mode" getter="get_nextgi_ray_lighting_mode" enum="Environment.NextGIRayLightingMode" default="0">
+			Overrides [member ProjectSettings.rendering/global_illumination/nextgi/ray_lighting_mode] for this environment. [constant NEXTGI_RAY_LIGHTING_MODE_PROJECT_DEFAULT] follows the project setting; [constant NEXTGI_RAY_LIGHTING_MODE_SURFACE_CACHE] shades reflection hits from the Surface Radiance Cache; [constant NEXTGI_RAY_LIGHTING_MODE_HIT_LIGHTING_FOR_REFLECTIONS] re-traces reflection hits through the material hit groups and shades them directly against the scene's lights when hardware ray tracing pipelines are available (falling back to the surface cache with [code]HIT_LIGHTING_UNSUPPORTED[/code] otherwise).
 		</member>
 		<member name="nextgi_read_sky_light" type="bool" setter="set_nextgi_read_sky_light" getter="is_nextgi_reading_sky_light" default="true">
 			If [code]true[/code], NextGI includes sky light in the indirect result. Set this to [code]false[/code] for interior scenes that should not pick up the sky.
@@ -498,6 +531,15 @@
 		</constant>
 		<constant name="SDFGI_Y_SCALE_100_PERCENT" value="2" enum="SDFGIYScale">
 			Use 100% scale for SDFGI on the Y (vertical) axis. SDFGI cells will be as tall as they are wide. This is usually the best choice for highly vertical scenes. The downside is that light leaking may become more noticeable with thin floors and ceilings.
+		</constant>
+		<constant name="NEXTGI_RAY_LIGHTING_MODE_PROJECT_DEFAULT" value="0" enum="NextGIRayLightingMode">
+			Use [member ProjectSettings.rendering/global_illumination/nextgi/ray_lighting_mode].
+		</constant>
+		<constant name="NEXTGI_RAY_LIGHTING_MODE_SURFACE_CACHE" value="1" enum="NextGIRayLightingMode">
+			Shade NextGI reflection hits from the Surface Radiance Cache.
+		</constant>
+		<constant name="NEXTGI_RAY_LIGHTING_MODE_HIT_LIGHTING_FOR_REFLECTIONS" value="2" enum="NextGIRayLightingMode">
+			Shade NextGI reflection hits at full material resolution with direct light evaluation, ray-traced area shadows, multi-bounce mirror reflections, and translucent tint skipping when supported on the hardware ray tracing tier.
 		</constant>
 	</constants>
 </class>

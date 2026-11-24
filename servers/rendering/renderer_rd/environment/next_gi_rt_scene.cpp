@@ -1105,7 +1105,8 @@ void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_dat
 			add(feed->nextgi_static_light_instances[i], false);
 		}
 	}
-	shadow_allocator.update(masks.ptr(), masks.size());
+	// GodotNext: nextgi_hit_lighting (#129). Reserve TLAS mask bit 1 for alpha-blended instances when hit lighting runs.
+	shadow_allocator.update(masks.ptr(), masks.size(), hit_lighting_translucent_enabled ? uint32_t(NEXTGI_RT_MASK_TRANSLUCENT) : 0u);
 }
 
 void NextGIRTScene::_push_shadow_word(uint32_t p_layers, uint32_t p_alpha_base) {
@@ -2028,6 +2029,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
 	LocalVector<NextGIInstanceRecord> instance_records;
 	LocalVector<NextGISurfaceRecord> surface_records;
+	// GodotNext: nextgi_hit_lighting (#129).
+	translucent_instance_count = 0;
+
 	// GodotNext: nextgi_shadow_policy (#145)
 	struct DeferredShadowParts {
 		RenderGeometryInstanceBase *instance = nullptr;
@@ -2035,6 +2039,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		Transform3D transform;
 		uint32_t layers = 0;
 		float max_scale = 1.0f;
+		uint32_t element_index = UINT32_MAX;
 		bool multimesh_element = false;
 	};
 	LocalVector<DeferredShadowParts> deferred_shadow_parts;
@@ -2485,6 +2490,24 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					}
 				}
 			}
+			// GodotNext: nextgi_hit_lighting (#129). When hit lighting is active, an instance whose effective
+			// material override turns every geometry in this part translucent enters the TLAS on mask bit 1
+			// (NEXTGI_RT_MASK_TRANSLUCENT) instead of the opaque GI bit 7 so diffuse GI ignores it while
+			// hit-lighting reflection rays can skip and tint through it.
+			bool override_translucent = false;
+			if (hit_lighting_translucent_enabled && !part.geometries.is_empty()) {
+				override_translucent = true;
+				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+					if (part_geometry.is_proxy_surface || _nextgi_shadow_class(_nextgi_shadow_effective_material(geometry_instance, mesh, part_geometry.surface)) != NEXTGI_SHADOW_CLASS_TRANSLUCENT) {
+						override_translucent = false;
+						break;
+					}
+				}
+			}
+			if (override_translucent) {
+				record.rt_flags |= NEXTGI_RT_FLAG_TRANSLUCENT;
+				translucent_instance_count++;
+			}
 			// GodotNext: nextgeo_rt_native (#156). A native set's eps is its bucket's (select()).
 			record.origin_offset = nextgi_rt_origin_offset(native_parts ? native_eps : eps_rt, max_scale);
 			_queue_pages(geometry_instance, record, fed.element_index); // GodotNext: nextgi_src_page_levels (#247)
@@ -2500,7 +2523,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			// the instance's materials: with an alpha-tested one the instance is non-opaque (GI rays force opacity), and
 			// its geometries' alpha table entries tell the candidate loop which to test.
 			const uint32_t shadow_alpha_base = _push_shadow_part(geometry_instance, mesh, part.geometries, fed.shadow_layers, part.chunk, native_parts);
-			tlas_instance.mask = nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
+			tlas_instance.mask = override_translucent
+					? (nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, false) | uint32_t(NEXTGI_RT_MASK_TRANSLUCENT))
+					: nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
 			stats.shadow_unallocated_instances += (tlas_instance.mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
 			if (shadow_alpha_base != UINT32_MAX) {
 				shadow_alpha_bits |= tlas_instance.mask;
@@ -2540,19 +2565,37 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		} else {
 			stats.coverage.blas_pending++;
 		}
-		// GodotNext: nextgi_shadow_policy (#145). The instance's shadow parts join after every GI record, so the GI
-		// records keep their indices.
-		if (!blas_dirty && (fed.shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0) {
+		// GodotNext: nextgi_shadow_policy (#145), nextgi_hit_lighting (#129). The instance's shadow parts join after
+		// every GI record, so the GI records keep their indices. When hit lighting is active, translucent shadow parts
+		// also enter even when they cast no shadows (mask bit 1, NEXTGI_RT_MASK_TRANSLUCENT).
+		if (!blas_dirty) {
 			const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(mesh);
 			if (shadow_parts != nullptr && !shadow_parts->is_empty()) {
-				DeferredShadowParts deferred;
-				deferred.instance = geometry_instance;
-				deferred.mesh = mesh;
-				deferred.transform = transform;
-				deferred.layers = fed.shadow_layers;
-				deferred.max_scale = max_scale;
-				deferred.multimesh_element = fed.element_index != UINT32_MAX;
-				deferred_shadow_parts.push_back(deferred);
+				bool admit_shadow_parts = (fed.shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0;
+				if (!admit_shadow_parts && hit_lighting_translucent_enabled) {
+					for (const MeshStorage::NextGIRTPart &part : *shadow_parts) {
+						for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+							if (!part_geometry.is_proxy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(geometry_instance, mesh, part_geometry.surface)) == NEXTGI_SHADOW_CLASS_TRANSLUCENT) {
+								admit_shadow_parts = true;
+								break;
+							}
+						}
+						if (admit_shadow_parts) {
+							break;
+						}
+					}
+				}
+				if (admit_shadow_parts) {
+					DeferredShadowParts deferred;
+					deferred.instance = geometry_instance;
+					deferred.mesh = mesh;
+					deferred.transform = transform;
+					deferred.layers = fed.shadow_layers;
+					deferred.max_scale = max_scale;
+					deferred.element_index = fed.element_index;
+					deferred.multimesh_element = fed.element_index != UINT32_MAX;
+					deferred_shadow_parts.push_back(deferred);
+				}
 			}
 		}
 	}
@@ -2697,7 +2740,20 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			if (!part.blas.is_valid() || part.geometries.is_empty()) {
 				continue;
 			}
-			const uint32_t mask = nextgi_shadow_instance_mask(shadow_allocation, deferred.layers, false);
+			// GodotNext: nextgi_hit_lighting (#129). Alpha-blended surfaces admitted with mask bit 1 (no GI bit 7).
+			bool has_translucent = false;
+			if (hit_lighting_translucent_enabled) {
+				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+					if (!part_geometry.is_proxy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(deferred.instance, deferred.mesh, part_geometry.surface)) == NEXTGI_SHADOW_CLASS_TRANSLUCENT) {
+						has_translucent = true;
+						break;
+					}
+				}
+			}
+			uint32_t mask = nextgi_shadow_instance_mask(shadow_allocation, deferred.layers, false);
+			if (has_translucent) {
+				mask |= uint32_t(NEXTGI_RT_MASK_TRANSLUCENT);
+			}
 			if (mask == 0 || instance_records.size() + gpu_reserved >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
 				continue;
 			}
@@ -2713,9 +2769,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			record.object_to_world[11] = deferred.transform.origin.z;
 			record.surface_base = surface_records.size();
 			record.surface_count = part.geometries.size();
-			record.rt_flags = NEXTGI_RT_FLAG_STATIC;
+			record.rt_flags = NEXTGI_RT_FLAG_STATIC | (has_translucent ? uint32_t(NEXTGI_RT_FLAG_TRANSLUCENT) : 0u);
 			record.tlas_index = record_index;
-			// No card set and no relight pages: GI never hits it.
+			// No card set and no relight pages unless admitted for hit-lighting translucency: opaque GI never hits it.
 			// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Ensure proxy shadow parts carry #130 attribute
 			// streams when an alpha-tested NextGeo surface needs them.
 			bool shadow_proxy_has_alpha = false;
@@ -2729,6 +2785,13 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				if (shadow_proxy_has_alpha) {
 					mesh_storage->mesh_nextgi_rt_request_proxy_attributes(deferred.mesh);
 				}
+			}
+			if (has_translucent) {
+				record.card_set = NextGISRC::get_instance_card_set(deferred.instance);
+				if (record.card_set == UINT32_MAX) {
+					record.card_set = NextGISRC::get_mesh_card_set(deferred.mesh);
+				}
+				translucent_instance_count++;
 			}
 			float eps_rt = 0.0f;
 			for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
@@ -2754,7 +2817,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 						surface_record.vertex_offset = info.vertex_offset;
 						surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
 						surface_record.triangle_count = part_geometry.triangle_count;
-						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
+						surface_record.flags = has_translucent ? 0u : uint32_t(NEXTGI_RT_SURFACE_FLAG_NO_CARDS);
 						hit_arena_chunk = info.chunk;
 						hit_attribute_chunk = info.attribute_chunk;
 						hit_attribute_offset = info.attribute_offset;
@@ -2780,6 +2843,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				}
 			}
 			record.origin_offset = nextgi_rt_origin_offset(eps_rt, deferred.max_scale);
+			if (has_translucent) {
+				_queue_pages(deferred.instance, record, deferred.element_index);
+			}
 			instance_records.push_back(record);
 			// The AS memory line tracks the mesh while its shadow parts are in the TLAS too (a mesh may have no other).
 			if (RSG::rasterizer != nullptr) {

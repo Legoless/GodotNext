@@ -64,6 +64,9 @@ struct NextGICardClusterResult;
 
 // GodotNext: nextgi_hit_groups (#130)
 class NextGIHitMaterials;
+// GodotNext: nextgi_hit_lighting (#129)
+class NextGIHitLighting;
+struct NextGIHitLightingVerdict;
 
 // GodotNext: path_tracer (#167)
 class PathTracer;
@@ -409,6 +412,16 @@ private:
 	PathTracer *path_tracer = nullptr;
 	uint64_t path_tracer_request_frame = UINT64_MAX;
 	void _render_path_tracer(RenderDataRD *p_render_data, bool p_hwrt_frame);
+	// GodotNext: nextgi_hit_lighting (#129). Sorted-deferred hit lighting for reflections (lazily created).
+	NextGIHitLighting *hit_lighting = nullptr;
+	uint64_t hit_lighting_request_frame = UINT64_MAX;
+	bool hit_lighting_unsupported_logged = false;
+	bool hit_lighting_last_active = false;
+	bool hit_lighting_last_fallback = false;
+	bool hit_lighting_translucent_active = false;
+	int hit_lighting_last_requested = 0;
+	int hit_lighting_last_effective = 0;
+	void _free_hit_lighting();
 	uint32_t rough_reflection_mip_count = 1;
 	void _gather(RenderDataRD *p_render_data);
 	void _settings_changed();
@@ -715,6 +728,14 @@ public:
 	// (trace on frames where its has_current_records() is true); while it does not ask, what it would get.
 	int get_hit_availability_for(uint32_t p_consumer) const;
 	NextGIHitMaterials *get_hit_materials() const { return hit_materials; }
+	// GodotNext: nextgi_hit_lighting (#129). Ray Lighting Mode and hit lighting for reflections.
+	static int read_ray_lighting_mode();
+	static uint32_t read_max_reflection_bounces();
+	NextGIHitLightingVerdict evaluate_hit_lighting_for_environment(RID p_environment) const;
+	bool is_hit_lighting_active_for_view(RID p_environment) const;
+	bool is_hit_lighting_translucent_enabled() const { return hit_lighting_translucent_active; }
+	NextGIHitLighting *ensure_hit_lighting();
+	NextGIHitLighting *get_hit_lighting() const { return hit_lighting; }
 	void set_front_layer(NextGIFrontLayer *p_front_layer) { front_layer = p_front_layer; }
 	bool has_front_layer() const { return front_layer != nullptr; }
 	NextGIReference *get_reference() const { return reference; }

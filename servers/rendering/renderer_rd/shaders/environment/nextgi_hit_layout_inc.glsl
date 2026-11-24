@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  nextgi_hit_layout_inc.glsl                                            */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 // GodotNext: nextgi_hit_groups (#130). Not a standalone shader.
 //
 // The one layout every stage of the NextGI hit pipeline declares: the base library's ray generation, miss
@@ -14,6 +44,7 @@
 #extension GL_EXT_samplerless_texture_functions : require
 
 #include "nextgi_records_inc.glsl"
+#include "nextgi_hit_lighting_common_inc.glsl"
 
 // NextGIHitMaterials' records (next_gi_hit_materials.cpp), std430.
 // One per NextGISurfaceRecord, at the same index: where the geometry's attribute stream is and which
@@ -161,6 +192,85 @@ hit_shadow_retrace;
 // GodotNext: path_tracer_denoise (#168). First-hit albedo and world normal guides accumulated by path_tracer_hit.glsl.
 layout(rgba32f, set = 0, binding = 35) restrict uniform image2D hit_pt_guide_albedo;
 layout(rgba32f, set = 0, binding = 36) restrict uniform image2D hit_pt_guide_normal;
+
+// GodotNext: nextgi_hit_lighting (#129). Hit lighting for reflections (and future GI / World Cache consumers):
+// sorted hit records, 64^3 world light grid, D14 scenario lights, #145 shadow policy tables, SRC/WRC indirect
+// sources, and reflection output images. Other raygen stages bind stand-ins for these slots.
+layout(set = 0, binding = 37, std430) restrict readonly buffer HitLightParams {
+	vec4 camera_pos_radius; // xyz camera pos, w rt_scene_radius
+	vec4 grid_min_inv_cell; // xyz grid_min, w = 64.0 / (2.0 * rt_scene_radius)
+	vec4 ambient_color_sky; // rgb ambient color, a sky_enabled (0/1)
+	vec4 fog_params0; // x enabled, y depth_mode, z density, w height
+	vec4 fog_params1; // x height_density, y depth_begin, z depth_end, w depth_curve
+	vec4 fog_light_color; // rgb color, a energy
+	vec4 wrc_camera; // xyz camera, w valid (0/1)
+	vec4 wrc_origin_spacing; // xyz origin, w spacing
+	uvec4 counts0; // x max_rays, y light_count, z max_reflection_bounces, w frame
+	uvec4 counts1; // x trace_w, y trace_h, z page_rect_count, w flags (NEXTGI_HL_PARAM_FLAG_*)
+}
+hit_light_params;
+
+layout(set = 0, binding = 38, std430) restrict readonly buffer HitLightRecords {
+	NextGIHitLightRecord data[];
+}
+hit_light_records;
+
+layout(set = 0, binding = 39, std430) restrict readonly buffer HitLightSortedIndices {
+	uint data[];
+}
+hit_light_sorted_indices;
+
+layout(set = 0, binding = 40, std430) restrict readonly buffer HitLightLights {
+	NextGIHitLightGPU data[];
+}
+hit_light_lights;
+
+layout(set = 0, binding = 41, std430) restrict readonly buffer HitLightGrid {
+	uint data[];
+}
+hit_light_grid;
+
+layout(set = 0, binding = 42, std430) restrict buffer HitLightCounters {
+	NextGIHitLightCounters data;
+}
+hit_light_counters;
+
+struct NextGIShadowAlpha {
+	uvec4 info; // flags, bindless texture slot, attribute stream chunk, attribute stream offset.
+	vec2 params; // threshold, albedo alpha.
+	uvec2 index; // The geometry's triangles: arena chunk, byte offset.
+	vec4 uv_transform; // UV1 scale (xy) and offset (zw).
+};
+
+layout(set = 0, binding = 43, std430) restrict readonly buffer NextGIShadowInstances {
+	uvec2 data[];
+}
+nextgi_shadow_instances;
+
+layout(set = 0, binding = 44, std430) restrict readonly buffer NextGIShadowAlphaTable {
+	NextGIShadowAlpha data[];
+}
+nextgi_shadow_alpha;
+
+layout(set = 0, binding = 45, std430) restrict readonly buffer HitLightCardSets {
+	NextGICardSet data[];
+}
+hit_light_card_sets;
+
+layout(set = 0, binding = 46, std430) restrict readonly buffer HitLightPageRects {
+	uvec2 data[];
+}
+hit_light_page_rects;
+
+layout(set = 0, binding = 47) uniform texture2D hit_light_src_indirect;
+layout(set = 0, binding = 48) uniform texture2D hit_light_wrc_radiance;
+layout(set = 0, binding = 49) uniform texture2D hit_light_wrc_visibility;
+layout(set = 0, binding = 50) uniform texture2D hit_light_sky;
+layout(set = 0, binding = 51) uniform texture2D hit_light_blue_noise;
+
+layout(rgba16f, set = 0, binding = 52) restrict uniform image2D hit_light_reflection_out;
+layout(r16f, set = 0, binding = 53) restrict uniform image2D hit_light_hit_distance_out;
+layout(rgba16f, set = 0, binding = 54) restrict uniform image2D hit_light_debug_out;
 
 layout(set = 1, binding = 0) uniform texture2D hit_textures[];
 

@@ -182,6 +182,8 @@ private:
 		bool nextgi_fog_on_reflection_hits = true;
 		bool nextgi_translucency_front_layer_reflections = false;
 		float nextgi_scene_view_distance = 200.0f;
+		// GodotNext: nextgi_hit_lighting (#129). 0 = Project Default, 1 = Surface Cache, 2 = Hit Lighting for Reflections.
+		int nextgi_ray_lighting_mode = 0;
 
 		// Adjustments
 		bool adjustments_enabled = false;
@@ -347,6 +349,9 @@ public:
 	float environment_get_nextgi_max_roughness_to_trace(RID p_env) const;
 	bool environment_get_nextgi_fog_on_reflection_hits(RID p_env) const;
 	bool environment_get_nextgi_translucency_front_layer_reflections(RID p_env) const;
+	// GodotNext: nextgi_hit_lighting (#129).
+	void environment_set_nextgi_ray_lighting_mode(RID p_env, int p_mode);
+	int environment_get_nextgi_ray_lighting_mode(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

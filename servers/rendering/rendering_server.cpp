@@ -3518,6 +3518,9 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: nextgi_user_surface
 	ClassDB::bind_method(D_METHOD("environment_set_nextgi", "env", "enable", "energy", "read_sky", "max_roughness", "fog_hits", "view_distance", "front_layer_reflections"), &RenderingServer::environment_set_nextgi);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_translucency_front_layer_reflections", "env"), &RenderingServer::environment_get_nextgi_translucency_front_layer_reflections);
+	// GodotNext: nextgi_hit_lighting (#129).
+	ClassDB::bind_method(D_METHOD("environment_set_nextgi_ray_lighting_mode", "env", "mode"), &RenderingServer::environment_set_nextgi_ray_lighting_mode);
+	ClassDB::bind_method(D_METHOD("environment_get_nextgi_ray_lighting_mode", "env"), &RenderingServer::environment_get_nextgi_ray_lighting_mode);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_enabled", "env"), &RenderingServer::environment_get_nextgi_enabled);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_energy", "env"), &RenderingServer::environment_get_nextgi_energy);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_read_sky_light", "env"), &RenderingServer::environment_get_nextgi_read_sky_light);
@@ -4378,6 +4381,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium (Lite Beta),High (60 FPS class),Epic (30 FPS class)"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/mode", PROPERTY_HINT_ENUM, "GI and reflections,Reflections only"), 0);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/reflections", true);
+	// GodotNext: nextgi_hit_lighting (#129). Ray Lighting Mode and multi-bounce specular cap.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/ray_lighting_mode", PROPERTY_HINT_ENUM, "Surface Cache,Hit Lighting for Reflections"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/max_reflection_bounces", PROPERTY_HINT_RANGE, "1,4,1"), 1);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field", false);

@@ -643,6 +643,16 @@ bool Environment::get_nextgi_translucency_front_layer_reflections() const {
 
 void Environment::_update_nextgi() {
 	RS::get_singleton()->environment_set_nextgi(environment, nextgi_enabled, nextgi_energy, nextgi_read_sky_light, nextgi_max_roughness_to_trace, nextgi_fog_on_reflection_hits, nextgi_scene_view_distance, nextgi_translucency_front_layer_reflections);
+	RS::get_singleton()->environment_set_nextgi_ray_lighting_mode(environment, int(nextgi_ray_lighting_mode));
+}
+
+void Environment::set_nextgi_ray_lighting_mode(NextGIRayLightingMode p_mode) {
+	nextgi_ray_lighting_mode = NextGIRayLightingMode(CLAMP(int(p_mode), int(NEXTGI_RAY_LIGHTING_MODE_PROJECT_DEFAULT), int(NEXTGI_RAY_LIGHTING_MODE_HIT_LIGHTING_FOR_REFLECTIONS)));
+	_update_nextgi();
+}
+
+Environment::NextGIRayLightingMode Environment::get_nextgi_ray_lighting_mode() const {
+	return nextgi_ray_lighting_mode;
 }
 
 void Environment::set_nextgi_scene_view_distance(float p_distance) {
@@ -1515,6 +1525,9 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_nextgi_translucency_front_layer_reflections"), &Environment::get_nextgi_translucency_front_layer_reflections);
 	ClassDB::bind_method(D_METHOD("set_nextgi_scene_view_distance", "distance"), &Environment::set_nextgi_scene_view_distance);
 	ClassDB::bind_method(D_METHOD("get_nextgi_scene_view_distance"), &Environment::get_nextgi_scene_view_distance);
+	// GodotNext: nextgi_hit_lighting (#129).
+	ClassDB::bind_method(D_METHOD("set_nextgi_ray_lighting_mode", "mode"), &Environment::set_nextgi_ray_lighting_mode);
+	ClassDB::bind_method(D_METHOD("get_nextgi_ray_lighting_mode"), &Environment::get_nextgi_ray_lighting_mode);
 	ClassDB::bind_method(D_METHOD("is_nextgi_reading_sky_light"), &Environment::is_nextgi_reading_sky_light);
 	ADD_GROUP("NextGI", "nextgi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_nextgi_enabled", "is_nextgi_enabled");
@@ -1525,6 +1538,8 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_fog_on_reflection_hits"), "set_nextgi_fog_on_reflection_hits", "is_nextgi_fog_on_reflection_hits");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_translucency_front_layer_reflections"), "set_nextgi_translucency_front_layer_reflections", "get_nextgi_translucency_front_layer_reflections");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "nextgi_scene_view_distance", PROPERTY_HINT_RANGE, "0,800,0.1,or_greater,suffix:m"), "set_nextgi_scene_view_distance", "get_nextgi_scene_view_distance");
+	// GodotNext: nextgi_hit_lighting (#129).
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "nextgi_ray_lighting_mode", PROPERTY_HINT_ENUM, "Project Default,Surface Cache,Hit Lighting for Reflections"), "set_nextgi_ray_lighting_mode", "get_nextgi_ray_lighting_mode");
 
 	// Glow
 
@@ -1728,6 +1743,11 @@ void Environment::_bind_methods() {
 	BIND_ENUM_CONSTANT(SDFGI_Y_SCALE_50_PERCENT);
 	BIND_ENUM_CONSTANT(SDFGI_Y_SCALE_75_PERCENT);
 	BIND_ENUM_CONSTANT(SDFGI_Y_SCALE_100_PERCENT);
+
+	// GodotNext: nextgi_hit_lighting (#129).
+	BIND_ENUM_CONSTANT(NEXTGI_RAY_LIGHTING_MODE_PROJECT_DEFAULT);
+	BIND_ENUM_CONSTANT(NEXTGI_RAY_LIGHTING_MODE_SURFACE_CACHE);
+	BIND_ENUM_CONSTANT(NEXTGI_RAY_LIGHTING_MODE_HIT_LIGHTING_FOR_REFLECTIONS);
 }
 
 Environment::Environment() {

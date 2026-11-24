@@ -131,10 +131,39 @@ enum NextGIHitConsumer : uint32_t {
 	NEXTGI_HIT_CONSUMER_PATH_TRACER = 1u << 5,
 };
 
-// GodotNext: path_tracer (#167). The base library's ray generation stages: the check's, then the path tracer's.
+// GodotNext: path_tracer (#167), nextgi_hit_lighting (#129). The base library's ray generation stages:
+// the check's, the path tracer's, and hit lighting's.
 enum {
 	NEXTGI_HIT_RAYGEN_CHECK = 0,
 	NEXTGI_HIT_RAYGEN_PATH_TRACER = 1,
+	NEXTGI_HIT_RAYGEN_HIT_LIGHTING = 2,
+};
+
+// GodotNext: nextgi_hit_lighting (#129). Inputs for raygen stage 2 (nextgi_hit_lighting.glsl): sorted
+// reflection hit records, 64^3 world light grid, D14 scenario lights, SRC/WRC indirect sources, and
+// reflection output targets.
+struct NextGIHitLightTrace {
+	RID params;
+	RID records;
+	RID sorted_indices;
+	RID lights;
+	RID light_grid;
+	RID counters;
+	RID indirect_buffer; // Optional indirect RT dispatch command (12 bytes at offset 0).
+	RID src_material_depth;
+	RID src_cards;
+	RID src_card_sets;
+	RID src_page_rects;
+	RID src_indirect;
+	RID wrc_radiance;
+	RID wrc_visibility;
+	RID sky;
+	RID blue_noise;
+	RID reflection_out;
+	RID hit_distance_out;
+	RID debug_out;
+	uint32_t max_rays = 0;
+	float time = 0.0f;
 };
 
 // GodotNext: path_tracer (#167), path_tracer_denoise (#168). One path tracer sample per pixel through the hit
@@ -588,6 +617,16 @@ public:
 	bool can_trace_path_tracer() const;
 	uint64_t get_pipeline_serial() const;
 	bool trace_path_tracer(NextGIRTScene *p_rt_scene, const NextGIHitPathTrace &p_trace);
+
+	// GodotNext: nextgi_hit_lighting (#129). Raygen stage 2 (nextgi_hit_lighting.glsl) with optional SER.
+	bool has_hit_lighting_raygen() const;
+	bool has_hit_lighting_ser() const;
+	const char *get_hit_lighting_ser_mode() const;
+	bool can_trace_hit_lighting() const;
+	bool trace_hit_lighting(NextGIRTScene *p_rt_scene, const NextGIHitLightTrace &p_trace);
+	RID get_hit_surface_buffer() const;
+	RID get_material_table_buffer() const;
+	uint32_t get_material_count() const;
 
 	// GodotNext: nextgi_shadow_policy (#145). The shadow rays' material retrace: traces every record of
 	// p_records (next_gi_shadow_policy.h, NextGIShadowRetraceRecord, up to p_capacity) through the hit groups with

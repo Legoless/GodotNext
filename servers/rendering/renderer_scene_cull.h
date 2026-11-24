@@ -1531,6 +1531,9 @@ public:
 	PASS1RC(float, environment_get_nextgi_max_roughness_to_trace, RID)
 	PASS1RC(bool, environment_get_nextgi_fog_on_reflection_hits, RID)
 	PASS1RC(bool, environment_get_nextgi_translucency_front_layer_reflections, RID)
+	// GodotNext: nextgi_hit_lighting (#129).
+	PASS2(environment_set_nextgi_ray_lighting_mode, RID, int)
+	PASS1RC(int, environment_get_nextgi_ray_lighting_mode, RID)
 	PASS1(nextgi_set_hardware_ray_tracing, int)
 	PASS0RC(Dictionary, nextgi_get_tier_info)
 

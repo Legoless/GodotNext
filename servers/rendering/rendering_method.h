@@ -335,6 +335,9 @@ public:
 	virtual float environment_get_nextgi_max_roughness_to_trace(RID p_env) const = 0;
 	virtual bool environment_get_nextgi_fog_on_reflection_hits(RID p_env) const = 0;
 	virtual bool environment_get_nextgi_translucency_front_layer_reflections(RID p_env) const = 0;
+	// GodotNext: nextgi_hit_lighting (#129).
+	virtual void environment_set_nextgi_ray_lighting_mode(RID p_env, int p_mode) = 0;
+	virtual int environment_get_nextgi_ray_lighting_mode(RID p_env) const = 0;
 	virtual void nextgi_set_hardware_ray_tracing(int p_mode) = 0;
 	virtual Dictionary nextgi_get_tier_info() const = 0;
 

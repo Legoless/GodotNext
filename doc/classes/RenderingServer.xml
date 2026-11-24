@@ -1332,6 +1332,13 @@
 				Returns the NextGI energy multiplier for the environment RID. See [member Environment.nextgi_energy].
 			</description>
 		</method>
+		<method name="environment_get_nextgi_ray_lighting_mode" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="env" type="RID" />
+			<description>
+				Returns the NextGI ray lighting mode override for the environment RID. See [member Environment.nextgi_ray_lighting_mode].
+			</description>
+		</method>
 		<method name="environment_get_nextgi_read_sky_light" qualifiers="const">
 			<return type="bool" />
 			<param index="0" name="env" type="RID" />
@@ -1486,6 +1493,14 @@
 			<param index="1" name="enable" type="bool" />
 			<description>
 				Sets whether the specified environment RID uses NextGI. See [member Environment.nextgi_enabled] for more information.
+			</description>
+		</method>
+		<method name="environment_set_nextgi_ray_lighting_mode">
+			<return type="void" />
+			<param index="0" name="env" type="RID" />
+			<param index="1" name="mode" type="int" />
+			<description>
+				Sets the NextGI ray lighting mode override for the specified environment RID ([code]0[/code] Project Default, [code]1[/code] Surface Cache, [code]2[/code] Hit Lighting for Reflections). See [member Environment.nextgi_ray_lighting_mode].
 			</description>
 		</method>
 		<method name="environment_set_sdfgi">

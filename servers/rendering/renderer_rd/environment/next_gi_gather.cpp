@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_lighting.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
@@ -821,6 +822,30 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	NextGIViewMath::store_basis(view.view_to_world, params.view_to_world); // GodotNext: nextgi_view_math
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
+	// GodotNext: nextgi_hit_lighting (#129). Snapshot view parameters for hit lighting if active this frame.
+	last_view_to_world = view.view_to_world;
+	last_hiz_texture = hiz_texture;
+	last_frame_color_texture = last_frame_texture;
+	last_sky_texture = sky_tex;
+	last_hiz_max_mip = params.pad1;
+	last_rt_radius = params.rt_radius;
+	last_max_origin_offset = params.max_origin_offset;
+	last_max_trace_roughness = params.max_trace_roughness;
+	last_sky_enabled = params.sky_enabled != 0u;
+	last_reflect_enabled = params.reflect_enabled != 0u;
+	last_reflect_debug = params.reflect_debug != 0u;
+	last_ambient_color = ambient;
+	last_fog_enabled = params.fog_enabled != 0u;
+	last_fog_depth_mode = params.fog_depth_mode != 0u;
+	last_fog_density = params.fog_density;
+	last_fog_height = params.fog_height;
+	last_fog_height_density = params.fog_height_density;
+	last_fog_depth_begin = params.fog_depth_begin;
+	last_fog_depth_end = params.fog_depth_end;
+	last_fog_depth_curve = params.fog_depth_curve;
+	last_fog_light_color = Color(params.fog_light_color[0], params.fog_light_color[1], params.fog_light_color[2], 1.0f);
+	last_fog_light_energy = params.fog_light_color[3];
+
 	_free_uniform_set();
 	RID page_rects = relight->get_page_rect_buffer();
 	if (!page_rects.is_valid()) {
@@ -1200,9 +1225,74 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	}
 	// GodotNext: nextgi_reflect (#60). One specular trace per trace pixel.
 	// GodotNext: nextgi_reflect_divisor (#274). The trace size follows the preset's reflection_divisor.
+	// GodotNext: nextgi_hit_lighting (#129). When hit lighting for reflections is active on HWRT, run
+	// Mark -> World Light Grid -> Hit Sort -> Hit Lighting writing specular_raw before _denoise_specular().
+	// Surface Cache mode skips this completely and runs MODE_REFLECT byte-identically.
 	const uint32_t reflect_groups_x = nextgi_reflect_dispatch_groups(uint32_t(last_trace_size.width));
 	const uint32_t reflect_groups_y = nextgi_reflect_dispatch_groups(uint32_t(last_trace_size.height));
-	if (reflect_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
+	bool ran_hit_lighting = false;
+	NextGI *hl_next_gi = NextGI::get_singleton();
+	if (!bound_swrt && hl_next_gi != nullptr && p_render_data != nullptr && last_screen_w > 0 && last_screen_h > 0 &&
+			hl_next_gi->is_hit_lighting_active_for_view(p_render_data->environment)) {
+		NextGIHitLighting *hl = hl_next_gi->ensure_hit_lighting();
+		if (hl != nullptr) {
+			NextGIHitLighting::ExecuteParams ep;
+			ep.render_data = p_render_data;
+			ep.rt_scene = hl_next_gi->get_rt_scene();
+			ep.hit_materials = hl_next_gi->get_hit_materials();
+			ep.src = hl_next_gi->get_src();
+			ep.relight = NextGIRelight::get_singleton();
+			ep.wrc = hl_next_gi->get_wrc(p_render_data->render_buffers.ptr());
+			ep.depth = last_depth.is_valid() ? last_depth : dummy_color;
+			ep.normal_roughness = last_normal_roughness.is_valid() ? last_normal_roughness : dummy_color;
+			ep.hiz = last_hiz_texture.is_valid() ? last_hiz_texture : dummy_color;
+			ep.last_frame = last_frame_color_texture.is_valid() ? last_frame_color_texture : dummy_color;
+			ep.sky_tex = last_sky_texture.is_valid() ? last_sky_texture : dummy_color;
+			ep.blue_noise = blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color;
+			ep.sampler_linear = sampler;
+			ep.sampler_nearest = sampler_nearest;
+			ep.dummy_color = dummy_color;
+			ep.dummy_buffer = dummy_buffer;
+			ep.reflection_out = specular_raw;
+			ep.hit_distance_out = last_specular_hit;
+			ep.debug_out = specular_debug;
+			ep.reflect_counter_buffer = reflect_counter_buffer;
+			ep.screen_size = Size2i(int(last_screen_w), int(last_screen_h));
+			ep.trace_size = last_trace_size;
+			ep.inv_view_proj = last_inv_view_proj;
+			ep.view_proj = last_prev_view_proj;
+			ep.view_to_world = last_view_to_world;
+			ep.camera_pos = last_camera_pos;
+			ep.rt_radius = last_rt_radius;
+			ep.max_origin_offset = last_max_origin_offset;
+			ep.max_trace_roughness = last_max_trace_roughness;
+			ep.frame = frame;
+			ep.max_reflection_bounces = NextGI::read_max_reflection_bounces();
+			ep.hiz_max_mip = last_hiz_max_mip;
+			ep.reflect_enabled = last_reflect_enabled;
+			ep.reflect_debug = last_reflect_debug;
+			ep.blue_noise_mode = rr_sampling_mode == 0u;
+			ep.front_layer = front_layer;
+			ep.sky_enabled = last_sky_enabled;
+			ep.ambient_color = last_ambient_color;
+			ep.fog_enabled = last_fog_enabled;
+			ep.fog_depth_mode = last_fog_depth_mode;
+			ep.fog_density = last_fog_density;
+			ep.fog_height = last_fog_height;
+			ep.fog_height_density = last_fog_height_density;
+			ep.fog_depth_begin = last_fog_depth_begin;
+			ep.fog_depth_end = last_fog_depth_end;
+			ep.fog_depth_curve = last_fog_depth_curve;
+			ep.fog_light_color = last_fog_light_color;
+			ep.fog_light_energy = last_fog_light_energy;
+			ep.time = p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f;
+			ran_hit_lighting = hl->execute(ep);
+			if (ran_hit_lighting) {
+				hl_next_gi->note_reflection_dispatch();
+			}
+		}
+	}
+	if (!ran_hit_lighting && reflect_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
 		ReflectCountersGPU zero_reflect;
 		rd->buffer_update(reflect_counter_buffer, 0, sizeof(zero_reflect), &zero_reflect);
 		const RD::ComputeListID list = rd->compute_list_begin();

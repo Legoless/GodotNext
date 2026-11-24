@@ -76,6 +76,13 @@ public:
 		SDFGI_Y_SCALE_100_PERCENT,
 	};
 
+	// GodotNext: nextgi_hit_lighting (#129).
+	enum NextGIRayLightingMode {
+		NEXTGI_RAY_LIGHTING_MODE_PROJECT_DEFAULT,
+		NEXTGI_RAY_LIGHTING_MODE_SURFACE_CACHE,
+		NEXTGI_RAY_LIGHTING_MODE_HIT_LIGHTING_FOR_REFLECTIONS,
+	};
+
 	enum FogMode {
 		FOG_MODE_EXPONENTIAL,
 		FOG_MODE_DEPTH,
@@ -172,6 +179,8 @@ private:
 	bool nextgi_fog_on_reflection_hits = true;
 	bool nextgi_translucency_front_layer_reflections = false;
 	float nextgi_scene_view_distance = 200.0f;
+	// GodotNext: nextgi_hit_lighting (#129).
+	NextGIRayLightingMode nextgi_ray_lighting_mode = NEXTGI_RAY_LIGHTING_MODE_PROJECT_DEFAULT;
 	void _update_nextgi();
 
 	// Glow
@@ -378,6 +387,9 @@ public:
 	bool get_nextgi_translucency_front_layer_reflections() const;
 	void set_nextgi_scene_view_distance(float p_distance);
 	float get_nextgi_scene_view_distance() const;
+	// GodotNext: nextgi_hit_lighting (#129).
+	void set_nextgi_ray_lighting_mode(NextGIRayLightingMode p_mode);
+	NextGIRayLightingMode get_nextgi_ray_lighting_mode() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);
@@ -488,5 +500,6 @@ VARIANT_ENUM_CAST(Environment::AmbientSource)
 VARIANT_ENUM_CAST(Environment::ReflectionSource)
 VARIANT_ENUM_CAST(Environment::ToneMapper)
 VARIANT_ENUM_CAST(Environment::SDFGIYScale)
+VARIANT_ENUM_CAST(Environment::NextGIRayLightingMode)
 VARIANT_ENUM_CAST(Environment::GlowBlendMode)
 VARIANT_ENUM_CAST(Environment::FogMode)

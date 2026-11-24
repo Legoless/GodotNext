@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  nextgi_shadow_ray_inc.glsl                                            */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 // GodotNext: nextgi_shadow_policy (#145, plan §21.3 contract M4). The shadow-ray include that ray-traced
 // shadows (#141), MegaLights (#146) and the SRC relight's shadow rays (D14) share, so all of them apply one
 // visibility policy (next_gi_shadow_policy.h has the CPU side and a model of this function).
@@ -42,6 +72,7 @@ const uint NEXTGI_SHADOW_ALPHA_NEAREST = 1u << 6u;
 const uint NEXTGI_SHADOW_ALPHA_CLAMP = 1u << 7u;
 const uint NEXTGI_SHADOW_MAX_ALPHA_SAMPLES = 4u;
 
+#ifndef NEXTGI_SHADOW_USE_HIT_LAYOUT
 struct NextGIShadowAlpha {
 	uvec4 info; // flags, bindless texture slot, attribute stream chunk, attribute stream offset.
 	vec2 params; // threshold, albedo alpha.
@@ -58,6 +89,7 @@ layout(set = NEXTGI_SHADOW_SET, binding = NEXTGI_SHADOW_ALPHA_BINDING, std430) r
 	NextGIShadowAlpha data[];
 }
 nextgi_shadow_alpha;
+#endif // !NEXTGI_SHADOW_USE_HIT_LAYOUT
 
 // Set by trace_shadow(): the ray met a candidate left to the retrace and nothing else occluded it.
 bool nextgi_shadow_retrace = false;
@@ -94,6 +126,13 @@ bool nextgi_shadow_retrace_append(vec3 p_origin, vec3 p_direction, float p_tmax,
 #ifdef NEXTGI_SHADOW_ALPHA_TEXTURES
 #extension GL_EXT_nonuniform_qualifier : require
 
+#ifdef NEXTGI_SHADOW_USE_HIT_LAYOUT
+// GodotNext: nextgi_hit_lighting (#129). Reuse the hit pipeline's arena chunks, linear repeating sampler, and
+// set 1 bindless texture table declared by nextgi_hit_layout_inc.glsl instead of re-declaring them.
+#define nextgi_shadow_chunk_uint nextgi_hit_chunk_uint
+#define nextgi_shadow_alpha_sampler SAMPLER_LINEAR_REPEAT
+#define nextgi_shadow_alpha_textures hit_textures
+#else
 layout(set = NEXTGI_SHADOW_SET, binding = NEXTGI_SHADOW_CHUNK0_BINDING, std430) restrict readonly buffer NextGIShadowChunk0 {
 	uint data[];
 }
@@ -129,6 +168,7 @@ uint nextgi_shadow_chunk_uint(uint p_chunk, uint p_byte) {
 	}
 	return nextgi_shadow_chunk3.data[word];
 }
+#endif // NEXTGI_SHADOW_USE_HIT_LAYOUT
 
 // BaseMaterial3D's alpha at the hit: the albedo texture's alpha at UV1 (scale and offset applied, the texture's
 // top mip) times the albedo color's alpha. The UV comes from the surface's attribute stream (#130's layout: a

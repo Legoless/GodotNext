@@ -1,0 +1,79 @@
+/**************************************************************************/
+/*  nextgi-hit-lighting.md                                                */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
+# NextGI hit lighting for reflections source log
+
+The plan's clean-room protocol (§19) requires a source log per subsystem. This file records the outside
+inputs used for hit lighting for reflections (#129, plan §21.2 contract L7, GL-1 to GL-3): the Ray Lighting
+Mode project setting and per-`Environment` override, reflection hit marking, 16-bit material-key counting
+sort, the 64^3 world-space light grid, sorted-deferred re-trace into #130 material hit groups with optional
+Shader Execution Reordering (SER), inline ray-query area shadows via #145 `trace_shadow()`, multi-bounce
+mirror reflections, and translucent TLAS admission with tinted skipping.
+
+## No Unreal Engine input
+
+The mark shader, 16-bit counting sort, 64^3 world light grid builder, raygen shader, BRDF shading,
+translucent TLAS mask bit reservation, and verification tests were written from the plan (§21.2 L7),
+issue #129, and public specifications/talks listed below. No Unreal Engine source, shader, plugin,
+NvRTX sample, or decompile was opened.
+
+## Sorted-deferred hit lighting architecture (public talk)
+
+| Field | Value |
+|---|---|
+| What | Daniel Wright, Krzysztof Narkowicz, Patrick Kelly, "Lumen: Real-time Global Illumination in Unreal Engine 5", SIGGRAPH 2022 Advances in Real-Time Rendering course (public presentation slides): high-level two-stage ray lighting concept — trace primary rays to record hits and material IDs, compact and sort active hits by material, and evaluate full material shading and direct lights with shadows on the sorted hits, with an optional fallback to the Surface Radiance Cache. |
+| Upstream | https://advances.realtimerendering.com/s2022/ |
+| Version | SIGGRAPH 2022 published course notes |
+| License | Public SIGGRAPH course slides; high-level algorithm concept only. Consulted, not copied |
+| Read on | 2026-11-24, for issue #129 (known published algorithm) |
+| Consulted by | The #129 implementer |
+| Used in | `servers/rendering/renderer_rd/environment/next_gi_hit_lighting.{h,cpp}`, `servers/rendering/renderer_rd/shaders/environment/nextgi_reflect.glsl`, `nextgi_hit_sort.glsl`, `nextgi_light_grid.glsl`, `nextgi_hit_lighting.glsl` |
+| Copied files | None |
+
+## GLSL Shader Execution Reordering extensions
+
+| Field | Value |
+|---|---|
+| What | `GL_EXT_shader_invocation_reorder` (`hitObjectEXT`, `hitObjectTraceRayEXT`, `reorderThreadEXT`, `hitObjectExecuteShaderEXT`) and `GL_NV_shader_invocation_reorder` (`hitObjectNV`, `hitObjectTraceRayNV`, `reorderThreadNV`, `hitObjectExecuteShaderNV`) for reordering raygen shader invocations by hit object and a 16-bit coherence hint (material key). |
+| Upstream | https://github.com/KhronosGroup/GLSL/tree/main/extensions/ext and https://github.com/KhronosGroup/GLSL/tree/main/extensions/nv |
+| Version | Khronos GLSL extension specifications supported by the vendored glslang and #179 RT pipelines |
+| License | Khronos specifications. Consulted, not copied |
+| Read on | 2026-11-24, for issue #129 |
+| Consulted by | The #129 implementer |
+| Used in | `servers/rendering/renderer_rd/shaders/environment/nextgi_hit_lighting.glsl`, `servers/rendering/renderer_rd/environment/next_gi_hit_materials.cpp` |
+| Copied files | None |
+
+## Existing repository components reused
+
+- Material hit groups, bindless tables, and pipeline library linking (#130, `next_gi_hit_materials.{h,cpp}`, `nextgi_hit_layout_inc.glsl`).
+- Shared RT shadow visibility policy and inline `trace_shadow()` (#145, `next_gi_shadow_policy.{h,cpp}`, `nextgi_shadow_ray_inc.glsl`).
+- D14 scenario light set filtering, physical light energy conversion, and omni/spot attenuation (`next_gi_relight.cpp`, `next_gi_src_relight.h`).
+- SRC indirect texture and WRC probe sampling (`next_gi_src.h`, `next_gi_relight.h`, `next_gi_wrc.h`, `nextgi_wrc_sample_inc.glsl`).
+- Forward+ GGX PBR BRDF formulation (Trowbridge-Reitz NDF, height-correlated Smith-GGX visibility, Schlick Fresnel, Lambertian diffuse) and reflection fog (`nextgi_gather_body_inc.glsl`).

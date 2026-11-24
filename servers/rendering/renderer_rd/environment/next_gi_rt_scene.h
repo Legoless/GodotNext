@@ -71,6 +71,8 @@ enum NextGIInstanceRTFlags {
 	NEXTGI_RT_FLAG_ALPHA_AS_OPAQUE = 1 << 2,
 	NEXTGI_RT_FLAG_FAR = 1 << 3,
 	NEXTGI_RT_FLAG_LIGHTMAPPED = 1 << 4,
+	// GodotNext: nextgi_hit_lighting (#129). Alpha-blended instance admitted with TLAS mask bit 1.
+	NEXTGI_RT_FLAG_TRANSLUCENT = 1 << 5,
 };
 
 // NextGISurfaceRecord::flags (plan §6.3 hit record). Bits 8-31 carry the bind-pose vertex
@@ -689,6 +691,10 @@ private:
 	uint64_t records_hash = 0;
 	bool surface_sources_wanted = false;
 	bool surface_sources_valid = false;
+	// GodotNext: nextgi_hit_lighting (#129). When true, alpha-blended instances enter the TLAS with
+	// mask bit 1 (NEXTGI_RT_MASK_TRANSLUCENT) and SRC cards so hit-lighting reflections skip and tint through them.
+	bool hit_lighting_translucent_enabled = false;
+	uint32_t translucent_instance_count = 0;
 	void _finish_surface_sources(const LocalVector<NextGIInstanceRecord> &p_records, const LocalVector<NextGISurfaceRecord> &p_surfaces);
 
 	void _build_dirty_mesh_parts(RID p_mesh);
@@ -777,6 +783,10 @@ public:
 	const LocalVector<SurfaceSource> &get_surface_sources() const { return surface_sources; }
 	uint64_t get_records_hash() const { return records_hash; }
 	void set_as_budget_bytes(uint64_t p_bytes) { as_budget_bytes = p_bytes; }
+	// GodotNext: nextgi_hit_lighting (#129).
+	void set_hit_lighting_translucent_enabled(bool p_enabled) { hit_lighting_translucent_enabled = p_enabled; }
+	bool is_hit_lighting_translucent_enabled() const { return hit_lighting_translucent_enabled; }
+	uint32_t get_translucent_instance_count() const { return translucent_instance_count; }
 
 	NextGIRTScene() {}
 	~NextGIRTScene() {}

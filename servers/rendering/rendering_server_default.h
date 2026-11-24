@@ -1013,6 +1013,9 @@ public:
 	FUNC1RC(float, environment_get_nextgi_max_roughness_to_trace, RID)
 	FUNC1RC(bool, environment_get_nextgi_fog_on_reflection_hits, RID)
 	FUNC1RC(bool, environment_get_nextgi_translucency_front_layer_reflections, RID)
+	// GodotNext: nextgi_hit_lighting (#129).
+	FUNC2(environment_set_nextgi_ray_lighting_mode, RID, int)
+	FUNC1RC(int, environment_get_nextgi_ray_lighting_mode, RID)
 	FUNC1(nextgi_set_hardware_ray_tracing, int)
 	FUNC0RC(Dictionary, nextgi_get_tier_info)
 

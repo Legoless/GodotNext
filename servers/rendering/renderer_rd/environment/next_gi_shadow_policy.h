@@ -62,6 +62,9 @@ enum {
 	NEXTGI_SHADOW_LAYER_MASK = 0xFFFFF, // Godot's 20 render layers.
 	NEXTGI_SHADOW_DYNAMIC_BITS = 6,
 	NEXTGI_SHADOW_MASK_DYNAMIC = 0x3F,
+	// GodotNext: nextgi_hit_lighting (#129). TLAS instance mask bit 1 reserved for alpha-blended
+	// instances while hit lighting is active so reflection rays can skip translucent segments.
+	NEXTGI_RT_MASK_TRANSLUCENT = 1 << 1,
 	NEXTGI_SHADOW_MASK_UNALLOCATED = 1 << 6,
 	NEXTGI_SHADOW_MASK_GI = 1 << 7,
 	NEXTGI_SHADOW_MASK_CASTERS = NEXTGI_SHADOW_MASK_DYNAMIC | NEXTGI_SHADOW_MASK_UNALLOCATED,
@@ -265,14 +268,16 @@ private:
 	uint32_t stable_frames = 0;
 	bool has_allocation = false;
 
-	void _adopt(const uint32_t *p_masks, uint32_t p_count);
+	void _adopt(const uint32_t *p_masks, uint32_t p_count, uint32_t p_reserved_bits = 0);
 
 public:
 	// Once per frame, before the TLAS phase, with the caster masks of every shadowed light. The first non-empty
 	// choice applies at once (nothing to keep stable yet). After that, a different choice applies only once it
 	// has been the choice on NEXTGI_SHADOW_HYSTERESIS_FRAMES consecutive frames; masks in both keep their bits.
+	// GodotNext: nextgi_hit_lighting (#129). p_reserved_bits excludes bits (such as NEXTGI_RT_MASK_TRANSLUCENT)
+	// from dynamic shadow allocation, evacuating any newly reserved bit immediately.
 	// Returns true when the allocation changed.
-	bool update(const uint32_t *p_caster_masks, uint32_t p_count);
+	bool update(const uint32_t *p_caster_masks, uint32_t p_count, uint32_t p_reserved_bits = 0);
 	const Allocation &get_allocation() const { return allocation; }
 	uint32_t get_stable_frames() const { return stable_frames; }
 	uint32_t get_pending_count() const { return pending_count; }

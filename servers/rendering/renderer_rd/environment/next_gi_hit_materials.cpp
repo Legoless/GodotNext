@@ -39,6 +39,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_hit_base.glsl.gen.h"
+// GodotNext: nextgi_hit_lighting (#129)
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_hit_lighting.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_hit_material.glsl.gen.h"
 // GodotNext: path_tracer (#167)
 #include "servers/rendering/renderer_rd/shaders/environment/path_tracer_hit.glsl.gen.h"
@@ -46,6 +48,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_device_rt_pipeline.h"
 #include "servers/rendering/rendering_server_enums.h"
 
 namespace RendererRD {
@@ -868,6 +871,16 @@ struct NextGIHitMaterials::Internal {
 	RID path_tracer_shader_rid;
 	bool path_tracer_raygen = false;
 	RID path_tracer_dummy_image;
+	// GodotNext: nextgi_hit_lighting (#129). Raygen stage 2 (NEXTGI_HIT_RAYGEN_HIT_LIGHTING) with optional SER,
+	// plus format-matched 1x1 dummy images (rgba16f / r16f) for other raygen stages' stand-in bindings.
+	NextgiHitLightingShaderRD hit_lighting_shader;
+	RID hit_lighting_version;
+	RID hit_lighting_shader_rid;
+	bool hit_lighting_raygen = false;
+	bool hit_lighting_ser = false;
+	const char *hit_lighting_ser_mode = "NONE";
+	RID dummy_rgba16f_image;
+	RID dummy_r16f_image;
 
 	RID base_library;
 	RID linked;
@@ -1013,15 +1026,93 @@ bool NextGIHitMaterials::_initialize() {
 	const uint32_t record[4] = { UINT32_MAX, 0u, 0u, 0u };
 	fallback.record_data.resize(sizeof(record));
 	memcpy(fallback.record_data.ptrw(), record, sizeof(record));
-	// GodotNext: path_tracer (#167). Ray generation stage 1 is the path tracer's (NEXTGI_HIT_RAYGEN_PATH_TRACER).
-	// A device that cannot build it keeps the hit groups without it, and the path tracer traces inline. It shades
-	// hits with the material groups, so Simplified Material (#286), where it traces inline, leaves it out.
+	// GodotNext: path_tracer (#167), nextgi_hit_lighting (#129). Ray generation stage 1 is the path tracer's
+	// (NEXTGI_HIT_RAYGEN_PATH_TRACER) and stage 2 is hit lighting's (NEXTGI_HIT_RAYGEN_HIT_LIGHTING).
+	// Both shade hits with the material groups, so Simplified Material (#286) leaves them out.
+	bool hit_lighting_ser_requested = false;
+	const char *hit_lighting_ser_label = "NONE";
 	if (in.material_groups) {
 		in.path_tracer_shader.initialize({ "" });
 		in.path_tracer_version = in.path_tracer_shader.version_create(false);
 		in.path_tracer_shader_rid = in.path_tracer_shader.version_get_shader(in.path_tracer_version, 0);
+
+		const bool has_ser = rd->has_feature(RD::SUPPORTS_RAYTRACING_REORDER);
+		const uint32_t ser_exts = has_ser ? uint32_t(rd->limit_get(RD::LIMIT_RAYTRACING_REORDER_EXTENSIONS)) : 0u;
+		int ser_variant = 0;
+		if (has_ser && (ser_exts & RDRTPipeline::REORDER_USAGE_EXT) != 0) {
+			ser_variant = 1;
+			hit_lighting_ser_requested = true;
+			hit_lighting_ser_label = "EXT";
+		} else if (has_ser && (ser_exts & RDRTPipeline::REORDER_USAGE_NV) != 0) {
+			ser_variant = 2;
+			hit_lighting_ser_requested = true;
+			hit_lighting_ser_label = "NV";
+		}
+		Vector<String> hl_defines;
+		hl_defines.push_back("");
+		hl_defines.push_back("#define NEXTGI_HIT_SER_EXT\n");
+		hl_defines.push_back("#define NEXTGI_HIT_SER_NV\n");
+		in.hit_lighting_shader.initialize(hl_defines);
+		for (int v = 0; v < 3; v++) {
+			in.hit_lighting_shader.set_variant_enabled(v, v == ser_variant);
+		}
+		in.hit_lighting_version = in.hit_lighting_shader.version_create(false);
+		if (in.hit_lighting_version.is_valid()) {
+			in.hit_lighting_shader_rid = in.hit_lighting_shader.version_get_shader(in.hit_lighting_version, ser_variant);
+		}
+		// Fall back cleanly to non-SER variant 0 if SER variant compilation failed.
+		if (in.hit_lighting_shader_rid.is_null() && ser_variant != 0) {
+			if (in.hit_lighting_version.is_valid()) {
+				in.hit_lighting_shader.version_free(in.hit_lighting_version);
+				in.hit_lighting_version = RID();
+			}
+			for (int v = 0; v < 3; v++) {
+				in.hit_lighting_shader.set_variant_enabled(v, v == 0);
+			}
+			in.hit_lighting_version = in.hit_lighting_shader.version_create(false);
+			if (in.hit_lighting_version.is_valid()) {
+				in.hit_lighting_shader_rid = in.hit_lighting_shader.version_get_shader(in.hit_lighting_version, 0);
+			}
+			hit_lighting_ser_requested = false;
+			hit_lighting_ser_label = "NONE";
+		}
 	}
-	if (in.path_tracer_shader_rid.is_valid()) {
+	if (in.hit_lighting_shader_rid.is_valid()) {
+		RD::PipelineShader raygens[3];
+		raygens[0] = raygen;
+		raygens[1].shader = in.path_tracer_shader_rid.is_valid() ? in.path_tracer_shader_rid : in.base_shader_rid;
+		raygens[2].shader = in.hit_lighting_shader_rid;
+		BitField<RD::RaytracingPipelineFlags> flags = RD::RAYTRACING_PIPELINE_FLAG_LIBRARY;
+		if (hit_lighting_ser_requested) {
+			flags.set_flag(RD::RAYTRACING_PIPELINE_FLAG_REORDER);
+		}
+		in.base_library = rd->raytracing_pipeline_create(Span<RD::PipelineShader>(raygens, 3), Span<RD::PipelineShader>(&miss, 1), Span<RD::HitGroup>(&fallback, 1), 1, flags);
+		if (in.base_library.is_null() && hit_lighting_ser_requested) {
+			// Retry without SER if the driver rejects SER on a linked pipeline library.
+			if (in.hit_lighting_version.is_valid()) {
+				in.hit_lighting_shader.version_free(in.hit_lighting_version);
+				in.hit_lighting_version = RID();
+			}
+			for (int v = 0; v < 3; v++) {
+				in.hit_lighting_shader.set_variant_enabled(v, v == 0);
+			}
+			in.hit_lighting_version = in.hit_lighting_shader.version_create(false);
+			in.hit_lighting_shader_rid = in.hit_lighting_version.is_valid() ? in.hit_lighting_shader.version_get_shader(in.hit_lighting_version, 0) : RID();
+			hit_lighting_ser_requested = false;
+			hit_lighting_ser_label = "NONE";
+			if (in.hit_lighting_shader_rid.is_valid()) {
+				raygens[2].shader = in.hit_lighting_shader_rid;
+				in.base_library = rd->raytracing_pipeline_create(Span<RD::PipelineShader>(raygens, 3), Span<RD::PipelineShader>(&miss, 1), Span<RD::HitGroup>(&fallback, 1), 1, RD::RAYTRACING_PIPELINE_FLAG_LIBRARY);
+			}
+		}
+		if (in.base_library.is_valid()) {
+			in.path_tracer_raygen = in.path_tracer_shader_rid.is_valid();
+			in.hit_lighting_raygen = true;
+			in.hit_lighting_ser = hit_lighting_ser_requested;
+			in.hit_lighting_ser_mode = hit_lighting_ser_label;
+		}
+	}
+	if (in.base_library.is_null() && in.path_tracer_shader_rid.is_valid()) {
 		RD::PipelineShader raygens[2];
 		raygens[0] = raygen;
 		raygens[1].shader = in.path_tracer_shader_rid;
@@ -1058,9 +1149,8 @@ bool NextGIHitMaterials::_initialize() {
 		in.params_table_set = rd->uniform_set_create(u, in.base_shader_rid, 2);
 	}
 	ERR_FAIL_COND_V(in.texture_table_set.is_null() || in.params_table_set.is_null(), false);
-	// GodotNext: path_tracer (#167). Large enough for the path tracer's params block (HitPTParams, 192 bytes),
-	// which the check binds it as.
-	in.dummy_buffer = rd->storage_buffer_create(256);
+	// GodotNext: path_tracer (#167), nextgi_hit_lighting (#129). Large enough for HitPTParams (192B) and HitLightParams (160B).
+	in.dummy_buffer = rd->storage_buffer_create(512);
 	{
 		RD::TextureFormat format;
 		format.width = 1;
@@ -1070,6 +1160,16 @@ bool NextGIHitMaterials::_initialize() {
 		in.path_tracer_dummy_image = rd->texture_create(format, RD::TextureView());
 		ERR_FAIL_COND_V(in.path_tracer_dummy_image.is_null(), false);
 		rd->texture_clear(in.path_tracer_dummy_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
+
+		format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		in.dummy_rgba16f_image = rd->texture_create(format, RD::TextureView());
+		ERR_FAIL_COND_V(in.dummy_rgba16f_image.is_null(), false);
+		rd->texture_clear(in.dummy_rgba16f_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
+
+		format.format = RD::DATA_FORMAT_R16_SFLOAT;
+		in.dummy_r16f_image = rd->texture_create(format, RD::TextureView());
+		ERR_FAIL_COND_V(in.dummy_r16f_image.is_null(), false);
+		rd->texture_clear(in.dummy_r16f_image, Color(65504.0, 0, 0, 0), 0, 1, 0, 1);
 	}
 	return true;
 }
@@ -1860,6 +1960,19 @@ static void _nextgi_hit_append_scene_uniforms(NextGIRTScene *p_rt_scene, RID p_h
 	material_storage->samplers_rd_get_default().append_uniforms(r_uniforms, 11);
 }
 
+// GodotNext: nextgi_hit_lighting (#129). Stand-in bindings 37..54 for stages that do not run hit lighting.
+static void _nextgi_hit_append_hit_lighting_dummies(RID p_dummy_buffer, RID p_black_texture, RID p_dummy_rgba16f, RID p_dummy_r16f, LocalVector<RD::Uniform> &r_uniforms) {
+	for (uint32_t binding = 37; binding <= 46; binding++) {
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, p_dummy_buffer));
+	}
+	for (uint32_t binding = 47; binding <= 51; binding++) {
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, binding, p_black_texture));
+	}
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 52, p_dummy_rgba16f));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 53, p_dummy_r16f));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 54, p_dummy_rgba16f));
+}
+
 void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, float p_time) {
 	Internal &in = *internal;
 	if (!has_current_records() || p_rt_scene == nullptr || p_src == nullptr || !p_rt_scene->is_tlas_traceable()) {
@@ -1931,6 +2044,9 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, in.dummy_buffer)); // GodotNext: nextgi_shadow_policy (#145)
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, in.path_tracer_dummy_image));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
+	// GodotNext: nextgi_hit_lighting (#129). Stand-ins for hit-lighting bindings 37..54.
+	const RID check_black = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, check_black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 
 	struct PushConstant {
@@ -2045,6 +2161,8 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	// GodotNext: path_tracer_denoise (#168). First-hit albedo and normal guides.
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, p_trace.guide_albedo.is_valid() ? p_trace.guide_albedo : in.path_tracer_dummy_image));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, p_trace.guide_normal.is_valid() ? p_trace.guide_normal : in.path_tracer_dummy_image));
+	// GodotNext: nextgi_hit_lighting (#129). Stand-ins for hit-lighting bindings 37..54.
+	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2107,6 +2225,9 @@ bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_r
 	// GodotNext: path_tracer_denoise (#168). Stand-ins for the path tracer's guide images.
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, in.path_tracer_dummy_image));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
+	// GodotNext: nextgi_hit_lighting (#129). Stand-ins for hit-lighting bindings 37..54.
+	const RID check_black = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, check_black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2141,6 +2262,127 @@ bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_r
 	rd->draw_command_end_label();
 	rd->free_rid(scene_set);
 	in.counters.shadow_retrace_dispatches++;
+	return true;
+}
+
+// GodotNext: nextgi_hit_lighting (#129)
+bool NextGIHitMaterials::has_hit_lighting_raygen() const {
+	return internal->ready && internal->hit_lighting_raygen;
+}
+
+bool NextGIHitMaterials::has_hit_lighting_ser() const {
+	return internal->ready && internal->hit_lighting_ser;
+}
+
+const char *NextGIHitMaterials::get_hit_lighting_ser_mode() const {
+	return internal->ready ? internal->hit_lighting_ser_mode : "NONE";
+}
+
+bool NextGIHitMaterials::can_trace_hit_lighting() const {
+	return has_hit_lighting_raygen() && is_ready() && has_current_records() && internal->linked.is_valid() &&
+			internal->hit_surface_buffer.is_valid() && internal->material_table_buffer.is_valid() && internal->texture_slot_buffer.is_valid();
+}
+
+RID NextGIHitMaterials::get_hit_surface_buffer() const {
+	return internal != nullptr ? internal->hit_surface_buffer : RID();
+}
+
+RID NextGIHitMaterials::get_material_table_buffer() const {
+	return internal != nullptr ? internal->material_table_buffer : RID();
+}
+
+uint32_t NextGIHitMaterials::get_material_count() const {
+	return internal != nullptr ? internal->material_index_count : 0u;
+}
+
+bool NextGIHitMaterials::trace_hit_lighting(NextGIRTScene *p_rt_scene, const NextGIHitLightTrace &p_trace) {
+	Internal &in = *internal;
+	if (!can_trace_hit_lighting() || p_rt_scene == nullptr || !p_rt_scene->is_tlas_traceable() || p_trace.max_rays == 0) {
+		return false;
+	}
+	if (p_trace.params.is_null() || p_trace.records.is_null() || p_trace.sorted_indices.is_null() ||
+			p_trace.lights.is_null() || p_trace.light_grid.is_null() || p_trace.counters.is_null() ||
+			p_trace.reflection_out.is_null()) {
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	ERR_FAIL_COND_V(rd == nullptr || texture_storage == nullptr, false);
+	const RID black = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID shadow_instances = p_rt_scene->get_shadow_instance_buffer();
+	const RID shadow_alpha = p_rt_scene->get_shadow_alpha_buffer();
+
+	LocalVector<RD::Uniform> uniforms;
+	_nextgi_hit_append_scene_uniforms(p_rt_scene, in.hit_surface_buffer, in.material_table_buffer, in.texture_slot_buffer, in.dummy_buffer, uniforms);
+	// Bindings 23..29: reuse binding 26 (SRC material depth) and binding 27 (SRC cards) for D6 indirect lookup.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23, black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 24, black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 25, black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 26, p_trace.src_material_depth.is_valid() ? p_trace.src_material_depth : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, p_trace.src_cards.is_valid() ? p_trace.src_cards : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, in.dummy_buffer));
+	// Bindings 30..36: path tracer & shadow retrace stand-ins.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 30, in.path_tracer_dummy_image));
+	for (uint32_t binding = 31; binding <= 34; binding++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, in.dummy_buffer));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, in.path_tracer_dummy_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
+	// Bindings 37..54: Hit lighting resources.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, p_trace.params));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 38, p_trace.records));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, p_trace.sorted_indices));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, p_trace.lights));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 41, p_trace.light_grid));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 42, p_trace.counters));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, shadow_instances.is_valid() ? shadow_instances : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 44, shadow_alpha.is_valid() ? shadow_alpha : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 45, p_trace.src_card_sets.is_valid() ? p_trace.src_card_sets : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 46, p_trace.src_page_rects.is_valid() ? p_trace.src_page_rects : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 47, p_trace.src_indirect.is_valid() ? p_trace.src_indirect : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 48, p_trace.wrc_radiance.is_valid() ? p_trace.wrc_radiance : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 49, p_trace.wrc_visibility.is_valid() ? p_trace.wrc_visibility : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 50, p_trace.sky.is_valid() ? p_trace.sky : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 51, p_trace.blue_noise.is_valid() ? p_trace.blue_noise : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 52, p_trace.reflection_out));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 53, p_trace.hit_distance_out.is_valid() ? p_trace.hit_distance_out : in.dummy_r16f_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 54, p_trace.debug_out.is_valid() ? p_trace.debug_out : in.dummy_rgba16f_image));
+
+	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
+	ERR_FAIL_COND_V(scene_set.is_null(), false);
+
+	struct PushConstant {
+		float time;
+		uint32_t record_count;
+		uint32_t job_count;
+		uint32_t sample_count;
+		uint32_t material_count;
+		uint32_t flags;
+		uint32_t pad0;
+		uint32_t pad1;
+	};
+	static_assert(sizeof(PushConstant) == 32, "HitParams is 32 bytes (nextgi_hit_layout_inc.glsl).");
+	PushConstant push = {};
+	push.time = p_trace.time;
+	push.record_count = in.record_count;
+	push.material_count = in.material_index_count;
+
+	rd->draw_command_begin_label("NextGI Hit Lighting");
+	RD::RaytracingListID list = rd->raytracing_list_begin();
+	rd->raytracing_list_bind_raytracing_pipeline(list, in.linked);
+	rd->raytracing_list_bind_uniform_set(list, scene_set, 0);
+	rd->raytracing_list_bind_uniform_set(list, in.texture_table_set, 1);
+	rd->raytracing_list_bind_uniform_set(list, in.params_table_set, 2);
+	rd->raytracing_list_set_push_constant(list, &push, sizeof(push));
+	if (p_trace.indirect_buffer.is_valid() && rd->has_feature(RD::SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT)) {
+		rd->raytracing_list_trace_rays_indirect(list, NEXTGI_HIT_RAYGEN_HIT_LIGHTING, in.hit_sbt, p_trace.indirect_buffer, 0);
+	} else {
+		rd->raytracing_list_trace_rays(list, NEXTGI_HIT_RAYGEN_HIT_LIGHTING, in.hit_sbt, p_trace.max_rays, 1, 1);
+	}
+	rd->raytracing_list_end();
+	rd->draw_command_end_label();
+	rd->free_rid(scene_set);
 	return true;
 }
 
@@ -2212,6 +2454,10 @@ void NextGIHitMaterials::fill_counters(Dictionary &r_counters) const {
 	}
 	r_counters["hit_check_materials"] = int64_t(c.check_materials);
 	r_counters["hit_check_pending_shaders"] = int64_t(c.check_pending_shaders);
+	// GodotNext: nextgi_hit_lighting (#129)
+	r_counters["hit_lighting_raygen"] = internal->hit_lighting_raygen;
+	r_counters["hit_lighting_ser"] = internal->hit_lighting_ser;
+	r_counters["hit_lighting_ser_mode"] = String(internal->hit_lighting_ser_mode);
 }
 
 NextGIHitMaterials::NextGIHitMaterials(bool p_material_groups, RID p_texture_table) {
@@ -2265,7 +2511,7 @@ NextGIHitMaterials::~NextGIHitMaterials() {
 			rd->free_rid(in.base_library);
 		}
 		// GodotNext: nextgi_shadow_policy (#145). A shared texture table stays with its owner.
-		const RID buffers[] = { in.texture_table_set, in.params_table_set, in.texture_table_shared ? RID() : in.texture_table, in.params_table, in.material_table_buffer, in.texture_slot_buffer, in.hit_surface_buffer, in.dummy_buffer, in.path_tracer_dummy_image };
+		const RID buffers[] = { in.texture_table_set, in.params_table_set, in.texture_table_shared ? RID() : in.texture_table, in.params_table, in.material_table_buffer, in.texture_slot_buffer, in.hit_surface_buffer, in.dummy_buffer, in.path_tracer_dummy_image, in.dummy_rgba16f_image, in.dummy_r16f_image };
 		for (const RID &rid : buffers) {
 			if (rid.is_valid()) {
 				rd->free_rid(rid);
@@ -2285,6 +2531,10 @@ NextGIHitMaterials::~NextGIHitMaterials() {
 	// GodotNext: path_tracer (#167)
 	if (in.path_tracer_version.is_valid()) {
 		in.path_tracer_shader.version_free(in.path_tracer_version);
+	}
+	// GodotNext: nextgi_hit_lighting (#129)
+	if (in.hit_lighting_version.is_valid()) {
+		in.hit_lighting_shader.version_free(in.hit_lighting_version);
 	}
 	memdelete(internal);
 	internal = nullptr;

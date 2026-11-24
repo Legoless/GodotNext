@@ -274,6 +274,9 @@ public:
 	bool environment_get_nextgi_fog_on_reflection_hits(RID p_env) const;
 	bool environment_get_nextgi_translucency_front_layer_reflections(RID p_env) const;
 	float environment_get_nextgi_scene_view_distance(RID p_env) const;
+	// GodotNext: nextgi_hit_lighting (#129).
+	void environment_set_nextgi_ray_lighting_mode(RID p_env, int p_mode);
+	int environment_get_nextgi_ray_lighting_mode(RID p_env) const;
 	// GLES3 and the dummy renderer keep these defaults: no NextGI tier and no software trace.
 	virtual void nextgi_set_hardware_ray_tracing(int p_mode) {}
 	virtual Dictionary nextgi_get_tier_info() const;

@@ -957,6 +957,19 @@ bool RendererEnvironmentStorage::environment_get_nextgi_translucency_front_layer
 	return env->nextgi_translucency_front_layer_reflections;
 }
 
+// GodotNext: nextgi_hit_lighting (#129)
+void RendererEnvironmentStorage::environment_set_nextgi_ray_lighting_mode(RID p_env, int p_mode) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->nextgi_ray_lighting_mode = CLAMP(p_mode, 0, 2);
+}
+
+int RendererEnvironmentStorage::environment_get_nextgi_ray_lighting_mode(RID p_env) const {
+	const Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0);
+	return env->nextgi_ray_lighting_mode;
+}
+
 // Adjustments
 
 void RendererEnvironmentStorage::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {

@@ -120,23 +120,26 @@ bool NextGIShadowMaskAllocator::Allocation::same_set(const uint32_t *p_masks, ui
 	return true;
 }
 
-void NextGIShadowMaskAllocator::_adopt(const uint32_t *p_masks, uint32_t p_count) {
+void NextGIShadowMaskAllocator::_adopt(const uint32_t *p_masks, uint32_t p_count, uint32_t p_reserved_bits) {
 	Allocation next;
 	next.generation = allocation.generation + 1;
-	// Masks in both keep their bits, so their instances keep their masks.
+	// Masks in both keep their bits, so their instances keep their masks, unless the bit is now reserved.
 	for (int i = 0; i < NEXTGI_SHADOW_DYNAMIC_BITS; i++) {
+		if ((p_reserved_bits & (1u << i)) != 0) {
+			continue;
+		}
 		if ((allocation.used & (1u << i)) != 0 && _contains(p_masks, p_count, allocation.masks[i])) {
 			next.masks[i] = allocation.masks[i];
 			next.used |= 1u << i;
 		}
 	}
-	// New masks take the free bits, lowest first, in the order of the choice.
+	// New masks take the free non-reserved bits, lowest first, in the order of the choice.
 	for (uint32_t k = 0; k < p_count; k++) {
 		if (next.find(p_masks[k]) >= 0) {
 			continue;
 		}
 		for (int i = 0; i < NEXTGI_SHADOW_DYNAMIC_BITS; i++) {
-			if ((next.used & (1u << i)) == 0) {
+			if ((p_reserved_bits & (1u << i)) == 0 && (next.used & (1u << i)) == 0) {
 				next.masks[i] = p_masks[k];
 				next.used |= 1u << i;
 				break;
@@ -146,25 +149,33 @@ void NextGIShadowMaskAllocator::_adopt(const uint32_t *p_masks, uint32_t p_count
 	allocation = next;
 }
 
-bool NextGIShadowMaskAllocator::update(const uint32_t *p_caster_masks, uint32_t p_count) {
+bool NextGIShadowMaskAllocator::update(const uint32_t *p_caster_masks, uint32_t p_count, uint32_t p_reserved_bits) {
 	LocalVector<NextGIShadowMaskCount> top;
 	nextgi_shadow_top_masks(p_caster_masks, p_count, top);
+	const uint32_t reserved = p_reserved_bits & NEXTGI_SHADOW_MASK_DYNAMIC;
+	uint32_t available_slots = 0;
+	for (int i = 0; i < NEXTGI_SHADOW_DYNAMIC_BITS; i++) {
+		if ((reserved & (1u << i)) == 0) {
+			available_slots++;
+		}
+	}
 	uint32_t choice[NEXTGI_SHADOW_DYNAMIC_BITS] = {};
-	const uint32_t choice_count = top.size();
+	const uint32_t choice_count = MIN(top.size(), available_slots);
 	for (uint32_t i = 0; i < choice_count; i++) {
 		choice[i] = top[i].mask;
 	}
-	if (allocation.same_set(choice, choice_count)) {
+	const bool violates_reserved = (allocation.used & reserved) != 0;
+	if (!violates_reserved && allocation.same_set(choice, choice_count)) {
 		pending_count = 0;
 		stable_frames = 0;
 		return false;
 	}
-	if (!has_allocation) {
-		if (choice_count == 0) {
+	if (!has_allocation || violates_reserved) {
+		if (!violates_reserved && choice_count == 0) {
 			return false;
 		}
-		_adopt(choice, choice_count);
-		has_allocation = true;
+		_adopt(choice, choice_count, reserved);
+		has_allocation = has_allocation || choice_count > 0;
 		pending_count = 0;
 		stable_frames = 0;
 		return true;
@@ -185,7 +196,7 @@ bool NextGIShadowMaskAllocator::update(const uint32_t *p_caster_masks, uint32_t 
 	if (stable_frames < NEXTGI_SHADOW_HYSTERESIS_FRAMES) {
 		return false;
 	}
-	_adopt(choice, choice_count);
+	_adopt(choice, choice_count, reserved);
 	pending_count = 0;
 	stable_frames = 0;
 	return true;

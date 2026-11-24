@@ -625,6 +625,15 @@ bool RendererSceneRender::environment_get_nextgi_translucency_front_layer_reflec
 	return environment_storage.environment_get_nextgi_translucency_front_layer_reflections(p_env);
 }
 
+// GodotNext: nextgi_hit_lighting (#129).
+void RendererSceneRender::environment_set_nextgi_ray_lighting_mode(RID p_env, int p_mode) {
+	environment_storage.environment_set_nextgi_ray_lighting_mode(p_env, p_mode);
+}
+
+int RendererSceneRender::environment_get_nextgi_ray_lighting_mode(RID p_env) const {
+	return environment_storage.environment_get_nextgi_ray_lighting_mode(p_env);
+}
+
 Dictionary RendererSceneRender::nextgi_get_tier_info() const {
 	// NextGI runs only on the Forward+ RD renderer (plan §3.1, tier matrix row 14).
 	Dictionary info;

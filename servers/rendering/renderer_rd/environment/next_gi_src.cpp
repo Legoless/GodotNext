@@ -45,6 +45,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -1525,6 +1526,20 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 		for (const MeshStorage::NextGIRTPart &part : *parts) {
 			for (const NextGIRTPartGeometry &geometry : part.geometries) {
 				part_surfaces.push_back(geometry.surface);
+			}
+		}
+	}
+	// GodotNext: nextgi_hit_lighting (#129). When hit lighting admits alpha-blended instances into the TLAS,
+	// build SRC cards for their blended surfaces too so they receive indirect GI.
+	if (next_gi != nullptr && next_gi->is_hit_lighting_translucent_enabled() && MaterialStorage::get_singleton() != nullptr) {
+		if (const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(p_mesh)) {
+			for (const MeshStorage::NextGIRTPart &part : *shadow_parts) {
+				for (const NextGIRTPartGeometry &geometry : part.geometries) {
+					const RID mat = mesh_storage->mesh_surface_get_material(p_mesh, int(geometry.surface));
+					if (mat.is_valid() && MaterialStorage::get_singleton()->material_get_nextgi_rt_class(mat) == MaterialStorage::ShaderData::NEXTGI_RT_BLENDED) {
+						part_surfaces.push_back(geometry.surface);
+					}
+				}
 			}
 		}
 	}
