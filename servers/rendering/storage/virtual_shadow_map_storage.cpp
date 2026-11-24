@@ -102,6 +102,34 @@ uint32_t RendererVirtualShadowMapStorage::map_kind_map_count(MapKind p_kind, uin
 	}
 }
 
+// GodotNext: vsm_local_lights (#216, plan §21.3 contract S7).
+float RendererVirtualShadowMapStorage::clamp_resolution_bias(float p_bias) {
+	if (Math::is_nan(p_bias)) {
+		return 0.0f;
+	}
+	return CLAMP(p_bias, RESOLUTION_BIAS_MIN, RESOLUTION_BIAS_MAX);
+}
+
+uint32_t RendererVirtualShadowMapStorage::pack_resolution_bias(float p_bias) {
+	const float clamped = clamp_resolution_bias(p_bias);
+	const int32_t q = int32_t(std::lround(double(clamped) * double(RESOLUTION_BIAS_SCALE)));
+	return (uint32_t(q) & LIGHT_FLAGS_RES_BIAS_MASK) << LIGHT_FLAGS_RES_BIAS_SHIFT;
+}
+
+float RendererVirtualShadowMapStorage::unpack_resolution_bias(uint32_t p_light_flags) {
+	const uint32_t raw = (p_light_flags >> LIGHT_FLAGS_RES_BIAS_SHIFT) & LIGHT_FLAGS_RES_BIAS_MASK;
+	const int32_t q = (raw & 0x80u) != 0u ? (int32_t(raw) - 256) : int32_t(raw);
+	return float(q) / RESOLUTION_BIAS_SCALE;
+}
+
+void RendererVirtualShadowMapStorage::resolution_bias_parts(uint32_t p_light_flags, int32_t &r_int_bias, float &r_footprint_scale) {
+	const uint32_t raw = (p_light_flags >> LIGHT_FLAGS_RES_BIAS_SHIFT) & LIGHT_FLAGS_RES_BIAS_MASK;
+	const int32_t q = (raw & 0x80u) != 0u ? (int32_t(raw) - 256) : int32_t(raw);
+	r_int_bias = _floor_shift(q, 4u);
+	const int32_t rem = q - (r_int_bias * 16);
+	r_footprint_scale = rem == 0 ? 1.0f : std::exp2(float(rem) * (1.0f / RESOLUTION_BIAS_SCALE));
+}
+
 /* CLIPMAPS */
 
 uint32_t RendererVirtualShadowMapStorage::clipmap_level_count(float p_max_distance) {
@@ -367,6 +395,10 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_INDIRECT_ALL " + itos(INDIRECT_ALL) + "u\n";
 	// GodotNext: vsm_projection (#222).
 	defines += "#define VSM_LIGHT_FLAGS_SAMPLE " + itos(LIGHT_FLAGS_SAMPLE) + "u\n";
+	// GodotNext: vsm_local_lights (#216).
+	defines += "#define VSM_LIGHT_FLAGS_DISTANT_COARSE " + itos(LIGHT_FLAGS_DISTANT_COARSE) + "u\n";
+	defines += "#define VSM_LIGHT_FLAGS_RES_BIAS_SHIFT " + itos(LIGHT_FLAGS_RES_BIAS_SHIFT) + "u\n";
+	defines += "#define VSM_LIGHT_FLAGS_RES_BIAS_MASK " + itos(LIGHT_FLAGS_RES_BIAS_MASK) + "u\n";
 	// GodotNext: df_shadows (#214).
 	defines += "#define VSM_LIGHT_FLAGS_DF_SAMPLE " + itos(LIGHT_FLAGS_DF_SAMPLE) + "u\n";
 	defines += "#define VSM_LIGHT_FLAGS_DF_FULL " + itos(LIGHT_FLAGS_DF_FULL) + "u\n";
@@ -570,6 +602,79 @@ const RendererVirtualShadowMapStorage::MapRange *RendererVirtualShadowMapStorage
 	}
 	maps->last_used_frame = frame;
 	return &maps->range;
+}
+
+bool RendererVirtualShadowMapStorage::can_allocate_maps(uint32_t p_maps) const {
+	if (p_maps == 0) {
+		return true;
+	}
+	if (p_maps > TABLE_MAX_MAPS) {
+		return false;
+	}
+	for (const FreeRange &range : free_ranges) {
+		if (range.count >= p_maps) {
+			return true;
+		}
+	}
+	uint32_t tail_free = 0;
+	if (!free_ranges.is_empty()) {
+		const FreeRange &last = free_ranges[free_ranges.size() - 1];
+		if (last.first + last.count == table_capacity) {
+			tail_free = last.count;
+		}
+	}
+	const uint32_t needed = table_capacity + p_maps - tail_free;
+	if (needed <= TABLE_MAX_MAPS) {
+		return true;
+	}
+	// Simulate coalescing free ranges with stale evictable lights when the table is near TABLE_MAX_MAPS.
+	LocalVector<FreeRange> sim(free_ranges);
+	for (const KeyValue<RID, LightMaps> &E : light_maps) {
+		if (E.value.last_used_frame + MAP_EVICT_AFTER_FRAMES > frame) {
+			continue;
+		}
+		const uint32_t first = E.value.range.first;
+		const uint32_t count = E.value.range.count;
+		uint32_t idx = 0;
+		while (idx < sim.size() && sim[idx].first < first) {
+			idx++;
+		}
+		const bool join_prev = idx > 0 && sim[idx - 1].first + sim[idx - 1].count == first;
+		const bool join_next = idx < sim.size() && first + count == sim[idx].first;
+		if (join_prev && join_next) {
+			sim[idx - 1].count += count + sim[idx].count;
+			sim.remove_at(idx);
+			if (sim[idx - 1].count >= p_maps) {
+				return true;
+			}
+		} else if (join_prev) {
+			sim[idx - 1].count += count;
+			if (sim[idx - 1].count >= p_maps) {
+				return true;
+			}
+		} else if (join_next) {
+			sim[idx].first = first;
+			sim[idx].count += count;
+			if (sim[idx].count >= p_maps) {
+				return true;
+			}
+		} else {
+			FreeRange r;
+			r.first = first;
+			r.count = count;
+			sim.insert(idx, r);
+			if (count >= p_maps) {
+				return true;
+			}
+		}
+	}
+	if (!sim.is_empty()) {
+		const FreeRange &last = sim[sim.size() - 1];
+		if (last.first + last.count == table_capacity && table_capacity + p_maps - last.count <= TABLE_MAX_MAPS) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void RendererVirtualShadowMapStorage::get_free_range(uint32_t p_index, uint32_t &r_first, uint32_t &r_count) const {
@@ -1050,11 +1155,19 @@ void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, ui
 		if (!inside) {
 			continue;
 		}
-		// GodotNext: vsm_settings_debug (#221). Plus the map's moving-light bias.
-		const int32_t bias = p_lod_bias + data.lod_bias + (p_map_bias != nullptr ? int32_t(overflow_bias(p_map_bias[map])) : 0);
-		const uint32_t mip = biased_mip(int32_t(face_mip(w * data.texel_scale, p_footprint)), bias);
+		// GodotNext: vsm_settings_debug (#221) / vsm_local_lights (#216). Plus moving bias, per-light
+		// resolution bias and distant-light coarse-only policy.
+		int32_t res_int_bias = 0;
+		float res_scale = 1.0f;
+		resolution_bias_parts(p_light.flags, res_int_bias, res_scale);
+		const bool distant_coarse = (p_light.flags & LIGHT_FLAGS_DISTANT_COARSE) != 0u;
+		const int32_t bias = p_lod_bias + data.lod_bias + res_int_bias + (p_map_bias != nullptr ? int32_t(overflow_bias(p_map_bias[map])) : 0);
+		uint32_t mip = biased_mip(int32_t(face_mip(w * data.texel_scale, p_footprint * res_scale)), bias);
+		if (distant_coarse && mip < COARSE_FIRST_MIP) {
+			mip = COARSE_FIRST_MIP;
+		}
 		const uint32_t index = entry_index(map, mip, (texel_x >> mip) >> PAGE_SIZE_SHIFT, (texel_y >> mip) >> PAGE_SIZE_SHIFT);
-		r_requests.push_back(uint64_t(index));
+		r_requests.push_back(uint64_t(index) | (distant_coarse ? REQUEST_COARSE : 0u));
 		if (r_sample != nullptr && r_sample->table != nullptr && _sample_confirmed(r_sample, index)) {
 			// The texel's center: lookup() lands on the same texel.
 			const Vector2 uv((float(texel_x) + 0.5f) / float(VIRTUAL_SIZE), (float(texel_y) + 0.5f) / float(VIRTUAL_SIZE));
@@ -1112,8 +1225,12 @@ void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_ma
 	}
 	// The finest level that holds the point; level + mip as the footprint asks, then the map's overflow
 	// bias. A page outside that mip's window goes to the next level.
-	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, held by level 0.
-	const int32_t level_mip = clipmap_level_mip(p_footprint, p_lod_bias + p_maps[first].lod_bias);
+	// GodotNext: vsm_settings_debug (#221) / vsm_local_lights (#216). Plus the light's moving bias (held by
+	// level 0) and per-light resolution bias.
+	int32_t res_int_bias = 0;
+	float res_scale = 1.0f;
+	resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+	const int32_t level_mip = clipmap_level_mip(p_footprint * res_scale, p_lod_bias + p_maps[first].lod_bias + res_int_bias);
 	for (uint32_t level = 0; level < count; level++) {
 		const uint32_t map = first + level;
 		if (map >= p_table_maps) {
@@ -2125,6 +2242,8 @@ const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL 
 const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local";
 const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL_MOVING = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving";
 const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving";
+// GodotNext: vsm_local_lights (#216).
+const char *const RendererVirtualShadowMapStorage::SETTING_DISTANT_LIGHT_SCREEN_RADIUS = "rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius";
 // GodotNext: df_shadows (#214).
 const char *const RendererVirtualShadowMapStorage::SETTING_DF_MAX_LIGHTS = "rendering/lights_and_shadows/virtual_shadows/df_max_lights";
 
@@ -2510,12 +2629,14 @@ RendererVirtualShadowMapStorage::ShadowMethod RendererVirtualShadowMapStorage::r
 }
 
 RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::default_scalability(PoolQuality p_quality) {
+	const PoolQuality q = p_quality < POOL_QUALITY_MAX ? p_quality : DEFAULT_QUALITY;
 	Scalability values;
-	values.max_physical_pages = pool_quality_pages(p_quality < POOL_QUALITY_MAX ? p_quality : DEFAULT_QUALITY);
-	values.lod_bias_directional = p_quality == POOL_QUALITY_LOW ? 1 : 0;
+	values.max_physical_pages = pool_quality_pages(q);
+	values.lod_bias_directional = q == POOL_QUALITY_LOW ? 1 : 0;
 	values.lod_bias_local = values.lod_bias_directional;
 	values.lod_bias_directional_moving = values.lod_bias_directional + 1;
 	values.lod_bias_local_moving = values.lod_bias_local + 1;
+	values.distant_light_screen_radius = default_distant_light_screen_radius(q);
 	return values;
 }
 
@@ -2526,6 +2647,7 @@ RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::cl
 	values.lod_bias_local = CLAMP(values.lod_bias_local, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
 	values.lod_bias_directional_moving = CLAMP(values.lod_bias_directional_moving, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
 	values.lod_bias_local_moving = CLAMP(values.lod_bias_local_moving, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
+	values.distant_light_screen_radius = Math::is_nan(values.distant_light_screen_radius) ? 0.0f : CLAMP(values.distant_light_screen_radius, 0.0f, 1.0f);
 	return values;
 }
 
@@ -2541,6 +2663,18 @@ static int64_t _read_preset_setting(const char *p_setting, RendererVirtualShadow
 	return settings->get_setting(name);
 }
 
+static float _read_preset_setting_float(const char *p_setting, RendererVirtualShadowMapStorage::PoolQuality p_quality, float p_default) {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings == nullptr) {
+		return p_default;
+	}
+	const StringName name = String(p_setting) + "." + RendererVirtualShadowMapStorage::pool_quality_name(p_quality);
+	if (!settings->has_setting(name)) {
+		return p_default;
+	}
+	return float(settings->get_setting(name));
+}
+
 RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::read_scalability(PoolQuality p_quality) {
 	const Scalability defaults = default_scalability(p_quality);
 	Scalability values;
@@ -2549,6 +2683,7 @@ RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::re
 	values.lod_bias_local = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_LOCAL, p_quality, defaults.lod_bias_local), int64_t(INT32_MIN), int64_t(INT32_MAX)));
 	values.lod_bias_directional_moving = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_DIRECTIONAL_MOVING, p_quality, defaults.lod_bias_directional_moving), int64_t(INT32_MIN), int64_t(INT32_MAX)));
 	values.lod_bias_local_moving = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_LOCAL_MOVING, p_quality, defaults.lod_bias_local_moving), int64_t(INT32_MIN), int64_t(INT32_MAX)));
+	values.distant_light_screen_radius = _read_preset_setting_float(SETTING_DISTANT_LIGHT_SCREEN_RADIUS, p_quality, defaults.distant_light_screen_radius);
 	return clamp_scalability(values);
 }
 
@@ -2560,6 +2695,31 @@ RendererVirtualShadowMapStorage::PoolQuality RendererVirtualShadowMapStorage::re
 	}
 	const int64_t value = settings->get_setting_with_override(name);
 	return (value >= 0 && value < int64_t(POOL_QUALITY_MAX)) ? PoolQuality(value) : DEFAULT_QUALITY;
+}
+
+// GodotNext: vsm_local_lights (#216).
+float RendererVirtualShadowMapStorage::local_light_projected_radius(const Vector3 &p_view_position, float p_radius, const Projection &p_projection) {
+	if (!(p_radius > 0.0f)) {
+		return 0.0f;
+	}
+	const float scale_x = Math::abs(float(p_projection.columns[0][0]));
+	const float scale_y = Math::abs(float(p_projection.columns[1][1]));
+	const float proj_scale = MAX(scale_x, scale_y);
+	if (!(proj_scale > 0.0f)) {
+		return 1.0f;
+	}
+	if (p_projection.is_orthogonal()) {
+		return 0.5f * p_radius * proj_scale;
+	}
+	const float dist = float(p_view_position.length());
+	if (!(dist > p_radius)) {
+		return 1.0f;
+	}
+	return 0.5f * (p_radius / dist) * proj_scale;
+}
+
+bool RendererVirtualShadowMapStorage::is_local_light_distant(float p_screen_radius, float p_threshold) {
+	return p_threshold > 0.0f && p_screen_radius < p_threshold;
 }
 
 int32_t RendererVirtualShadowMapStorage::moving_lod_bias(int32_t p_static_bias, int32_t p_moving_bias, uint64_t p_frames_since_moved) {
@@ -2675,10 +2835,13 @@ float RendererVirtualShadowMapStorage::directional_tan_half_angle(float p_size) 
 	return std::sqrt(size / (2.0f - size));
 }
 
-bool RendererVirtualShadowMapStorage::clipmap_projection_select(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, float p_footprint, int32_t p_lod_bias, uint32_t &r_level, uint32_t &r_mip) {
+bool RendererVirtualShadowMapStorage::clipmap_projection_select(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, float p_footprint, int32_t p_lod_bias, uint32_t &r_level, uint32_t &r_mip, uint32_t p_light_flags) {
 	// The same choice as mark_directional_point()'s fine request, with the light's moving bias (#221) held by
-	// level 0.
-	const int32_t level_mip = clipmap_level_mip(p_footprint, p_lod_bias + (p_first < p_table_maps ? p_maps[p_first].lod_bias : 0));
+	// level 0 and per-light resolution bias (#216).
+	int32_t res_int_bias = 0;
+	float res_scale = 1.0f;
+	resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+	const int32_t level_mip = clipmap_level_mip(p_footprint * res_scale, p_lod_bias + (p_first < p_table_maps ? p_maps[p_first].lod_bias : 0) + res_int_bias);
 	for (uint32_t level = 0; level < p_count; level++) {
 		const uint32_t map = p_first + level;
 		if (map >= p_table_maps) {
@@ -2778,7 +2941,7 @@ float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput 
 	const Vector2i initial_texel0 = clipmap_texel0(level0, p_world);
 	uint32_t level = 0;
 	uint32_t mip = 0;
-	if (!clipmap_projection_select(p_in.maps, p_in.table_maps, p_in.map_bias, first, count, initial_texel0, p_in.footprint, p_in.lod_bias, level, mip)) {
+	if (!clipmap_projection_select(p_in.maps, p_in.table_maps, p_in.map_bias, first, count, initial_texel0, p_in.footprint, p_in.lod_bias, level, mip, p_light_flags)) {
 		return 1.0f;
 	}
 	// GodotNext: vsm_fog_translucency (#215). Resolve the resident page first so normal bias, PCF spacing
@@ -2939,9 +3102,16 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 		return 1.0f;
 	}
 	const MapData &face = p_in.maps[map];
-	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, as mark_local_point().
-	const int32_t bias = p_in.lod_bias + face.lod_bias + (p_in.map_bias != nullptr ? int32_t(overflow_bias(p_in.map_bias[map])) : 0);
-	uint32_t mip = biased_mip(int32_t(face_mip(w * face.texel_scale, p_in.footprint)), bias);
+	// GodotNext: vsm_settings_debug (#221) / vsm_local_lights (#216). Plus moving bias, per-light resolution
+	// bias and distant-light coarse-only policy, as mark_local_point().
+	int32_t res_int_bias = 0;
+	float res_scale = 1.0f;
+	resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+	const int32_t bias = p_in.lod_bias + face.lod_bias + res_int_bias + (p_in.map_bias != nullptr ? int32_t(overflow_bias(p_in.map_bias[map])) : 0);
+	uint32_t mip = biased_mip(int32_t(face_mip(w * face.texel_scale, p_in.footprint * res_scale)), bias);
+	if ((p_light_flags & LIGHT_FLAGS_DISTANT_COARSE) != 0u && mip < COARSE_FIRST_MIP) {
+		mip = COARSE_FIRST_MIP;
+	}
 	// GodotNext: vsm_fog_translucency (#215). Resolve the resident mip first so normal bias, PCF spacing
 	// and SMRT reach scale to the actual resident mip (e.g. coarse pages under translucent SMRT or overflow).
 	const Vector2 initial_uv(row_dot(face.rows[0], p_world) / w * 0.5f + 0.5f, row_dot(face.rows[1], p_world) / w * 0.5f + 0.5f);
@@ -3033,6 +3203,81 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 		lit += occluded ? 0u : 1u;
 	}
 	return float(lit) / float(rays);
+}
+
+// GodotNext: vsm_local_lights (#216). CPU models of vsm_transmittance_directional() and
+// vsm_transmittance_local() in vsm_smrt_inc.glsl.
+float RendererVirtualShadowMapStorage::transmittance_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_view_depth, bool p_coarse) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+	if (p_in.table == nullptr || p_in.maps == nullptr || first >= p_in.table_maps || p_in.maps[first].kind != MAP_KIND_DIRECTIONAL) {
+		return -1.0f;
+	}
+	const MapData &level0 = p_in.maps[first];
+	const Vector2i texel0 = clipmap_texel0(level0, p_world);
+	LookupResult result;
+	if (p_coarse) {
+		if (p_view_depth > level0.max_distance) {
+			return -1.0f;
+		}
+		uint32_t found_level = 0;
+		bool in_domain = false;
+		result = clipmap_coarse_sample_level(p_in.table, p_in.table_maps, p_in.maps, first, count, texel0, found_level, in_domain);
+	} else {
+		uint32_t level = 0;
+		uint32_t mip = 0;
+		if (!clipmap_projection_select(p_in.maps, p_in.table_maps, p_in.map_bias, first, count, texel0, p_in.footprint, p_in.lod_bias, level, mip, p_light_flags)) {
+			return -1.0f;
+		}
+		uint32_t found_level = level;
+		result = clipmap_sample_level(p_in.table, p_in.table_maps, p_in.maps, first, count, texel0, level, mip, found_level);
+	}
+	if (!result.valid) {
+		return -1.0f;
+	}
+	const float stored = pool_depth(p_in, result.texel_x, result.texel_y);
+	return stored < 1.0e30f ? std::fabs(row_dot(level0.rows[2], p_world) - stored) : -1.0f;
+}
+
+float RendererVirtualShadowMapStorage::transmittance_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, bool p_coarse) {
+	if (p_in.table == nullptr || p_in.maps == nullptr) {
+		return -1.0f;
+	}
+	float w = 0.0f;
+	const uint32_t map = face_projection_select(p_in.maps, p_in.table_maps, p_map_base, p_light_flags, p_world, w);
+	if (map == MAP_NONE) {
+		return -1.0f;
+	}
+	const MapData &face = p_in.maps[map];
+	uint32_t mip = COARSE_FIRST_MIP;
+	if (!p_coarse) {
+		int32_t res_int_bias = 0;
+		float res_scale = 1.0f;
+		resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+		const int32_t bias = p_in.lod_bias + face.lod_bias + res_int_bias + (p_in.map_bias != nullptr ? int32_t(overflow_bias(p_in.map_bias[map])) : 0);
+		mip = biased_mip(int32_t(face_mip(w * face.texel_scale, p_in.footprint * res_scale)), bias);
+		if ((p_light_flags & LIGHT_FLAGS_DISTANT_COARSE) != 0u && mip < COARSE_FIRST_MIP) {
+			mip = COARSE_FIRST_MIP;
+		}
+	}
+	const float x_ndc = row_dot(face.rows[0], p_world) / w;
+	const float y_ndc = row_dot(face.rows[1], p_world) / w;
+	const Vector2 uv(x_ndc * 0.5f + 0.5f, y_ndc * 0.5f + 0.5f);
+	const LookupResult result = lookup(p_in.table, p_in.table_maps, map, uv, mip, true);
+	if (!result.valid) {
+		return -1.0f;
+	}
+	const float stored = pool_depth(p_in, result.texel_x, result.texel_y);
+	if (!(stored < 1.0e30f)) {
+		return -1.0f;
+	}
+	float thickness = std::fabs(w - stored);
+	if (face.kind != MAP_KIND_SPOT) {
+		// Omni and area cube faces store axial depth along the face normal; convert to Euclidean radial
+		// thickness so SSS transmittance matches Godot's dual-paraboloid atlas without cube-corner seams.
+		thickness *= std::sqrt(1.0f + x_ndc * x_ndc + y_ndc * y_ndc);
+	}
+	return thickness;
 }
 
 /* VOLUMETRIC FOG AND FORWARD TRANSLUCENCY COARSE LOOKUPS (#215) */

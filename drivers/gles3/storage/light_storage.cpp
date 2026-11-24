@@ -98,6 +98,8 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	// GodotNext: light_grid (#139).
 	light.param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE] = 90.0;
 	light.param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH] = 0.2;
+	// GodotNext: vsm_local_lights (#216).
+	light.param[RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS] = 0.0;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -154,6 +156,10 @@ void LightStorage::light_set_param(RID p_light, RSE::LightParam p_param, float p
 	Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL(light);
 	ERR_FAIL_INDEX(p_param, RSE::LIGHT_PARAM_MAX);
+
+	if (p_param == RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS) {
+		p_value = CLAMP(p_value, -2.0f, 4.0f);
+	}
 
 	if (light->param[p_param] == p_value) {
 		return;

@@ -402,6 +402,8 @@ public:
 		// GodotNext: vsm_non_nanite (#218).
 		const RenderVSMShadowData *vsm_shadows = nullptr;
 		uint32_t vsm_shadow_count = 0;
+		// GodotNext: vsm_local_lights (#216). Local VSM lights updated separately from MAX_UPDATE_SHADOWS.
+		uint32_t vsm_local_light_count = 0;
 		// GodotNext: vsm_caching (#212).
 		const RenderVSMInvalidation *vsm_invalidations = nullptr;
 		uint32_t vsm_invalidation_count = 0;

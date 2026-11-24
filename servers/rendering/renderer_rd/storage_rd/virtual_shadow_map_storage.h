@@ -316,8 +316,14 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	// GodotNext: vsm_projection (#222).
 	bool view_samples = false;
 	uint32_t view_sampled_lights = 0;
+	// GodotNext: vsm_local_lights (#216). Per-view local and distant local VSM light counters.
+	uint32_t view_local_lights = 0;
+	uint32_t view_distant_lights = 0;
 	struct ProjectionStats {
 		uint32_t lights_sampled = 0;
+		uint32_t local_lights = 0;
+		uint32_t local_lights_culled = 0;
+		uint32_t distant_lights = 0;
 		uint32_t atlas_passes = 0;
 		uint32_t atlas_passes_skipped = 0;
 		uint32_t rays_local = 0;
@@ -436,9 +442,12 @@ public:
 	void record_df_stats(const DFStats &p_stats);
 	// The view that samples the maps: its shadow-atlas passes kept and skipped, after update_light() ran for
 	// its lights; then its SMRT counts (set_projection_params()). get_debug_info() reports them as "projection".
-	void record_projection_view(uint32_t p_atlas_passes, uint32_t p_atlas_passes_skipped) {
+	void record_projection_view(uint32_t p_atlas_passes, uint32_t p_atlas_passes_skipped, uint32_t p_local_lights_culled = 0) {
 		pending_projection = ProjectionStats();
 		pending_projection.lights_sampled = view_sampled_lights;
+		pending_projection.local_lights = view_local_lights;
+		pending_projection.local_lights_culled = p_local_lights_culled;
+		pending_projection.distant_lights = view_distant_lights;
 		pending_projection.atlas_passes = p_atlas_passes;
 		pending_projection.atlas_passes_skipped = p_atlas_passes_skipped;
 	}
@@ -502,6 +511,9 @@ public:
 		Vector2 area_size;
 		uint32_t caster_mask = 0xFFFFFFFFu;
 		bool reverse_cull = false;
+		// GodotNext: vsm_local_lights (#216).
+		float resolution_bias = 0.0f;
+		float screen_radius = 1.0f; // Local lights: projected screen radius (fraction of viewport height).
 	};
 	// LightStorage::update_light_buffers() calls begin_light_update() once, then this for every light it
 	// writes. It allocates or keeps the light's maps (and moves a directional light's clipmap levels to

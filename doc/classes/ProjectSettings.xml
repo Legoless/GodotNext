@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  ProjectSettings.xml                                                   */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="ProjectSettings" inherits="Object" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
@@ -3431,6 +3461,18 @@
 		</member>
 		<member name="rendering/lights_and_shadows/virtual_shadows/df_max_lights" type="int" setter="" getter="" default="-1">
 			Maximum number of distance-field shadow mask layers traced per view (up to 8). Each directional light using distance-field far-shadow handoff and each light with [member Light3D.shadow_method] set to [constant Light3D.SHADOW_METHOD_DISTANCE_FIELD] uses one layer in the half-resolution R8 mask array. [code]-1[/code] selects the default for the active [member rendering/lights_and_shadows/virtual_shadows/quality] preset: 2 at Low, 4 at Medium, 8 at High and Epic. [code]0[/code] disables distance-field shadow tracing.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius.epic" type="float" setter="" getter="" default="0.015">
+			Projected screen radius (fraction of viewport height) below which local lights request only coarse virtual shadow map mips at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality]. [code]0.0[/code] disables the distant-light coarse policy.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius.high" type="float" setter="" getter="" default="0.03">
+			Projected screen radius (fraction of viewport height) below which local lights request only coarse virtual shadow map mips at the High preset of [member rendering/lights_and_shadows/virtual_shadows/quality]. [code]0.0[/code] disables the distant-light coarse policy.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius.low" type="float" setter="" getter="" default="0.06">
+			Projected screen radius (fraction of viewport height) below which local lights request only coarse virtual shadow map mips at the Low preset of [member rendering/lights_and_shadows/virtual_shadows/quality]. [code]0.0[/code] disables the distant-light coarse policy.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius.medium" type="float" setter="" getter="" default="0.045">
+			Projected screen radius (fraction of viewport height) below which local lights request only coarse virtual shadow map mips at the Medium preset of [member rendering/lights_and_shadows/virtual_shadows/quality]. [code]0.0[/code] disables the distant-light coarse policy.
 		</member>
 		<member name="rendering/lights_and_shadows/virtual_shadows/max_physical_pages.epic" type="int" setter="" getter="" default="16384">
 			The physical pages in the virtual shadow map pool (32 KiB each) at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].

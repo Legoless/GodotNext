@@ -2658,7 +2658,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
 	if (vsm_storage != nullptr) {
 		if (vsm_sample_view) {
-			vsm_storage->record_projection_view(vsm_atlas_passes, vsm_atlas_passes_skipped);
+			const uint32_t vsm_local_culled = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->vsm_local_light_count : 0u;
+			vsm_storage->record_projection_view(vsm_atlas_passes, vsm_atlas_passes_skipped, vsm_local_culled);
 		}
 		vsm_storage->set_view_samples(false);
 	}
@@ -2775,13 +2776,13 @@ bool RenderForwardClustered::vsm_view_samples(const Ref<RenderSceneBuffers> &p_r
 }
 
 bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const {
-	// GodotNext: vsm_projection (#222, issue step 7) / vsm_fog_translucency (#215). A shadowed light that
-	// already holds virtual maps is sampled through them by a view that samples VSM (including volumetric fog
-	// and forward transparents via coarse pages; the maps it gets in its first frame are drawn and sampled in
-	// that frame, after its atlas pass).
+	// GodotNext: vsm_projection (#222, issue step 7) / vsm_fog_translucency (#215) / vsm_local_lights (#216).
+	// A shadowed light whose method resolves to VIRTUAL bypasses the shadow atlas from its first frame onward
+	// (including the 88-slot positional atlas and MAX_UPDATE_SHADOWS = 512) whenever VSM has table capacity
+	// for its maps; update_light_buffers() allocates them later in the same view before marking and raster.
 	(void)p_environment;
 	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
-	if (vsm == nullptr || !vsm->is_active() || vsm->map_get(p_light_instance) == nullptr) {
+	if (vsm == nullptr || !vsm->is_active()) {
 		return false;
 	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -2798,9 +2799,34 @@ bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_e
 	if (!RendererVirtualShadowMapStorage::light_uses_vsm(light_storage->light_get_shadow_method(base))) {
 		return false;
 	}
-	// Keep this light's map range from being LRU-evicted by another light before update_light_buffers() runs.
-	vsm->map_touch(p_light_instance);
-	return true;
+	if (vsm->map_get(p_light_instance) != nullptr) {
+		// Keep this light's map range from being LRU-evicted by another light before update_light_buffers() runs.
+		vsm->map_touch(p_light_instance);
+		return true;
+	}
+	// Frame 1: bypass the atlas as soon as the page table can hold this light's maps.
+	uint32_t needed_maps = 0;
+	switch (light_storage->light_get_type(base)) {
+		case RSE::LIGHT_DIRECTIONAL: {
+			float max_distance = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE);
+			if (max_distance <= 0.0f) {
+				max_distance = float(Math::INF);
+			}
+			needed_maps = RendererVirtualShadowMapStorage::clipmap_level_count(max_distance);
+		} break;
+		case RSE::LIGHT_SPOT: {
+			needed_maps = 1;
+		} break;
+		case RSE::LIGHT_OMNI: {
+			needed_maps = 6;
+		} break;
+		case RSE::LIGHT_AREA: {
+			needed_maps = 5;
+		} break;
+		default:
+			return false;
+	}
+	return vsm->can_allocate_maps(needed_maps);
 }
 
 // GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). Shared readiness check for
@@ -3531,7 +3557,9 @@ void RenderForwardClustered::_vsm_debug_draw(const RenderDataRD *p_render_data) 
 				}
 				RendererRD::DebugEffects::VSMDebugLight light;
 				light.map_base = range->first;
-				light.light_flags = RendererVirtualShadowMapStorage::light_flags(range->kind, range->count);
+				// GodotNext: vsm_local_lights (#216). Include per-light resolution bias and distant coarse flag.
+				light.light_flags = RendererVirtualShadowMapStorage::light_flags(range->kind, range->count) |
+						RendererVirtualShadowMapStorage::pack_resolution_bias(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS));
 				light.kind = uint32_t(range->kind);
 				if (type != RSE::LIGHT_DIRECTIONAL) {
 					const Transform3D transform = light_storage->light_instance_get_base_transform(light_instance);
@@ -3539,6 +3567,11 @@ void RenderForwardClustered::_vsm_debug_draw(const RenderDataRD *p_render_data) 
 					float reach = MAX(light_storage->light_get_param(base, RSE::LIGHT_PARAM_RANGE), 0.001f);
 					if (type == RSE::LIGHT_AREA) {
 						reach += float(light_storage->light_area_get_size(base).length()) * 0.5f;
+					}
+					const Vector3 view_pos = scene_data->cam_transform.affine_inverse().xform(transform.origin);
+					const float screen_radius = RendererVirtualShadowMapStorage::local_light_projected_radius(view_pos, reach, projection);
+					if (RendererVirtualShadowMapStorage::is_local_light_distant(screen_radius, scalability.distant_light_screen_radius)) {
+						light.light_flags |= RendererVirtualShadowMapStorage::LIGHT_FLAGS_DISTANT_COARSE;
 					}
 					light.inv_reach = 1.0f / reach;
 					light.position[0] = float(transform.origin.x);
@@ -3965,6 +3998,8 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 	HashSet<GeometryInstanceForwardClustered *> virtual_skipped_set;
 	LocalVector<UniqueCaster> unique_casters;
 	uint32_t active_vsm_lights = 0;
+	// GodotNext: vsm_local_lights (#216). Track local lights processed and indirect draws issued.
+	uint32_t active_vsm_local_lights = 0;
 	// Raster check only: the casters each light with virtual maps rasterizes, for the per-light atlas diff.
 	HashMap<RID, HashSet<GeometryInstanceForwardClustered *>> vsm_light_casters;
 	LocalVector<VSMRasterCheckCapture::Light> check_lights;
@@ -3982,6 +4017,9 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 			continue;
 		}
 		active_vsm_lights++;
+		if (range->kind != RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL) {
+			active_vsm_local_lights++;
+		}
 		const RID base_light = light_storage->light_instance_get_base_light(vs.light);
 		const bool rev_cull = base_light.is_valid() && light_storage->light_get_reverse_cull_face_mode(base_light);
 		const uint32_t lflags = RendererVirtualShadowMapStorage::light_flags(range->kind, range->count);
@@ -4562,6 +4600,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 
 	rd->draw_command_begin_label("VSM Non-Nanite Cull and Raster");
 
+	uint32_t indirect_draw_count = 0;
 	if (!groups.is_empty()) {
 		LocalVector<RD::Uniform> cull_uniforms;
 		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, map_data_buf));
@@ -4722,6 +4761,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				} else {
 					rd->draw_list_draw_indirect(dlist, use_indices, vsm_indirect_commands_buffer, cmd_offset, 1, 0);
 				}
+				indirect_draw_count++;
 			}
 			rd->draw_list_end();
 		}
@@ -4736,6 +4776,9 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 
 	Dictionary stats;
 	stats["light_count"] = int64_t(active_vsm_lights);
+	// GodotNext: vsm_local_lights (#216).
+	stats["local_light_count"] = int64_t(active_vsm_local_lights);
+	stats["indirect_draw_count"] = int64_t(indirect_draw_count);
 	stats["caster_count"] = int64_t(unique_casters.size());
 	stats["surface_element_count"] = int64_t(element_count);
 	stats["group_count"] = int64_t(groups.size());

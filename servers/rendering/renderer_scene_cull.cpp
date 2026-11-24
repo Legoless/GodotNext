@@ -4174,6 +4174,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	//render shadows
 
 	max_shadows_used = 0;
+	// GodotNext: vsm_local_lights (#216). VSM local lights are counted independently of MAX_UPDATE_SHADOWS.
+	uint32_t vsm_local_light_count = 0;
 
 	if (p_using_shadows) { //setup shadow maps
 		// GodotNext: vsm_projection (#222) and df_shadows (#214). Whether this view's light loop samples
@@ -4538,6 +4540,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					return false;
 				}
 			};
+			// GodotNext: vsm_local_lights (#216). Collect VSM local light casters independently of
+			// MAX_UPDATE_SHADOWS = 512 and the 88-slot positional shadow atlas while keeping frustum,
+			// distance-fade, visibility-layer and shadow_caster_mask culling.
 			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size(); i++) {
 				Instance *pos_ins = scene_cull_result.lights[i];
 				InstanceLightData *pos_light = static_cast<InstanceLightData *>(pos_ins->base_data);
@@ -4548,6 +4553,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (!RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(pos_ins->base))) {
 					continue;
 				}
+				if (!RSG::light_storage->light_instance_is_shadow_visible_at_position(pos_light->instance, camera_position)) {
+					continue;
+				}
+				vsm_local_light_count++;
 				const uint32_t caster_mask = RSG::light_storage->light_get_shadow_caster_mask(pos_ins->base);
 				instance_shadow_cull_result.clear();
 				CullVSMBox cull_box;
@@ -4600,9 +4609,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		// Q: Should this whole block be skipped if we're rendering our reflection probe?
 
 		sdfgi_update_data.update_static = false;
-		// GodotNext: vsm_non_nanite (#218), vsm_caching (#212).
+		// GodotNext: vsm_non_nanite (#218), vsm_caching (#212), vsm_local_lights (#216).
 		sdfgi_update_data.vsm_shadows = nullptr;
 		sdfgi_update_data.vsm_shadow_count = 0;
+		sdfgi_update_data.vsm_local_light_count = 0;
 		sdfgi_update_data.vsm_invalidations = nullptr;
 		sdfgi_update_data.vsm_invalidation_count = 0;
 		sdfgi_update_data.vsm_invalidation_epoch = 0;
@@ -4640,9 +4650,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_dynamic_light_count = scenario->nextgi_dynamic_lights.size();
 			sdfgi_update_data.nextgi_static_light_instances = scenario->static_lights.ptr();
 			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
-			// GodotNext: vsm_non_nanite (#218), vsm_caching (#212).
+			// GodotNext: vsm_non_nanite (#218), vsm_caching (#212), vsm_local_lights (#216).
 			sdfgi_update_data.vsm_shadows = vsm_shadow_data.is_empty() ? nullptr : vsm_shadow_data.ptr();
 			sdfgi_update_data.vsm_shadow_count = vsm_shadow_data.size();
+			sdfgi_update_data.vsm_local_light_count = vsm_local_light_count;
 			sdfgi_update_data.vsm_invalidations = scenario->vsm_invalidations_published.is_empty() ? nullptr : scenario->vsm_invalidations_published.ptr();
 			sdfgi_update_data.vsm_invalidation_count = scenario->vsm_invalidations_published.size();
 			sdfgi_update_data.vsm_invalidation_epoch = scenario->vsm_invalidation_epoch;

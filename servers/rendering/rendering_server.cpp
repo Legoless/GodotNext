@@ -2858,6 +2858,8 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: light_grid (#139).
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_BARN_DOOR_ANGLE);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_BARN_DOOR_LENGTH);
+	// GodotNext: vsm_local_lights (#216).
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DISABLED);
@@ -4144,6 +4146,8 @@ void RenderingServer::init() {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_local);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL_MOVING) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_directional_moving);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_local_moving);
+		// GodotNext: vsm_local_lights (#216, plan §21.3 contract S7). Projected screen-radius threshold below which local lights request coarse mips only.
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, String(RendererVirtualShadowMapStorage::SETTING_DISTANT_LIGHT_SCREEN_RADIUS) + suffix, PROPERTY_HINT_RANGE, "0,1,0.005"), double(values.distant_light_screen_radius));
 	}
 	// GodotNext: vsm_projection (#222). Virtual shadow map SMRT soft shadows: rays per pixel and light, and
 	// steps per ray. -1 takes the active VSM quality preset's value (RendererVirtualShadowMapStorage::

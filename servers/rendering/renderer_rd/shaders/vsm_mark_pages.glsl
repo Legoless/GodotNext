@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  vsm_mark_pages.glsl                                                   */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 #[compute]
 
 #version 450
@@ -38,10 +68,10 @@ layout(set = 0, binding = 0, std430) restrict buffer VSMPageTable {
 }
 vsm_page_table;
 
-#include "light_data_inc.glsl"
-#include "vsm_mark_inc.glsl"
-#include "vsm_page_table_inc.glsl"
-#include "vsm_state_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/light_data_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/vsm_mark_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/vsm_page_table_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/vsm_state_inc.glsl"
 
 layout(set = 0, binding = 1, std430) restrict readonly buffer VSMMaps {
 	VSMMapData data[];
@@ -200,9 +230,17 @@ void vsm_mark_local(uint map_base, uint light_flags, vec3 world, float footprint
 		if (!inside) {
 			continue;
 		}
-		int bias = view.data.bias.y + map_data.lod_bias + int(vsm_overflow_bias(map));
-		uint mip = vsm_biased_mip(int(vsm_face_mip(w * map_data.texel_scale, footprint)), bias);
-		vsm_request(map, mip, (texel >> mip) >> VSM_PAGE_SIZE_SHIFT, false);
+		// GodotNext: vsm_local_lights (#216). Per-light resolution bias and distant-light coarse-only policy.
+		int res_int_bias;
+		float res_scale;
+		vsm_resolution_bias_parts(light_flags, res_int_bias, res_scale);
+		bool distant_coarse = (light_flags & VSM_LIGHT_FLAGS_DISTANT_COARSE) != 0u;
+		int bias = view.data.bias.y + map_data.lod_bias + res_int_bias + int(vsm_overflow_bias(map));
+		uint mip = vsm_biased_mip(int(vsm_face_mip(w * map_data.texel_scale, footprint * res_scale)), bias);
+		if (distant_coarse && mip < VSM_COARSE_FIRST_MIP) {
+			mip = VSM_COARSE_FIRST_MIP;
+		}
+		vsm_request(map, mip, (texel >> mip) >> VSM_PAGE_SIZE_SHIFT, distant_coarse);
 	}
 }
 
@@ -243,7 +281,10 @@ void vsm_mark_directional(uint map_base, uint light_flags, vec3 world, float foo
 		}
 		return;
 	}
-	int level_mip = vsm_clipmap_level_mip(footprint, view.data.bias.x + vsm_maps.data[first].lod_bias);
+	int res_int_bias;
+	float res_scale;
+	vsm_resolution_bias_parts(light_flags, res_int_bias, res_scale);
+	int level_mip = vsm_clipmap_level_mip(footprint * res_scale, view.data.bias.x + vsm_maps.data[first].lod_bias + res_int_bias);
 	for (uint level = 0u; level < count; level++) {
 		uint map = first + level;
 		if (map >= view.data.misc.x) {

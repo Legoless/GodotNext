@@ -4840,3 +4840,509 @@ TEST_CASE("[VSM] Resident-mip-first resolution scales bias and SMRT reach to coa
 		CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, scene.light_position, 0.05f) > 0.95f);
 	}
 }
+
+TEST_CASE("[VSM] Local light map kinds, projections and 256+ local lights bypassing MAX_UPDATE_SHADOWS (#216)") {
+	using VSM = RendererVirtualShadowMapStorage;
+
+	// Map counts per local kind: Spot 1, Omni 6 cube faces, Area 5 front-hemisphere faces.
+	CHECK(VSM::map_kind_map_count(VSM::MAP_KIND_SPOT, 1) == 1u);
+	CHECK(VSM::map_kind_map_count(VSM::MAP_KIND_OMNI, 1) == 6u);
+	CHECK(VSM::map_kind_map_count(VSM::MAP_KIND_AREA, 1) == 5u);
+
+	const Transform3D xform(Basis(), Vector3(2.0f, 3.0f, -1.0f));
+
+	// Spot: 1 perspective map along -Z.
+	{
+		const VSM::MapData spot_map = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, xform, 12.0f, 45.0f);
+		CHECK(spot_map.kind == VSM::MAP_KIND_SPOT);
+		CHECK(spot_map.max_distance == doctest::Approx(12.0f));
+		float w = 0.0f;
+		uint32_t tx = 0;
+		uint32_t ty = 0;
+		CHECK(VSM::face_texel(spot_map, xform.origin + Vector3(0, 0, -4.0f), w, tx, ty));
+		CHECK(w == doctest::Approx(4.0f));
+		CHECK(tx == VSM::VIRTUAL_SIZE / 2u);
+		CHECK(ty == VSM::VIRTUAL_SIZE / 2u);
+		CHECK_FALSE(VSM::face_texel(spot_map, xform.origin + Vector3(0, 0, 4.0f), w, tx, ty));
+	}
+
+	// Omni: 6 cube faces covering all 6 cardinal directions.
+	{
+		VSM::MapData omni_maps[6];
+		for (uint32_t f = 0; f < 6; f++) {
+			omni_maps[f] = VSM::map_data_face(VSM::MAP_KIND_OMNI, f, xform, 10.0f, 45.0f);
+			CHECK(omni_maps[f].kind == VSM::MAP_KIND_OMNI);
+			CHECK(omni_maps[f].index == f);
+		}
+		const uint32_t omni_flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6);
+		const Vector3 dirs[6] = { Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, -1, 0), Vector3(0, 0, 1), Vector3(0, 0, -1) };
+		for (uint32_t f = 0; f < 6; f++) {
+			float w = 0.0f;
+			const uint32_t selected = VSM::face_projection_select(omni_maps, 6, 0, omni_flags, xform.origin + dirs[f] * 3.0f, w);
+			CHECK(selected == f);
+			CHECK(w == doctest::Approx(3.0f));
+		}
+	}
+
+	// Area: 5 front-hemisphere faces (+X, -X, +Y, -Y, -Z), excluding back hemisphere (+Z), and supporting
+	// area reach (range + half diagonal).
+	{
+		const Vector2 area_size(2.0f, 2.0f);
+		const float range = 8.0f;
+		const float reach = range + float(area_size.length()) * 0.5f;
+		VSM::MapData area_maps[5];
+		for (uint32_t f = 0; f < 5; f++) {
+			area_maps[f] = VSM::map_data_face(VSM::MAP_KIND_AREA, f, xform, reach, 45.0f);
+			CHECK(area_maps[f].kind == VSM::MAP_KIND_AREA);
+			CHECK(area_maps[f].max_distance == doctest::Approx(reach));
+		}
+		const uint32_t area_flags = VSM::light_flags(VSM::MAP_KIND_AREA, 5);
+		const Vector3 front_dirs[5] = {
+			Vector3(3.0f, 0.0f, -0.5f),
+			Vector3(-3.0f, 0.0f, -0.5f),
+			Vector3(0.0f, 3.0f, -0.5f),
+			Vector3(0.0f, -3.0f, -0.5f),
+			Vector3(0.0f, 0.0f, -3.0f),
+		};
+		for (uint32_t f = 0; f < 5; f++) {
+			float w = 0.0f;
+			CHECK(VSM::face_projection_select(area_maps, 5, 0, area_flags, xform.origin + front_dirs[f], w) == f);
+		}
+		// Strictly behind the area light (+Z): none of the 5 front-hemisphere faces hold it.
+		float back_w = 0.0f;
+		CHECK(VSM::face_projection_select(area_maps, 5, 0, area_flags, xform.origin + Vector3(0.0f, 0.0f, 4.0f), back_w) == VSM::MAP_NONE);
+	}
+
+	// 256 mixed Spot/Omni/Area lights (86 + 85 + 85 = 1021 maps) and >512 local lights bypass the 88-slot
+	// positional atlas and MAX_UPDATE_SHADOWS = 512 with zero allocation failures.
+	{
+		TestVSMStorage storage;
+		storage.set_frame(1);
+		uint32_t expected_maps = 0;
+		for (uint32_t i = 0; i < 256; i++) {
+			const VSM::MapKind kind = (i % 3u == 0u) ? VSM::MAP_KIND_SPOT : ((i % 3u == 1u) ? VSM::MAP_KIND_OMNI : VSM::MAP_KIND_AREA);
+			const uint32_t need = VSM::map_kind_map_count(kind, 1);
+			CHECK(storage.can_allocate_maps(need));
+			const uint32_t first = storage.map_allocate(light_rid(1000 + i), kind);
+			CHECK(first != VSM::MAP_NONE);
+			const VSM::MapRange *range = storage.map_get(light_rid(1000 + i));
+			REQUIRE(range != nullptr);
+			CHECK(range->first == first);
+			CHECK(range->count == need);
+			CHECK(range->kind == kind);
+			expected_maps += need;
+		}
+		CHECK(storage.get_light_count() == 256u);
+		CHECK(storage.get_allocated_map_count() == expected_maps);
+		CHECK(expected_maps == 86u * 1u + 85u * 6u + 85u * 5u);
+		CHECK(storage.get_failed_allocation_count() == 0u);
+
+		// Push beyond MAX_UPDATE_SHADOWS (512) with 300 additional mixed local lights (556 total).
+		for (uint32_t i = 256; i < 556; i++) {
+			const VSM::MapKind kind = (i % 3u == 0u) ? VSM::MAP_KIND_SPOT : ((i % 3u == 1u) ? VSM::MAP_KIND_OMNI : VSM::MAP_KIND_AREA);
+			const uint32_t need = VSM::map_kind_map_count(kind, 1);
+			CHECK(storage.can_allocate_maps(need));
+			CHECK(storage.map_allocate(light_rid(1000 + i), kind) != VSM::MAP_NONE);
+		}
+		CHECK(storage.get_light_count() == 556u);
+		CHECK(storage.get_failed_allocation_count() == 0u);
+	}
+
+	// can_allocate_maps() returns false when TABLE_MAX_MAPS is full of active lights and true once stale.
+	{
+		TestVSMStorage storage;
+		storage.set_frame(1);
+		uint64_t next_id = 1;
+		while (storage.get_allocated_map_count() + 6u <= VSM::TABLE_MAX_MAPS) {
+			CHECK(storage.map_allocate(light_rid(next_id++), VSM::MAP_KIND_OMNI) != VSM::MAP_NONE);
+		}
+		// Remaining tail < 6 maps -> cannot fit another 6-map omni light in the same frame.
+		CHECK_FALSE(storage.can_allocate_maps(6u));
+		// After MAP_EVICT_AFTER_FRAMES frames, stale lights can be evicted so can_allocate_maps(6) is true.
+		storage.set_frame(1 + VSM::MAP_EVICT_AFTER_FRAMES);
+		CHECK(storage.can_allocate_maps(6u));
+	}
+}
+
+TEST_CASE("[VSM] Per-light shadow_resolution_bias packing, clamping and mip selection (#216)") {
+	using VSM = RendererVirtualShadowMapStorage;
+
+	// Clamping including non-finite values.
+	CHECK(VSM::clamp_resolution_bias(-10.0f) == doctest::Approx(VSM::RESOLUTION_BIAS_MIN));
+	CHECK(VSM::clamp_resolution_bias(10.0f) == doctest::Approx(VSM::RESOLUTION_BIAS_MAX));
+	CHECK(VSM::clamp_resolution_bias(-float(Math::INF)) == doctest::Approx(VSM::RESOLUTION_BIAS_MIN));
+	CHECK(VSM::clamp_resolution_bias(float(Math::INF)) == doctest::Approx(VSM::RESOLUTION_BIAS_MAX));
+	CHECK(VSM::clamp_resolution_bias(std::nanf("")) == doctest::Approx(0.0f));
+	CHECK(VSM::clamp_resolution_bias(0.0f) == doctest::Approx(0.0f));
+	CHECK(VSM::clamp_resolution_bias(-1.5f) == doctest::Approx(-1.5f));
+	CHECK(VSM::clamp_resolution_bias(2.75f) == doctest::Approx(2.75f));
+
+	// Zero bias encodes to 0 so legacy vsm_flags are completely unchanged.
+	CHECK(VSM::pack_resolution_bias(0.0f) == 0u);
+	CHECK(VSM::unpack_resolution_bias(0u) == doctest::Approx(0.0f));
+
+	// Round-trip every 1/16 step across [-2.0, +4.0] alongside all other vsm_flags bits.
+	const uint32_t base_flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6) | VSM::LIGHT_FLAGS_SAMPLE | VSM::LIGHT_FLAGS_DISTANT_COARSE | VSM::df_pack_flags(5, true);
+	for (int32_t q = -32; q <= 64; q++) {
+		const float bias = float(q) / VSM::RESOLUTION_BIAS_SCALE;
+		const uint32_t packed = base_flags | VSM::pack_resolution_bias(bias);
+		CHECK(VSM::unpack_resolution_bias(packed) == doctest::Approx(bias));
+		CHECK(VSM::light_map(120, packed, 3) == 123u);
+		CHECK(VSM::light_map(120, packed, 6) == VSM::MAP_NONE);
+		CHECK(VSM::df_layer(packed) == 5u);
+		CHECK((packed & VSM::LIGHT_FLAGS_SAMPLE) != 0u);
+		CHECK((packed & VSM::LIGHT_FLAGS_DISTANT_COARSE) != 0u);
+	}
+
+	// resolution_bias_parts(): exact integer floor and [1, 2) footprint scale.
+	{
+		int32_t ib = 0;
+		float scale = 0.0f;
+		VSM::resolution_bias_parts(VSM::pack_resolution_bias(0.0f), ib, scale);
+		CHECK(ib == 0);
+		CHECK(scale == 1.0f);
+
+		VSM::resolution_bias_parts(VSM::pack_resolution_bias(-2.0f), ib, scale);
+		CHECK(ib == -2);
+		CHECK(scale == 1.0f);
+
+		VSM::resolution_bias_parts(VSM::pack_resolution_bias(-0.5f), ib, scale);
+		CHECK(ib == -1);
+		CHECK(scale == doctest::Approx(std::sqrt(2.0f)));
+
+		VSM::resolution_bias_parts(VSM::pack_resolution_bias(0.5f), ib, scale);
+		CHECK(ib == 0);
+		CHECK(scale == doctest::Approx(std::sqrt(2.0f)));
+
+		VSM::resolution_bias_parts(VSM::pack_resolution_bias(3.25f), ib, scale);
+		CHECK(ib == 3);
+		CHECK(scale == doctest::Approx(std::exp2(0.25f)));
+	}
+
+	// mark_local_point() shifts requested mip monotonically with shadow_resolution_bias.
+	{
+		const Transform3D spot_xform(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 4.0f, 0));
+		const VSM::MapData map = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xform, 12.0f, 45.0f);
+		const Vector3 world(0.0f, 0.0f, 0.0f);
+		// Pick a footprint equal to 4.5x mip-0 texel at w=4 so bias=0 selects mip 2 cleanly.
+		const float footprint = map.texel_scale * 4.0f * 4.5f;
+		auto requested_mip = [&](float p_bias) -> uint32_t {
+			VSM::MarkLight light;
+			light.kind = VSM::MAP_KIND_SPOT;
+			light.map_base = 0;
+			light.flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1) | VSM::pack_resolution_bias(p_bias);
+			LocalVector<uint64_t> reqs;
+			VSM::mark_local_point(&map, 1, nullptr, light, world, footprint, 0, false, false, reqs);
+			REQUIRE(reqs.size() == 1u);
+			const uint32_t local_idx = uint32_t(reqs[0]) % VSM::ENTRIES_PER_MAP;
+			for (uint32_t m = 0; m < VSM::MIP_COUNT; m++) {
+				if (local_idx < VSM::mip_entry_offset(m + 1)) {
+					return m;
+				}
+			}
+			return VSM::MIP_COUNT;
+		};
+		CHECK(requested_mip(-2.0f) == 0u);
+		CHECK(requested_mip(-1.0f) == 1u);
+		CHECK(requested_mip(0.0f) == 2u);
+		CHECK(requested_mip(1.0f) == 3u);
+		CHECK(requested_mip(2.0f) == 4u);
+		CHECK(requested_mip(4.0f) == 6u);
+		// Fractional +0.5 pushes 4.5 * sqrt(2) = 6.36 < 8 -> mip 2; +0.875 pushes 4.5 * 2^0.875 = 8.25 >= 8 -> mip 3.
+		CHECK(requested_mip(0.5f) == 2u);
+		CHECK(requested_mip(0.875f) == 3u);
+	}
+
+	// Directional light: mark_directional_point() and clipmap_projection_select() agree across biases.
+	{
+		using namespace TestVirtualShadowMapProjection;
+		const LocalVector<VSM::MapData> levels = sun_levels(6);
+		const Vector3 world(0.3f, 0.0f, -0.4f);
+		const Vector2i texel0 = VSM::clipmap_texel0(levels[0], world);
+		const float footprint = 0.01f;
+		uint32_t prev_total = 0;
+		const float biases[] = { -2.0f, -0.5f, 0.0f, 1.5f, 3.0f, 4.0f };
+		for (uint32_t i = 0; i < sizeof(biases) / sizeof(biases[0]); i++) {
+			const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, levels.size()) | VSM::pack_resolution_bias(biases[i]);
+			uint32_t sel_level = 0;
+			uint32_t sel_mip = 0;
+			REQUIRE(VSM::clipmap_projection_select(levels.ptr(), levels.size(), nullptr, 0, levels.size(), texel0, footprint, 0, sel_level, sel_mip, flags));
+			LocalVector<uint64_t> reqs;
+			VSM::mark_directional_point(levels.ptr(), levels.size(), nullptr, 0, flags, world, footprint, 0, false, reqs);
+			REQUIRE(reqs.size() >= 1u);
+			const uint32_t req_map = uint32_t(reqs[0]) / VSM::ENTRIES_PER_MAP;
+			const uint32_t req_local = uint32_t(reqs[0]) % VSM::ENTRIES_PER_MAP;
+			uint32_t req_mip = VSM::MIP_COUNT;
+			for (uint32_t m = 0; m < VSM::MIP_COUNT; m++) {
+				if (req_local < VSM::mip_entry_offset(m + 1)) {
+					req_mip = m;
+					break;
+				}
+			}
+			CHECK(req_map == sel_level);
+			CHECK(req_mip == sel_mip);
+			const uint32_t total = sel_level + sel_mip;
+			if (i > 0) {
+				CHECK(total >= prev_total);
+			}
+			prev_total = total;
+		}
+		CHECK(prev_total > 0u);
+	}
+
+	// GLSL defines expose the #216 flag constants.
+	const String defines = VSM::get_glsl_defines();
+	CHECK(defines.contains("VSM_LIGHT_FLAGS_DISTANT_COARSE"));
+	CHECK(defines.contains("VSM_LIGHT_FLAGS_RES_BIAS_SHIFT"));
+	CHECK(defines.contains("VSM_LIGHT_FLAGS_RES_BIAS_MASK"));
+}
+
+TEST_CASE("[VSM][SceneTree] Light3D.shadow_resolution_bias and LIGHT_PARAM_SHADOW_RESOLUTION_BIAS bind and clamp (#216)") {
+	bool valid = false;
+	CHECK(ClassDB::get_integer_constant("Light3D", "PARAM_SHADOW_RESOLUTION_BIAS", &valid) == int64_t(Light3D::PARAM_SHADOW_RESOLUTION_BIAS));
+	CHECK(valid);
+	CHECK(int64_t(Light3D::PARAM_SHADOW_RESOLUTION_BIAS) == int64_t(RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS));
+	CHECK(ClassDB::get_integer_constant("RenderingServer", "LIGHT_PARAM_SHADOW_RESOLUTION_BIAS", &valid) == int64_t(RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS));
+	CHECK(valid);
+
+	Light3D *lights[4] = {
+		memnew(DirectionalLight3D),
+		memnew(OmniLight3D),
+		memnew(SpotLight3D),
+		memnew(AreaLight3D),
+	};
+	for (Light3D *light : lights) {
+		CHECK(light->get_param(Light3D::PARAM_SHADOW_RESOLUTION_BIAS) == doctest::Approx(0.0f));
+		CHECK(float(light->get("shadow_resolution_bias")) == doctest::Approx(0.0f));
+		light->set("shadow_resolution_bias", 1.75f);
+		CHECK(light->get_param(Light3D::PARAM_SHADOW_RESOLUTION_BIAS) == doctest::Approx(1.75f));
+		light->set_param(Light3D::PARAM_SHADOW_RESOLUTION_BIAS, -9.0f);
+		CHECK(light->get_param(Light3D::PARAM_SHADOW_RESOLUTION_BIAS) == doctest::Approx(-2.0f));
+		light->set_param(Light3D::PARAM_SHADOW_RESOLUTION_BIAS, 9.0f);
+		CHECK(light->get_param(Light3D::PARAM_SHADOW_RESOLUTION_BIAS) == doctest::Approx(4.0f));
+		memdelete(light);
+	}
+}
+
+TEST_CASE("[VSM] Distant-light screen-radius policy, coarse-only marking and 25% pool overflow safety (#216)") {
+	using VSM = RendererVirtualShadowMapStorage;
+
+	// Preset defaults decrease strictly from Low to Epic and clamp cleanly.
+	const VSM::Scalability low = VSM::default_scalability(VSM::POOL_QUALITY_LOW);
+	const VSM::Scalability med = VSM::default_scalability(VSM::POOL_QUALITY_MEDIUM);
+	const VSM::Scalability high = VSM::default_scalability(VSM::POOL_QUALITY_HIGH);
+	const VSM::Scalability epic = VSM::default_scalability(VSM::POOL_QUALITY_EPIC);
+	CHECK(low.distant_light_screen_radius > med.distant_light_screen_radius);
+	CHECK(med.distant_light_screen_radius > high.distant_light_screen_radius);
+	CHECK(high.distant_light_screen_radius > epic.distant_light_screen_radius);
+	CHECK(epic.distant_light_screen_radius > 0.0f);
+	{
+		VSM::Scalability s = high;
+		s.distant_light_screen_radius = -1.0f;
+		CHECK(VSM::clamp_scalability(s).distant_light_screen_radius == 0.0f);
+		s.distant_light_screen_radius = 5.0f;
+		CHECK(VSM::clamp_scalability(s).distant_light_screen_radius == 1.0f);
+		s.distant_light_screen_radius = std::nanf("");
+		CHECK(VSM::clamp_scalability(s).distant_light_screen_radius == 0.0f);
+	}
+
+	// Projected screen radius (perspective, camera-inside, orthographic, and disabled threshold).
+	Projection persp;
+	persp.set_perspective(90.0f, 1.0f, 0.1f, 500.0f, false); // P[0][0] == P[1][1] == 1.0
+	CHECK(VSM::local_light_projected_radius(Vector3(0.0f, 0.0f, -100.0f), 2.0f, persp) == doctest::Approx(0.01f));
+	CHECK(VSM::is_local_light_distant(VSM::local_light_projected_radius(Vector3(0.0f, 0.0f, -100.0f), 2.0f, persp), high.distant_light_screen_radius));
+	CHECK_FALSE(VSM::is_local_light_distant(VSM::local_light_projected_radius(Vector3(0.0f, 0.0f, -10.0f), 2.0f, persp), low.distant_light_screen_radius));
+	// Camera inside or on sphere -> 1.0 (never demoted).
+	CHECK(VSM::local_light_projected_radius(Vector3(0.0f, 0.0f, -1.5f), 2.0f, persp) == doctest::Approx(1.0f));
+	CHECK(VSM::local_light_projected_radius(Vector3(0.0f, 0.0f, -10.0f), 0.0f, persp) == 0.0f);
+	// Threshold 0 disables distant demotion.
+	CHECK_FALSE(VSM::is_local_light_distant(0.001f, 0.0f));
+	// Orthographic projection.
+	Projection ortho;
+	ortho.set_orthogonal(-10.0f, 10.0f, -10.0f, 10.0f, 0.1f, 100.0f); // P[0][0] = P[1][1] = 0.1
+	CHECK(VSM::local_light_projected_radius(Vector3(0.0f, 0.0f, -50.0f), 2.0f, ortho) == doctest::Approx(0.1f));
+
+	// LIGHT_FLAGS_DISTANT_COARSE clamps fine marking requests to >= COARSE_FIRST_MIP and flags REQUEST_COARSE,
+	// even when shadow_resolution_bias is -2.0.
+	{
+		const Transform3D spot_xform(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 4.0f, 0));
+		const VSM::MapData map = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xform, 12.0f, 45.0f);
+		VSM::MarkLight light;
+		light.kind = VSM::MAP_KIND_SPOT;
+		light.map_base = 0;
+		light.flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1) | VSM::LIGHT_FLAGS_DISTANT_COARSE | VSM::pack_resolution_bias(-2.0f);
+		LocalVector<uint64_t> reqs;
+		VSM::mark_local_point(&map, 1, nullptr, light, Vector3(0.0f, 0.0f, 0.0f), 0.0005f, 0, false, false, reqs);
+		REQUIRE(reqs.size() == 1u);
+		CHECK((reqs[0] & VSM::REQUEST_COARSE) != 0u);
+		const uint32_t local_idx = uint32_t(reqs[0]) % VSM::ENTRIES_PER_MAP;
+		CHECK(local_idx >= VSM::mip_entry_offset(VSM::COARSE_FIRST_MIP));
+		CHECK(local_idx < VSM::mip_entry_offset(VSM::COARSE_FIRST_MIP + 1));
+	}
+
+	// 25% pool overflow (2048 pages) with 256 mixed local lights (1021 maps): Phase-0 root pages stay resident,
+	// coarse requests come before fine, overflow hits fine pages only, and 0 samples are unmapped.
+	{
+		const uint32_t pool_pages = VSM::pool_quality_pages(VSM::POOL_QUALITY_HIGH) / 4u; // 2048 pages (25%)
+		const uint32_t grid_width = uint32_t(VSM::pool_page_grid(pool_pages).x);
+		LocalVector<VSM::MapData> maps;
+		LocalVector<uint32_t> light_bases;
+		LocalVector<uint32_t> light_flags_list;
+		for (uint32_t i = 0; i < 256; i++) {
+			const VSM::MapKind kind = (i % 3u == 0u) ? VSM::MAP_KIND_SPOT : ((i % 3u == 1u) ? VSM::MAP_KIND_OMNI : VSM::MAP_KIND_AREA);
+			const uint32_t count = VSM::map_kind_map_count(kind, 1);
+			const uint32_t base = maps.size();
+			light_bases.push_back(base);
+			const bool distant = (i >= 192);
+			light_flags_list.push_back(VSM::light_flags(kind, count) | (distant ? VSM::LIGHT_FLAGS_DISTANT_COARSE : 0u));
+			const Transform3D xf(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(float(i % 16) * 2.0f, 4.0f, float(i / 16) * 2.0f));
+			for (uint32_t f = 0; f < count; f++) {
+				maps.push_back(VSM::map_data_face(kind, f, xf, 8.0f, 45.0f));
+			}
+		}
+		const uint32_t table_maps = maps.size();
+		REQUIRE(table_maps == 1021u);
+		const uint64_t table_entries = uint64_t(table_maps) * VSM::ENTRIES_PER_MAP;
+		LocalVector<uint32_t> table;
+		table.resize(table_entries);
+		memset(table.ptr(), 0, table_entries * sizeof(uint32_t));
+		LocalVector<VSM::PageRecord> pages;
+		pages.resize(pool_pages);
+
+		LocalVector<uint32_t> request_list;
+		auto add_request = [&](uint32_t p_idx, bool p_coarse) {
+			const uint32_t prev = table[p_idx];
+			table[p_idx] = prev | VSM::ENTRY_REQUESTED | (p_coarse ? VSM::ENTRY_COARSE : 0u);
+			if ((prev & VSM::ENTRY_REQUESTED) == 0u) {
+				request_list.push_back(p_idx);
+			}
+		};
+		// Phase 0: always-resident root pages of every face of all 256 lights (1021 requests).
+		LocalVector<uint64_t> res_reqs;
+		for (uint32_t i = 0; i < 256; i++) {
+			VSM::mark_resident(maps.ptr(), table_maps, light_bases[i], light_flags_list[i], res_reqs);
+		}
+		for (uint64_t r : res_reqs) {
+			add_request(uint32_t(r), true);
+		}
+		const uint32_t resident_count = request_list.size();
+		CHECK(resident_count == table_maps);
+		// Phase 1 (distant coarse) + Phase 2 (fine mip-0 requests exceeding pool capacity).
+		for (uint32_t m = 0; m < table_maps; m++) {
+			// Request 4 fine mip-0 pages per map -> 4084 fine + 1021 resident = 5105 > 2048 pages.
+			for (uint32_t k = 0; k < 4; k++) {
+				add_request(VSM::entry_index(m, 0, k, k), false);
+			}
+		}
+
+		const VSM::AllocationCounts counts = VSM::allocate_model(table.ptr(), table_entries, pages.ptr(), pool_pages, grid_width, request_list.ptr(), request_list.size(), 1, 60, resident_count);
+		CHECK(counts.overflow > 0u);
+		CHECK(counts.resident_overflow == 0u);
+		// Every fine lookup across every map of all 256 lights falls back cleanly to an allocated page -> 0 unmapped.
+		uint32_t unmapped = 0;
+		for (uint32_t m = 0; m < table_maps; m++) {
+			const VSM::LookupResult lr = VSM::lookup(table.ptr(), table_maps, m, Vector2(0.5f, 0.5f), 0, true);
+			if (!lr.valid) {
+				unmapped++;
+			}
+		}
+		CHECK(unmapped == 0u);
+	}
+}
+
+TEST_CASE("[VSM] Subsurface transmittance VSM depth lookup matches analytic thickness (#216)") {
+	using VSM = RendererVirtualShadowMapStorage;
+	using namespace TestVirtualShadowMapProjection;
+
+	// Directional light: slab at y=1, receiver at y=0 -> thickness = 1.0 m; front face y=1.02 -> small positive abs;
+	// outside slab -> -1.0 sentinel.
+	{
+		ProjectionScene scene;
+		scene.slab_half = 1.5f;
+		scene.slab_height = 1.0f;
+		scene.set_maps(sun_levels(4));
+		for (uint32_t l = 0; l < 4; l++) {
+			scene.allocate(l, 0);
+			scene.allocate(l, VSM::CLIPMAP_RESIDENT_MIP);
+		}
+		scene.fill();
+		const VSM::ProjectionInput in = scene.input();
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 4) | VSM::LIGHT_FLAGS_SAMPLE;
+
+		CHECK(VSM::transmittance_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), 4.0f, false) == doctest::Approx(1.0f).epsilon(0.02));
+		CHECK(VSM::transmittance_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), 4.0f, true) == doctest::Approx(1.0f).epsilon(0.05));
+		// Front face slightly toward light: small negative raw delta returns abs >= 0 (never collides with -1 sentinel).
+		const float front_t = VSM::transmittance_directional(in, 0, flags, Vector3(0.0f, 1.02f, 0.0f), 4.0f, false);
+		CHECK(front_t >= 0.0f);
+		CHECK(front_t == doctest::Approx(0.02f).epsilon(0.01));
+		// Lit ground outside slab: receiver sits on the ground plane stored in VSM -> thickness ~ 0.0.
+		CHECK(VSM::transmittance_directional(in, 0, flags, Vector3(5.0f, 0.0f, 0.0f), 4.0f, false) == doctest::Approx(0.0f).epsilon(0.01));
+		// Empty texel (cleared pool) returns -1.0 sentinel so caller keeps transmittance_depth.
+		VSM::ProjectionInput empty_in = in;
+		LocalVector<uint32_t> empty_pool;
+		empty_pool.resize(scene.pool.size());
+		memset(empty_pool.ptr(), 0, empty_pool.size() * sizeof(uint32_t));
+		empty_in.pool = empty_pool.ptr();
+		CHECK(VSM::transmittance_directional(empty_in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), 4.0f, false) == doctest::Approx(-1.0f));
+	}
+
+	// Spot light: axial thickness along spot -Z.
+	{
+		const Transform3D spot_xform(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 4.0f, 0));
+		ProjectionScene scene;
+		scene.light_position = spot_xform.origin;
+		scene.slab_half = 3.0f;
+		scene.slab_height = 1.0f;
+		LocalVector<VSM::MapData> maps;
+		maps.push_back(VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xform, 12.0f, 55.0f));
+		scene.set_maps(maps);
+		scene.allocate(0, 2);
+		scene.allocate(0, VSM::COARSE_FIRST_MIP);
+		scene.fill();
+
+		const VSM::ProjectionInput in = scene.input();
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1) | VSM::LIGHT_FLAGS_SAMPLE;
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), false) == doctest::Approx(1.0f).epsilon(0.02));
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(1.5f, 0.0f, 0.0f), false) == doctest::Approx(1.0f).epsilon(0.02));
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(0.0f, 1.02f, 0.0f), false) == doctest::Approx(0.02f).epsilon(0.01));
+		// Lit ground outside slab -> thickness ~ 0.0; point behind spot light -> -1.0 sentinel.
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(4.5f, 0.0f, 0.0f), false) == doctest::Approx(0.0f).epsilon(0.01));
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(0.0f, 6.0f, 0.0f), false) == doctest::Approx(-1.0f));
+	}
+
+	// Omni and Area lights: cube-face radial conversion sqrt(1 + x_ndc^2 + y_ndc^2) matches Euclidean radial
+	// thickness of Godot's dual-paraboloid atlas even near cube-face corners.
+	for (uint32_t k = 0; k < 2; k++) {
+		const VSM::MapKind kind = k == 0 ? VSM::MAP_KIND_OMNI : VSM::MAP_KIND_AREA;
+		const uint32_t face_count = VSM::map_kind_map_count(kind, 1);
+		const Transform3D xf(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 4.0f, 0));
+		ProjectionScene scene;
+		scene.light_position = xf.origin;
+		scene.slab_half = 4.0f;
+		scene.slab_height = 1.0f;
+		LocalVector<VSM::MapData> maps;
+		for (uint32_t f = 0; f < face_count; f++) {
+			maps.push_back(VSM::map_data_face(kind, f, xf, 12.0f, 45.0f));
+		}
+		scene.set_maps(maps);
+		for (uint32_t f = 0; f < face_count; f++) {
+			scene.allocate(f, 2);
+			scene.allocate(f, VSM::COARSE_FIRST_MIP);
+		}
+		scene.fill();
+
+		const VSM::ProjectionInput in = scene.input();
+		const uint32_t flags = VSM::light_flags(kind, face_count) | VSM::LIGHT_FLAGS_SAMPLE;
+		// On-axis (0, 0, 0): radial thickness == axial thickness == 1.0 m.
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), false) == doctest::Approx(1.0f).epsilon(0.02));
+		// Off-axis (2, 0, 2) from light at (0, 4, 0): x_ndc = 0.5, y_ndc = 0.5 -> exact radial thickness = sqrt(1.5).
+		const float expected_radial = std::sqrt(1.5f);
+		CHECK(VSM::transmittance_local(in, 0, flags, Vector3(2.0f, 0.0f, 2.0f), false) == doctest::Approx(expected_radial).epsilon(0.04));
+		// Distant coarse mode still resolves cleanly through coarse mip.
+		CHECK(VSM::transmittance_local(in, 0, flags | VSM::LIGHT_FLAGS_DISTANT_COARSE, Vector3(2.0f, 0.0f, 2.0f), false) == doctest::Approx(expected_radial).epsilon(0.08));
+		if (kind == VSM::MAP_KIND_AREA) {
+			// Behind area light front hemisphere -> -1.0.
+			CHECK(VSM::transmittance_local(in, 0, flags, Vector3(0.0f, 6.0f, 0.0f), false) == doctest::Approx(-1.0f));
+		}
+	}
+}

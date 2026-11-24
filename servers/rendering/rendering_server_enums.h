@@ -274,6 +274,8 @@ enum LightParam {
 	// GodotNext: light_grid (#139, plan §21.3 contract M2). AreaLight3D barn door culling parameters.
 	LIGHT_PARAM_BARN_DOOR_ANGLE,
 	LIGHT_PARAM_BARN_DOOR_LENGTH,
+	// GodotNext: vsm_local_lights (#216, plan §21.3 contract S7). Per-light VSM resolution bias in mips [-2, +4].
+	LIGHT_PARAM_SHADOW_RESOLUTION_BIAS,
 	LIGHT_PARAM_MAX,
 };
 

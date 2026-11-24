@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  vsm_debug.glsl                                                        */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 #[vertex]
 
 #version 450
@@ -38,9 +68,9 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer VSMPageTable {
 }
 vsm_page_table;
 
-#include "../vsm_mark_inc.glsl"
-#include "../vsm_page_table_inc.glsl"
-#include "../vsm_raster_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/vsm_mark_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/vsm_page_table_inc.glsl"
+#include "servers/rendering/renderer_rd/shaders/vsm_raster_inc.glsl"
 
 layout(set = 0, binding = 2, std430) restrict readonly buffer VSMMaps {
 	VSMMapData data[];
@@ -111,7 +141,10 @@ uint sample_directional(DebugLight light, vec3 world, float view_depth, float fo
 		return REACH_NONE;
 	}
 	ivec2 texel0 = vsm_clipmap_texel0(level0, world);
-	int level_mip = vsm_clipmap_level_mip(footprint, params.bias.x + level0.lod_bias);
+	int res_int_bias;
+	float res_scale;
+	vsm_resolution_bias_parts(light.info.y, res_int_bias, res_scale);
+	int level_mip = vsm_clipmap_level_mip(footprint * res_scale, params.bias.x + level0.lod_bias + res_int_bias);
 	uint start_level = count;
 	for (uint level = 0u; level < count; level++) {
 		uint map = first + level;
@@ -177,7 +210,13 @@ uint sample_local(DebugLight light, vec3 world, float footprint, out DebugSample
 		if (!vsm_face_texel(map_data, world, w, texel)) {
 			continue;
 		}
-		uint mip = vsm_biased_mip(int(vsm_face_mip(w * map_data.texel_scale, footprint)), params.bias.y + map_data.lod_bias);
+		int res_int_bias;
+		float res_scale;
+		vsm_resolution_bias_parts(light.info.y, res_int_bias, res_scale);
+		uint mip = vsm_biased_mip(int(vsm_face_mip(w * map_data.texel_scale, footprint * res_scale)), params.bias.y + map_data.lod_bias + res_int_bias);
+		if ((light.info.y & VSM_LIGHT_FLAGS_DISTANT_COARSE) != 0u && mip < VSM_COARSE_FIRST_MIP) {
+			mip = VSM_COARSE_FIRST_MIP;
+		}
 		vec2 uv = (vec2(texel) + 0.5) / float(VSM_VIRTUAL_SIZE);
 		VSMLookup lookup = vsm_lookup(table_maps, map, uv, mip);
 		if (!lookup.valid) {

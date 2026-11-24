@@ -174,6 +174,8 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	// GodotNext: light_grid (#139). Default open (90 deg) preserves legacy AABB and culling.
 	light.param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE] = RendererRD::LightGrid::DEFAULT_BARN_DOOR_ANGLE_DEG;
 	light.param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH] = RendererRD::LightGrid::DEFAULT_BARN_DOOR_LENGTH;
+	// GodotNext: vsm_local_lights (#216).
+	light.param[RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS] = 0.0;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -231,6 +233,11 @@ void LightStorage::light_set_param(RID p_light, RSE::LightParam p_param, float p
 	Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL(light);
 	ERR_FAIL_INDEX(p_param, RSE::LIGHT_PARAM_MAX);
+
+	// GodotNext: vsm_local_lights (#216). Clamp per-light VSM resolution bias to [-2, +4] mips.
+	if (p_param == RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS) {
+		p_value = RendererVirtualShadowMapStorage::clamp_resolution_bias(p_value);
+	}
 
 	if (light->param[p_param] == p_value) {
 		return;
@@ -1005,6 +1012,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						// GodotNext: vsm_caching (#212).
 						update.caster_mask = light->shadow_caster_mask;
 						update.reverse_cull = light->reverse_cull;
+						// GodotNext: vsm_local_lights (#216).
+						update.resolution_bias = light->param[RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS];
 						vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
 
 						if (df_full || df_handoff_start > 0.0f) {
@@ -1310,7 +1319,15 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_data.volumetric_fog_energy = light->param[RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY];
 		light_data.bake_mode = light->bake_mode;
 
-		// GodotNext: vsm_page_pool (#220).
+		float radius = MAX(0.001, light->param[RSE::LIGHT_PARAM_RANGE]);
+		light_data.inv_radius = 1.0 / radius;
+		Vector2 area_size = light->area_size;
+		Vector3 pos = inverse_transform.xform(light_transform.origin);
+		light_data.position[0] = pos.x;
+		light_data.position[1] = pos.y;
+		light_data.position[2] = pos.z;
+
+		// GodotNext: vsm_page_pool (#220), vsm_local_lights (#216).
 		{
 			uint32_t vsm_map_base = RendererVirtualShadowMapStorage::MAP_NONE;
 			uint32_t vsm_flags = 0;
@@ -1330,6 +1347,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				update.area_size = light->area_size;
 				update.caster_mask = light->shadow_caster_mask;
 				update.reverse_cull = light->reverse_cull;
+				// GodotNext: vsm_local_lights (#216). Per-light resolution bias and projected screen radius.
+				update.resolution_bias = light->param[RSE::LIGHT_PARAM_SHADOW_RESOLUTION_BIAS];
+				const float reach = type == RSE::LIGHT_AREA ? (radius + float(area_size.length()) * 0.5f) : radius;
+				update.screen_radius = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? RendererVirtualShadowMapStorage::local_light_projected_radius(pos, reach, p_render_data->scene_data->cam_projection) : 1.0f;
 				vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
 			}
 			light_data.vsm_map_base = vsm_map_base;
@@ -1337,14 +1358,6 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			light_data.vsm_pad[0] = 0;
 			light_data.vsm_pad[1] = 0;
 		}
-
-		float radius = MAX(0.001, light->param[RSE::LIGHT_PARAM_RANGE]);
-		light_data.inv_radius = 1.0 / radius;
-		Vector2 area_size = light->area_size;
-		Vector3 pos = inverse_transform.xform(light_transform.origin);
-		light_data.position[0] = pos.x;
-		light_data.position[1] = pos.y;
-		light_data.position[2] = pos.z;
 
 		Vector3 direction = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 0, -1))).normalized();
 

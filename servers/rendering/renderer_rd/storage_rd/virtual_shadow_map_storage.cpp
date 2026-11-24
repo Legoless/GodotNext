@@ -434,6 +434,9 @@ bool VirtualShadowMapStorage::_pool_resize(uint32_t p_page_count) {
 
 void VirtualShadowMapStorage::begin_light_update() {
 	view_directional.clear();
+	// GodotNext: vsm_local_lights (#216). Reset per-view local and distant local VSM light counters.
+	view_local_lights = 0;
+	view_distant_lights = 0;
 	// GodotNext: df_shadows (#214). Reset per-view DF shadow assignments before update_light_buffers() populates them.
 	df_view_lights.clear();
 	df_view_dropped = 0;
@@ -536,7 +539,15 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 		}
 	}
 	r_map_base = first;
-	r_flags = light_flags(range->kind, range->count);
+	r_flags = light_flags(range->kind, range->count) | pack_resolution_bias(p_light.resolution_bias);
+	// GodotNext: vsm_local_lights (#216). Local lights below the preset screen-radius threshold request coarse mips only.
+	if (range->kind != MAP_KIND_DIRECTIONAL) {
+		view_local_lights++;
+		if (is_local_light_distant(p_light.screen_radius, scalability.distant_light_screen_radius)) {
+			r_flags |= LIGHT_FLAGS_DISTANT_COARSE;
+			view_distant_lights++;
+		}
+	}
 	// GodotNext: vsm_projection (#222). The view's light loop samples these maps instead of the shadow atlas.
 	if (view_samples) {
 		r_flags |= LIGHT_FLAGS_SAMPLE;
@@ -567,8 +578,11 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 			view_directional.push_back(entry);
 		}
 	} else {
+		// GodotNext: vsm_local_lights (#216). Area lights reach range + half diagonal from center, matching
+		// LightStorage::update_light_buffers() and vsm_light_reaches().
+		const float face_range = range->kind == MAP_KIND_AREA ? (p_light.range + float(p_light.area_size.length()) * 0.5f) : p_light.range;
 		for (uint32_t face = 0; face < range->count; face++) {
-			MapData data = map_data_face(range->kind, face, p_light.transform, p_light.range, p_light.spot_angle);
+			MapData data = map_data_face(range->kind, face, p_light.transform, face_range, p_light.spot_angle);
 			data.lod_bias = moving_bias;
 			_set_map_data(first + face, data);
 		}
@@ -588,6 +602,8 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 	info["project_shadow_method"] = get_project_shadow_method() == SHADOW_METHOD_VIRTUAL ? String("virtual") : String("atlas");
 	info["dev_switch"] = is_dev_switch_forcing();
 	info["lod_bias_moving"] = Vector2i(scalability.lod_bias_directional_moving, scalability.lod_bias_local_moving);
+	// GodotNext: vsm_local_lights (#216).
+	info["distant_light_screen_radius"] = double(scalability.distant_light_screen_radius);
 	info["pool_pages"] = int64_t(get_pool_page_count());
 	info["pool_grid"] = pool_page_grid(get_pool_page_count());
 	info["pool_texture_size"] = pool_texture_size;
@@ -641,6 +657,10 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 		Dictionary projection;
 		projection["views"] = int64_t(projection_views);
 		projection["lights_sampled"] = int64_t(last_projection.lights_sampled);
+		// GodotNext: vsm_local_lights (#216).
+		projection["local_lights"] = int64_t(last_projection.local_lights);
+		projection["local_lights_culled"] = int64_t(last_projection.local_lights_culled);
+		projection["distant_lights"] = int64_t(last_projection.distant_lights);
 		projection["atlas_passes"] = int64_t(last_projection.atlas_passes);
 		projection["atlas_passes_skipped"] = int64_t(last_projection.atlas_passes_skipped);
 		projection["rays_local"] = int64_t(last_projection.rays_local);

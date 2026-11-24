@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  Light3D.xml                                                           */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="Light3D" inherits="VisualInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
@@ -145,6 +175,9 @@
 		<member name="shadow_opacity" type="float" setter="set_param" getter="get_param" default="1.0">
 			The opacity to use when rendering the light's shadow map. Values lower than [code]1.0[/code] make the light appear through shadows. This can be used to fake global illumination at a low performance cost.
 		</member>
+		<member name="shadow_resolution_bias" type="float" setter="set_param" getter="get_param" default="0.0">
+			Per-light virtual shadow map mip bias, clamped to the range [code][-2.0, 4.0][/code]. Positive values select coarser mips (lower shadow resolution, fewer physical pages); negative values select finer mips (higher shadow resolution, more physical pages). Added on top of the active preset's virtual shadow map resolution LOD bias and ignored by shadow-atlas lights.
+		</member>
 		<member name="shadow_reverse_cull_face" type="bool" setter="set_shadow_reverse_cull_face" getter="get_shadow_reverse_cull_face" default="false">
 			If [code]true[/code], reverses the backface culling of the mesh. This can be useful when you have a flat mesh that has a light behind it. If you need to cast a shadow on both sides of the mesh, set the mesh to use double-sided shadows with [constant GeometryInstance3D.SHADOW_CASTING_SETTING_DOUBLE_SIDED].
 		</member>
@@ -230,7 +263,10 @@
 		<constant name="PARAM_BARN_DOOR_LENGTH" value="25" enum="Param">
 			Constant for accessing [member AreaLight3D.barn_door_length].
 		</constant>
-		<constant name="PARAM_MAX" value="26" enum="Param">
+		<constant name="PARAM_SHADOW_RESOLUTION_BIAS" value="26" enum="Param">
+			Constant for accessing [member shadow_resolution_bias].
+		</constant>
+		<constant name="PARAM_MAX" value="27" enum="Param">
 			Represents the size of the [enum Param] enum.
 		</constant>
 		<constant name="BAKE_DISABLED" value="0" enum="BakeMode">

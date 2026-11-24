@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  vsm_smrt_inc.glsl                                                     */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 // GodotNext: vsm_projection (#222, plan §21.3 contract S6). Virtual Shadow Map projection with Shadow Map
 // Ray Tracing (SMRT) for the Forward+ light loop: vsm_shadow_directional() and vsm_shadow_local() replace
 // the shadow atlas samplers for lights whose LightData vsm_flags carry VSM_LIGHT_FLAGS_SAMPLE.
@@ -66,11 +96,15 @@ uint vsm_projection_overflow_bias(uint p_map) {
 }
 
 // RendererVirtualShadowMapStorage::clipmap_projection_select(): the marking pass's fine request.
-bool vsm_clipmap_projection_select(uint p_first, uint p_count, ivec2 p_texel0, float p_footprint, out uint r_level, out uint r_mip) {
+bool vsm_clipmap_projection_select(uint p_first, uint p_count, uint p_light_flags, ivec2 p_texel0, float p_footprint, out uint r_level, out uint r_mip) {
 	uint table_maps = vsm_projection.data.counts.x;
-	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, held by level 0, as the marking pass.
+	// GodotNext: vsm_settings_debug (#221) / vsm_local_lights (#216). Plus the light's moving bias (level 0)
+	// and per-light resolution bias, as the marking pass.
 	int map_bias = p_first < table_maps ? vsm_maps.data[p_first].lod_bias : 0;
-	int level_mip = vsm_clipmap_level_mip(p_footprint, vsm_projection.data.bias.x + map_bias);
+	int res_int_bias;
+	float res_scale;
+	vsm_resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+	int level_mip = vsm_clipmap_level_mip(p_footprint * res_scale, vsm_projection.data.bias.x + map_bias + res_int_bias);
 	r_level = 0u;
 	r_mip = 0u;
 	for (uint level = 0u; level < p_count; level++) {
@@ -191,7 +225,7 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 	float footprint = p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y;
 	uint level;
 	uint mip;
-	if (!vsm_clipmap_projection_select(first, count, initial_texel0, footprint, level, mip)) {
+	if (!vsm_clipmap_projection_select(first, count, p_light_flags, initial_texel0, footprint, level, mip)) {
 		return 1.0;
 	}
 	// GodotNext: vsm_fog_translucency (#215). Resolve the resident page first so normal bias, PCF spacing
@@ -292,9 +326,16 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 	}
 	VSMMapData face = vsm_maps.data[map];
 	float footprint = p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y;
-	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, as the marking pass.
-	int bias = vsm_projection.data.bias.y + face.lod_bias + int(vsm_projection_overflow_bias(map));
-	uint mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint)), bias);
+	// GodotNext: vsm_settings_debug (#221) / vsm_local_lights (#216). Plus moving bias, per-light resolution
+	// bias and distant-light coarse-only policy, as the marking pass.
+	int res_int_bias;
+	float res_scale;
+	vsm_resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+	int bias = vsm_projection.data.bias.y + face.lod_bias + res_int_bias + int(vsm_projection_overflow_bias(map));
+	uint mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint * res_scale)), bias);
+	if ((p_light_flags & VSM_LIGHT_FLAGS_DISTANT_COARSE) != 0u && mip < VSM_COARSE_FIRST_MIP) {
+		mip = VSM_COARSE_FIRST_MIP;
+	}
 	// GodotNext: vsm_fog_translucency (#215). Resolve the resident mip first so normal bias, PCF spacing
 	// and SMRT reach scale to the actual resident mip (e.g. coarse pages under translucent SMRT or overflow).
 	vec2 initial_uv = vec2(vsm_row(face.row0, p_world) / w * 0.5 + 0.5, vsm_row(face.row1, p_world) / w * 0.5 + 0.5);
@@ -410,7 +451,7 @@ float vsm_transmittance_directional(uint p_map_base, uint p_light_flags, vec3 p_
 	} else {
 		uint level;
 		uint mip;
-		if (!vsm_clipmap_projection_select(first, count, texel0, p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y, level, mip)) {
+		if (!vsm_clipmap_projection_select(first, count, p_light_flags, texel0, p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y, level, mip)) {
 			return -1.0;
 		}
 		uint found_level;
@@ -420,10 +461,12 @@ float vsm_transmittance_directional(uint p_map_base, uint p_light_flags, vec3 p_
 		return -1.0;
 	}
 	float stored = vsm_pool_depth(result.texel);
-	return stored < 1.0e30 ? vsm_row(level0.row2, p_world) - stored : -1.0;
+	// GodotNext: vsm_local_lights (#216). Return abs(thickness) >= 0 so small negative front-face deltas do
+	// not collide with the -1.0 unmapped sentinel (SSS() uses abs(transmittance_z) anyway).
+	return stored < 1.0e30 ? abs(vsm_row(level0.row2, p_world) - stored) : -1.0;
 }
 
-// As vsm_transmittance_directional(), for spot, omni and area lights (the distance along the face axis).
+// As vsm_transmittance_directional(), for spot, omni and area lights.
 float vsm_transmittance_local(uint p_map_base, uint p_light_flags, vec3 p_world, float p_view_depth) {
 	float w;
 	uint map = vsm_face_projection_select(p_map_base, p_light_flags, p_world, w);
@@ -434,13 +477,30 @@ float vsm_transmittance_local(uint p_map_base, uint p_light_flags, vec3 p_world,
 	uint mip = VSM_COARSE_FIRST_MIP;
 	if (!sc_use_vsm_coarse()) {
 		float footprint = p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y;
-		mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint)), vsm_projection.data.bias.y + face.lod_bias + int(vsm_projection_overflow_bias(map)));
+		int res_int_bias;
+		float res_scale;
+		vsm_resolution_bias_parts(p_light_flags, res_int_bias, res_scale);
+		mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint * res_scale)), vsm_projection.data.bias.y + face.lod_bias + res_int_bias + int(vsm_projection_overflow_bias(map)));
+		if ((p_light_flags & VSM_LIGHT_FLAGS_DISTANT_COARSE) != 0u && mip < VSM_COARSE_FIRST_MIP) {
+			mip = VSM_COARSE_FIRST_MIP;
+		}
 	}
-	vec2 uv = vec2(vsm_row(face.row0, p_world) / w * 0.5 + 0.5, vsm_row(face.row1, p_world) / w * 0.5 + 0.5);
+	float x_ndc = vsm_row(face.row0, p_world) / w;
+	float y_ndc = vsm_row(face.row1, p_world) / w;
+	vec2 uv = vec2(x_ndc * 0.5 + 0.5, y_ndc * 0.5 + 0.5);
 	VSMLookup result = vsm_lookup(vsm_projection.data.counts.x, map, uv, mip);
 	if (!result.valid) {
 		return -1.0;
 	}
 	float stored = vsm_pool_depth(result.texel);
-	return stored < 1.0e30 ? w - stored : -1.0;
+	if (!(stored < 1.0e30)) {
+		return -1.0;
+	}
+	float thickness = abs(w - stored);
+	if (face.kind != VSM_MAP_KIND_SPOT) {
+		// GodotNext: vsm_local_lights (#216). Omni and area cube faces store axial depth along the face
+		// normal; convert to Euclidean radial thickness so SSS matches Godot's dual-paraboloid atlas.
+		thickness *= sqrt(1.0 + x_ndc * x_ndc + y_ndc * y_ndc);
+	}
+	return thickness;
 }

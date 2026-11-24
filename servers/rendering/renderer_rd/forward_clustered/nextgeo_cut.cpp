@@ -3072,6 +3072,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 
 	rd->draw_command_begin_label("VSM NextGeo Cull and Raster");
 
+	// GodotNext: vsm_local_lights (#216). Count indirect raster dispatches issued for local maps (chain 1).
+	uint32_t local_raster_indirect_dispatches = 0u;
 	// Chain 0: all directional maps; Chain 1: all local maps (1 indirect dispatch chain each).
 	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
 		RendererRD::NextGeoVSMParams vp = {};
@@ -3228,6 +3230,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 				rd->compute_list_set_push_constant(list, push, sizeof(push));
 				rd->compute_list_dispatch_indirect(list, vsm_raster_args, 0u);
 				rd->compute_list_end();
+				if (chain == 1u) {
+					local_raster_indirect_dispatches++;
+				}
 			}
 		}
 
@@ -3268,6 +3273,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 					rd->draw_list_draw_indirect(dl, false, vsm_raster_args, 4u * sizeof(uint32_t), 1u, 0u);
 				}
 				rd->draw_list_end();
+				if (chain == 1u) {
+					local_raster_indirect_dispatches++;
+				}
 			}
 		}
 
@@ -3275,6 +3283,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		if (use_bins) {
 			_compact_vsm_bins();
 			_draw_vsm_bins(chain, p_inputs);
+			if (chain == 1u) {
+				local_raster_indirect_dispatches += 2u * p_inputs.raster_bin_programs.size();
+			}
 		}
 	}
 
@@ -3292,6 +3303,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		stats["views"] = int64_t(vsm_dispatched_views);
 		stats["directional_chains"] = int64_t(1);
 		stats["local_chains"] = int64_t(1);
+		// GodotNext: vsm_local_lights (#216). Indirect raster dispatches issued for all local dirty pages combined.
+		stats["local_raster_indirect_dispatches"] = int64_t(local_raster_indirect_dispatches);
 		stats["used_indirect_count"] = use_indirect_count;
 		stats["hw_raster_path"] = RendererRD::nextgeo_hw_raster_path_name(use_mesh_hw);
 		const RendererRD::NextGeoHWRasterReason vsm_hw_reason = use_mesh_hw

@@ -32,6 +32,7 @@
 
 #include "core/math/aabb.h"
 #include "core/math/basis.h"
+#include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
 #include "core/math/vector2i.h"
@@ -174,6 +175,24 @@ public:
 	}
 	static_assert((LIGHT_FLAGS_DF_SAMPLE & (LIGHT_FLAGS_SAMPLE | LIGHT_FLAGS_KIND_MASK | (LIGHT_FLAGS_COUNT_MASK << LIGHT_FLAGS_COUNT_SHIFT))) == 0, "DF flags must not overlap VSM flags.");
 	static_assert(DF_MAX_LIGHTS_PER_VIEW <= LIGHT_FLAGS_DF_LAYER_MASK + 1u, "DF layer index fits its 4-bit field.");
+	// GodotNext: vsm_local_lights (#216, plan §21.3 contract S7).
+	// - bit 10: distant local light (projected radius below quality-preset threshold) requesting coarse mips only;
+	// - bits 16-23: per-light shadow_resolution_bias clamped to [-2, +4] mips as signed 8-bit fixed-point
+	//   (1/16 mip step; 0 encodes 0.0 mips so lights without an explicit bias keep existing vsm_flags).
+	static constexpr uint32_t LIGHT_FLAGS_DISTANT_COARSE = 1u << 10;
+	static constexpr uint32_t LIGHT_FLAGS_RES_BIAS_SHIFT = 16;
+	static constexpr uint32_t LIGHT_FLAGS_RES_BIAS_MASK = 0xFFu;
+	static constexpr float RESOLUTION_BIAS_MIN = -2.0f;
+	static constexpr float RESOLUTION_BIAS_MAX = 4.0f;
+	static constexpr float RESOLUTION_BIAS_SCALE = 16.0f;
+	static_assert((LIGHT_FLAGS_DISTANT_COARSE & (LIGHT_FLAGS_SAMPLE | LIGHT_FLAGS_DF_SAMPLE | LIGHT_FLAGS_DF_FULL | (LIGHT_FLAGS_DF_LAYER_MASK << LIGHT_FLAGS_DF_LAYER_SHIFT) | LIGHT_FLAGS_KIND_MASK | (LIGHT_FLAGS_COUNT_MASK << LIGHT_FLAGS_COUNT_SHIFT))) == 0, "LIGHT_FLAGS_DISTANT_COARSE must not overlap existing vsm_flags bits.");
+	static_assert(((LIGHT_FLAGS_RES_BIAS_MASK << LIGHT_FLAGS_RES_BIAS_SHIFT) & (LIGHT_FLAGS_DISTANT_COARSE | LIGHT_FLAGS_SAMPLE | LIGHT_FLAGS_DF_SAMPLE | LIGHT_FLAGS_DF_FULL | (LIGHT_FLAGS_DF_LAYER_MASK << LIGHT_FLAGS_DF_LAYER_SHIFT) | LIGHT_FLAGS_KIND_MASK | (LIGHT_FLAGS_COUNT_MASK << LIGHT_FLAGS_COUNT_SHIFT))) == 0, "LIGHT_FLAGS_RES_BIAS must not overlap existing vsm_flags bits.");
+	static float clamp_resolution_bias(float p_bias);
+	static uint32_t pack_resolution_bias(float p_bias);
+	static float unpack_resolution_bias(uint32_t p_light_flags);
+	// Splits the packed resolution bias into a floor integer mip bias and a footprint scale in [1, 2).
+	// Matches vsm_resolution_bias_parts() in vsm_mark_inc.glsl.
+	static void resolution_bias_parts(uint32_t p_light_flags, int32_t &r_int_bias, float &r_footprint_scale);
 	// The map of a light's clipmap level or face p_index, or MAP_NONE when the light has no maps or
 	// p_index is not below its map count. The CPU model of vsm_light_map() in
 	// vsm_page_table_inc.glsl: consumers never add an index to vsm_map_base themselves, since
@@ -825,12 +844,18 @@ public:
 		int32_t lod_bias_local = 0;
 		int32_t lod_bias_directional_moving = 0;
 		int32_t lod_bias_local_moving = 0;
+		// GodotNext: vsm_local_lights (#216). Local lights whose projected radius (fraction of viewport
+		// height) falls below this threshold request coarse mips only.
+		float distant_light_screen_radius = 0.03f;
 	};
 	static constexpr PoolQuality DEFAULT_QUALITY = POOL_QUALITY_HIGH;
 	// Provisional until PQ (docs/godotnext/source-log/vsm.md): no bias at High and Epic; Low takes one mip,
 	// a quarter of the pages, for its quarter of High's pool; moving lights take one mip more than static
 	// ones at every preset.
 	static Scalability default_scalability(PoolQuality p_quality);
+	static constexpr float default_distant_light_screen_radius(PoolQuality p_quality) {
+		return p_quality == POOL_QUALITY_LOW ? 0.06f : (p_quality == POOL_QUALITY_MEDIUM ? 0.045f : (p_quality == POOL_QUALITY_HIGH ? 0.03f : 0.015f));
+	}
 	static constexpr uint32_t MIN_PHYSICAL_PAGES = 64;
 	static constexpr int32_t MAX_SETTING_LOD_BIAS = 4;
 	// Clamps a preset's values to what the pool and the mark pass take.
@@ -841,9 +866,15 @@ public:
 	static const char *const SETTING_LOD_BIAS_LOCAL;
 	static const char *const SETTING_LOD_BIAS_DIRECTIONAL_MOVING;
 	static const char *const SETTING_LOD_BIAS_LOCAL_MOVING;
+	static const char *const SETTING_DISTANT_LIGHT_SCREEN_RADIUS;
 	// The preset's values from the project settings (the defaults where a setting is missing).
 	static Scalability read_scalability(PoolQuality p_quality);
 	static PoolQuality read_quality();
+	// GodotNext: vsm_local_lights (#216). Projected screen radius of a local light sphere of reach p_radius
+	// at view-space position p_view_position, as a fraction of viewport height (0.5 = half screen height).
+	// Returns 1.0 when the camera is inside or closer than p_radius (never demoted to distant).
+	static float local_light_projected_radius(const Vector3 &p_view_position, float p_radius, const Projection &p_projection);
+	static bool is_local_light_distant(float p_screen_radius, float p_threshold);
 
 	// Moving lights: a light whose transform (a directional light's basis) changed in the current frame is
 	// moving. It adds the moving bias minus the static bias to its maps; once it stops, that extra bias steps
@@ -950,7 +981,7 @@ public:
 	static float directional_tan_half_angle(float p_size);
 	// The level and mip the projection reads for a receiver: the marking pass's fine request
 	// (mark_directional_point()), so the sample finds the page the view asked for.
-	static bool clipmap_projection_select(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, float p_footprint, int32_t p_lod_bias, uint32_t &r_level, uint32_t &r_mip);
+	static bool clipmap_projection_select(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, float p_footprint, int32_t p_lod_bias, uint32_t &r_level, uint32_t &r_mip, uint32_t p_light_flags = 0);
 	// clipmap_sample() that also gives the level it found the page in.
 	static LookupResult clipmap_sample_level(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t p_level, uint32_t p_mip, uint32_t &r_level);
 	// The face of a spot, omni or area light that holds p_world (the one with the largest w where faces
@@ -984,6 +1015,11 @@ public:
 	// light, on p_level and p_mip (CPU model of vsm_prefiltered_distant()).
 	static float prefiltered_distant(const ProjectionInput &p_in, uint32_t p_first, uint32_t p_count, const Vector2 &p_t, float p_depth, uint32_t p_level, uint32_t p_mip);
 	static float shadow_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, float p_radius, const Vector3 &p_area_a = Vector3(), const Vector3 &p_area_b = Vector3());
+	// GodotNext: vsm_local_lights (#216). CPU models of vsm_transmittance_directional() and
+	// vsm_transmittance_local() in vsm_smrt_inc.glsl: returns occluder-to-receiver thickness (>= 0), or -1
+	// when no mapped occupied VSM texel exists (caller keeps transmittance_depth).
+	static float transmittance_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_view_depth, bool p_coarse = false);
+	static float transmittance_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, bool p_coarse = false);
 
 	/* VOLUMETRIC FOG AND FORWARD TRANSLUCENCY COARSE LOOKUPS (#215, plan §21.3 contract S6, GV-7) */
 
@@ -1101,6 +1137,9 @@ public:
 	const MapRange *map_get(RID p_light_instance) const;
 	// As map_get(), and marks the light's maps used in this frame.
 	const MapRange *map_touch(RID p_light_instance);
+	// GodotNext: vsm_local_lights (#216). Read-only check whether the table has capacity (including
+	// growth up to TABLE_MAX_MAPS and evictable stale lights) to allocate p_maps maps this frame.
+	bool can_allocate_maps(uint32_t p_maps) const;
 
 	// Directional lights: allocates one map per clipmap level that p_max_distance needs and moves each
 	// level's window to the camera. Pages that wrap are marked ENTRY_SCROLLED; a change of the light

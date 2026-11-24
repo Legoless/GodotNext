@@ -1,3 +1,33 @@
+/**************************************************************************/
+/*  vsm.md                                                                */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
 # Virtual Shadow Maps source log
 
 The plan's clean-room protocol (§19) requires a source log per subsystem. This file records every
@@ -362,3 +392,32 @@ tunes them against GV-10.
 | Directional far-caster VSM drop | `LightStorage::update_light_buffers()` clamps the directional VSM `max_distance` to `distance_field_shadow_start` (keeping `fade_from`/`fade_to` extended to `distance_field_shadow_distance`), and `vsm_instance_cull.glsl` + `cull_box_dirty_pages()` drop non-Nanite casters whose world AABB nearest point to the camera exceeds `distance_field_shadow_start`, counting them in `VSM_CULL_STATE_DF_FAR_CULLED`. | Issue #214 step 3: drops far non-Nanite casters from directional VSM maps while keeping CPU/GPU cull parity in `get_vsm_raster_check_result()`. |
 | Tier rule & fallback | `evaluate_df_tier()` requires Forward+ with `rendering/global_illumination/mesh_sdf/generate` enabled and not dropped by HWRT (`keep_when_hwrt == false`). Reasons: `UNSUPPORTED_RENDERER`, `MESH_SDF_DISABLED`, `DROPPED_FOR_HWRT`. Exposed in `virtual_shadow_maps_get_tier_info()` (`df_available`, `df_reason`, `df_fallback_lines`, `df_max_lights`) and `Light3D::get_configuration_warnings()`. When unavailable, directional handoff is ignored so VSM/atlas continues to full distance, and `SHADOW_METHOD_DISTANCE_FIELD` falls back to `SHADOW_METHOD_PROJECT`. | Issue #214 step 5: clear inspector/debug reason and zero impact when DF shadows are off or unavailable. |
 | Self-shadowing guard | Soft cone visibility accumulates once the sample clears `2 * band` above the receiver's tangent plane and clamps the effective cone tangent to `max(0.5 * NdotL, DF_MIN_CONE_TAN)`, while hard interior hits (`surface_d <= 0`) still occlude immediately. | Guarantees an unobstructed flat receiver never self-shadows at grazing light angles or wide light radii while preserving crisp contact shadows. |
+
+## VSM local lights, resolution bias, distant-light policy and transmittance (#216), 2026-11-24
+
+The code follows plan §21.3 (contract S7, local-lights half; GV-3, GV-8), issue #216, #220's page-table
+map allocator (`MAP_KIND_SPOT`, `MAP_KIND_OMNI`, `MAP_KIND_AREA`), #219's dirty-page lists
+(`VSM_INDIRECT_LOCAL`) and three-phase allocation (`MODE_RESIDENT` root pages first, then `ENTRY_COARSE`,
+then fine requests), #218's non-Nanite indirect-count raster, #217's NextGeo local indirect chain, #221's
+scalability presets, and #222's SMRT/transmittance lookups. No outside source, shader, paper, or SDK was
+consulted beyond Epic's public Virtual Shadow Maps documentation page listed under Approved inputs.
+
+### Provisional values (#216)
+
+They live in `servers/rendering/storage/virtual_shadow_map_storage.h`, and PQ (§22) measures and tunes them
+against GV-3 and GV-8.
+
+| Value | Provisional | Derivation |
+|---|---|---|
+| Distant-light screen-radius threshold (`rendering/lights_and_shadows/virtual_shadows/distant_light_screen_radius.{low,medium,high,epic}`) | Low `0.06`, Medium `0.045`, High `0.03`, Epic `0.015` (fraction of viewport height; `0.0` disables) | At 1080p High, `0.03` corresponds to a ~65 px projected light diameter (~32 px radius): below that size a 128 × 128 coarse mip (`COARSE_FIRST_MIP = 5`) or 64 × 64 root page already provides >= 1 shadow texel per screen pixel across the light's footprint while saving fine pages under many-light load. Scales monotonically with the preset pool budgets. |
+| Per-light `shadow_resolution_bias` (`Light3D.shadow_resolution_bias`, `LIGHT_PARAM_SHADOW_RESOLUTION_BIAS`) | Range `[-2.0, +4.0]` mips, default `0.0`, quantized as signed 8-bit fixed-point Q3.4 (1/16 mip step) in `vsm_flags` bits `16..23` | Range fixed by issue #216. Packing in `vsm_flags` avoids enlarging `LightData` (240 B) or `DirectionalLightData`; `0x00` encodes `0.0` so lights without a bias keep unchanged `vsm_flags`, and splitting into `floor(q / 16)` + `exp2(rem / 16)` footprint scale matches CPU and GPU bit-for-bit with no `exp2` when `rem == 0`. |
+
+### Contract decisions (#216), 2026-11-24
+
+| Topic | Decision | Why |
+|---|---|---|
+| Frame-1 atlas bypass & `MAX_UPDATE_SHADOWS` | `RenderForwardClustered::vsm_light_skips_atlas()` returns `true` for VSM-resolved shadowed lights as soon as `VirtualShadowMapStorage::can_allocate_maps(needed_maps)` succeeds (even on Frame 1 before `update_light_buffers()` runs). `RendererSceneCull` skips `_light_instance_update_shadow()` and the 88-slot positional shadow atlas for those lights while keeping frustum, `light_instance_is_shadow_visible_at_position()`, visibility-layer and `shadow_caster_mask` culling in the VSM caster loop, counting `vsm_local_light_count` independently of `MAX_UPDATE_SHADOWS = 512`. | Eliminates Frame-1 atlas fallback and removes the 88-slot positional atlas and 512-shadow cap so 256+ shadowed local lights all cast VSM shadows from Frame 1 onward with 0 atlas passes. |
+| Area-light 5-face reach | `VirtualShadowMapStorage::update_light()` passes `range + area_size.length() * 0.5f` as the far plane of `map_data_face()` for `MAP_KIND_AREA` (matching `LightStorage::update_light_buffers()` and `vsm_light_reaches()`). | Prevents area-light VSM faces from clipping shadows short near the rectangle's corners. |
+| Many-light single dispatch | All local dirty pages stay concatenated in `dirty_buffer[dirty_directional..dirty_total)` (`VSM_INDIRECT_LOCAL`). NextGeo runs 1 local chain (`local_raster_indirect_dispatches = 2`: 1 SW indirect compute + 1 HW indirect-count draw), and non-Nanite groups across all lights by mesh/material (`indirect_draw_count = groups.size()`), both independent of dirty light count (`<= 4` indirect dispatches for 64+ dirty local lights). | Satisfies S7's many-light single-dispatch requirement on both Nanite and non-Nanite paths without per-light CPU loops. |
+| Distant-light coarse policy & overflow safety | Local lights with `local_light_projected_radius(view_pos, reach, cam_projection) < distant_light_screen_radius` receive `LIGHT_FLAGS_DISTANT_COARSE` (bit 10 of `vsm_flags`). Page marking (`vsm_mark_pages.glsl`, `mark_local_point()`) clamps their requested mip to `>= COARSE_FIRST_MIP` and flags `ENTRY_COARSE` so they allocate in Phase 1 (after Phase-0 always-resident root pages and before Phase-2 fine pages). Projection, transmittance and debug draws apply the same clamp. | Keeps distant lights on coarse mips and guarantees 0 sampled-but-unmapped pages even under 25% pool overflow (`GODOT_DEV_VSM=25%`). |
+| Subsurface transmittance (`LIGHT_PARAM_TRANSMITTANCE_BIAS`) | `vsm_transmittance_directional()` and `vsm_transmittance_local()` (and their CPU models) return `abs(thickness) >= 0` whenever a mapped, occupied VSM texel exists (`-1.0` only when unmapped/empty), apply `shadow_resolution_bias` and `LIGHT_FLAGS_DISTANT_COARSE`, and for `MAP_KIND_OMNI` and `MAP_KIND_AREA` cube faces convert axial face depth difference `|w - stored|` to Euclidean radial thickness by multiplying by `sqrt(1 + x_ndc^2 + y_ndc^2)`. | Prevents small negative front-face deltas from colliding with the `-1.0` sentinel and matches Godot's dual-paraboloid omni/area SSS radial thickness without cube-corner seams. |
