@@ -35,6 +35,8 @@
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+// GodotNext: light_function_atlas (#138).
+#include "servers/rendering/renderer_rd/storage_rd/light_function_atlas.h"
 // GodotNext: vsm_page_pool (#220).
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -215,6 +217,7 @@ void LightStorage::area_light_initialize(RID p_rid) {
 void LightStorage::light_free(RID p_rid) {
 	light_set_projector(p_rid, RID()); //clear projector
 	light_area_set_texture(p_rid, RID()); //clear area texture
+	light_set_light_function(p_rid, RID()); //clear light function
 
 	// delete the texture
 	Light *light = light_owner.get_or_null(p_rid);
@@ -305,6 +308,55 @@ void LightStorage::light_set_projector(RID p_light, RID p_texture) {
 		}
 		light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT_SOFT_SHADOW_AND_PROJECTOR);
 	}
+}
+
+void LightStorage::light_set_light_function(RID p_light, RID p_material) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+
+	if (light->light_function == p_material) {
+		return;
+	}
+
+	light->light_function = p_material;
+	if (LightFunctionAtlas::get_singleton() != nullptr) {
+		LightFunctionAtlas::get_singleton()->set_light_material(p_light, p_material);
+	}
+
+	light->version++;
+	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+}
+
+RID LightStorage::light_get_light_function(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RID());
+	return light->light_function;
+}
+
+void LightStorage::light_set_light_function_scale(RID p_light, const Vector3 &p_scale) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+
+	if (light->light_function_scale == p_scale) {
+		return;
+	}
+
+	light->light_function_scale = p_scale;
+	light->version++;
+	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+}
+
+Vector3 LightStorage::light_get_light_function_scale(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, Vector3(1, 1, 1));
+	return light->light_function_scale;
+}
+
+Dictionary LightStorage::light_function_atlas_get_stats() const {
+	if (LightFunctionAtlas::get_singleton() != nullptr) {
+		return LightFunctionAtlas::get_singleton()->get_stats();
+	}
+	return Dictionary();
 }
 
 void LightStorage::light_set_negative(RID p_light, bool p_enable) {
@@ -856,6 +908,11 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 	if (VirtualShadowMapStorage::get_singleton() != nullptr) {
 		VirtualShadowMapStorage::get_singleton()->begin_light_update();
 	}
+	// GodotNext: light_function_atlas (#138). Reset per-view light function entries before collecting culled lights.
+	LightFunctionAtlas *lfa = LightFunctionAtlas::get_singleton();
+	if (lfa != nullptr) {
+		lfa->begin_view_entries();
+	}
 
 	r_directional_light_count = 0;
 	r_positional_light_count = 0;
@@ -953,6 +1010,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				light_data.sscs_index = (light->shadow && light->allow_contact_shadows)
 						? directional_contact_shadows_count++
 						: 0xffffffff;
+				// GodotNext: light_function_atlas (#138).
+				light_data.light_function_index = (lfa != nullptr && light->light_function.is_valid())
+						? lfa->append_view_entry(light_instance->light, LightFunctionAtlasPacker::MODE_DIRECTIONAL, light_transform, light->light_function_scale, 45.0f)
+						: LightFunctionAtlasPacker::ENTRY_NONE;
 
 				float angular_diameter = light->param[RSE::LIGHT_PARAM_SIZE];
 				if (angular_diameter > 0.0) {
@@ -1355,8 +1416,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			}
 			light_data.vsm_map_base = vsm_map_base;
 			light_data.vsm_flags = vsm_flags;
-			light_data.vsm_pad[0] = 0;
-			light_data.vsm_pad[1] = 0;
+			// GodotNext: light_function_atlas (#138).
+			if (lfa != nullptr && light->light_function.is_valid()) {
+				const LightFunctionAtlasPacker::Mode lf_mode = type == RSE::LIGHT_OMNI ? LightFunctionAtlasPacker::MODE_OMNI : (type == RSE::LIGHT_SPOT ? LightFunctionAtlasPacker::MODE_SPOT : LightFunctionAtlasPacker::MODE_AREA);
+				light_data.light_function_index = lfa->append_view_entry(light_instance->light, lf_mode, light_transform, light->light_function_scale, light->param[RSE::LIGHT_PARAM_SPOT_ANGLE]);
+			} else {
+				light_data.light_function_index = LightFunctionAtlasPacker::ENTRY_NONE;
+			}
+			light_data.vsm_pad = 0;
 		}
 
 		Vector3 direction = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 0, -1))).normalized();
@@ -1619,6 +1686,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 	if (r_directional_light_count) {
 		RD::get_singleton()->buffer_update(directional_light_buffer, 0, sizeof(DirectionalLightData) * r_directional_light_count, directional_lights);
+	}
+
+	if (lfa != nullptr) {
+		lfa->finish_view_entries();
 	}
 }
 

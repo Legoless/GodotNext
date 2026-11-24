@@ -57,6 +57,12 @@ public:
 	virtual void light_set_param(RID p_light, RSE::LightParam p_param, float p_value) = 0;
 	virtual void light_set_shadow(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_projector(RID p_light, RID p_texture) = 0;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	virtual void light_set_light_function(RID p_light, RID p_material) = 0;
+	virtual RID light_get_light_function(RID p_light) const = 0;
+	virtual void light_set_light_function_scale(RID p_light, const Vector3 &p_scale) = 0;
+	virtual Vector3 light_get_light_function_scale(RID p_light) const = 0;
+	virtual Dictionary light_function_atlas_get_stats() const = 0;
 	virtual void light_set_negative(RID p_light, bool p_enable) = 0;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) = 0;
 	virtual void light_set_distance_fade(RID p_light, bool p_enabled, float p_begin, float p_shadow, float p_length) = 0;

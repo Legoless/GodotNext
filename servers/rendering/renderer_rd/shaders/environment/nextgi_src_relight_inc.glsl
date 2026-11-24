@@ -7,6 +7,8 @@
 #ifndef NEXTGI_SRC_RELIGHT_INC_GLSL
 #define NEXTGI_SRC_RELIGHT_INC_GLSL
 
+#include "../light_function_inc.glsl"
+
 #ifdef NEXTGI_RADIANCE_RGBA16F
 layout(rgba16f, set = 0, binding = 1) uniform image2D radiance_image;
 #else
@@ -101,8 +103,16 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIRelightPara
 	uint page_count;
 	float rt_radius;
 	uint page_offset;
+	uint light_function_count; // GodotNext: light_function_atlas (#138)
 }
 params;
+
+// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+layout(set = 0, binding = 29) uniform sampler2D light_function_atlas;
+layout(set = 0, binding = 30, std430) restrict readonly buffer NextGILightFunctions {
+	LightFunctionEntry data[];
+}
+light_function_data;
 
 const uint REUSE_NONE = 0xFFFFFFFFu;
 const float PI = 3.14159265;
@@ -303,7 +313,8 @@ void main() {
 	vec3 emission = texelFetch(emission_tex, material, 0).rgb;
 	vec3 direct = vec3(0.0);
 	for (uint i = 0u; i < page.light_count; i++) {
-		NextGILight light = lights.data[page_lights.data[page.light_offset + i]];
+		uint light_idx = page_lights.data[page.light_offset + i];
+		NextGILight light = lights.data[light_idx];
 		uint light_type = uint(light.direction_type.w + 0.5);
 		vec3 to_light;
 		float atten = 1.0;
@@ -328,7 +339,11 @@ void main() {
 		if (i < page.shadowed_count) {
 			shadow = (mask & (1u << i)) != 0u ? 1.0 : 0.0;
 		}
-		direct += light.color_energy.rgb * light.color_energy.a * atten * ndotl * shadow;
+		vec3 light_contrib = light.color_energy.rgb * light.color_energy.a * atten * ndotl * shadow;
+		if (params.light_function_count > 0u && light_idx < params.light_function_count) {
+			light_contrib *= light_function_mask_combined(light_function_data.data[light_idx], light_function_atlas, world);
+		}
+		direct += light_contrib;
 	}
 	vec3 indirect = texelFetch(src_indirect_tex, radiance_coord / 8, 0).rgb;
 	vec3 radiance = emission + (albedo / PI) * (direct + indirect);

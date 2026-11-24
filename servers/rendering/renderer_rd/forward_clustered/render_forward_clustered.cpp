@@ -2040,6 +2040,11 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.vsm_coarse_miss = vsm_ready ? vsm->get_coarse_miss_buffer() : vsm_projection_default_miss_buffer;
 		settings.vsm_table_maps = vsm_ready ? vsm->get_table_capacity() : 0u;
 
+		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+		settings.light_function_atlas = light_function_atlas.get_atlas_texture_or_default();
+		settings.light_function_buffer = light_function_atlas.get_view_entry_buffer_or_default();
+		settings.light_function_count = light_function_atlas.has_baked_atlas() ? light_function_atlas.get_view_entry_count() : 0u;
+
 		RendererRD::Fog::get_singleton()->volumetric_fog_update(settings, p_cam_projection, p_cam_transform, p_prev_cam_inv_transform, p_shadow_atlas, p_directional_light_count, p_use_directional_shadows, p_positional_light_count, p_voxel_gi_count, p_fog_volumes);
 	}
 }
@@ -2574,6 +2579,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	if (render_shadows) {
 		_render_shadow_end();
 	}
+
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Bake dirty static and per-frame
+	// animated light functions once per frame before NextGI SRC relight, light buffers, and volumetric fog.
+	light_function_atlas.bake(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0, time);
 
 	// GodotNext: nextgi_frame_block
 	// Right after the shadow batch, which shares RENDER_LIST_SECONDARY with SRC card capture.
@@ -7004,6 +7013,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 	// GodotNext: nextgi_frame_block
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sscs, using_sdfgi || using_voxelgi, normal_roughness_views, voxel_gi_views, using_nextgi);
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Only enable atlas sampling in
+	// Forward+ shaders when this view has at least one active light function.
+	base_specialization.use_light_function = light_function_atlas.has_baked_atlas() && light_function_atlas.get_view_entry_count() > 0;
 	if (using_nextgi) {
 		_render_nextgi_front_layer(p_render_data, reverse_cull, screen_size, radiance_texture, samplers, base_specialization);
 	}
@@ -7497,6 +7509,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// rendering/lights_and_shadows/virtual_shadows/translucent_quality == 0.
 		SceneShaderForwardClustered::ShaderSpecialization transparent_specialization = base_specialization;
 		transparent_specialization.use_vsm_coarse = vsm_sample_view && vsm_translucent_coarse;
+		// GodotNext: light_function_atlas (#138). Forward transparents ignore the Light Function Atlas
+		// by default unless rendering/lights_and_shadows/light_function_atlas/translucent is enabled.
+		transparent_specialization.use_light_function = base_specialization.use_light_function && RendererRD::LightFunctionAtlas::read_translucent_enabled();
 		// GodotNext: avboit (#295, plan §21.2.1) & rd_readonly_depth (#301). With AVBOIT the alpha
 		// list is drawn in any order. Keep the depth attachment read-only when no transparent
 		// surface writes depth or stencil so TSR level 2 overlaps the transparent pass.
@@ -9455,6 +9470,12 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		const RID lg_indices = (p_render_data && p_render_data->packed_light_grid_index_buffer.is_valid()) ? p_render_data->packed_light_grid_index_buffer : default_lg;
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 60, lg_headers));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 61, lg_indices));
+	}
+	{
+		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Bindings 62 and 63 hold the
+		// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 stays free for #140 IES).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 62, light_function_atlas.get_atlas_texture_or_default()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 63, light_function_atlas.get_view_entry_buffer_or_default()));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)

@@ -563,6 +563,18 @@ ShaderTypes::ShaderTypes() {
 		shader_modes[RSE::SHADER_TEXTURE_BLIT].modes.push_back({ PNAME("blend"), "mix", "add", "sub", "mul", "disabled", "premul_alpha" });
 	}
 
+	/************ LIGHT_FUNCTION **************************/
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["global"].built_ins["TIME"] = constt(ShaderLanguage::TYPE_FLOAT);
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["constants"].built_ins["PI"] = constvt(ShaderLanguage::TYPE_FLOAT, { pi_scalar });
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["constants"].built_ins["TAU"] = constvt(ShaderLanguage::TYPE_FLOAT, { tau_scalar });
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["constants"].built_ins["E"] = constvt(ShaderLanguage::TYPE_FLOAT, { e_scalar });
+
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["light_function"].built_ins["LIGHT_UV"] = constt(ShaderLanguage::TYPE_VEC2);
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["light_function"].built_ins["LIGHT_MASK"] = ShaderLanguage::TYPE_VEC3;
+	shader_modes[RSE::SHADER_LIGHT_FUNCTION].functions["light_function"].main_function = true;
+
 	// Must be kept in sync with the Shader::Mode enum.
 	shader_types_list.push_back("spatial");
 	shader_types_list.push_back("canvas_item");
@@ -570,6 +582,7 @@ ShaderTypes::ShaderTypes() {
 	shader_types_list.push_back("sky");
 	shader_types_list.push_back("fog");
 	shader_types_list.push_back("texture_blit");
+	shader_types_list.push_back("light_function");
 	DEV_ASSERT(shader_types_list.size() == Shader::MODE_MAX);
 
 	for (const String &type : shader_types_list) {

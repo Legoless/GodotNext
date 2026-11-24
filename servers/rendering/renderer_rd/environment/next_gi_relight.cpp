@@ -45,6 +45,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_retrace.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_function_atlas.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -175,8 +176,9 @@ struct NextGIRelightParamsGPU {
 	uint32_t page_count = 0;
 	float rt_radius = 0.0f;
 	uint32_t page_offset = 0;
+	uint32_t light_function_count = 0; // GodotNext: light_function_atlas (#138)
 };
-static_assert(sizeof(NextGIRelightParamsGPU) == 20, "The relight params must match nextgi_src_relight.glsl.");
+static_assert(sizeof(NextGIRelightParamsGPU) == 24, "The relight params must match nextgi_src_relight.glsl.");
 
 struct NextGIRelightCountersGPU {
 	uint32_t traced = 0;
@@ -391,13 +393,15 @@ void NextGIRelight::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID buffers[11] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer, light_shadow_buffer, far_light_shadow_buffer, retrace_buffer };
-	for (int i = 0; i < 11; i++) {
+	RID buffers[12] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer, light_shadow_buffer, far_light_shadow_buffer, retrace_buffer, light_function_buffer };
+	for (int i = 0; i < 12; i++) {
 		if (buffers[i].is_valid()) {
 			rd->free_rid(buffers[i]);
 		}
 	}
 	light_buffer = RID();
+	light_function_buffer = RID();
+	light_function_capacity = 0;
 	// GodotNext: nextgi_shadow_policy (#145)
 	light_shadow_buffer = RID();
 	far_light_shadow_buffer = RID();
@@ -430,6 +434,9 @@ void NextGIRelight::free_resources() {
 	if (shadow_sampler.is_valid()) {
 		rd->free_rid(shadow_sampler);
 	}
+	if (light_function_sampler.is_valid()) {
+		rd->free_rid(light_function_sampler);
+	}
 	if (indirect_texture.is_valid()) {
 		rd->free_rid(indirect_texture);
 	}
@@ -444,6 +451,7 @@ void NextGIRelight::free_resources() {
 	dummy_depth = RID();
 	material_sampler = RID();
 	shadow_sampler = RID();
+	light_function_sampler = RID();
 	atlases_ready = false;
 }
 
@@ -465,6 +473,14 @@ bool NextGIRelight::_ensure_atlases() {
 	shadow_state.enable_compare = true;
 	shadow_state.compare_op = RD::COMPARE_OP_GREATER;
 	shadow_sampler = rd->sampler_create(shadow_state);
+
+	// GodotNext: light_function_atlas (#138). Linear clamp sampler for atlas tile lookups.
+	RD::SamplerState lf_state;
+	lf_state.mag_filter = RD::SAMPLER_FILTER_LINEAR;
+	lf_state.min_filter = RD::SAMPLER_FILTER_LINEAR;
+	lf_state.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	lf_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+	light_function_sampler = rd->sampler_create(lf_state);
 
 	BitField<RD::TextureUsageBits> storage = RD::TEXTURE_USAGE_STORAGE_BIT;
 	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
@@ -1333,6 +1349,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 
 	struct CpuLight {
 		NextGILight gpu;
+		LightFunctionAtlasPacker::EntryGPU lf_entry; // GodotNext: light_function_atlas (#138)
 		RID instance;
 		bool directional = false;
 		bool is_static = false;
@@ -1340,6 +1357,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		uint32_t caster_mask = 0xFFFFFFFFu; // GodotNext: nextgi_shadow_policy (#145)
 	};
 	LocalVector<CpuLight> cpu_lights;
+	LightFunctionAtlas *lf_atlas = LightFunctionAtlas::get_singleton();
+	bool any_light_function = false;
 
 	auto add_light = [&](RID p_light_instance, bool p_directional, bool p_static) {
 		if (!light_storage->owns_light_instance(p_light_instance)) {
@@ -1397,6 +1416,17 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		}
 		if (p_static) {
 			cpu.gpu.flags |= NEXTGI_LIGHT_FLAG_STATIC;
+		}
+		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+		if (lf_atlas != nullptr && lf_atlas->has_baked_atlas()) {
+			const LightFunctionAtlasPacker::Mode lf_mode = (type == RSE::LIGHT_DIRECTIONAL)
+					? LightFunctionAtlasPacker::MODE_DIRECTIONAL
+					: ((type == RSE::LIGHT_OMNI) ? LightFunctionAtlasPacker::MODE_OMNI : ((type == RSE::LIGHT_SPOT) ? LightFunctionAtlasPacker::MODE_SPOT : LightFunctionAtlasPacker::MODE_AREA));
+			const Vector3 lf_scale = RSG::light_storage->light_get_light_function_scale(light);
+			const float spot_angle_deg = (type == RSE::LIGHT_SPOT) ? RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ANGLE) : 45.0f;
+			if (lf_atlas->build_entry_for_light(light, lf_mode, transform, lf_scale, spot_angle_deg, cpu.lf_entry)) {
+				any_light_function = true;
+			}
 		}
 		cpu_lights.push_back(cpu);
 		if (p_directional) {
@@ -1580,8 +1610,11 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 
 	LocalVector<NextGILight> gpu_lights;
 	gpu_lights.resize(MAX(cpu_lights.size(), 1u));
+	LocalVector<LightFunctionAtlasPacker::EntryGPU> gpu_lf_entries;
+	gpu_lf_entries.resize(gpu_lights.size());
 	for (uint32_t i = 0; i < cpu_lights.size(); i++) {
 		gpu_lights[i] = cpu_lights[i].gpu;
+		gpu_lf_entries[i] = cpu_lights[i].lf_entry;
 	}
 	// GodotNext: nextgi_shadow_policy (#145). Per light, the light word and the caster mask trace_shadow() takes. The
 	// far TLAS's proxies carry every bit and no shadow instance words, so the far dispatch traces them all as
@@ -1705,6 +1738,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	max_texels = MAX(max_texels, last_texels);
 
 	_storage_buffer(light_buffer, light_capacity, gpu_lights.size(), sizeof(NextGILight));
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	_storage_buffer(light_function_buffer, light_function_capacity, gpu_lf_entries.size(), sizeof(LightFunctionAtlasPacker::EntryGPU));
 	// GodotNext: nextgi_shadow_policy (#145)
 	_storage_buffer(light_shadow_buffer, light_shadow_capacity, gpu_lights.size(), sizeof(uint32_t) * 2);
 	_storage_buffer(far_light_shadow_buffer, far_light_shadow_capacity, gpu_lights.size(), sizeof(uint32_t) * 2);
@@ -1739,6 +1774,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 
 	if (!gpu_lights.is_empty()) {
 		rd->buffer_update(light_buffer, 0, gpu_lights.size() * sizeof(NextGILight), gpu_lights.ptr());
+		// GodotNext: light_function_atlas (#138).
+		rd->buffer_update(light_function_buffer, 0, gpu_lf_entries.size() * sizeof(LightFunctionAtlasPacker::EntryGPU), gpu_lf_entries.ptr());
 		// GodotNext: nextgi_shadow_policy (#145)
 		rd->buffer_update(light_shadow_buffer, 0, light_shadows.size() * sizeof(uint32_t), light_shadows.ptr());
 		rd->buffer_update(far_light_shadow_buffer, 0, far_light_shadows.size() * sizeof(uint32_t), far_light_shadows.ptr());
@@ -1766,6 +1803,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	params.ray_budget = NextGI::get_singleton() != nullptr ? NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).relight_shadow_rays : uint32_t(NEXTGI_SRC_RELIGHT_RAY_CAP);
 	params.page_count = gpu_pages.size() + far_gpu_pages.size();
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
+	params.light_function_count = any_light_function ? cpu_lights.size() : 0u;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	// GodotNext: ps_swrt_trace (#186 step 5). The software relight's per-light candidate lists,
@@ -1853,7 +1891,10 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			shadow_texture_set_table = table;
 		}
 	}
-	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != record_buffer || cached_near_tlas != tlas || cached_far_tlas != far_tlas || cached_swrt != swrt) {
+	const RID lf_atlas_tex = lf_atlas != nullptr ? lf_atlas->get_atlas_texture_or_default() : src->get_atlas_texture(NextGISRC::ATLAS_ALBEDO);
+	static RID cached_lf_atlas;
+	static RID cached_lf_buffer;
+	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != record_buffer || cached_near_tlas != tlas || cached_far_tlas != far_tlas || cached_swrt != swrt || cached_lf_atlas != lf_atlas_tex || cached_lf_buffer != light_function_buffer) {
 		_reset_uniform_set();
 		cached_directional = directional_tex;
 		cached_positional = positional_tex;
@@ -1862,6 +1903,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cached_near_tlas = tlas;
 		cached_far_tlas = far_tlas;
 		cached_swrt = swrt;
+		cached_lf_atlas = lf_atlas_tex;
+		cached_lf_buffer = light_function_buffer;
 	}
 	if (!uniform_set.is_valid()) {
 		RD::Uniform uniforms[23] = {
@@ -1893,8 +1936,16 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		if (swrt) {
 			// GodotNext: ps_swrt_trace (#186, #188). The sibling's set 0 holds the per-light candidate
 			// lists in place of the TLAS (#186 step 5), and there is no far field (HWRT only, plan L8).
-			uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, candidate_buffer);
-			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
+			LocalVector<RD::Uniform> swrt_list;
+			swrt_list.reserve(22);
+			swrt_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, candidate_buffer));
+			for (int i = 1; i < 20; i++) {
+				swrt_list.push_back(uniforms[i]);
+			}
+			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+			swrt_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 29, Vector<RID>({ light_function_sampler, lf_atlas_tex })));
+			swrt_list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, light_function_buffer));
+			uniform_set = rd->uniform_set_create(swrt_list, shader_rid, 0);
 		} else if (shadow_instances.is_valid() && shadow_alpha.is_valid()) {
 			// GodotNext: nextgi_shadow_policy (#145). Variant 1 adds the alpha path's arena chunks and sampler (23 to
 			// 27) and the retrace records (28). The far dispatch's words take the opaque path, which reads none of them.
@@ -1908,6 +1959,9 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 				}
 				list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, retrace_buffer));
 			}
+			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+			list.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 29, Vector<RID>({ light_function_sampler, lf_atlas_tex })));
+			list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, light_function_buffer));
 			uniform_set = rd->uniform_set_create(list, shader_rid, 0);
 			list[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
 			list[22] = RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, far_light_shadow_buffer);

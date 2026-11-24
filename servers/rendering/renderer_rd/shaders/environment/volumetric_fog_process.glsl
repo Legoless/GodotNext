@@ -225,6 +225,11 @@ layout(set = 0, binding = 15, std140) uniform Params {
 	// GodotNext: vsm_fog_translucency (#215). World-space camera origin for VSM coarse lookups and table capacity (0 when off).
 	vec3 vsm_cam_origin;
 	uint vsm_table_maps;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	uint light_function_count;
+	uint lf_pad0;
+	uint lf_pad1;
+	uint lf_pad2;
 }
 params;
 #ifndef MODE_COPY
@@ -278,6 +283,14 @@ layout(set = 0, binding = 26) uniform sampler vsm_nearest_sampler;
 #include "../vsm_page_table_inc.glsl"
 #include "../vsm_raster_inc.glsl"
 #include "../vsm_coarse_inc.glsl"
+
+// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+#include "../light_function_inc.glsl"
+layout(set = 0, binding = 27) uniform texture2D light_function_atlas;
+layout(set = 0, binding = 28, std430) buffer restrict readonly LightFunctionBuffer {
+	LightFunctionEntry data[];
+}
+light_function_data;
 #endif
 
 float get_depth_at_pos(float cell_depth_size, int z) {
@@ -506,6 +519,14 @@ void main() {
 					shadow_attenuation = mix(vec3(1.0 - directional_lights.data[i].shadow_opacity), vec3(1.0), shadow);
 				}
 
+				// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+				if (params.light_function_count > 0u) {
+					uint lf_idx = directional_lights.data[i].light_function_index;
+					if (lf_idx < params.light_function_count) {
+						shadow_attenuation *= light_function_mask(light_function_data.data[lf_idx], light_function_atlas, linear_sampler, froxel_world_pos);
+					}
+				}
+
 				total_light += shadow_attenuation * directional_lights.data[i].color * directional_lights.data[i].energy * henyey_greenstein(dot(safe_normalize(view_pos), safe_normalize(directional_lights.data[i].direction)), params.phase_g) * directional_lights.data[i].volumetric_fog_energy;
 			}
 		}
@@ -598,6 +619,12 @@ void main() {
 								shadow_attenuation = mix(1.0 - omni_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / omni_lights.data[light_index].inv_radius * INV_FOG_FADE));
 							}
 						}
+						if (params.light_function_count > 0u) {
+							uint lf_idx = omni_lights.data[light_index].light_function_index;
+							if (lf_idx < params.light_function_count) {
+								light *= light_function_mask(light_function_data.data[lf_idx], light_function_atlas, linear_sampler, froxel_world_pos);
+							}
+						}
 						total_light += light * attenuation * shadow_attenuation * henyey_greenstein(dot(safe_normalize(light_pos - view_pos), safe_normalize(view_pos)), params.phase_g) * omni_lights.data[light_index].volumetric_fog_energy;
 					}
 				}
@@ -667,6 +694,12 @@ void main() {
 								float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
 
 								shadow_attenuation = mix(1.0 - spot_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / spot_lights.data[light_index].inv_radius * INV_FOG_FADE));
+							}
+						}
+						if (params.light_function_count > 0u) {
+							uint lf_idx = spot_lights.data[light_index].light_function_index;
+							if (lf_idx < params.light_function_count) {
+								light *= light_function_mask(light_function_data.data[lf_idx], light_function_atlas, linear_sampler, froxel_world_pos);
 							}
 						}
 						total_light += light * attenuation * shadow_attenuation * henyey_greenstein(dot(safe_normalize(light_rel_vec), safe_normalize(view_pos)), params.phase_g) * spot_lights.data[light_index].volumetric_fog_energy;
@@ -779,6 +812,12 @@ void main() {
 							float cos_theta = 0.0;
 							if (dot(light_rel_vec, light_rel_vec) > EPSILON) {
 								cos_theta = dot(normalize(light_rel_vec), normalize(view_pos));
+							}
+							if (params.light_function_count > 0u) {
+								uint lf_idx = area_lights.data[light_index].light_function_index;
+								if (lf_idx < params.light_function_count) {
+									light_color *= light_function_mask(light_function_data.data[lf_idx], light_function_atlas, linear_sampler, froxel_world_pos);
+								}
 							}
 							total_light += light_color * attenuation * shadow_attenuation * henyey_greenstein(cos_theta, params.phase_g) * area_lights.data[light_index].volumetric_fog_energy;
 						}

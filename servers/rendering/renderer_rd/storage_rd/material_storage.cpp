@@ -2368,6 +2368,8 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 		new_type = SHADER_TYPE_FOG;
 	} else if (mode_string == "texture_blit") {
 		new_type = SHADER_TYPE_TEXTURE_BLIT;
+	} else if (mode_string == "light_function") {
+		new_type = SHADER_TYPE_LIGHT_FUNCTION;
 	} else {
 		new_type = SHADER_TYPE_MAX;
 	}

@@ -1153,6 +1153,7 @@ MaterialStorage::MaterialStorage() {
 	shader_data_request_func[RSE::SHADER_SKY] = _create_sky_shader_func;
 	shader_data_request_func[RSE::SHADER_TEXTURE_BLIT] = _create_tex_blit_shader_func;
 	shader_data_request_func[RSE::SHADER_FOG] = nullptr;
+	shader_data_request_func[RSE::SHADER_LIGHT_FUNCTION] = nullptr;
 
 	material_data_request_func[RSE::SHADER_SPATIAL] = _create_scene_material_func;
 	material_data_request_func[RSE::SHADER_CANVAS_ITEM] = _create_canvas_material_func;
@@ -1160,6 +1161,7 @@ MaterialStorage::MaterialStorage() {
 	material_data_request_func[RSE::SHADER_SKY] = _create_sky_material_func;
 	material_data_request_func[RSE::SHADER_TEXTURE_BLIT] = _create_tex_blit_material_func;
 	material_data_request_func[RSE::SHADER_FOG] = nullptr;
+	material_data_request_func[RSE::SHADER_LIGHT_FUNCTION] = nullptr;
 
 	static_assert(sizeof(GlobalShaderUniforms::Value) == 16);
 

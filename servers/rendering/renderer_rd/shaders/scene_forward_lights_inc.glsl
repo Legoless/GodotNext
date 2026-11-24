@@ -562,6 +562,15 @@ float df_shadow_upsample(uint p_layer, float p_depth, vec3 p_view_normal) {
 
 #endif // SHADOWS_DISABLED
 
+#ifdef LIGHT_FUNCTION_ATLAS
+// GodotNext: light_function_atlas (#138). View-space to world-space conversion for Light Function Atlas lookups,
+// available regardless of SHADOWS_DISABLED.
+vec3 lf_world_position(vec3 p_view) {
+	vec4 p = vec4(p_view, 1.0);
+	return vec3(dot(scene_data_block.data.inv_view_matrix[0], p), dot(scene_data_block.data.inv_view_matrix[1], p), dot(scene_data_block.data.inv_view_matrix[2], p));
+}
+#endif
+
 half get_omni_attenuation(float distance, float inv_range, float decay) {
 	float nd = distance * inv_range;
 	nd *= nd;
@@ -867,6 +876,12 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		}
 	}
 
+#ifdef LIGHT_FUNCTION_ATLAS
+	if (sc_use_light_function() && omni_lights.data[idx].light_function_index != LIGHT_FUNCTION_NONE) {
+		color *= light_function_mask(light_function_data.data[omni_lights.data[idx].light_function_index], light_function_atlas, SAMPLER_LINEAR_CLAMP, lf_world_position(vertex));
+	}
+#endif
+
 	vec3 light_rel_vec_norm = light_rel_vec / light_length;
 	light_compute(normal, hvec3(light_rel_vec_norm), eye_vec, size, hvec3(color), false, omni_attenuation * shadow, f0, roughness, metallic, half(omni_lights.data[idx].specular_amount), albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
@@ -1101,6 +1116,12 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		}
 	}
 
+#ifdef LIGHT_FUNCTION_ATLAS
+	if (sc_use_light_function() && spot_lights.data[idx].light_function_index != LIGHT_FUNCTION_NONE) {
+		color *= light_function_mask(light_function_data.data[spot_lights.data[idx].light_function_index], light_function_atlas, SAMPLER_LINEAR_CLAMP, lf_world_position(vertex));
+	}
+#endif
+
 	light_compute(normal, hvec3(light_rel_vec_norm), eye_vec, size, hvec3(color), false, spot_attenuation * shadow, f0, roughness, metallic, half(spot_lights.data[idx].specular_amount), albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 			backlight,
@@ -1315,6 +1336,11 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	light_attenuation_ltc = light_attenuation_ltc * shadow;
 	half light_attenuation = light_attenuation_raw * shadow;
 	hvec3 color = hvec3(area_lights.data[idx].color);
+#ifdef LIGHT_FUNCTION_ATLAS
+	if (sc_use_light_function() && area_lights.data[idx].light_function_index != LIGHT_FUNCTION_NONE) {
+		color *= hvec3(light_function_mask(light_function_data.data[area_lights.data[idx].light_function_index], light_function_atlas, SAMPLER_LINEAR_CLAMP, lf_world_position(vertex)));
+	}
+#endif
 	float max_mipmap = area_lights.data[idx].cone_angle;
 
 	vec3 points[4];

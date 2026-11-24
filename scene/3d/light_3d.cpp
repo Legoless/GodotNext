@@ -35,6 +35,7 @@
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "scene/main/scene_tree.h"
+#include "scene/resources/material.h"
 #include "servers/rendering/rendering_server.h"
 
 void Light3D::set_param(Param p_param, real_t p_value) {
@@ -236,6 +237,11 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 		}
 	}
 
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	if (light_function.is_valid() && light_function->get_shader_mode() != Shader::MODE_LIGHT_FUNCTION) {
+		warnings.push_back(RTR("Light function material must use a shader with `shader_type light_function;`."));
+	}
+
 	return warnings;
 }
 
@@ -283,6 +289,26 @@ void Light3D::set_projector(const Ref<Texture2D> &p_texture) {
 
 Ref<Texture2D> Light3D::get_projector() const {
 	return projector;
+}
+
+void Light3D::set_light_function(const Ref<Material> &p_material) {
+	light_function = p_material;
+	RID mat_id = light_function.is_valid() ? light_function->get_rid() : RID();
+	RS::get_singleton()->light_set_light_function(light, mat_id);
+	update_configuration_warnings();
+}
+
+Ref<Material> Light3D::get_light_function() const {
+	return light_function;
+}
+
+void Light3D::set_light_function_scale(const Vector3 &p_scale) {
+	light_function_scale = p_scale;
+	RS::get_singleton()->light_set_light_function_scale(light, p_scale);
+}
+
+Vector3 Light3D::get_light_function_scale() const {
+	return light_function_scale;
 }
 
 void Light3D::owner_changed_notify() {
@@ -453,6 +479,12 @@ void Light3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_projector", "projector"), &Light3D::set_projector);
 	ClassDB::bind_method(D_METHOD("get_projector"), &Light3D::get_projector);
 
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	ClassDB::bind_method(D_METHOD("set_light_function", "material"), &Light3D::set_light_function);
+	ClassDB::bind_method(D_METHOD("get_light_function"), &Light3D::get_light_function);
+	ClassDB::bind_method(D_METHOD("set_light_function_scale", "scale"), &Light3D::set_light_function_scale);
+	ClassDB::bind_method(D_METHOD("get_light_function_scale"), &Light3D::get_light_function_scale);
+
 	ClassDB::bind_method(D_METHOD("set_temperature", "temperature"), &Light3D::set_temperature);
 	ClassDB::bind_method(D_METHOD("get_temperature"), &Light3D::get_temperature);
 	ClassDB::bind_method(D_METHOD("get_correlated_color"), &Light3D::get_correlated_color);
@@ -467,6 +499,9 @@ void Light3D::_bind_methods() {
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "light_volumetric_fog_energy", PROPERTY_HINT_RANGE, "0,16,0.001,or_greater"), "set_param", "get_param", PARAM_VOLUMETRIC_FOG_ENERGY);
 	// Only allow texture types that display correctly.
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "light_projector", PROPERTY_HINT_RESOURCE_TYPE, "Texture2D,-AnimatedTexture,-AtlasTexture,-CameraTexture,-CanvasTexture,-MeshTexture,-Texture2DRD,-ViewportTexture"), "set_projector", "get_projector");
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "light_function", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial"), "set_light_function", "get_light_function");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "light_function_scale", PROPERTY_HINT_RANGE, "0.001,1024,0.01,or_greater"), "set_light_function_scale", "get_light_function_scale");
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "light_size", PROPERTY_HINT_RANGE, "0,1,0.001,or_greater,suffix:m"), "set_param", "get_param", PARAM_SIZE);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "light_angular_distance", PROPERTY_HINT_RANGE, "0,90,0.01,degrees"), "set_param", "get_param", PARAM_SIZE);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "light_negative"), "set_negative", "is_negative");

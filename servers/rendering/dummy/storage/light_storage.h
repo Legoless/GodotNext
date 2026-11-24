@@ -83,6 +83,12 @@ public:
 	virtual void light_set_param(RID p_light, RSE::LightParam p_param, float p_value) override {}
 	virtual void light_set_shadow(RID p_light, bool p_enabled) override {}
 	virtual void light_set_projector(RID p_light, RID p_texture) override {}
+	// GodotNext: light_function_atlas (#138).
+	virtual void light_set_light_function(RID p_light, RID p_material) override {}
+	virtual RID light_get_light_function(RID p_light) const override { return RID(); }
+	virtual void light_set_light_function_scale(RID p_light, const Vector3 &p_scale) override {}
+	virtual Vector3 light_get_light_function_scale(RID p_light) const override { return Vector3(1, 1, 1); }
+	virtual Dictionary light_function_atlas_get_stats() const override { return Dictionary(); }
 	virtual void light_set_negative(RID p_light, bool p_enable) override {}
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) override {}
 	virtual void light_set_distance_fade(RID p_light, bool p_enabled, float p_begin, float p_shadow, float p_length) override {}

@@ -111,6 +111,15 @@ void blit() {
 }
 )";
 			} break;
+			case Shader::MODE_LIGHT_FUNCTION: {
+				code += R"(
+void light_function() {
+	// Called for every texel of the light's tile in the Light Function Atlas.
+	// LIGHT_UV is in [0, 1]^2; assign a multiplier to LIGHT_MASK (vec3, default vec3(1.0)).
+	LIGHT_MASK = vec3(1.0);
+}
+)";
+			} break;
 			case Shader::MODE_MAX: {
 				ERR_FAIL_V_MSG(Ref<Shader>(), "Invalid shader mode for text shader editor.");
 			} break;

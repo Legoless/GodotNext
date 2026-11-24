@@ -3410,6 +3410,15 @@
 		<member name="rendering/lights_and_shadows/directional_shadow/soft_shadow_filter_quality.mobile" type="int" setter="" getter="" default="0">
 			Lower-end override for [member rendering/lights_and_shadows/directional_shadow/soft_shadow_filter_quality] on mobile devices, due to performance concerns or driver support.
 		</member>
+		<member name="rendering/lights_and_shadows/light_function_atlas/format" type="int" setter="" getter="" default="0">
+			Pixel format of the Light Function Atlas used by [member Light3D.light_function] shaders. [b]R8[/b] ([code]0[/code], default) stores a monochrome luminance mask using a quarter of the memory and bandwidth; [b]RGBA8[/b] ([code]1[/code]) preserves full RGB light-function color tinting. Falls back to [b]RGBA8[/b] automatically if the device does not support 8-bit single-channel storage images.
+		</member>
+		<member name="rendering/lights_and_shadows/light_function_atlas/size" type="int" setter="" getter="" default="2048">
+			Resolution (width and height in pixels, rounded up to a power of two between 256 and 8192) of the Light Function Atlas texture. Larger sizes allow higher per-light tile resolution when many lights use [member Light3D.light_function].
+		</member>
+		<member name="rendering/lights_and_shadows/light_function_atlas/translucent" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], forward transparent surfaces sample the Light Function Atlas. Disabled by default so transparents avoid extra atlas lookups unless needed.
+		</member>
 		<member name="rendering/lights_and_shadows/multi_bounce_occlusion/enabled" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], approximates local multi-bounce global illumination in ambient occlusion by integrating albedo information.
 			[b]Note:[/b] Multi-bounce occlusion is only supported in the Forward+ rendering method.

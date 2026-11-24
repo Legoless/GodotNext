@@ -44,6 +44,8 @@
 // GodotNext: nextgi_tier
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
+// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+#include "servers/rendering/renderer_rd/storage_rd/light_function_atlas.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
@@ -74,6 +76,8 @@ protected:
 	RendererRD::FSR *fsr = nullptr;
 	RendererRD::VRS *vrs = nullptr;
 	RendererRD::Resolve *resolve_effects = nullptr;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	RendererRD::LightFunctionAtlas light_function_atlas;
 #ifdef METAL_ENABLED
 	RendererRD::MFXSpatialEffect *mfx_spatial = nullptr;
 #endif

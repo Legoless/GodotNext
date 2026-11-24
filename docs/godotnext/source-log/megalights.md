@@ -56,6 +56,34 @@ register their posed slot indices in the shared shadow alpha table, mark alpha-t
 `FORCE_NO_OPAQUE` (deferred as shadow-only without the GI bit when the mesh material excludes them per D17),
 and bind #130 hit groups on alpha-tested skinned slots so Full HWRT material retrace evaluates shader-code alpha.
 
+### Light functions and the Light Function Atlas (#138, contract M8), 2026-11-24
+
+Written from the plan (§21.3 contract M8, GM-11, M-9), issue #138, and Godot's own shader compiler,
+`MaterialStorage`, volumetric fog shader compiler template (`FogShaderData`), Forward+ lighting shaders,
+volumetric fog density pass, and NextGI SRC relight pass. No outside paper, article or code was consulted.
+
+Contract decisions for M8:
+- **Shader language:** `shader_type light_function;` with main function `void light_function()`, read-only
+  built-ins `vec2 LIGHT_UV` (normalized `[0, 1]` tile UV), `float TIME`, and constants `PI`/`TAU`/`E`, and
+  read-write output `vec3 LIGHT_MASK` (initialized to `vec3(1.0)`). In R8 atlas mode (default), the compute
+  bake writes Rec.709 luminance `dot(clamp(LIGHT_MASK, 0.0, 1.0), vec3(0.2126, 0.7152, 0.0722))` to `r8`
+  (falling back to `rgba8` if the device lacks `R8_UNORM` storage-image support); in RGBA8 mode, it writes
+  `vec4(clamp(LIGHT_MASK, 0.0, 1.0), 1.0)`.
+- **Atlas layout & dirty tracking:** Shelf-packed square tiles starting at 256 px and adaptively halving
+  down to 16 px on capacity overflow so 1,024+ lights fit cleanly in the default 2048×2048 atlas. Static
+  functions (no `TIME` usage) bake once on creation and re-bake only when `material_get_change_serial()`
+  advances or the atlas resizes/repacks; animated functions (`TIME`) bake at most once per rendered frame.
+  The atlas texture is lazily allocated on first active light function so scenes without light functions
+  perform zero bakes and render byte-identically.
+- **Projection & consumers:** Per-light `LightFunctionEntry` (80 bytes, std430) stores the half-texel-inset
+  tile UV rect, world-to-light 3×4 transform, `light_function_scale` parameters, and mode/format flags:
+  directional and area lights use wrapped planar projection, omni lights use octahedral projection of the
+  scaled local direction, and spot lights use perspective frustum projection (returning `vec3(0.0)` behind
+  the light). Shared helper `light_function_inc.glsl` is consumed by Forward+ (Set 1 bindings 62/63; opaque
+  always, forward transparents gated on `rendering/lights_and_shadows/light_function_atlas/translucent`),
+  Volumetric Fog (`MODE_DENSITY`, Set 0 bindings 27/28), and NextGI SRC relight (Set 0 bindings 29/30),
+  and is ready for #141 RT shadows and #142 MegaLights.
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

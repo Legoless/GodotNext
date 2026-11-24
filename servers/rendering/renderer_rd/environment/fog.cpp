@@ -468,6 +468,8 @@ bool Fog::VolumetricFog::sync_gi_dependent_sets_validity(bool p_ensure_freed) {
 		bound_vsm_coarse_miss = RID();
 		bound_shadow_atlas_depth = RID();
 		bound_directional_shadow_depth = RID();
+		bound_light_function_atlas = RID();
+		bound_light_function_buffer = RID();
 		valid = false;
 	}
 
@@ -816,14 +818,18 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 		RD::get_singleton()->compute_list_end();
 	}
 
-	// GodotNext: vsm_fog_translucency (#215). Rebuild density sets when VSM or shadow-atlas resources change
-	// (e.g. VSM activation/resize, or lazy shadow-atlas allocation when a positional/directional light appears).
+	// GodotNext: vsm_fog_translucency (#215) & light_function_atlas (#138). Rebuild density sets when VSM,
+	// shadow-atlas, or Light Function Atlas resources change.
+	const RID lf_atlas = p_settings.light_function_atlas.is_valid() ? p_settings.light_function_atlas : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+	const RID lf_buffer = p_settings.light_function_buffer.is_valid() ? p_settings.light_function_buffer : p_settings.omni_light_buffer;
 	const bool shadow_bindings_changed = fog->bound_vsm_pool_tex != p_settings.vsm_pool_tex ||
 			fog->bound_vsm_page_table != p_settings.vsm_page_table ||
 			fog->bound_vsm_map_data != p_settings.vsm_map_data ||
 			fog->bound_vsm_coarse_miss != p_settings.vsm_coarse_miss ||
 			fog->bound_shadow_atlas_depth != p_settings.shadow_atlas_depth ||
-			fog->bound_directional_shadow_depth != p_settings.directional_shadow_depth;
+			fog->bound_directional_shadow_depth != p_settings.directional_shadow_depth ||
+			fog->bound_light_function_atlas != lf_atlas ||
+			fog->bound_light_function_buffer != lf_buffer;
 	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity(shadow_bindings_changed);
 	if (!fog->copy_uniform_set.is_null() && !RD::get_singleton()->uniform_set_is_valid(fog->copy_uniform_set)) {
 		fog->copy_uniform_set = RID();
@@ -1093,12 +1099,29 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 				u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
 				uniforms.push_back(u);
 			}
+			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Bindings 27..28 are MODE_DENSITY-only.
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 27;
+				u.append_id(lf_atlas);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 28;
+				u.append_id(lf_buffer);
+				uniforms.push_back(u);
+			}
 			fog->bound_vsm_pool_tex = p_settings.vsm_pool_tex;
 			fog->bound_vsm_page_table = p_settings.vsm_page_table;
 			fog->bound_vsm_map_data = p_settings.vsm_map_data;
 			fog->bound_vsm_coarse_miss = p_settings.vsm_coarse_miss;
 			fog->bound_shadow_atlas_depth = p_settings.shadow_atlas_depth;
 			fog->bound_directional_shadow_depth = p_settings.directional_shadow_depth;
+			fog->bound_light_function_atlas = lf_atlas;
+			fog->bound_light_function_buffer = lf_buffer;
 			fog->gi_dependent_sets.process_uniform_set_density = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY)), 0);
 			if (fog->nextgi_density_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(fog->nextgi_density_uniform_set)) {
 				RD::get_singleton()->free_rid(fog->nextgi_density_uniform_set);
@@ -1280,6 +1303,11 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 	params.vsm_cam_origin[1] = float(p_cam_transform.origin.y);
 	params.vsm_cam_origin[2] = float(p_cam_transform.origin.z);
 	params.vsm_table_maps = p_settings.vsm_table_maps;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	params.light_function_count = p_settings.light_function_count;
+	params.lf_pad[0] = 0;
+	params.lf_pad[1] = 0;
+	params.lf_pad[2] = 0;
 
 	RD::get_singleton()->draw_command_begin_label("Render Volumetric Fog");
 

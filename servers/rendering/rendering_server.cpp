@@ -2600,6 +2600,7 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::SHADER_SKY);
 	BIND_ENUM_CONSTANT(RSE::SHADER_FOG);
 	BIND_ENUM_CONSTANT(RSE::SHADER_TEXTURE_BLIT);
+	BIND_ENUM_CONSTANT(RSE::SHADER_LIGHT_FUNCTION);
 	BIND_ENUM_CONSTANT(RSE::SHADER_MAX);
 
 	/* MATERIAL */
@@ -2795,6 +2796,10 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_param", "light", "param", "value"), &RenderingServer::light_set_param);
 	ClassDB::bind_method(D_METHOD("light_set_shadow", "light", "enabled"), &RenderingServer::light_set_shadow);
 	ClassDB::bind_method(D_METHOD("light_set_projector", "light", "texture"), &RenderingServer::light_set_projector);
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	ClassDB::bind_method(D_METHOD("light_set_light_function", "light", "material"), &RenderingServer::light_set_light_function);
+	ClassDB::bind_method(D_METHOD("light_set_light_function_scale", "light", "scale"), &RenderingServer::light_set_light_function_scale);
+	ClassDB::bind_method(D_METHOD("light_function_atlas_get_stats"), &RenderingServer::light_function_atlas_get_stats);
 	ClassDB::bind_method(D_METHOD("light_set_negative", "light", "enable"), &RenderingServer::light_set_negative);
 	ClassDB::bind_method(D_METHOD("light_set_cull_mask", "light", "mask"), &RenderingServer::light_set_cull_mask);
 	ClassDB::bind_method(D_METHOD("light_set_distance_fade", "decal", "enabled", "begin", "shadow", "length"), &RenderingServer::light_set_distance_fade);
@@ -4173,6 +4178,11 @@ void RenderingServer::init() {
 		// (-1 = VSM quality preset, clamped to 8).
 		GLOBAL_DEF(PropertyInfo(Variant::INT, VSM::SETTING_DF_MAX_LIGHTS, PROPERTY_HINT_RANGE, vformat("-1,%d,1", VSM::DF_MAX_LIGHTS_PER_VIEW)), -1);
 	}
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8, GM-11, M-9).
+	// Atlas size, format (R8 monochrome default or RGBA8 RGB), and forward translucency opt-in (off by default).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/light_function_atlas/size", PROPERTY_HINT_RANGE, "256,8192,256"), 2048);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/light_function_atlas/format", PROPERTY_HINT_ENUM, "R8,RGBA8"), 0);
+	GLOBAL_DEF("rendering/lights_and_shadows/light_function_atlas/translucent", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);

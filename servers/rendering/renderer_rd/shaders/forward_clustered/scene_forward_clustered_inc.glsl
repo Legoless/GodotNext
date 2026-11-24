@@ -197,6 +197,12 @@ bool sc_use_df_shadows() {
 	return ((sc_packed_1() >> 13) & 1U) != 0;
 }
 
+// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). The pass samples the Light Function Atlas
+// for lights whose light_function_index != LIGHT_FUNCTION_NONE (off on forward transparents by default).
+bool sc_use_light_function() {
+	return ((sc_packed_1() >> 14) & 1U) != 0;
+}
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
@@ -651,9 +657,19 @@ layout(set = 1, binding = 61, std430) buffer restrict readonly PackedLightGridIn
 }
 packed_light_grid_indices;
 
+// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Bindings 62 and 63 hold the
+// Light Function Atlas texture and per-view LightFunctionEntry SSBO (binding 64 stays free for #140 IES).
+#include "../light_function_inc.glsl"
+layout(set = 1, binding = 62) uniform texture2D light_function_atlas;
+layout(set = 1, binding = 63, std430) buffer restrict readonly LightFunctionBuffer {
+	LightFunctionEntry data[];
+}
+light_function_data;
+
 #define FORWARD_CLUSTERED_LIGHT_GRID
 
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
+#define LIGHT_FUNCTION_ATLAS
 #define VSM_PROJECTION
 #define VSM_COARSE_NEAREST_SAMPLER SAMPLER_NEAREST_CLAMP
 #include "../vsm_page_table_inc.glsl"

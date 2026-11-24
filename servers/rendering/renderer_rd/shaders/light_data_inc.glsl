@@ -33,12 +33,12 @@ struct LightData { //this structure needs to be as packed as possible
 	float volumetric_fog_energy;
 	uint bake_mode;
 	vec4 projector_rect; //projector rect in srgb decal atlas
-	// GodotNext: vsm_page_pool (#220). The light's first virtual shadow map, or VSM_MAP_NONE
-	// (0xFFFFFFFF), and its map kind (bits 0-1) and map count (bits 2-6). LightStorage::LightData
-	// is the C++ copy.
+	// GodotNext: vsm_page_pool (#220) and light_function_atlas (#138).
+	// vsm_map_base is the light's first virtual shadow map or VSM_MAP_NONE (0xFFFFFFFF);
+	// light_function_index indexes the LightFunctionEntry SSBO or LIGHT_FUNCTION_NONE (0xFFFFFFFF).
 	uint vsm_map_base;
 	uint vsm_flags;
-	uint vsm_pad0;
+	uint light_function_index;
 	uint vsm_pad1;
 };
 
@@ -80,7 +80,7 @@ struct DirectionalLightData {
 	float fade_from;
 	float fade_to;
 	uint sscs_index;
-	uint pad;
+	uint light_function_index; // GodotNext: light_function_atlas (#138). Index into LightFunctionEntry SSBO or LIGHT_FUNCTION_NONE.
 	uint bake_mode;
 	float volumetric_fog_energy;
 	vec4 shadow_bias;

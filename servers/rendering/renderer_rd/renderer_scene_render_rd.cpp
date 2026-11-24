@@ -39,6 +39,8 @@
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/decal_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/light_data_inc.glsl.gen.h"
+// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+#include "servers/rendering/renderer_rd/shaders/light_function_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/scene_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -1879,6 +1881,7 @@ void RendererSceneRenderRD::init() {
 	{
 		ShaderIncludeDB::register_built_in_include_file("godot/decal_data_inc.glsl", decal_data_inc_shader_glsl);
 		ShaderIncludeDB::register_built_in_include_file("godot/light_data_inc.glsl", light_data_inc_shader_glsl);
+		ShaderIncludeDB::register_built_in_include_file("godot/light_function_inc.glsl", light_function_inc_shader_glsl);
 		ShaderIncludeDB::register_built_in_include_file("godot/scene_data_inc.glsl", scene_data_inc_shader_glsl);
 	}
 
@@ -1908,6 +1911,8 @@ void RendererSceneRenderRD::init() {
 	}
 
 	{ //lights
+		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+		light_function_atlas.init();
 	}
 
 	if (is_volumetric_supported()) {
@@ -2007,6 +2012,8 @@ RendererSceneRenderRD::~RendererSceneRenderRD() {
 	if (is_volumetric_supported()) {
 		RendererRD::Fog::get_singleton()->free_fog_shader();
 	}
+
+	light_function_atlas.free_resources();
 
 	memdelete_arr(directional_penumbra_shadow_kernel);
 	memdelete_arr(directional_soft_shadow_kernel);

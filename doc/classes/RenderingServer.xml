@@ -2272,6 +2272,12 @@
 				If [code]true[/code], this light will not be used for anything except sky shaders. Use this for lights that impact your sky shader that you may want to hide from affecting the rest of the scene. For example, you may want to enable this when the sun in your sky shader falls below the horizon.
 			</description>
 		</method>
+		<method name="light_function_atlas_get_stats" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns runtime statistics for the Forward+ Light Function Atlas, including active tile counts, current tile resolution, static and animated bake totals, repacks, and active per-view entries.
+			</description>
+		</method>
 		<method name="light_grid_get_check_result">
 			<return type="Dictionary" />
 			<description>
@@ -2340,6 +2346,22 @@
 			<param index="4" name="length" type="float" />
 			<description>
 				Sets the distance fade for this 3D light. This acts as a form of level of detail (LOD) and can be used to improve performance. Equivalent to [member Light3D.distance_fade_enabled], [member Light3D.distance_fade_begin], [member Light3D.distance_fade_shadow], and [member Light3D.distance_fade_length].
+			</description>
+		</method>
+		<method name="light_set_light_function">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="material" type="RID" />
+			<description>
+				Assigns a [code]light_function[/code] shader material to the specified 3D light. Pass an empty [RID] to clear the light function. Equivalent to [member Light3D.light_function].
+			</description>
+		</method>
+		<method name="light_set_light_function_scale">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="scale" type="Vector3" />
+			<description>
+				Sets the projection scale used when sampling the specified 3D light's light function tile. Equivalent to [member Light3D.light_function_scale].
 			</description>
 		</method>
 		<method name="light_set_max_sdfgi_cascade">
@@ -5236,7 +5258,10 @@
 		<constant name="SHADER_TEXTURE_BLIT" value="5" enum="ShaderMode">
 			Shader is a texture_blit shader.
 		</constant>
-		<constant name="SHADER_MAX" value="6" enum="ShaderMode">
+		<constant name="SHADER_LIGHT_FUNCTION" value="6" enum="ShaderMode">
+			Shader is a light_function shader baked into the Light Function Atlas.
+		</constant>
+		<constant name="SHADER_MAX" value="7" enum="ShaderMode">
 			Represents the size of the [enum ShaderMode] enum.
 		</constant>
 		<constant name="MATERIAL_RENDER_PRIORITY_MIN" value="-128">

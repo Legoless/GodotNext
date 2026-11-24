@@ -58,6 +58,7 @@
 #include "scene/2d/gpu_particles_2d.h"
 #include "scene/3d/fog_volume.h"
 #include "scene/3d/gpu_particles_3d.h"
+#include "scene/3d/light_3d.h"
 #include "scene/gui/color_picker.h"
 #include "scene/gui/grid_container.h"
 #include "scene/gui/text_edit.h"
@@ -3605,6 +3606,8 @@ void EditorPropertyResource::_update_preferred_shader() {
 			shader_picker->set_preferred_mode(Shader::MODE_CANVAS_ITEM);
 		} else if (Object::cast_to<FogVolume>(ed_object)) {
 			shader_picker->set_preferred_mode(Shader::MODE_FOG);
+		} else if (Object::cast_to<Light3D>(ed_object) && ed_property == SNAME("light_function")) {
+			shader_picker->set_preferred_mode(Shader::MODE_LIGHT_FUNCTION);
 		} else if (Object::cast_to<Node3D>(ed_object) || Object::cast_to<Mesh>(ed_object)) {
 			shader_picker->set_preferred_mode(Shader::MODE_SPATIAL);
 		} else if (Object::cast_to<Sky>(ed_object)) {

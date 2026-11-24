@@ -192,6 +192,9 @@ private:
 			// GodotNext: vsm_fog_translucency (#215). World-space camera origin for VSM coarse lookups and table capacity (0 when off).
 			float vsm_cam_origin[3];
 			uint32_t vsm_table_maps;
+			// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Active per-view LightFunctionEntry count (0 when off).
+			uint32_t light_function_count;
+			uint32_t lf_pad[3];
 		};
 		static_assert(sizeof(ParamsUBO) % 16 == 0, "VolumetricFogShader::ParamsUBO must stay 16-byte aligned for std140.");
 
@@ -343,6 +346,9 @@ public:
 		RID bound_vsm_coarse_miss;
 		RID bound_shadow_atlas_depth;
 		RID bound_directional_shadow_depth;
+		// GodotNext: light_function_atlas (#138). Last bound atlas/buffer RIDs for density uniform-set invalidation.
+		RID bound_light_function_atlas;
+		RID bound_light_function_buffer;
 
 		int last_shadow_filter = -1;
 
@@ -398,6 +404,11 @@ public:
 		RID vsm_map_data;
 		RID vsm_coarse_miss;
 		uint32_t vsm_table_maps = 0;
+
+		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+		RID light_function_atlas;
+		RID light_function_buffer;
+		uint32_t light_function_count = 0;
 	};
 	void volumetric_fog_update(const VolumetricFogSettings &p_settings, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes);
 };

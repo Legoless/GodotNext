@@ -105,6 +105,8 @@ enum ShaderMode {
 	SHADER_SKY,
 	SHADER_FOG,
 	SHADER_TEXTURE_BLIT,
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	SHADER_LIGHT_FUNCTION,
 	SHADER_MAX,
 };
 

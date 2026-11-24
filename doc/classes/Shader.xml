@@ -84,5 +84,8 @@
 		<constant name="MODE_TEXTURE_BLIT" value="5" enum="Mode">
 			Mode used for drawing to DrawableTexture resources via blit calls.
 		</constant>
+		<constant name="MODE_LIGHT_FUNCTION" value="6" enum="Mode">
+			Mode used for evaluating procedural light masks baked into the Light Function Atlas for [Light3D] nodes.
+		</constant>
 	</constants>
 </class>

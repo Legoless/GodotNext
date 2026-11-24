@@ -570,6 +570,10 @@ public:
 	FUNC3(light_set_param, RID, RSE::LightParam, float)
 	FUNC2(light_set_shadow, RID, bool)
 	FUNC2(light_set_projector, RID, RID)
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	FUNC2(light_set_light_function, RID, RID)
+	FUNC2(light_set_light_function_scale, RID, const Vector3 &)
+	FUNC0RC(Dictionary, light_function_atlas_get_stats)
 	FUNC2(light_set_negative, RID, bool)
 	FUNC2(light_set_cull_mask, RID, uint32_t)
 	FUNC5(light_set_distance_fade, RID, bool, float, float, float)

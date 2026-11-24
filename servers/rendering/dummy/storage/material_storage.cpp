@@ -189,6 +189,8 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 		new_mode = RSE::SHADER_FOG;
 	} else if (mode_string == "texture_blit") {
 		new_mode = RSE::SHADER_TEXTURE_BLIT;
+	} else if (mode_string == "light_function") {
+		new_mode = RSE::SHADER_LIGHT_FUNCTION;
 	} else {
 		new_mode = RSE::SHADER_MAX;
 		ERR_FAIL_MSG("Shader type " + mode_string + " not supported in Dummy renderer.");

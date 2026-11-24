@@ -32,6 +32,8 @@
 
 #include "scene/3d/visual_instance_3d.h"
 
+class Material;
+
 class Light3D : public VisualInstance3D {
 	GDCLASS(Light3D, VisualInstance3D);
 
@@ -104,6 +106,9 @@ private:
 	// GodotNext: vsm_settings_debug (#221).
 	ShadowMethod shadow_method = SHADOW_METHOD_PROJECT;
 	Ref<Texture2D> projector;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	Ref<Material> light_function;
+	Vector3 light_function_scale = Vector3(1, 1, 1);
 	Color correlated_color = Color(1.0, 1.0, 1.0);
 	float temperature = 6500.0;
 	bool allow_contact_shadows = true;
@@ -171,6 +176,13 @@ public:
 
 	void set_projector(const Ref<Texture2D> &p_texture);
 	Ref<Texture2D> get_projector() const;
+
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	void set_light_function(const Ref<Material> &p_material);
+	Ref<Material> get_light_function() const;
+
+	void set_light_function_scale(const Vector3 &p_scale);
+	Vector3 get_light_function_scale() const;
 
 	void set_temperature(const float p_temperature);
 	float get_temperature() const;

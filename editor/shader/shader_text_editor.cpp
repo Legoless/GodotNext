@@ -899,6 +899,8 @@ void ShaderTextEditor::_check_shader_mode() {
 		mode = Shader::MODE_FOG;
 	} else if (type == "texture_blit") {
 		mode = Shader::MODE_TEXTURE_BLIT;
+	} else if (type == "light_function") {
+		mode = Shader::MODE_LIGHT_FUNCTION;
 	} else {
 		mode = Shader::MODE_SPATIAL;
 	}

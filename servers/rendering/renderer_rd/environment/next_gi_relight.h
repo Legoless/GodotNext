@@ -107,6 +107,8 @@ class NextGIRelight {
 	RID dummy_depth;
 	RID material_sampler;
 	RID shadow_sampler;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	RID light_function_sampler;
 	bool radiance_is_packed = true;
 	uint64_t radiance_bytes = 0;
 	bool atlases_ready = false;
@@ -157,6 +159,9 @@ class NextGIRelight {
 	RID uniform_set;
 	RID far_uniform_set;
 	uint32_t light_capacity = 0;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Per-light LightFunctionEntry buffer.
+	RID light_function_buffer;
+	uint32_t light_function_capacity = 0;
 	// GodotNext: nextgi_shadow_policy (#145). Per light: the light word and caster mask of the near and far TLAS.
 	RID light_shadow_buffer;
 	RID far_light_shadow_buffer;

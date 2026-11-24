@@ -63,6 +63,9 @@ private:
 		float param[RSE::LIGHT_PARAM_MAX];
 		Color color = Color(1, 1, 1, 1);
 		RID projector;
+		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+		RID light_function;
+		Vector3 light_function_scale = Vector3(1, 1, 1);
 		bool shadow = false;
 		bool negative = false;
 		bool reverse_cull = false;
@@ -169,12 +172,11 @@ private:
 		float volumetric_fog_energy;
 		uint32_t bake_mode;
 		float projector_rect[4];
-		// GodotNext: vsm_page_pool (#220). The light's first virtual shadow map, or
-		// RendererVirtualShadowMapStorage::MAP_NONE, and its map kind and count. Written for
-		// every light on every frame.
+		// GodotNext: vsm_page_pool (#220) and light_function_atlas (#138).
 		uint32_t vsm_map_base;
 		uint32_t vsm_flags;
-		uint32_t vsm_pad[2];
+		uint32_t light_function_index;
+		uint32_t vsm_pad;
 	};
 	// GodotNext: vsm_page_pool (#220). An std430 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
@@ -222,7 +224,7 @@ private:
 		float fade_from;
 		float fade_to;
 		uint32_t sscs_index;
-		uint32_t pad;
+		uint32_t light_function_index; // GodotNext: light_function_atlas (#138).
 		uint32_t bake_mode;
 		float volumetric_fog_energy;
 		float shadow_bias[4];
@@ -530,6 +532,12 @@ public:
 	virtual void light_set_param(RID p_light, RSE::LightParam p_param, float p_value) override;
 	virtual void light_set_shadow(RID p_light, bool p_enabled) override;
 	virtual void light_set_projector(RID p_light, RID p_texture) override;
+	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
+	virtual void light_set_light_function(RID p_light, RID p_material) override;
+	virtual RID light_get_light_function(RID p_light) const override;
+	virtual void light_set_light_function_scale(RID p_light, const Vector3 &p_scale) override;
+	virtual Vector3 light_get_light_function_scale(RID p_light) const override;
+	virtual Dictionary light_function_atlas_get_stats() const override;
 	virtual void light_set_negative(RID p_light, bool p_enable) override;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) override;
 	virtual void light_set_distance_fade(RID p_light, bool p_enabled, float p_begin, float p_shadow, float p_length) override;
