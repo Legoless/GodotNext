@@ -185,6 +185,8 @@ public:
 	virtual String get_name() const;
 
 	virtual bool supports_platform(const Ref<EditorExportPlatform> &p_export_platform) const;
+	// C++-only export veto hook checked by EditorExportPlatform::can_export() before any byte is written.
+	virtual bool _blocks_export(const Ref<EditorExportPlatform> &p_export_platform, const Ref<EditorExportPreset> &p_preset, String &r_error) const { return false; }
 	PackedStringArray get_export_features(const Ref<EditorExportPlatform> &p_export_platform, bool p_debug) const;
 
 	void end_generate_apple_embedded_project(const String &p_path, bool p_will_build_archive);

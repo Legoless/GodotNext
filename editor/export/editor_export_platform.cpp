@@ -2540,6 +2540,17 @@ bool EditorExportPlatform::can_export(const Ref<EditorExportPreset> &p_preset, S
 		if (!plugin_warning.is_empty()) {
 			export_plugins_warning += plugin_warning;
 		}
+
+		String block_error;
+		if (export_plugins[i]->_blocks_export(export_platform, p_preset, block_error)) {
+			valid = false;
+			if (!block_error.is_empty()) {
+				if (!block_error.ends_with("\n")) {
+					block_error += "\n";
+				}
+				r_error += block_error;
+			}
+		}
 	}
 
 	if (!export_plugins_warning.is_empty()) {

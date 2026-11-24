@@ -127,6 +127,10 @@ jobs:
           cache-name: ${{ matrix.cache-name }}
         continue-on-error: true
 
+      - name: Check vendor bytes (check_vendor_bytes.py)
+        run: |
+          python ./misc/scripts/check_vendor_bytes.py "${{ matrix.bin }}"
+
       - name: Prepare artifact
         if: matrix.compiler == 'msvc'
         run: |

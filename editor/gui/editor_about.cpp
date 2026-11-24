@@ -53,12 +53,33 @@
 #include "scene/main/scene_tree.h"
 #include "scene/resources/style_box.h"
 
+Vector<String> EditorAbout::attribution_lines;
+
+void EditorAbout::add_attribution_line(const String &p_line) {
+	if (p_line.is_empty()) {
+		return;
+	}
+	if (!attribution_lines.has(p_line)) {
+		attribution_lines.push_back(p_line);
+	}
+}
+
+Vector<String> EditorAbout::get_attribution_lines() {
+	return attribution_lines;
+}
+
 void EditorAbout::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_TRANSLATION_CHANGED: {
-			_about_text_label->set_text(
+			String about_text =
 					String(U"© 2014-present ") + TTR("Godot Engine contributors") + ".\n" +
-					String(U"© 2007-2014 Juan Linietsky, Ariel Manzur.\n"));
+					String(U"© 2007-2014 Juan Linietsky, Ariel Manzur.\n");
+			for (const String &line : attribution_lines) {
+				if (!line.is_empty()) {
+					about_text += line + "\n";
+				}
+			}
+			_about_text_label->set_text(about_text);
 
 			_project_manager_label->set_text(TTR("Project Manager", "Job Title"));
 

@@ -23,13 +23,20 @@ import sys
 from pathlib import Path
 
 PATTERNS = (
-    # NVIDIA DLSS / NGX / Streamline (plan §19, GU-6)
+    # NVIDIA DLSS / NGX / Streamline (plan §19, GU-6, §21.5, U6, #208)
     "nvsdk_ngx*.h",
     "nvsdk_ngx*.lib",
     "libnvsdk_ngx.a",
     "libsdk_nvngx.a",
+    "nvngx_dlssd.dll",
+    "nvngx_dlssg.dll",
     "nvngx_*.dll",
     "libnvidia-ngx*.so*",
+    "sl.h",
+    "sl_*.h",
+    "sl.*.dll",
+    "sl.*.lib",
+    "sl.*.json",
     "sl_nvperf.*",
     # Intel OpenImageDenoise SDK (plan §19, §21.0.6, #168)
     "oidn.h",

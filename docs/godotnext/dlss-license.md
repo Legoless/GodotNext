@@ -85,6 +85,31 @@ The pinned NVIDIA DLSS SDK tag was cloned outside any git work tree under explic
 | `lib/Windows_arm64ec/rel/nvngx_dlssd.dll` | `a1187568263cffa74d1be671dfa117e92808e915c8cedb942c2a0679750ea350` |
 | `lib/Windows_arm64ec/rel/nvngx_dlssg.dll` | `0b853e47497ddccfb2860f3e6c0e48273f568c9400a0b286662fdf2fd044dded` |
 
+### Streamline `v2.14.16` (plan §21.5, U6, #208)
+
+Streamline source code is licensed under MIT, whereas its NVIDIA-signed plugin
+DLLs (`sl.*.dll`, `nvngx_dlssg.dll`, `nvngx_dlssd.dll`) are governed by
+NVIDIA's terms (NVIDIA RTX SDKs License). `sl_nvperf.*` (`sl_nvperf.h` /
+`sl_nvperf.dll`, Nsight Perf SDK license) is excluded: it is never listed in
+`dlss_runtime.json`, never copied on export, and rejected by the repository
+guard and `.gitignore`.
+
+Distribution stays developer-built; official GodotNext editor and template
+binaries stay 100% MIT and DLSS/Streamline-free (§18.1, decided 2026-11-02).
+Export only copies `rel` files listed in `dlss_runtime.json` after verifying
+their SHA-256 digests against the manifest.
+
+#### `bin/x64/` rel SHA-256 pins (`v2.14.16`)
+
+| Relative path | SHA-256 |
+|---|---|
+| `bin/x64/sl.interposer.dll` | `b1d7395aebd7b9722841d64dcf7433680020b6a8e421f851c16d5ba0c2182edf` |
+| `bin/x64/sl.common.dll` | `38eea3b4209afc455636ea372b5933d65fcc13becec6c84d101dcfc4d8648f75` |
+| `bin/x64/sl.dlss_g.dll` | `3ed9538df724993bea8a050195a6a78b9c8c8a566d5b05ade477aab3c390e90f` |
+| `bin/x64/sl.reflex.dll` | `443577e869352436ff7ec8f4d9c90418d3e95368436ce219261e0f4f07a38122` |
+| `bin/x64/sl.pcl.dll` | `5698c38e722318681f215c9fe68e45b9bedd51378acc699d8eee26e961e57770` |
+| `bin/x64/nvngx_dlssg.dll` | `8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7` |
+
 ## The five questions for NVIDIA (plan §19(j))
 
 Status: **not sent** (reason: lead chooses timing before commercial/public distribution; closing #98 does not trigger sending, and agents never send mail).
@@ -104,6 +129,13 @@ Answers are recorded here when they arrive.
 ## CI guard
 
 `misc/scripts/check_proprietary_sdk_files.py` checks `git ls-files` (or
-`--root DIR`) against the SDK basenames and exits 1 on a hit. The
-`.github/workflows/static_checks.yml` step runs it on the checkout and on a
-planted fixture outside the checkout; `.gitignore` carries the same patterns.
+`--root DIR`) against the NGX, DLSS, Streamline (`sl.h`, `sl_*.h`, `sl.*.dll`,
+`sl.*.lib`, `sl.*.json`, `sl_nvperf.*`, `nvngx_dlssd.dll`, `nvngx_dlssg.dll`)
+and OIDN basenames and exits 1 on a hit. The `.github/workflows/static_checks.yml`
+step runs it on the checkout and on planted NGX, OIDN and Streamline fixtures
+outside the checkout; `.gitignore` carries the same patterns.
+
+`misc/scripts/check_vendor_bytes.py` scans compiled binaries for ASCII and
+UTF-16LE occurrences of `nvngx_dlssg`, `nvngx_dlssd`, `sl.interposer`,
+`sl.dlss_g`, `NVSDK_NGX` and `nvngx_dlss`, exiting 1 on any hit.
+`.github/workflows/windows_builds.yml` runs it on default and DLSS mock builds.

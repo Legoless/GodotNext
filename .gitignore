@@ -400,15 +400,22 @@ $RECYCLE.BIN/
 *.lnk
 *.generated.props
 
-# Proprietary / developer-supplied SDKs (NVIDIA DLSS/NGX, Intel OIDN, plan §19).
+# Proprietary / developer-supplied SDKs (NVIDIA DLSS/NGX/Streamline, Intel OIDN, plan §19, #208).
 # No SDK header, library, runtime or sample enters the repository; the guard is
 # misc/scripts/check_proprietary_sdk_files.py.
 nvsdk_ngx*.h
 nvsdk_ngx*.lib
 libnvsdk_ngx.a
 libsdk_nvngx.a
+nvngx_dlssd.dll
+nvngx_dlssg.dll
 nvngx_*.dll
 libnvidia-ngx*.so*
+sl.h
+sl_*.h
+sl.*.dll
+sl.*.lib
+sl.*.json
 sl_nvperf.*
 oidn.h
 oidn.hpp

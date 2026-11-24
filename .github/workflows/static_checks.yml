@@ -49,6 +49,13 @@ jobs:
             echo "The proprietary SDK guard accepted the planted OIDN fixture." >&2
             exit 1
           fi
+          rm -rf "$plant"
+          mkdir -p "$plant/include" "$plant/bin/x64"
+          touch "$plant/include/sl.h" "$plant/bin/x64/sl.interposer.dll"
+          if python3 ./misc/scripts/check_proprietary_sdk_files.py --root "$plant"; then
+            echo "The proprietary SDK guard accepted the planted Streamline fixture." >&2
+            exit 1
+          fi
 
       - name: Get changed files
         id: changed-files

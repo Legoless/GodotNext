@@ -68,9 +68,14 @@ private:
 	Vector<ItemList *> name_lists;
 	CreditsRoll *credits_roll = nullptr;
 
+	static Vector<String> attribution_lines;
+
 protected:
 	void _notification(int p_what);
 
 public:
+	static void add_attribution_line(const String &p_line);
+	static Vector<String> get_attribution_lines();
+
 	EditorAbout();
 };
