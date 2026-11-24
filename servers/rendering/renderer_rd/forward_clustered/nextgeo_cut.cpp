@@ -45,6 +45,8 @@
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: spline_meshes (#161).
+#include "servers/rendering/storage/spline_deform.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
@@ -263,25 +265,35 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 		}
 		const uint32_t node_base = 8 + group_count * 60;
 		const float scale = record.world_aabb_min[3];
+		const bool has_spline = (record.flags & RendererVirtualMeshStorage::RECORD_HAS_SPLINE) != 0u;
+		const SplineDeformPose spline_pose = has_spline ? p_storage->get_spline_entry(record.flags >> RendererVirtualMeshStorage::RECORD_SPLINE_INDEX_SHIFT).current : SplineDeformPose();
 		auto projected = [&](const float p_sphere[4], float p_error) {
 			if (p_error >= 3.4e38f) {
 				return tau + 1.0f;
 			}
+			Vector3 local_center(p_sphere[0], p_sphere[1], p_sphere[2]);
+			float local_radius = p_sphere[3];
+			float eff_error = p_error;
+			if (has_spline) {
+				const float raw_radius = local_radius;
+				spline_deform_bounds_sphere(spline_pose, local_center, local_radius);
+				eff_error = eff_error * spline_pose.up_max_stretch[3] + spline_deform_curvature_error(spline_pose, raw_radius);
+			}
 			if ((cut_flags & RendererRD::NEXTGEO_CUT_FLAG_ORTHOGRAPHIC) != 0) {
-				return p_error * scale * p_cut.view[0] * lod_bias;
+				return eff_error * scale * p_cut.view[0] * lod_bias;
 			}
 			const Vector3 center(
-					record.transform[0][0] * p_sphere[0] + record.transform[0][1] * p_sphere[1] + record.transform[0][2] * p_sphere[2] + record.transform[0][3],
-					record.transform[1][0] * p_sphere[0] + record.transform[1][1] * p_sphere[1] + record.transform[1][2] * p_sphere[2] + record.transform[1][3],
-					record.transform[2][0] * p_sphere[0] + record.transform[2][1] * p_sphere[1] + record.transform[2][2] * p_sphere[2] + record.transform[2][3]);
+					record.transform[0][0] * local_center.x + record.transform[0][1] * local_center.y + record.transform[0][2] * local_center.z + record.transform[0][3],
+					record.transform[1][0] * local_center.x + record.transform[1][1] * local_center.y + record.transform[1][2] * local_center.z + record.transform[1][3],
+					record.transform[2][0] * local_center.x + record.transform[2][1] * local_center.y + record.transform[2][2] * local_center.z + record.transform[2][3]);
 			// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Mirror cluster_cull.glsl bound inflation.
 			const float expand = MAX(record.prev_world_aabb_max[3], 0.0f) + wpo_bound;
-			const float radius = (p_sphere[3] + expand) * scale;
+			const float radius = (local_radius + expand) * scale;
 			const float distance = MAX(center.distance_to(eye) - radius, znear);
 			if ((cut_flags & RendererRD::NEXTGEO_CUT_FLAG_DUAL_PARABOLOID) != 0) {
-				return p_error * scale * 0.5f * height / distance * lod_bias;
+				return eff_error * scale * 0.5f * height / distance * lod_bias;
 			}
-			return p_error * scale * 0.5f * height * p11 / distance * lod_bias;
+			return eff_error * scale * 0.5f * height * p11 / distance * lod_bias;
 		};
 		r_instances++;
 		LocalVector<uint32_t> stack;
@@ -743,6 +755,7 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
+	const RID spline_buf = RSG::virtual_mesh_storage->get_spline_buffer();
 	RD::Uniform u_records(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
 	RD::Uniform u_meshes(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
 	RD::Uniform u_pages(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf);
@@ -757,7 +770,8 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		RID shader = sw_shader.version_get_shader(sw_version, storage);
 		RD::Uniform u_counters(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_counters);
 		RD::Uniform u_vis64(vis64_type, 9, p_raster.vis64);
-		RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_counters, u_vis64);
+		RD::Uniform u_splines(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf);
+		RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_counters, u_vis64, u_splines);
 		if (!set.is_valid()) {
 			return false;
 		}
@@ -787,7 +801,8 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 			RID pipeline = vis64_mesh_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
 			RID shader = vis64_mesh_shader.version_get_shader(vis64_mesh_version, variant);
 			RD::Uniform u_counters(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_counters);
-			RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64, u_counters);
+			RD::Uniform u_splines(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf);
+			RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64, u_counters, u_splines);
 			if (!pipeline.is_valid() || !set.is_valid()) {
 				return false;
 			}
@@ -801,7 +816,8 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		} else {
 			RID pipeline = vis64_raster_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
 			RID shader = vis64_raster_shader.version_get_shader(vis64_raster_version, variant);
-			RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64);
+			RD::Uniform u_splines(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, spline_buf);
+			RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64, u_splines);
 			if (!pipeline.is_valid() || !set.is_valid()) {
 				return false;
 			}
@@ -832,11 +848,18 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		}
 		RID pipeline = export_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
 		RID shader = export_shader.version_get_shader(export_version, variant);
-		RD::Uniform u_export_records(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
-		RD::Uniform u_export_visible(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, clusters);
-		RD::Uniform u_export_raster(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_params);
-		RD::Uniform u_export_vis64(vis64_type, 3, p_raster.vis64);
-		RID set = uniform_set_cache->get_cache(shader, 0, u_export_records, u_export_visible, u_export_raster, u_export_vis64);
+		LocalVector<RD::Uniform> export_uniforms;
+		export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+		export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, clusters));
+		export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_params));
+		export_uniforms.push_back(RD::Uniform(vis64_type, 3, p_raster.vis64));
+		if (with_velocity) {
+			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, cluster_buf));
+			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, page_buf));
+			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, spline_buf));
+		}
+		RID set = uniform_set_cache->get_cache_vec(shader, 0, export_uniforms);
 		if (!pipeline.is_valid() || !set.is_valid()) {
 			return false;
 		}
@@ -1027,6 +1050,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, RSG::virtual_mesh_storage->get_spline_buffer()));
 	LocalVector<RD::Uniform> bin_uniforms;
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, raster_bin_lists));
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, raster_bin_state));
@@ -1265,7 +1289,8 @@ bool NextGeoCut::_draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters);
 	RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params);
 	RD::Uniform u6(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf);
-	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6);
+	RD::Uniform u9(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RSG::virtual_mesh_storage->get_spline_buffer());
+	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6, u9);
 	if (!set.is_valid()) {
 		return false;
 	}
@@ -1302,7 +1327,7 @@ RID NextGeoCut::_uniform_set(const LocalVector<RD::Uniform> &p_uniforms, int p_v
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(cluster_shader.version_get_shader(cluster_version, p_variant), 0, p_uniforms);
 }
 
-void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_hiz_tex, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out, RID p_request_buf) {
+void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_hiz_tex, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out, RID p_request_buf, bool p_include_splines) {
 	RID records = RSG::virtual_mesh_storage->get_record_buffer();
 	RID mesh_records = RSG::virtual_mesh_storage->get_mesh_record_buffer();
 	RID dag = RSG::virtual_mesh_storage->get_dag_buffer();
@@ -1324,9 +1349,12 @@ void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, draw_args));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, p_request_buf.is_valid() ? p_request_buf : dummy_page_buf));
+	if (p_include_splines) {
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, RSG::virtual_mesh_storage->get_spline_buffer()));
+	}
 }
 
-void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out) {
+void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out, bool p_include_splines) {
 	RID records = RSG::virtual_mesh_storage->get_record_buffer();
 	RID mesh_records = RSG::virtual_mesh_storage->get_mesh_record_buffer();
 	RID dag = RSG::virtual_mesh_storage->get_dag_buffer();
@@ -1348,6 +1376,9 @@ void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, shadow_draw_args));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, dummy_page_buf));
+	if (p_include_splines) {
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, RSG::virtual_mesh_storage->get_spline_buffer()));
+	}
 }
 
 // GodotNext: nextgeo_sw_raster (#162). The main-view CLUSTER_CULL variant's raster-bin outputs.
@@ -2090,7 +2121,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	if (p_is_main_view) {
 		if (capture_stats) {
 			LocalVector<RD::Uniform> uniforms;
-			_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, level_b, level_a, groups, clusters, bvh_args[0], dummy_page_buf);
+			_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, level_b, level_a, groups, clusters, bvh_args[0], dummy_page_buf, false);
 			RID set = _uniform_set(uniforms, 2);
 			if (set.is_valid()) {
 				list = rd->compute_list_begin();
@@ -2345,7 +2376,7 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 
 	if (capture_stats) {
 		LocalVector<RD::Uniform> uniforms;
-		_set_shadow_uniforms(uniforms, active_counters, shadow_level_b, shadow_level_a, shadow_groups, shadow_clusters, shadow_bvh_args[0]);
+		_set_shadow_uniforms(uniforms, active_counters, shadow_level_b, shadow_level_a, shadow_groups, shadow_clusters, shadow_bvh_args[0], false);
 		RID set = _uniform_set(uniforms, 5);
 		if (set.is_valid()) {
 			RD::ComputeListID list = rd->compute_list_begin();
@@ -2414,7 +2445,8 @@ bool NextGeoCut::draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, con
 	RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, shadow_clusters);
 	RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, shadow_raster_params);
 	RD::Uniform u6(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_page_buf);
-	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6);
+	RD::Uniform u9(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RSG::virtual_mesh_storage->get_spline_buffer());
+	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6, u9);
 	if (!set.is_valid()) {
 		return false;
 	}
@@ -2801,6 +2833,7 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_clusters[p_chain]));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_inputs.map_data_buffer));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_inputs.dirty_buffer));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, RSG::virtual_mesh_storage->get_spline_buffer()));
 
 	LocalVector<RD::Uniform> bin_uniforms;
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, vsm_bin_lists));
@@ -3050,6 +3083,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 	const RID residency_buf = p_storage->get_residency_buffer().is_valid() ? p_storage->get_residency_buffer() : dummy_page_buf;
 	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_page_buf;
+	const RID spline_buf = p_storage->get_spline_buffer();
 	// GodotNext: vsm_max_storage_buffer_range (#306). Refuse to bind a page arena larger than the device limit.
 	const uint64_t max_storage_range = rd->limit_get(RD::LIMIT_MAX_STORAGE_BUFFER_RANGE);
 	ERR_FAIL_COND_V_MSG(max_storage_range > 0 && p_storage->get_page_buffer().is_valid() && p_storage->get_page_arena_allocation_bytes() > max_storage_range, false,
@@ -3211,6 +3245,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm_groups));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, args_out));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_group_args));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, spline_buf));
 			const RID set = uniform_set_cache->get_cache_vec(bvh_sh, 0, u);
 			if (set.is_null()) {
 				break;
@@ -3237,6 +3272,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, bin_table_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, bin_append_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, bin_state_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, spline_buf));
 			const RID set = uniform_set_cache->get_cache_vec(leaf_sh, 0, u);
 			if (set.is_null()) {
 				continue;
@@ -3263,6 +3299,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_inputs.dirty_buffer));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_inputs.pool_texture));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, vsm_counters[chain]));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
 			const RID set = uniform_set_cache->get_cache_vec(sw_sh, 0, u);
 			if (set.is_valid()) {
 				const uint32_t push[4] = { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, p_inputs.count_sw_writes ? 1u : 0u, 0u, 0u };
@@ -3299,6 +3336,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, vsm_counters[chain]));
 			if (use_mesh_hw) {
 				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, vsm_hw_count_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, spline_buf));
+			} else {
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
 			}
 			const RID set = uniform_set_cache->get_cache_vec(hw_sh, 0, u);
 			if (pipeline.is_valid() && set.is_valid()) {

@@ -8,7 +8,9 @@ if "RD_GLSL" in env["BUILDERS"]:
     glsl_files = [str(f) for f in Glob("*.glsl") if str(f) not in gl_include_files]
 
     env.Depends([f + ".gen.h" for f in gl_include_files], ["#glsl_builders.py"])
-    env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + ["#glsl_builders.py"])
+    # GodotNext: spline_meshes (#161). NextGeo shaders include ../spline_deform_inc.glsl.
+    parent_spline_includes = [str(f) for f in Glob("../spline_deform_inc.glsl")]
+    env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + parent_spline_includes + ["#glsl_builders.py"])
     # GodotNext: nextgeo_shading_bins (#158). resolve_compute.glsl is the Forward+ fragment stage
     # (#include_stage), so it is rebuilt whenever that template or one of its includes changes.
     env.Depends(

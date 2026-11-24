@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="SplineMeshInstance3D" inherits="MeshInstance3D" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Mesh instance deformed along a cubic Hermite spline segment.
+	</brief_description>
+	<description>
+		[SplineMeshInstance3D] extends [MeshInstance3D] by deforming its mesh along a cubic Hermite spline defined by [member start_position], [member start_tangent], [member end_position], and [member end_tangent], with interpolated [member start_roll]/[member end_roll] twist and [member start_scale]/[member end_scale] cross-section scaling.
+		Vertices are mapped along [member forward_axis] across the undeformed mesh's extent onto [code][0, 1][/code] and transformed in-place on the GPU in both legacy Forward+ and NextGeo (cluster cull, SW/HW/mesh raster, visibility resolve, virtual shadow maps, and NextGI ray-traced proxy rebuilds) without shader variant proliferation.
+		Use [method set_from_path] to populate endpoints and tangents directly from a segment of a [Path3D].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="set_from_path">
+			<return type="void" />
+			<param index="0" name="path" type="Path3D" />
+			<param index="1" name="segment" type="int" />
+			<description>
+				Sets [member start_position], [member start_tangent], [member end_position], [member end_tangent], [member start_roll], and [member end_roll] from segment [param segment] (between curve points [code]segment[/code] and [code]segment + 1[/code]) of [param path]'s [Curve3D].
+				Bezier control handles are converted to cubic Hermite tangents automatically, falling back to the segment chord when handles are zero. When both nodes are inside the scene tree, curve points and tangents are transformed into this node's local space.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="end_position" type="Vector3" setter="set_end_position" getter="get_end_position" default="Vector3(0, 0, 1)">
+			End position of the cubic Hermite spline segment in local space.
+		</member>
+		<member name="end_roll" type="float" setter="set_end_roll" getter="get_end_roll" default="0.0">
+			Roll angle around the spline tangent at the end of the segment, in radians.
+		</member>
+		<member name="end_scale" type="Vector2" setter="set_end_scale" getter="get_end_scale" default="Vector2(1, 1)">
+			Cross-section scale applied perpendicular to [member forward_axis] at the end of the segment.
+		</member>
+		<member name="end_tangent" type="Vector3" setter="set_end_tangent" getter="get_end_tangent" default="Vector3(0, 0, 1)">
+			Outgoing tangent vector at [member end_position] in local space.
+		</member>
+		<member name="forward_axis" type="int" setter="set_forward_axis" getter="get_forward_axis" enum="SplineMeshInstance3D.Axis" default="2">
+			Local mesh axis mapped along the spline parameter [code]t[/code] from [code]0.0[/code] to [code]1.0[/code].
+		</member>
+		<member name="start_position" type="Vector3" setter="set_start_position" getter="get_start_position" default="Vector3(0, 0, 0)">
+			Start position of the cubic Hermite spline segment in local space.
+		</member>
+		<member name="start_roll" type="float" setter="set_start_roll" getter="get_start_roll" default="0.0">
+			Roll angle around the spline tangent at the start of the segment, in radians.
+		</member>
+		<member name="start_scale" type="Vector2" setter="set_start_scale" getter="get_start_scale" default="Vector2(1, 1)">
+			Cross-section scale applied perpendicular to [member forward_axis] at the start of the segment.
+		</member>
+		<member name="start_tangent" type="Vector3" setter="set_start_tangent" getter="get_start_tangent" default="Vector3(0, 0, 1)">
+			Incoming tangent vector at [member start_position] in local space.
+		</member>
+		<member name="up_vector" type="Vector3" setter="set_up_vector" getter="get_up_vector" default="Vector3(0, 1, 0)">
+			Reference up direction used to construct a stable orthonormal frame along the spline before applying roll.
+		</member>
+	</members>
+	<constants>
+		<constant name="AXIS_X" value="0" enum="Axis">
+			Deform the mesh along its local X axis.
+		</constant>
+		<constant name="AXIS_Y" value="1" enum="Axis">
+			Deform the mesh along its local Y axis.
+		</constant>
+		<constant name="AXIS_Z" value="2" enum="Axis">
+			Deform the mesh along its local Z axis.
+		</constant>
+	</constants>
+</class>

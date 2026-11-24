@@ -117,9 +117,12 @@ float nextgeo_rt_native_band_error(uint32_t p_band, float p_error_per_meter, flo
 	return MIN(eps, p_error_per_meter * near_distance);
 }
 
-NextGeoRTNativeExclusion nextgeo_rt_native_exclusion(bool p_skinned, bool p_vertex_offset, bool p_legacy_surfaces) {
+NextGeoRTNativeExclusion nextgeo_rt_native_exclusion(bool p_skinned, bool p_vertex_offset, bool p_legacy_surfaces, bool p_spline) {
 	if (p_skinned) {
 		return NEXTGEO_RT_NATIVE_EXCLUDED_SKINNED;
+	}
+	if (p_spline) {
+		return NEXTGEO_RT_NATIVE_EXCLUDED_SPLINE;
 	}
 	if (p_vertex_offset) {
 		return NEXTGEO_RT_NATIVE_EXCLUDED_VERTEX_OFFSET;

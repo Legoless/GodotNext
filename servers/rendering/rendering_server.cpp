@@ -3686,6 +3686,8 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: nextgeo_vertex_offset (#164).
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_vertex_offset_disable_distance", "instance", "distance"), &RenderingServer::instance_geometry_set_vertex_offset_disable_distance);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_rt_evaluate_vertex_offset", "instance", "enable"), &RenderingServer::instance_geometry_set_rt_evaluate_vertex_offset);
+	// GodotNext: spline_meshes (#161).
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_spline_deform", "instance", "params"), &RenderingServer::instance_geometry_set_spline_deform);
 
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shader_parameter", "instance", "parameter", "value"), &RenderingServer::instance_geometry_set_shader_parameter);
 	ClassDB::bind_method(D_METHOD("instance_geometry_get_shader_parameter", "instance", "parameter"), &RenderingServer::instance_geometry_get_shader_parameter);

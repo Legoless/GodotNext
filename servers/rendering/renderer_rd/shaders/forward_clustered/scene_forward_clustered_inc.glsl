@@ -452,6 +452,8 @@ struct InstanceData {
 	vec4 model_precision;
 	vec4 prev_model_precision;
 #endif
+	// GodotNext: spline_meshes (#161). x = spline_deforms SSBO index, y = active flag (non-zero when spline active).
+	uvec4 spline_deform_data;
 };
 
 #ifdef MODE_VISIBILITY_RESOLVE
@@ -762,6 +764,15 @@ layout(set = 1, binding = 48) uniform sampler2D nextgi_front_layer_reflection;
 layout(set = 1, binding = 49) uniform texture2D avboit_bounds;
 layout(set = 1, binding = 50) uniform texture2DArray avboit_occlusion;
 
+// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Available in every Forward+ pass
+// (color, depth prepass, shadow atlas, MODE_VSM, MODE_RENDER_SDF) with zero shader variants.
+#include "../spline_deform_inc.glsl"
+// GodotNext: spline_meshes (#161). Per-instance Hermite spline poses (Set 1 bindings 65..67 reserved for #141 RT shadows).
+layout(set = 1, binding = 68, std430) buffer restrict readonly SplineDeformBuffer {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+
 #define AVBOIT_SLICES 16u
 #define AVBOIT_MAX_ALPHA 0.999
 #define AVBOIT_MIN_DEPTH 1e-4
@@ -913,6 +924,12 @@ layout(set = 2, binding = 8, std430) restrict readonly buffer InstanceDataBuffer
 	InstanceData data[];
 }
 instances;
+
+// GodotNext: spline_meshes (#161). NextGeo per-record spline poses (Set 2 bindings 9-15 belong to resolve_compute_inc.glsl).
+layout(set = 2, binding = 16, std430) restrict readonly buffer NextGeoSplines {
+	SplineDeformEntry data[];
+}
+nextgeo_spline_deforms;
 
 #else
 

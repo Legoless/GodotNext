@@ -149,6 +149,7 @@ RendererVirtualMeshStorage::~RendererVirtualMeshStorage() {
 	_reset_pages();
 	_reset_clusters();
 	_reset_residency();
+	_reset_splines();
 }
 
 void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
@@ -812,6 +813,22 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 	state.dirty = true;
 	state.dirty_last = false;
 	state.free_frame = frame + 1;
+	// GodotNext: spline_meshes (#161). Release any spline slot owned by the freed record.
+	if ((records[p_record].flags & RECORD_HAS_SPLINE) != 0u) {
+		const uint32_t spline_slot = records[p_record].flags >> RECORD_SPLINE_INDEX_SHIFT;
+		if (spline_slot < spline_allocated.size() && spline_allocated[spline_slot]) {
+			spline_allocated[spline_slot] = 0;
+			spline_dirty[spline_slot] = 0;
+			spline_dirty_last[spline_slot] = 0;
+			spline_rewritten[spline_slot] = 0;
+			if (live_splines > 0) {
+				live_splines--;
+			}
+			if (!spline_free_next.has(spline_slot)) {
+				spline_free_next.push_back(spline_slot);
+			}
+		}
+	}
 	records[p_record].flags = 0;
 	live_records--;
 	const uint32_t index = records[p_record].virtual_mesh;
@@ -898,7 +915,7 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET;
+	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET | RECORD_HAS_SPLINE | RECORD_SPLINE_INDEX_MASK;
 	uint32_t keep = record.flags & preserved_mask;
 	if ((p_flags & RECORD_VISIBLE) == 0u) {
 		keep &= ~RECORD_VISIBLE;
@@ -1079,6 +1096,83 @@ void RendererVirtualMeshStorage::instance_record_set_vsm_dynamic(uint32_t p_reco
 	_mark_dirty(p_record);
 }
 
+// GodotNext: spline_meshes (#161, plan §21.4 contract N12).
+void RendererVirtualMeshStorage::instance_record_set_spline_deform(uint32_t p_record, bool p_active, const SplineDeformPose &p_pose, bool p_teleport) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	Record &record = records[p_record];
+	const bool had_spline = (record.flags & RECORD_HAS_SPLINE) != 0u;
+	if (!p_active) {
+		if (!had_spline) {
+			return;
+		}
+		const uint32_t slot = record.flags >> RECORD_SPLINE_INDEX_SHIFT;
+		if (slot < spline_allocated.size() && spline_allocated[slot]) {
+			spline_allocated[slot] = 0;
+			spline_dirty[slot] = 0;
+			spline_dirty_last[slot] = 0;
+			spline_rewritten[slot] = 0;
+			if (live_splines > 0) {
+				live_splines--;
+			}
+			if (!spline_free_next.has(slot)) {
+				spline_free_next.push_back(slot);
+			}
+		}
+		record.flags &= ~(RECORD_HAS_SPLINE | RECORD_SPLINE_INDEX_MASK);
+		_mark_dirty(p_record);
+		return;
+	}
+
+	uint32_t slot = UINT32_MAX;
+	if (had_spline) {
+		slot = record.flags >> RECORD_SPLINE_INDEX_SHIFT;
+		if (slot >= spline_entries.size() || !spline_allocated[slot]) {
+			slot = UINT32_MAX;
+		}
+	}
+	const bool newly_allocated = (slot == UINT32_MAX);
+	if (newly_allocated) {
+		if (!spline_free_now.is_empty()) {
+			slot = spline_free_now[spline_free_now.size() - 1];
+			spline_free_now.remove_at(spline_free_now.size() - 1);
+		} else {
+			ERR_FAIL_COND_MSG(spline_entries.size() >= 0x7FFFu, "NextGeo: spline deformation slot limit (32767) reached.");
+			slot = spline_entries.size();
+			spline_entries.push_back(SplineDeformEntry());
+			spline_allocated.push_back(0);
+			spline_dirty.push_back(0);
+			spline_dirty_last.push_back(0);
+			spline_rewritten.push_back(0);
+		}
+		spline_allocated[slot] = 1;
+		spline_dirty_last[slot] = 0;
+		spline_rewritten[slot] = 0;
+		live_splines++;
+		record.flags = (record.flags & ~RECORD_SPLINE_INDEX_MASK) | RECORD_HAS_SPLINE | (slot << RECORD_SPLINE_INDEX_SHIFT);
+		_mark_dirty(p_record);
+	}
+
+	SplineDeformEntry &entry = spline_entries[slot];
+	if (newly_allocated || p_teleport) {
+		entry.current = p_pose;
+		entry.previous = p_pose;
+	} else {
+		if (!spline_dirty[slot]) {
+			entry.previous = entry.current;
+		}
+		entry.current = p_pose;
+	}
+	spline_dirty[slot] = 1;
+}
+
+const SplineDeformEntry &RendererVirtualMeshStorage::get_spline_entry(uint32_t p_index) const {
+	static const SplineDeformEntry fallback;
+	ERR_FAIL_UNSIGNED_INDEX_V(p_index, spline_entries.size(), fallback);
+	return spline_entries[p_index];
+}
+
 void RendererVirtualMeshStorage::begin_frame() {
 	// Harvest the completed "NextGeo Page Upload" GPU timestamp delta before RD resets timestamps.
 	if (RSG::utilities != nullptr && RSG::virtual_mesh_storage == this) {
@@ -1109,6 +1203,10 @@ void RendererVirtualMeshStorage::begin_frame() {
 	frame++;
 	free_now = free_next;
 	free_next.clear();
+	for (uint32_t slot : spline_free_next) {
+		spline_free_now.push_back(slot);
+	}
+	spline_free_next.clear();
 }
 
 void RendererVirtualMeshStorage::process_streaming() {
@@ -1219,6 +1317,40 @@ void RendererVirtualMeshStorage::flush() {
 			_upload_mesh_records(first, count);
 		}
 		mesh_records_dirty = false;
+	}
+
+	// GodotNext: spline_meshes (#161). Advance spline temporal history and upload dirty entries.
+	if (!spline_entries.is_empty()) {
+		const uint32_t spline_count = spline_entries.size();
+		for (uint32_t s = 0; s < spline_count; s++) {
+			if (spline_dirty_last[s] && !spline_dirty[s] && spline_allocated[s]) {
+				spline_entries[s].previous = spline_entries[s].current;
+				spline_dirty[s] = 1;
+				spline_rewritten[s] = 1;
+			}
+		}
+		uint32_t s_first = UINT32_MAX;
+		uint32_t s_count = 0;
+		for (uint32_t s = 0; s < spline_count; s++) {
+			if (spline_dirty[s]) {
+				if (s_first == UINT32_MAX) {
+					s_first = s;
+				}
+				s_count++;
+			} else if (s_first != UINT32_MAX) {
+				_upload_splines(s_first, s_count);
+				s_first = UINT32_MAX;
+				s_count = 0;
+			}
+		}
+		if (s_first != UINT32_MAX) {
+			_upload_splines(s_first, s_count);
+		}
+		for (uint32_t s = 0; s < spline_count; s++) {
+			spline_dirty_last[s] = spline_dirty[s] && !spline_rewritten[s];
+			spline_dirty[s] = 0;
+			spline_rewritten[s] = 0;
+		}
 	}
 }
 

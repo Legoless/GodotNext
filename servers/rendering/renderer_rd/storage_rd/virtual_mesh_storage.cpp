@@ -61,6 +61,7 @@ void VirtualMeshStorage::free_resources() {
 	_reset_pages();
 	_reset_clusters();
 	_reset_residency();
+	_reset_splines();
 }
 
 uint64_t VirtualMeshStorage::_get_max_storage_buffer_range() const {
@@ -262,6 +263,52 @@ void VirtualMeshStorage::_upload_mesh_records(uint32_t p_first, uint32_t p_count
 	ERR_FAIL_COND(mesh_record_buffer.is_null());
 	ERR_FAIL_COND(p_first + p_count > mesh_buffer_capacity);
 	rd->buffer_update(mesh_record_buffer, p_first * sizeof(MeshRecord), p_count * sizeof(MeshRecord), mesh_records.ptr() + p_first);
+}
+
+RID VirtualMeshStorage::get_spline_buffer() const {
+	if (spline_buffer.is_null()) {
+		RenderingDevice *rd = RD::get_singleton();
+		if (rd != nullptr) {
+			SplineDeformEntry zero_entry;
+			spline_buffer = rd->storage_buffer_create(sizeof(SplineDeformEntry), Span<uint8_t>(reinterpret_cast<uint8_t *>(&zero_entry), sizeof(SplineDeformEntry)));
+			spline_buffer_capacity = spline_buffer.is_valid() ? 1u : 0u;
+		}
+	}
+	return spline_buffer;
+}
+
+void VirtualMeshStorage::_upload_splines(uint32_t p_first, uint32_t p_count) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_count == 0) {
+		return;
+	}
+	const uint32_t required = MAX(uint32_t(spline_entries.size()), 1u);
+	if (spline_buffer.is_null() || spline_buffer_capacity < required) {
+		if (spline_buffer.is_valid()) {
+			rd->free_rid(spline_buffer);
+			spline_buffer = RID();
+		}
+		uint32_t new_cap = MAX(spline_buffer_capacity, 1u);
+		while (new_cap < required) {
+			new_cap *= 2u;
+		}
+		spline_buffer = rd->storage_buffer_create(new_cap * sizeof(SplineDeformEntry));
+		ERR_FAIL_COND(spline_buffer.is_null());
+		spline_buffer_capacity = new_cap;
+		rd->buffer_update(spline_buffer, 0, spline_entries.size() * sizeof(SplineDeformEntry), spline_entries.ptr());
+		return;
+	}
+	ERR_FAIL_COND(p_first + p_count > spline_buffer_capacity);
+	rd->buffer_update(spline_buffer, p_first * sizeof(SplineDeformEntry), p_count * sizeof(SplineDeformEntry), spline_entries.ptr() + p_first);
+}
+
+void VirtualMeshStorage::_reset_splines() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && spline_buffer.is_valid()) {
+		rd->free_rid(spline_buffer);
+	}
+	spline_buffer = RID();
+	spline_buffer_capacity = 0;
 }
 
 } // namespace RendererRD

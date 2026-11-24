@@ -54,6 +54,8 @@
 // GodotNext: vsm_non_nanite (#218)
 #include "servers/rendering/renderer_rd/shaders/df_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_instance_cull.glsl.gen.h"
+// GodotNext: spline_meshes (#161)
+#include "servers/rendering/storage/spline_deform.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 class NextGISWRTTrace;
@@ -484,6 +486,8 @@ private:
 			float model_precision[4];
 			float prev_model_precision[4];
 #endif
+			// GodotNext: spline_meshes (#161). x = spline SSBO index, y = active flag (1 = spline active).
+			uint32_t spline_deform_data[4];
 
 			// These setters allow us to copy the data over with operation when using floats.
 			inline void set_lightmap_uv_scale(const Rect2 &p_rect) {
@@ -552,6 +556,14 @@ private:
 
 		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_MOTION"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY") };
 		InstanceData *curr_gpu_ptr[RENDER_LIST_MAX] = {};
+
+		// GodotNext: spline_meshes (#161). Per-render-list spline deform SSBOs (lazy, 224 B default when unused).
+		LocalVector<SplineDeformEntry> spline_deform_entries[RENDER_LIST_MAX];
+		RID spline_deform_buffer[RENDER_LIST_MAX];
+		uint32_t spline_deform_capacity[RENDER_LIST_MAX] = {};
+		bool spline_deform_dirty[RENDER_LIST_MAX] = {};
+		RID default_spline_deform_buffer;
+		RID get_spline_deform_buffer(RenderListType p_render_list);
 
 		LightmapCaptureData *lightmap_captures = nullptr;
 		uint32_t max_lightmap_captures;
@@ -760,6 +772,10 @@ private:
 			TELEPORTED,
 		} transform_status = TransformStatus::MOVED;
 		Transform3D prev_transform;
+		// GodotNext: spline_meshes (#161). Temporal history for spline motion vectors & VSM dynamic hook.
+		SplineDeformPose prev_spline_deform;
+		uint64_t prev_spline_change_frame = 0;
+		bool spline_changed_this_frame = false;
 		RID voxel_gi_instances[MAX_VOXEL_GI_INSTANCESS_PER_INSTANCE];
 		RID warned_vgd_mesh;
 		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
@@ -772,6 +788,7 @@ private:
 
 		virtual void set_transform(const Transform3D &p_transform, const AABB &p_aabb, const AABB &p_transformed_aabb) override;
 		virtual void reset_motion_vectors() override;
+		virtual void set_spline_deform(bool p_active, const SplineDeformPose &p_pose, uint64_t p_generation) override;
 		virtual void set_use_lightmap(RID p_lightmap_instance, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice_index) override;
 		virtual void set_lightmap_capture(const Color *p_sh9) override;
 

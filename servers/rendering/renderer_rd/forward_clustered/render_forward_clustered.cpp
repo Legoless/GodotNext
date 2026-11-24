@@ -1248,6 +1248,26 @@ void RenderForwardClustered::SceneState::grow_instance_buffer(RenderListType p_r
 	}
 }
 
+RID RenderForwardClustered::SceneState::get_spline_deform_buffer(RenderListType p_render_list) {
+	if (spline_deform_entries[p_render_list].is_empty()) {
+		return default_spline_deform_buffer;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	const uint32_t count = spline_deform_entries[p_render_list].size();
+	if (!spline_deform_buffer[p_render_list].is_valid() || spline_deform_capacity[p_render_list] < count) {
+		if (spline_deform_buffer[p_render_list].is_valid()) {
+			rd->free_rid(spline_deform_buffer[p_render_list]);
+		}
+		spline_deform_capacity[p_render_list] = MAX(Math::next_power_of_2(count), 16u);
+		spline_deform_buffer[p_render_list] = rd->storage_buffer_create(spline_deform_capacity[p_render_list] * sizeof(SplineDeformEntry));
+	}
+	if (spline_deform_dirty[p_render_list] && spline_deform_buffer[p_render_list].is_valid()) {
+		rd->buffer_update(spline_deform_buffer[p_render_list], 0, count * sizeof(SplineDeformEntry), spline_deform_entries[p_render_list].ptr());
+		spline_deform_dirty[p_render_list] = false;
+	}
+	return spline_deform_buffer[p_render_list].is_valid() ? spline_deform_buffer[p_render_list] : default_spline_deform_buffer;
+}
+
 void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, int *p_render_info, uint32_t p_offset, int32_t p_max_elements, bool p_update_buffer) {
 	RenderList *rl = &render_list[p_render_list];
 	uint32_t element_total = p_max_elements >= 0 ? uint32_t(p_max_elements) : rl->elements.size();
@@ -1262,6 +1282,10 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 		element_total += p_offset;
 		p_offset = 0u;
 		scene_state.curr_gpu_ptr[p_render_list] = reinterpret_cast<SceneState::InstanceData *>(scene_state.instance_buffer[p_render_list].map_raw_for_upload(0u));
+	}
+	if (p_offset == 0u) {
+		scene_state.spline_deform_entries[p_render_list].clear();
+		scene_state.spline_deform_dirty[p_render_list] = false;
 	}
 
 	if (p_render_info) {
@@ -1339,6 +1363,24 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 		instance_data.set_megalights_layer_group(ml_assign ? RendererRD::MegaLightsInputs::assign_layer_group(inst->layer_mask) : 0);
 		instance_data.material_feedback_index = material_feedback_index;
 		instance_data.set_uv_scale(uv_scale);
+		// GodotNext: spline_meshes (#161). Pack current/previous spline poses only for active spline instances.
+		if (inst->spline_deform_active) {
+			SplineDeformEntry spline_entry;
+			spline_entry.current = inst->spline_deform;
+			spline_entry.previous = inst->prev_spline_deform;
+			const uint32_t spline_idx = scene_state.spline_deform_entries[p_render_list].size();
+			scene_state.spline_deform_entries[p_render_list].push_back(spline_entry);
+			scene_state.spline_deform_dirty[p_render_list] = true;
+			instance_data.spline_deform_data[0] = spline_idx;
+			instance_data.spline_deform_data[1] = 1u;
+			instance_data.spline_deform_data[2] = 0u;
+			instance_data.spline_deform_data[3] = 0u;
+		} else {
+			instance_data.spline_deform_data[0] = 0u;
+			instance_data.spline_deform_data[1] = 0u;
+			instance_data.spline_deform_data[2] = 0u;
+			instance_data.spline_deform_data[3] = 0u;
+		}
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
 
@@ -1583,10 +1625,11 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			}
 			if (p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI || p_pass_mode == PASS_MODE_COLOR) {
 				bool transform_changed = inst->transform_status == GeometryInstanceForwardClustered::TransformStatus::MOVED;
+				bool spline_changed = inst->spline_deform_active && inst->spline_changed_this_frame;
 				bool has_mesh_instance = inst->mesh_instance.is_valid();
 				bool uses_particles = inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES;
 				bool is_multimesh_with_motion = !uses_particles && (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) && mesh_storage->_multimesh_uses_motion_vectors_offsets(inst->data->base);
-				bool is_dynamic = transform_changed || has_mesh_instance || uses_particles || is_multimesh_with_motion;
+				bool is_dynamic = transform_changed || spline_changed || has_mesh_instance || uses_particles || is_multimesh_with_motion;
 				if (p_nextgi_velocity && is_dynamic) {
 					flags |= INSTANCE_DATA_FLAGS_DYNAMIC;
 				}
@@ -1617,6 +1660,10 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		if (unlikely(inst->transform_status != GeometryInstanceForwardClustered::TransformStatus::NONE && frame > inst->prev_transform_change_frame && inst->prev_transform_change_frame)) {
 			inst->prev_transform = inst->transform;
 			inst->transform_status = GeometryInstanceForwardClustered::TransformStatus::NONE;
+		}
+		if (unlikely(inst->spline_changed_this_frame && frame > inst->prev_spline_change_frame && inst->prev_spline_change_frame)) {
+			inst->prev_spline_deform = inst->spline_deform;
+			inst->spline_changed_this_frame = false;
 		}
 
 		while (surf) {
@@ -1683,6 +1730,10 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					idata.set_megalights_layer_group(megalights_inputs_active ? RendererRD::MegaLightsInputs::assign_layer_group(inst->layer_mask) : 0);
 					idata.material_feedback_index = UINT32_MAX;
 					idata.set_uv_scale(Vector4(0.0, 0.0, 0.0, 0.0));
+					idata.spline_deform_data[0] = 0u;
+					idata.spline_deform_data[1] = 0u;
+					idata.spline_deform_data[2] = 0u;
+					idata.spline_deform_data[3] = 0u;
 
 					uint32_t cull_bits = 0u;
 					if (surf->shader->cull_mode == RSE::CULL_MODE_DISABLED) {
@@ -4099,7 +4150,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				uc.object_id = c.object_id;
 				uc.extra_margin = c.extra_margin;
 				// A set_transform() with the same value is not a move (light changes re-set transforms).
-				uc.moved_this_frame = inst->transform != inst->prev_transform;
+				uc.moved_this_frame = (inst->transform != inst->prev_transform) || (inst->spline_deform_active && inst->spline_changed_this_frame);
 				uc.shadow_cache_invalidation = c.shadow_cache_invalidation;
 				uc.vsm_last_moved_frame = c.vsm_last_moved_frame;
 				uc.vsm_shader_dynamic_flags = c.vsm_shader_dynamic_flags;
@@ -9574,6 +9625,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		// bound at Set 1 binding 64 (bindings 62..63 are reserved for #138 Light Function Atlas).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 64, light_storage->get_ies_atlas_texture()));
 	}
+	{
+		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Per-render-list spline deform SSBO.
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 68, scene_state.get_spline_deform_buffer(p_render_list)));
+	}
 
 	// GodotNext: nextgeo_shading_bins (#158)
 	if (r_uniforms != nullptr) {
@@ -9833,6 +9888,8 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		avboit_occlusion.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 		avboit_occlusion.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK));
 		uniforms.push_back(avboit_occlusion);
+		// GodotNext: spline_meshes (#161).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 68, scene_state.get_spline_deform_buffer(RENDER_LIST_SECONDARY)));
 	}
 
 	if (scene_shader.default_shader_sdfgi_rd.is_null()) {
@@ -10052,6 +10109,8 @@ RID RenderForwardClustered::_setup_vsm_render_pass_uniform_set(const RendererRD:
 		avboit_occlusion.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 		avboit_occlusion.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK));
 		uniforms.push_back(avboit_occlusion);
+		// GodotNext: spline_meshes (#161). Non-Nanite VSM depth raster deforms spline instances in-place.
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 68, scene_state.get_spline_deform_buffer(RENDER_LIST_SECONDARY)));
 	}
 
 	if (scene_shader.default_shader_vsm_rd.is_null()) {
@@ -10377,7 +10436,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	uint32_t raster_bin = 0;
 	if (route.virtual_geometry && admit_programmable) {
 		RendererVirtualMeshStorage::RasterBinKey bin_key;
-		bin_key.features = material_raster_features;
+		bin_key.features = material_raster_features | (ginstance->spline_deform_active ? RendererVirtualMeshStorage::RASTER_FEATURE_SPLINE : 0u);
 		bin_key.shader_version = p_material->shader_data->version;
 		bin_key.material = p_material->get_self();
 		raster_bin = RSG::virtual_mesh_storage->raster_bin_acquire(bin_key);
@@ -10714,6 +10773,7 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 			particles_storage->particles_update_dependency(ginstance->data->base, &ginstance->data->dependency_tracker);
 		}
 	} else if (ginstance->data->base_type == RSE::INSTANCE_MESH) {
+		// GodotNext: spline_meshes (#161). Active spline instances carry spline_deform_data[1] = 1 in InstanceData.
 		if (mesh_storage->skeleton_is_valid(ginstance->data->skeleton)) {
 			ginstance->transforms_uniform_set = mesh_storage->skeleton_get_3d_uniform_set(ginstance->data->skeleton, scene_shader.default_shader_rd, TRANSFORMS_UNIFORM_SET);
 			if (ginstance->data->dirty_dependencies) {
@@ -11188,6 +11248,31 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_transform(con
 void RenderForwardClustered::GeometryInstanceForwardClustered::reset_motion_vectors() {
 	prev_transform = transform;
 	transform_status = TransformStatus::TELEPORTED;
+	prev_spline_deform = spline_deform;
+	spline_changed_this_frame = false;
+}
+
+void RenderForwardClustered::GeometryInstanceForwardClustered::set_spline_deform(bool p_active, const SplineDeformPose &p_pose, uint64_t p_generation) {
+	const uint64_t frame = RSG::rasterizer ? RSG::rasterizer->get_frame_number() : 0;
+	const bool was_active = spline_deform_active;
+	if (!was_active && p_active) {
+		prev_spline_deform = p_pose;
+		prev_spline_change_frame = frame;
+		spline_changed_this_frame = true;
+	} else if (was_active && p_active) {
+		if (frame != prev_spline_change_frame) {
+			prev_spline_deform = spline_deform;
+			prev_spline_change_frame = frame;
+		}
+		spline_changed_this_frame = true;
+	} else if (!p_active) {
+		prev_spline_deform = p_pose;
+		spline_changed_this_frame = false;
+	}
+	RenderGeometryInstanceBase::set_spline_deform(p_active, p_pose, p_generation);
+	if (was_active != p_active) {
+		_mark_dirty();
+	}
 }
 
 void RenderForwardClustered::GeometryInstanceForwardClustered::set_use_lightmap(RID p_lightmap_instance, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice_index) {
@@ -11490,6 +11575,13 @@ RenderForwardClustered::RenderForwardClustered() {
 			scene_state.lightmap_capture_buffer = RD::get_singleton()->storage_buffer_create(sizeof(LightmapCaptureData) * scene_state.max_lightmap_captures);
 		}
 		{
+			// GodotNext: spline_meshes (#161). 224-byte default SSBO bound when a render list has no spline instances.
+			Vector<uint8_t> spline_zero;
+			spline_zero.resize(sizeof(SplineDeformEntry));
+			spline_zero.fill(0);
+			scene_state.default_spline_deform_buffer = RD::get_singleton()->storage_buffer_create(sizeof(SplineDeformEntry), spline_zero);
+		}
+		{
 			defines += "\n#define MATERIAL_UNIFORM_SET " + itos(MATERIAL_UNIFORM_SET) + "\n";
 		}
 #ifdef REAL_T_IS_DOUBLE
@@ -11689,8 +11781,14 @@ RenderForwardClustered::~RenderForwardClustered() {
 		}
 		RD::get_singleton()->free_rid(scene_state.lightmap_buffer);
 		RD::get_singleton()->free_rid(scene_state.lightmap_capture_buffer);
+		if (scene_state.default_spline_deform_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(scene_state.default_spline_deform_buffer);
+		}
 		for (uint32_t i = 0; i < RENDER_LIST_MAX; i++) {
 			scene_state.instance_buffer[i].uninit();
+			if (scene_state.spline_deform_buffer[i].is_valid()) {
+				RD::get_singleton()->free_rid(scene_state.spline_deform_buffer[i]);
+			}
 		}
 		memdelete_arr(scene_state.lightmap_captures);
 	}

@@ -12,6 +12,7 @@
 // no attachments, and a pixel shader that writes atomicMax(vis64, depth << 32 | ID).
 
 // clang-format off
+#include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 // clang-format on
 
@@ -111,6 +112,12 @@ layout(set = 0, binding = 7, std430) buffer restrict readonly RasterLists {
 raster_lists;
 #endif
 
+// GodotNext: spline_meshes (#161).
+layout(set = 0, binding = 9, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
 #ifdef MODE_SHADOW
@@ -192,6 +199,8 @@ void main() {
 		return;
 	}
 
+	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
+	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
 	bool cull_disabled = ((record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_DOUBLE_SIDED) || ((record.pad1[0] & (1u << surface_id)) != 0u);
 	bool cull_front = (record.pad1[1] & (1u << surface_id)) != 0u;
 	if (cull_disabled) {
@@ -208,6 +217,9 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 0u]),
 					uintBitsToFloat(pages.data[pw + 1u]),
 					uintBitsToFloat(pages.data[pw + 2u]));
+			if (has_spline) {
+				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
+			}
 			vec3 wp = vec3(
 					dot(record.transform[0].xyz, lp) + record.transform[0].w,
 					dot(record.transform[1].xyz, lp) + record.transform[1].w,
@@ -238,6 +250,9 @@ void main() {
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
+	if (has_spline) {
+		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
+	}
 
 	vec3 world_pos = vec3(
 			dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
@@ -307,6 +322,9 @@ void main() {
 		bucket_flags = bucket_word;
 	}
 
+	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
+	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
+
 #ifndef DEBUG_BACKFACE
 	if ((bucket_flags & NEXTGEO_BUCKET_CULL_DISABLED) != 0u) {
 		// NEXTGEO_BUCKET_CULL_DISABLED: orient the triangle clockwise in clip space so both faces pass POLYGON_CULL_BACK.
@@ -323,6 +341,9 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 0u]),
 					uintBitsToFloat(pages.data[pw + 1u]),
 					uintBitsToFloat(pages.data[pw + 2u]));
+			if (has_spline) {
+				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
+			}
 			vec3 wp = vec3(
 					dot(record.transform[0].xyz, lp) + record.transform[0].w,
 					dot(record.transform[1].xyz, lp) + record.transform[1].w,
@@ -349,10 +370,11 @@ void main() {
 	}
 
 	uint pos_word = desc.x + v_idx * stride;
-	vec3 local_pos = vec3(
+	vec3 raw_local_pos = vec3(
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
+	vec3 local_pos = has_spline ? spline_deform_position(spline_deforms.data[spline_idx].current, raw_local_pos) : raw_local_pos;
 
 	vec3 world_pos = vec3(
 			dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
@@ -368,10 +390,11 @@ void main() {
 #endif
 
 #ifdef WITH_VELOCITY
+	vec3 prev_local_pos = has_spline ? spline_deform_position(spline_deforms.data[spline_idx].previous, raw_local_pos) : raw_local_pos;
 	vec3 prev_world_pos = vec3(
-			dot(record.prev_transform[0].xyz, local_pos) + record.prev_transform[0].w,
-			dot(record.prev_transform[1].xyz, local_pos) + record.prev_transform[1].w,
-			dot(record.prev_transform[2].xyz, local_pos) + record.prev_transform[2].w);
+			dot(record.prev_transform[0].xyz, prev_local_pos) + record.prev_transform[0].w,
+			dot(record.prev_transform[1].xyz, prev_local_pos) + record.prev_transform[1].w,
+			dot(record.prev_transform[2].xyz, prev_local_pos) + record.prev_transform[2].w);
 	vec3 prev_view_pos = (raster.prev_view * vec4(prev_world_pos, 1.0)).xyz;
 	screen_position = cur_clip;
 	prev_screen_position = raster.prev_proj * vec4(prev_view_pos, 1.0);

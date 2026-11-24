@@ -21,6 +21,7 @@
 
 #include "../half_inc.glsl"
 #include "../scene_data_inc.glsl"
+#include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 #include "raster_features_inc.glsl"
 // GodotNext: vsm_nanite (#217). Depth-only VSM page raster shares the material raster target.
@@ -103,6 +104,12 @@ layout(set = 0, binding = 6, std430) buffer restrict readonly NextGeoBucketTable
 nextgeo_bucket_table;
 #endif
 
+// GodotNext: spline_meshes (#161).
+layout(set = 0, binding = 7, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+nextgeo_spline_deforms;
+
 /* Set 1: the scene environment the material code reads, as scene_forward_clustered_inc.glsl names it. */
 
 layout(set = 1, binding = 0, std140) uniform SceneDataBlock {
@@ -128,6 +135,7 @@ struct InstanceData {
 	vec4 model_precision;
 	vec4 prev_model_precision;
 #endif
+	uvec4 spline_deform_data;
 };
 
 layout(set = 1, binding = 1, std430) buffer restrict readonly InstanceDataBuffer {
@@ -790,6 +798,11 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 	uv2_attrib = _ng_c_uv2;
 	color_attrib = _ng_c_col;
 
+	// GodotNext: spline_meshes (#161).
+	if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+		spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, _ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin);
+	}
+
 	_ng_resolve_vertex_corner(
 			_ng_c_pos,
 			_ng_c_nrm,
@@ -934,6 +947,11 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 		uv_attrib = _ng_c_uv;
 		uv2_attrib = _ng_c_uv2;
 		color_attrib = _ng_c_col;
+
+		// GodotNext: spline_meshes (#161).
+		if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+			spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, _ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin);
+		}
 
 		_ng_resolve_vertex_corner(
 				_ng_c_pos,

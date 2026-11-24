@@ -895,6 +895,10 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				// GodotNext: nextgeo_vertex_offset (#164).
 				geom->geometry_instance->set_vertex_offset_disable_distance(instance->vertex_offset_disable_distance);
 				geom->geometry_instance->set_rt_evaluate_vertex_offset(instance->rt_evaluate_vertex_offset);
+				// GodotNext: spline_meshes (#161).
+				if (instance->spline_deform_active) {
+					geom->geometry_instance->set_spline_deform(true, instance->spline_deform, instance->spline_deform_generation);
+				}
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1834,6 +1838,47 @@ void RendererSceneCull::instance_geometry_set_rt_evaluate_vertex_offset(RID p_in
 	}
 }
 
+// GodotNext: spline_meshes (#161, plan §21.4 contract N12).
+void RendererSceneCull::instance_geometry_set_spline_deform(RID p_instance, const Dictionary &p_params) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+
+	bool new_active = false;
+	SplineDeformPose new_pose = spline_deform_pose_from_dictionary(p_params, new_active);
+	if (new_active && instance->base_type == RSE::INSTANCE_MESH && instance->base.is_valid()) {
+		const AABB mesh_aabb = RSG::mesh_storage->mesh_get_aabb(instance->base, instance->skeleton);
+		spline_deform_apply_mesh_aabb(new_pose, mesh_aabb);
+	}
+
+	const bool toggled = instance->spline_deform_active != new_active;
+	if (!toggled && (!new_active || instance->spline_deform == new_pose)) {
+		return;
+	}
+
+	instance->spline_deform_active = new_active;
+	instance->spline_deform = new_pose;
+	instance->spline_deform_generation++;
+
+	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data != nullptr) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+		if (geom->geometry_instance != nullptr) {
+			geom->geometry_instance->set_spline_deform(new_active, instance->spline_deform, instance->spline_deform_generation);
+		}
+		// Mark dynamic for VSM caching (#212) when spline params change.
+		const uint64_t cur_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0u;
+		geom->vsm_last_moved_frame = cur_frame;
+	}
+	if (RSG::virtual_mesh_storage != nullptr && instance->virtual_record != UINT32_MAX) {
+		RSG::virtual_mesh_storage->instance_record_set_spline_deform(instance->virtual_record, new_active, instance->spline_deform, toggled);
+	}
+
+	_instance_queue_update(instance, true, toggled);
+	if (instance->scenario != nullptr) {
+		_vsm_sync_instance(instance, instance->scenario, false, true);
+		_nextgi_emit_dirty(instance->scenario, instance, RendererRD::NEXTGI_DIRTY_MOVED);
+	}
+}
+
 void RendererSceneCull::instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value) {
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);
@@ -1964,6 +2009,10 @@ void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 	RSG::virtual_mesh_storage->instance_record_set_vertex_offset_bound(p_instance->virtual_record, p_instance->vertex_offset_bound);
 	RSG::virtual_mesh_storage->instance_record_set_vertex_offset_disable_distance(p_instance->virtual_record, p_instance->vertex_offset_disable_distance);
 	RSG::virtual_mesh_storage->instance_record_set_rt_evaluate_vertex_offset(p_instance->virtual_record, p_instance->rt_evaluate_vertex_offset);
+	// GodotNext: spline_meshes (#161). Push per-instance Hermite spline deformation when active.
+	if (p_instance->spline_deform_active) {
+		RSG::virtual_mesh_storage->instance_record_set_spline_deform(p_instance->virtual_record, true, p_instance->spline_deform, true);
+	}
 	const AABB world = p_instance->transformed_aabb.has_surface() ? p_instance->transformed_aabb : p_instance->transform.xform(p_instance->aabb);
 	_instance_record_set_transform(p_instance, p_instance->transform, world, p_instance->visible);
 }
@@ -2783,10 +2832,32 @@ void RendererSceneCull::_update_instance_aabb(Instance *p_instance) const {
 			// do nothing
 		} break;
 		case RSE::INSTANCE_MESH: {
+			const AABB mesh_aabb = RSG::mesh_storage->mesh_get_aabb(p_instance->base, p_instance->skeleton);
+			if (p_instance->spline_deform_active) {
+				// GodotNext: spline_meshes (#161). Keep axis_min/axis_max/max_stretch synchronized with the
+				// undeformed base mesh AABB and compute a tight 16-sample swept AABB for CPU culling.
+				SplineDeformPose updated = p_instance->spline_deform;
+				spline_deform_apply_mesh_aabb(updated, mesh_aabb);
+				if (updated != p_instance->spline_deform) {
+					p_instance->spline_deform = updated;
+					p_instance->spline_deform_generation++;
+					if (p_instance->base_data != nullptr) {
+						InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
+						if (geom->geometry_instance != nullptr) {
+							geom->geometry_instance->set_spline_deform(true, p_instance->spline_deform, p_instance->spline_deform_generation);
+						}
+					}
+					if (RSG::virtual_mesh_storage != nullptr && p_instance->virtual_record != UINT32_MAX) {
+						RSG::virtual_mesh_storage->instance_record_set_spline_deform(p_instance->virtual_record, true, p_instance->spline_deform, false);
+					}
+				}
+			}
 			if (p_instance->custom_aabb) {
 				new_aabb = *p_instance->custom_aabb;
+			} else if (p_instance->spline_deform_active) {
+				new_aabb = spline_deform_compute_swept_aabb(p_instance->spline_deform, mesh_aabb);
 			} else {
-				new_aabb = RSG::mesh_storage->mesh_get_aabb(p_instance->base, p_instance->skeleton);
+				new_aabb = mesh_aabb;
 			}
 
 		} break;

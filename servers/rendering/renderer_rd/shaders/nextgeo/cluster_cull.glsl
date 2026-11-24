@@ -18,6 +18,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // Shared includes before #ifdef VSM_VIEW so glsl_builders.py's include-once expansion makes them
 // visible to both VSM_VIEW and main/shadow variants.
 // clang-format off
+#include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 #include "raster_features_inc.glsl"
 // clang-format on
@@ -226,6 +227,14 @@ layout(set = 0, binding = 17, std430) buffer restrict VSMGroupArgsOut {
 vsm_group_args_out;
 #endif
 
+// GodotNext: spline_meshes (#161). Bound in VSM_BVH and VSM CLUSTER_CULL.
+#if !defined(VSM_SETUP) && !defined(VSM_SEED)
+layout(set = 0, binding = 23, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+#endif
+
 layout(push_constant, std430) uniform VSMCullPush {
 	uint level;
 	uint pad0;
@@ -308,6 +317,15 @@ float vsm_projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, flo
 	if (p_error >= 3.4e38) {
 		return vsm_params.max_texel_error + 1.0;
 	}
+#if !defined(VSM_SETUP) && !defined(VSM_SEED)
+	// GodotNext: spline_meshes (#161). Deform LOD sphere, scale error by max stretch, and add monotonic curve sag.
+	if ((p_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+		SplineDeformPose sp = spline_deforms.data[p_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
+		float raw_radius = p_lod_sphere.w;
+		spline_deform_bounds_sphere(sp, p_lod_sphere.xyz, p_lod_sphere.w);
+		p_error = p_error * sp.up_max_stretch.w + spline_deform_curvature_error(sp, raw_radius);
+	}
+#endif
 	float scale = vsm_instance_scale(p_record);
 	float page_texel = md.texel_scale * float(1u << mip);
 	if (!(page_texel > 0.0)) {
@@ -461,6 +479,13 @@ bool vsm_local_aabb_page_bounds(NextGeoInstanceRecord p_record, vec3 lmin, vec3 
 		r_straddles_near = false;
 		return false;
 	}
+#if !defined(VSM_SETUP) && !defined(VSM_SEED)
+	// GodotNext: spline_meshes (#161). Deform local BVH/group AABB along the Hermite segment.
+	if ((p_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+		SplineDeformPose sp = spline_deforms.data[p_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
+		spline_deform_local_aabb(sp, lmin, lmax);
+	}
+#endif
 	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
 	// Inflate local bounds by displacement and vertex-offset bounds.
 	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
@@ -830,6 +855,13 @@ void main() {
 					uintBitsToFloat(pages.data[route_rec_word + 1u]),
 					uintBitsToFloat(pages.data[route_rec_word + 2u]),
 					uintBitsToFloat(pages.data[route_rec_word + 3u]));
+			float max_edge = unpackHalf2x16(pages.data[route_rec_word + 16u]).x;
+			// GodotNext: spline_meshes (#161). Deform cluster sphere and scale edge length by max spline stretch.
+			if ((record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+				SplineDeformPose sp = spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
+				spline_deform_bounds_sphere(sp, bounds.xyz, bounds.w);
+				max_edge *= sp.up_max_stretch.w;
+			}
 			vec3 c_w = vsm_instance_point(record, bounds.xyz);
 			float expand = max(record.prev_world_aabb_max.w, 0.0) + (has_wpo ? nextgeo_record_vertex_offset_bound(record) : 0.0);
 			float r_w = (bounds.w + expand) * route_scale;
@@ -844,7 +876,6 @@ void main() {
 				vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_clusters, 1u));
 				continue;
 			}
-			float max_edge = unpackHalf2x16(pages.data[route_rec_word + 16u]).x;
 			software = vsm_sw_raster_route(record, route_scale, bounds, max_edge, md, mip);
 		}
 
@@ -1138,6 +1169,12 @@ raster_bin_state;
 const uint NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 6u;
 #endif
 
+// GodotNext: spline_meshes (#161). Bound in BVH_LEVEL and CLUSTER_CULL (main and shadow).
+layout(set = 0, binding = 23, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 	return vec3(
 			dot(p_record.transform[0].xyz, p_local) + p_record.transform[0].w,
@@ -1151,6 +1188,13 @@ vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error, vec4 p_camera, vec4 p_view, mat4 p_view_proj, uint p_flags) {
 	if (p_max_parent_error >= 3.4e38) {
 		return p_camera.w + 1.0;
+	}
+	// GodotNext: spline_meshes (#161). Deform cluster/group/BVH LOD sphere, scale error, and add monotonic curve sag.
+	if ((p_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+		SplineDeformPose sp = spline_deforms.data[p_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
+		float raw_radius = p_lod_sphere.w;
+		spline_deform_bounds_sphere(sp, p_lod_sphere.xyz, p_lod_sphere.w);
+		p_max_parent_error = p_max_parent_error * sp.up_max_stretch.w + spline_deform_curvature_error(sp, raw_radius);
 	}
 	float scale = p_record.world_aabb_min.w;
 	if ((p_flags & 4u) != 0u) {
@@ -1452,10 +1496,14 @@ void main() {
 							if (missing_page != last_requested_page) {
 								last_requested_page = missing_page;
 								float scale = record.world_aabb_min.w;
-								vec3 center = instance_point(record, own_lod.xyz);
+								vec4 req_lod = own_lod;
+								if ((record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+									spline_deform_bounds_sphere(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, req_lod.xyz, req_lod.w);
+								}
+								vec3 center = instance_point(record, req_lod.xyz);
 								// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
 								float expand = max(record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(record);
-								float dist = max(length(center - cull.camera.xyz) - (own_lod.w + expand) * scale, 0.0);
+								float dist = max(length(center - cull.camera.xyz) - (req_lod.w + expand) * scale, 0.0);
 								uint req_slot = atomicAdd(page_requests.data[0], 1u);
 								if (req_slot < page_requests.data[1]) {
 									uint req_base = 4u + page_requests.data[3] + req_slot * 4u;
@@ -1492,6 +1540,12 @@ void main() {
 						uintBitsToFloat(pages.data[route_rec_word + 2u]),
 						uintBitsToFloat(pages.data[route_rec_word + 3u]));
 				float max_edge = unpackHalf2x16(pages.data[route_rec_word + 16u]).x;
+				// GodotNext: spline_meshes (#161). Deform cluster sphere and scale edge length by max spline stretch.
+				if ((record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+					SplineDeformPose sp = spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
+					spline_deform_bounds_sphere(sp, bounds.xyz, bounds.w);
+					max_edge *= sp.up_max_stretch.w;
+				}
 				software = sw_raster_route(record, route_scale, bounds, max_edge);
 			}
 			uint bin = NEXTGEO_RASTER_BIN_FIXED;

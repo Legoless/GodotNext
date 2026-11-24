@@ -939,6 +939,20 @@ void main() {
 #endif
 			prev_vertex);
 
+	// GodotNext: spline_meshes (#161). Plain MeshInstance3D skips this branch cleanly.
+	if (instances.data[instance_index].spline_deform_data.y != 0u) {
+		SplineDeformPose prev_spline_pose = spline_deforms.data[instances.data[instance_index].spline_deform_data.x].previous;
+#if defined(NORMAL_USED) && defined(TANGENT_USED)
+		spline_deform_vertex_full(prev_spline_pose, prev_vertex, prev_normal, prev_tangent, prev_binormal);
+#elif defined(NORMAL_USED)
+		spline_deform_vertex_pos_nrm(prev_spline_pose, prev_vertex, prev_normal);
+#elif defined(TANGENT_USED)
+		spline_deform_vertex_pos_tan(prev_spline_pose, prev_vertex, prev_tangent, prev_binormal);
+#else
+		prev_vertex = spline_deform_position(prev_spline_pose, prev_vertex);
+#endif
+	}
+
 	global_time = scene_data_block.prev_data.time;
 	vertex_shader(prev_vertex,
 #ifdef NORMAL_USED
@@ -980,6 +994,20 @@ void main() {
 			binormal,
 #endif
 			vertex);
+
+	// GodotNext: spline_meshes (#161). Plain MeshInstance3D skips this branch cleanly.
+	if (instances.data[instance_index].spline_deform_data.y != 0u) {
+		SplineDeformPose cur_spline_pose = spline_deforms.data[instances.data[instance_index].spline_deform_data.x].current;
+#if defined(NORMAL_USED) && defined(TANGENT_USED)
+		spline_deform_vertex_full(cur_spline_pose, vertex, normal, tangent, binormal);
+#elif defined(NORMAL_USED)
+		spline_deform_vertex_pos_nrm(cur_spline_pose, vertex, normal);
+#elif defined(TANGENT_USED)
+		spline_deform_vertex_pos_tan(cur_spline_pose, vertex, tangent, binormal);
+#else
+		vertex = spline_deform_position(cur_spline_pose, vertex);
+#endif
+	}
 
 	// Current vertex.
 	global_time = scene_data_block.data.time;
@@ -4441,11 +4469,18 @@ void main() {
 
 #ifdef MOTION_VECTORS
 		if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_WRITE_VELOCITY) != 0u && (resolve_push.flags & NEXTGEO_RESOLVE_FLAG_RESET_VELOCITY) == 0u) {
+			vec3 _ng_p_pos = _ng_c_pos;
+			vec3 _ng_p_nrm = _ng_c_nrm;
+			vec3 _ng_p_tan = _ng_c_tan;
+			vec3 _ng_p_bin = _ng_c_bin;
+			if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+				spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].previous, _ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_p_bin);
+			}
 			_ng_resolve_vertex_corner(
-					_ng_c_pos,
-					_ng_c_nrm,
-					_ng_c_tan,
-					_ng_c_bin,
+					_ng_p_pos,
+					_ng_p_nrm,
+					_ng_p_tan,
+					_ng_p_bin,
 					_ng_entry.x,
 					scene_data_block.prev_data,
 					_ng_prev_xform,
@@ -4458,6 +4493,9 @@ void main() {
 		}
 #endif
 
+		if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+			spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, _ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin);
+		}
 		_ng_resolve_vertex_corner(
 				_ng_c_pos,
 				_ng_c_nrm,

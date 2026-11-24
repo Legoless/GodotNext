@@ -1111,6 +1111,8 @@ public:
 	// GodotNext: nextgeo_vertex_offset (#164).
 	FUNC2(instance_geometry_set_vertex_offset_disable_distance, RID, float)
 	FUNC2(instance_geometry_set_rt_evaluate_vertex_offset, RID, bool)
+	// GodotNext: spline_meshes (#161).
+	FUNC2(instance_geometry_set_spline_deform, RID, const Dictionary &)
 	FUNC2(instance_geometry_set_transparency, RID, float)
 	FUNC3(instance_geometry_set_shader_parameter, RID, const StringName &, const Variant &)
 	FUNC2RC(Variant, instance_geometry_get_shader_parameter, RID, const StringName &)

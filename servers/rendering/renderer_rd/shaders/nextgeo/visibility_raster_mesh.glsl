@@ -68,6 +68,7 @@ layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = 128, max_primitives = 128) out;
 
 // clang-format off
+#include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 // clang-format on
 
@@ -123,6 +124,12 @@ layout(set = 0, binding = 6, std430) buffer restrict readonly BucketTable {
 }
 bucket_table;
 
+// GodotNext: spline_meshes (#161).
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+
 shared vec4 s_clip_pos[128];
 
 void main() {
@@ -177,6 +184,7 @@ void main() {
 
 	SetMeshOutputsEXT(vert_count, tri_count);
 
+	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
 	uint tid = gl_LocalInvocationIndex;
 	if (tid < vert_count) {
 		uint pos_word = desc.x + tid * stride;
@@ -184,6 +192,9 @@ void main() {
 				uintBitsToFloat(pages.data[pos_word + 0u]),
 				uintBitsToFloat(pages.data[pos_word + 1u]),
 				uintBitsToFloat(pages.data[pos_word + 2u]));
+		if (has_spline) {
+			local_pos = spline_deform_position(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, local_pos);
+		}
 		vec3 world_pos = vec3(
 				dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
 				dot(record.transform[1].xyz, local_pos) + record.transform[1].w,

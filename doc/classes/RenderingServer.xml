@@ -2077,6 +2077,15 @@
 				Sets the virtual shadow map cache invalidation behavior for the specified 3D geometry instance. Equivalent to [member GeometryInstance3D.shadow_cache_invalidation]. Changing it invalidates the pages the instance's cached shadow covers, as removing the instance and adding it back would.
 			</description>
 		</method>
+		<method name="instance_geometry_set_spline_deform">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="params" type="Dictionary" />
+			<description>
+				Configures cubic Hermite spline deformation for the specified 3D mesh geometry instance. Passing an empty [Dictionary] clears spline deformation and restores the undeformed mesh bounds and rendering path.
+				Supported keys in [param params]: [code]"start_position"[/code] ([Vector3]), [code]"start_tangent"[/code] ([Vector3]), [code]"end_position"[/code] ([Vector3]), [code]"end_tangent"[/code] ([Vector3]), [code]"start_roll"[/code] ([float], radians), [code]"end_roll"[/code] ([float], radians), [code]"start_scale"[/code] ([Vector2]), [code]"end_scale"[/code] ([Vector2]), [code]"forward_axis"[/code] ([int], [code]0[/code] = X, [code]1[/code] = Y, [code]2[/code] = Z), and [code]"up_vector"[/code] ([Vector3]). Used internally by [SplineMeshInstance3D].
+			</description>
+		</method>
 		<method name="instance_geometry_set_transparency">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />

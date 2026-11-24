@@ -183,6 +183,7 @@ void main() {
 #else
 
 // clang-format off
+#include "spline_deform_inc.glsl"
 #include "nextgeo/nextgeo_records_inc.glsl"
 #include "nextgeo/raster_features_inc.glsl"
 #include "nextgeo/sw_raster_setup_inc.glsl"
@@ -234,6 +235,12 @@ layout(set = 0, binding = 9, std430) buffer restrict VSMCounters {
 	uint data[];
 }
 vsm_counters;
+
+// GodotNext: spline_meshes (#161).
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
 
 layout(push_constant, std430) uniform PushParams {
 	uint cluster_capacity;
@@ -309,12 +316,20 @@ void main() {
 	if (gl_LocalInvocationIndex == 0u) {
 		s_writes = 0u;
 	}
+	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
+	SplineDeformPose spline_pose;
+	if (has_spline) {
+		spline_pose = spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
+	}
 	for (uint v = gl_LocalInvocationIndex; v < vert_count; v += 64u) {
 		uint pos_word = desc.x + v * stride;
 		vec3 local_pos = vec3(
 				uintBitsToFloat(pages.data[pos_word + 0u]),
 				uintBitsToFloat(pages.data[pos_word + 1u]),
 				uintBitsToFloat(pages.data[pos_word + 2u]));
+		if (has_spline) {
+			local_pos = spline_deform_position(spline_pose, local_pos);
+		}
 		vec3 world_pos = vec3(
 				dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
 				dot(record.transform[1].xyz, local_pos) + record.transform[1].w,

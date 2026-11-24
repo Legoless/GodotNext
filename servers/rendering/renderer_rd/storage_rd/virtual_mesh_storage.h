@@ -49,6 +49,9 @@ class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	uint32_t cluster_bytes = 0;
 	RID residency_buffer;
 	uint32_t residency_bytes = 0;
+	// GodotNext: spline_meshes (#161). Compact spline deformation SSBO (lazy 1-entry default when unused).
+	mutable RID spline_buffer;
+	mutable uint32_t spline_buffer_capacity = 0;
 	uint32_t buffer_capacity = 0;
 	uint32_t mesh_buffer_capacity = 0;
 
@@ -68,6 +71,8 @@ protected:
 	bool _resize_residency(uint32_t p_bytes) override;
 	void _upload_residency(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
 	void _reset_residency() override;
+	void _upload_splines(uint32_t p_first, uint32_t p_count) override;
+	void _reset_splines() override;
 
 public:
 	VirtualMeshStorage();
@@ -77,6 +82,7 @@ public:
 	RID get_page_buffer() const override { return page_buffer; }
 	RID get_cluster_buffer() const override { return cluster_buffer; }
 	RID get_residency_buffer() const override { return residency_buffer; }
+	RID get_spline_buffer() const override;
 	RID get_record_buffer() const override { return record_buffer; }
 	RID get_mesh_record_buffer() const override { return mesh_record_buffer; }
 

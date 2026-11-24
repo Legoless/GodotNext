@@ -104,8 +104,7 @@ float nextgeo_rt_native_error_per_meter(float p_max_pixel_error, float p_interna
 // usable error per meter, every band takes the proxy's eps.
 float nextgeo_rt_native_band_error(uint32_t p_band, float p_error_per_meter, float p_proxy_eps, bool p_orthogonal);
 
-// Instances that keep the proxy in native mode (plan §21.4 N13, issue step 8). Displaced and spline
-// instances join this list with the features that create them (they are not on master yet).
+// Instances that keep the proxy in native mode (plan §21.4 N13, issue step 8).
 enum NextGeoRTNativeExclusion {
 	NEXTGEO_RT_NATIVE_INCLUDED = 0,
 	NEXTGEO_RT_NATIVE_EXCLUDED_SKINNED,
@@ -113,10 +112,12 @@ enum NextGeoRTNativeExclusion {
 	// A mesh whose proxy also carries legacy (non-virtual) surfaces: the native cut has only the
 	// virtual ones, so the mesh keeps its proxy rather than lose those surfaces from the TLAS.
 	NEXTGEO_RT_NATIVE_EXCLUDED_LEGACY_SURFACES,
+	// GodotNext: spline_meshes (#161). Spline meshes trace a per-instance Hermite-deformed RT proxy.
+	NEXTGEO_RT_NATIVE_EXCLUDED_SPLINE,
 	NEXTGEO_RT_NATIVE_EXCLUSION_MAX,
 };
 
-NextGeoRTNativeExclusion nextgeo_rt_native_exclusion(bool p_skinned, bool p_vertex_offset, bool p_legacy_surfaces);
+NextGeoRTNativeExclusion nextgeo_rt_native_exclusion(bool p_skinned, bool p_vertex_offset, bool p_legacy_surfaces, bool p_spline = false);
 
 // Which BLAS an instance traces in native mode.
 enum NextGeoRTNativeChoice {

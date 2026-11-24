@@ -168,6 +168,16 @@ void RenderGeometryInstanceBase::set_rt_evaluate_vertex_offset(bool p_enable) {
 	data->rt_evaluate_vertex_offset = p_enable;
 }
 
+// GodotNext: spline_meshes (#161).
+void RenderGeometryInstanceBase::set_spline_deform(bool p_active, const SplineDeformPose &p_pose, uint64_t p_generation) {
+	const bool toggled = spline_deform_active != p_active;
+	spline_deform_active = p_active;
+	spline_deform = p_pose;
+	spline_deform_generation = p_generation;
+	if (toggled) {
+		_mark_dirty();
+	}
+}
 void RenderGeometryInstanceBase::reset_motion_vectors() {
 }
 

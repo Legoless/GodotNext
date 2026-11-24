@@ -12,6 +12,7 @@
 // directly.
 
 // clang-format off
+#include "spline_deform_inc.glsl"
 #include "vsm_mark_inc.glsl"
 #include "vsm_raster_inc.glsl"
 #include "nextgeo/nextgeo_records_inc.glsl"
@@ -71,6 +72,12 @@ layout(set = 0, binding = 7, std430) buffer restrict readonly VSMDirty {
 }
 vsm_dirty;
 
+// GodotNext: spline_meshes (#161).
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
 	vsm_page_info_out = 0xFFFFFFFFu;
@@ -129,6 +136,8 @@ void main() {
 	// vsm_page_clip_position has no Y flip, matching _vsm_raster_non_nanite's flip_cull = !reverse_cull.
 	float map_cull_sign = ((pair.w & 2u) != 0u) ? 1.0 : -1.0;
 
+	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
+	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
 	if (cull_disabled) {
 		vec4 tri_clip[3];
 		for (uint c = 0u; c < 3u; c++) {
@@ -143,6 +152,9 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 0u]),
 					uintBitsToFloat(pages.data[pw + 1u]),
 					uintBitsToFloat(pages.data[pw + 2u]));
+			if (has_spline) {
+				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
+			}
 			vec3 wp = vec3(
 					dot(record.transform[0].xyz, lp) + record.transform[0].w,
 					dot(record.transform[1].xyz, lp) + record.transform[1].w,
@@ -172,6 +184,9 @@ void main() {
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
+	if (has_spline) {
+		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
+	}
 	vec3 world_pos = vec3(
 			dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
 			dot(record.transform[1].xyz, local_pos) + record.transform[1].w,

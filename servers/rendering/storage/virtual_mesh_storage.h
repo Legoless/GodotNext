@@ -39,6 +39,7 @@
 #include "core/templates/rid.h"
 #include "core/templates/safe_refcount.h"
 #include "servers/rendering/rendering_server_types.h"
+#include "servers/rendering/storage/spline_deform.h"
 
 // GodotNext: nextgeo_instance_records (#75, plan §6.3, §9), nextgeo_residency (#78)
 //
@@ -76,6 +77,11 @@ public:
 		RECORD_VSM_DYNAMIC = 1u << 14,
 		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Per-instance opt-in RT proxy WPO evaluation.
 		RECORD_RT_EVALUATE_VERTEX_OFFSET = 1u << 15,
+		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Bit 16 marks an active spline record;
+		// bits 17..31 store the 15-bit index into the compact spline deformation SSBO (up to 32,767).
+		RECORD_HAS_SPLINE = 1u << 16,
+		RECORD_SPLINE_INDEX_SHIFT = 17u,
+		RECORD_SPLINE_INDEX_MASK = 0xFFFE0000u,
 	};
 
 	// gi_flags.
@@ -197,6 +203,10 @@ public:
 		// GodotNext: nextgeo_displacement (#150). Displaced surfaces route through programmable raster bins (#163 adds dicing).
 		{ RASTER_FEATURE_DISPLACED, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "DISPLACED" },
 		{ RASTER_FEATURE_DISPLACED, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_DISPLACED" },
+		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Fixed-function Hermite spline deform
+		// runs at vertex fetch in both visibility and VSM fixed and programmable bins.
+		{ RASTER_FEATURE_SPLINE, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "SPLINE" },
+		{ RASTER_FEATURE_SPLINE, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_SPLINE" },
 	};
 	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
 
@@ -471,6 +481,11 @@ public:
 	void instance_record_set_rt_flags(uint32_t p_record, uint32_t p_rt_flags);
 	// GodotNext: vsm_caching (#212). Updates RECORD_VSM_DYNAMIC without touching other record flags.
 	void instance_record_set_vsm_dynamic(uint32_t p_record, bool p_dynamic);
+	// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Compact per-record spline pose & history.
+	void instance_record_set_spline_deform(uint32_t p_record, bool p_active, const SplineDeformPose &p_pose, bool p_teleport = false);
+	uint32_t get_live_spline_count() const { return live_splines; }
+	uint32_t get_spline_entry_count() const { return spline_entries.size(); }
+	const SplineDeformEntry &get_spline_entry(uint32_t p_index) const;
 
 	// Per frame: advance the free list and the temporal history, process page
 	// streaming uploads under the per-frame KiB cap, then upload dirty records.
@@ -558,6 +573,7 @@ public:
 	virtual RID get_page_buffer() const { return RID(); }
 	virtual RID get_cluster_buffer() const { return RID(); }
 	virtual RID get_residency_buffer() const { return RID(); }
+	virtual RID get_spline_buffer() const { return RID(); }
 	uint32_t get_record_count() const { return used_slots; }
 	uint32_t get_mesh_record_count() const { return mesh_records.size(); }
 	uint32_t get_max_bvh_levels() const;
@@ -581,6 +597,9 @@ protected:
 	virtual bool _resize_residency(uint32_t p_bytes) { return true; }
 	virtual void _upload_residency(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
 	virtual void _reset_residency() {}
+	// GodotNext: spline_meshes (#161). Compact spline deformation buffer.
+	virtual void _upload_splines(uint32_t p_first, uint32_t p_count) {}
+	virtual void _reset_splines() {}
 	// Renderer-specific bookkeeping after a record slot is reused.
 	virtual void _record_reused(uint32_t p_record) {}
 	// Renderer-specific refusal (for example an out-of-memory RD buffer).
@@ -718,6 +737,15 @@ protected:
 	LocalVector<SlotState> slot_states;
 	LocalVector<uint32_t> free_now;
 	LocalVector<uint32_t> free_next;
+	// GodotNext: spline_meshes (#161). Compact spline entry pool with per-frame temporal history.
+	LocalVector<SplineDeformEntry> spline_entries;
+	LocalVector<uint8_t> spline_allocated;
+	LocalVector<uint8_t> spline_dirty;
+	LocalVector<uint8_t> spline_dirty_last;
+	LocalVector<uint8_t> spline_rewritten;
+	LocalVector<uint32_t> spline_free_now;
+	LocalVector<uint32_t> spline_free_next;
+	uint32_t live_splines = 0;
 
 	HashMap<RID, MeshInfo> meshes;
 	HashMap<RID, uint32_t> mesh_indices;

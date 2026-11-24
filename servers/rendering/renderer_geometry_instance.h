@@ -34,6 +34,7 @@
 #include "core/math/rect2.h"
 #include "core/math/transform_3d.h"
 #include "core/templates/rid.h"
+#include "servers/rendering/storage/spline_deform.h"
 #include "servers/rendering/storage/utilities.h"
 
 // API definition for our RenderGeometryInstance class so we can expose this through GDExtension in the near future
@@ -84,6 +85,8 @@ public:
 	// GodotNext: nextgeo_vertex_offset (#164).
 	virtual void set_vertex_offset_disable_distance(float p_distance) {}
 	virtual void set_rt_evaluate_vertex_offset(bool p_enable) {}
+	// GodotNext: spline_meshes (#161, plan §21.4 contract N12).
+	virtual void set_spline_deform(bool p_active, const SplineDeformPose &p_pose, uint64_t p_generation) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -127,6 +130,11 @@ public:
 
 	// GodotNext: nextgeo_resolve (#80)
 	uint32_t nextgeo_record_index = UINT32_MAX;
+
+	// GodotNext: spline_meshes (#161).
+	bool spline_deform_active = false;
+	uint64_t spline_deform_generation = 0;
+	SplineDeformPose spline_deform;
 
 	struct Data {
 		//data used less often goes into regular heap
@@ -179,6 +187,8 @@ public:
 	// GodotNext: nextgeo_vertex_offset (#164).
 	virtual void set_vertex_offset_disable_distance(float p_distance) override;
 	virtual void set_rt_evaluate_vertex_offset(bool p_enable) override;
+	// GodotNext: spline_meshes (#161).
+	virtual void set_spline_deform(bool p_active, const SplineDeformPose &p_pose, uint64_t p_generation) override;
 
 	virtual void reset_motion_vectors() override;
 

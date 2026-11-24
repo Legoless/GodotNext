@@ -131,6 +131,8 @@ public:
 	// GodotNext: nextgeo_vertex_offset (#164).
 	virtual void instance_geometry_set_vertex_offset_disable_distance(RID p_instance, float p_distance) = 0;
 	virtual void instance_geometry_set_rt_evaluate_vertex_offset(RID p_instance, bool p_enable) = 0;
+	// GodotNext: spline_meshes (#161).
+	virtual void instance_geometry_set_spline_deform(RID p_instance, const Dictionary &p_params) = 0;
 	virtual void instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value) = 0;
 	virtual void instance_geometry_get_shader_parameter_list(RID p_instance, List<PropertyInfo> *p_parameters) const = 0;
 	virtual Variant instance_geometry_get_shader_parameter(RID p_instance, const StringName &p_parameter) const = 0;

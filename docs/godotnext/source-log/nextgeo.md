@@ -172,6 +172,17 @@ built directly on GodotNext's #155 programmable raster bins, #153 masked/two-sid
 #154 mesh-shader HW raster, #212/#217 VSM x Nanite, #80/#158 visibility resolve, and #45/#52 NextGI
 RT scene. Copied files: none.
 
+## Spline meshes (#161)
+
+No outside input. `SplineMeshInstance3D` (`scene/3d/spline_mesh_instance_3d.{h,cpp}`), the
+`RenderingServer.instance_geometry_set_spline_deform()` API, the shared cubic Hermite frame and
+16-sample swept-AABB reference (`servers/rendering/storage/spline_deform.h` and
+`servers/rendering/renderer_rd/shaders/spline_deform_inc.glsl`), the zero-variant legacy Forward+
+SSBO path, NextGeo cull/SW/HW-VS/HW-mesh/resolve integration (`RASTER_FEATURE_SPLINE`), VSM shadow
+integration (Nanite and non-Nanite), and per-instance deformed NextGI RT proxy BLAS rebuilds were
+implemented directly from GodotNext's plan (§21.4 contract N12, GN-8, GN-12, N8) and standard
+cubic Hermite spline mathematics. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

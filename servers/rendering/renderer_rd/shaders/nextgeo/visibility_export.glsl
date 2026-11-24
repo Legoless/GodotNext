@@ -29,6 +29,7 @@ void main() {
 #endif
 
 // clang-format off
+#include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 // clang-format on
 
@@ -76,6 +77,29 @@ vis64;
 layout(set = 0, binding = 3, r64ui) uniform restrict readonly u64image2D vis64;
 #endif
 
+#ifdef WITH_VELOCITY
+// GodotNext: spline_meshes (#161). Triangle fetch + previous spline pose for exact spline velocity export.
+layout(set = 0, binding = 4, std430) buffer restrict readonly Meshes {
+	NextGeoMeshRecord data[];
+}
+meshes;
+
+layout(set = 0, binding = 5, std430) buffer restrict readonly ClusterTable {
+	uvec4 data[];
+}
+cluster_table;
+
+layout(set = 0, binding = 6, std430) buffer restrict readonly Pages {
+	uint data[];
+}
+pages;
+
+layout(set = 0, binding = 7, std430) buffer restrict readonly NextGeoSplines {
+	SplineDeformEntry data[];
+}
+spline_deforms;
+#endif
+
 void main() {
 	ivec2 pixel = ivec2(gl_FragCoord.xy);
 #ifdef VIS64_BUFFER
@@ -104,16 +128,78 @@ void main() {
 	NextGeoInstanceRecord record = instances.data[entry.x];
 	velocity_out = vec2(0.0);
 	if (raster.reset_velocity == 0u && abs(world_h.w) > 1e-20) {
-		vec3 world_pos = world_h.xyz / world_h.w;
-		// The instance transform's rows are record.transform; its inverse maps back to mesh space.
-		mat3 rows_as_columns = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
-		vec3 offset = world_pos - vec3(record.transform[0].w, record.transform[1].w, record.transform[2].w);
-		vec3 local_pos = offset * inverse(rows_as_columns);
-		vec3 prev_world_pos = vec3(
-				dot(record.prev_transform[0].xyz, local_pos) + record.prev_transform[0].w,
-				dot(record.prev_transform[1].xyz, local_pos) + record.prev_transform[1].w,
-				dot(record.prev_transform[2].xyz, local_pos) + record.prev_transform[2].w);
-		vec4 prev_clip = raster.prev_proj * (raster.prev_view * vec4(prev_world_pos, 1.0));
+		vec4 prev_clip = vec4(0.0);
+		if ((record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
+			// GodotNext: spline_meshes (#161). Reconstruct triangle barycentrics to deform with the previous spline pose.
+			NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+			uint tri_idx = vis_id & 0x7Fu;
+			if (mesh.page_count > 0u && entry.y >= mesh.cluster_offset) {
+				uint local_cluster = entry.y - mesh.cluster_offset;
+				if (local_cluster < mesh.cluster_count) {
+					uvec4 desc = cluster_table.data[mesh.page_table_offset + local_cluster];
+					uint stride = desc.z & 0xFFu;
+					uint vert_count = (desc.z >> 8u) & 0xFFu;
+					uint tri_count = (desc.z >> 16u) & 0xFFu;
+					if (tri_idx < tri_count && stride >= 3u && vert_count > 0u) {
+						uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
+						SplineDeformPose cur_pose = spline_deforms.data[spline_idx].current;
+						SplineDeformPose prev_pose = spline_deforms.data[spline_idx].previous;
+						vec4 cur_c[3];
+						vec4 prev_c[3];
+						bool valid = true;
+						for (uint c = 0u; c < 3u; c++) {
+							uint ib = desc.y + tri_idx * 3u + c;
+							uint vi = (pages.data[ib >> 2u] >> ((ib & 3u) * 8u)) & 0xFFu;
+							if (vi >= vert_count) {
+								valid = false;
+								break;
+							}
+							uint pw = desc.x + vi * stride;
+							vec3 raw_pos = vec3(
+									uintBitsToFloat(pages.data[pw + 0u]),
+									uintBitsToFloat(pages.data[pw + 1u]),
+									uintBitsToFloat(pages.data[pw + 2u]));
+							vec3 cur_lp = spline_deform_position(cur_pose, raw_pos);
+							vec3 prev_lp = spline_deform_position(prev_pose, raw_pos);
+							vec3 cur_wp = vec3(
+									dot(record.transform[0].xyz, cur_lp) + record.transform[0].w,
+									dot(record.transform[1].xyz, cur_lp) + record.transform[1].w,
+									dot(record.transform[2].xyz, cur_lp) + record.transform[2].w);
+							vec3 prev_wp = vec3(
+									dot(record.prev_transform[0].xyz, prev_lp) + record.prev_transform[0].w,
+									dot(record.prev_transform[1].xyz, prev_lp) + record.prev_transform[1].w,
+									dot(record.prev_transform[2].xyz, prev_lp) + record.prev_transform[2].w);
+							cur_c[c] = raster.proj * (raster.view * vec4(cur_wp, 1.0));
+							prev_c[c] = raster.prev_proj * (raster.prev_view * vec4(prev_wp, 1.0));
+						}
+						if (valid) {
+							mat3 m = mat3(cur_c[0].xyw, cur_c[1].xyw, cur_c[2].xyw);
+							vec3 u0 = cross(m[1], m[2]);
+							vec3 u1 = cross(m[2], m[0]);
+							vec3 u2 = cross(m[0], m[1]);
+							float det = dot(m[0], u0);
+							float inv_det = abs(det) > 1e-20 ? (1.0 / det) : 0.0;
+							vec3 p = vec3(ndc, 1.0);
+							vec3 q = vec3(dot(u0, p), dot(u1, p), dot(u2, p)) * inv_det;
+							float inv_w_sum = q.x + q.y + q.z;
+							vec3 bary = abs(inv_w_sum) > 1e-20 ? (q / inv_w_sum) : vec3(1.0, 0.0, 0.0);
+							prev_clip = prev_c[0] * bary.x + prev_c[1] * bary.y + prev_c[2] * bary.z;
+						}
+					}
+				}
+			}
+		} else {
+			vec3 world_pos = world_h.xyz / world_h.w;
+			// The instance transform's rows are record.transform; its inverse maps back to mesh space.
+			mat3 rows_as_columns = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
+			vec3 offset = world_pos - vec3(record.transform[0].w, record.transform[1].w, record.transform[2].w);
+			vec3 local_pos = offset * inverse(rows_as_columns);
+			vec3 prev_world_pos = vec3(
+					dot(record.prev_transform[0].xyz, local_pos) + record.prev_transform[0].w,
+					dot(record.prev_transform[1].xyz, local_pos) + record.prev_transform[1].w,
+					dot(record.prev_transform[2].xyz, local_pos) + record.prev_transform[2].w);
+			prev_clip = raster.prev_proj * (raster.prev_view * vec4(prev_world_pos, 1.0));
+		}
 		if (prev_clip.w > 1e-6) {
 			vec2 position_clip = ndc - raster.taa_jitter;
 			vec2 prev_position_clip = (prev_clip.xy / prev_clip.w) - raster.prev_taa_jitter;

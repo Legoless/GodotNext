@@ -60,6 +60,8 @@
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
+// GodotNext: spline_meshes (#161)
+#include "servers/rendering/storage/spline_deform.h"
 
 namespace RendererRD {
 
@@ -1002,6 +1004,303 @@ RID NextGIRTScene::_get_vertex_offset_pipeline(RID p_shader) {
 	return pipeline;
 }
 
+// GodotNext: spline_meshes (#161). Deform RT proxy (or legacy mesh) vertices on CPU and rebuild BLAS on param change.
+bool NextGIRTScene::_spline_entry_alive(const SplineEntry &p_entry) const {
+	if (p_entry.parts.is_empty()) {
+		return false;
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr) {
+		return false;
+	}
+	for (const SplinePart &part : p_entry.parts) {
+		if (!part.blas.is_valid() || !part.chunk_buffer.is_valid() || !part.allocation.is_valid()) {
+			return false;
+		}
+		if (part.allocation.chunk >= mesh_storage->mesh_nextgi_rt_get_chunk_count() || mesh_storage->mesh_nextgi_rt_get_chunk_buffer(part.allocation.chunk) != part.chunk_buffer) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void NextGIRTScene::_free_spline_entry(SplineEntry &p_entry) {
+	RenderingDevice *rd = RD::get_singleton();
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	for (const SplinePart &part : p_entry.parts) {
+		if (rd != nullptr && part.blas.is_valid() && part.chunk_buffer.is_valid() && mesh_storage != nullptr && part.allocation.is_valid() &&
+				part.allocation.chunk < mesh_storage->mesh_nextgi_rt_get_chunk_count() && mesh_storage->mesh_nextgi_rt_get_chunk_buffer(part.allocation.chunk) == part.chunk_buffer) {
+			rd->free_rid(part.blas);
+		}
+		if (mesh_storage != nullptr && part.allocation.is_valid()) {
+			mesh_storage->mesh_nextgi_rt_arena_free(part.allocation);
+		}
+	}
+	p_entry.parts.clear();
+}
+
+bool NextGIRTScene::_rebuild_spline_entry(SplineEntry &r_entry, RID p_mesh, const RenderGeometryInstanceBase *p_instance, uint32_t &r_built_blas, uint32_t &r_built_triangles) {
+	_free_spline_entry(r_entry);
+	r_entry.mesh = p_mesh;
+	r_entry.spline_generation = p_instance->spline_deform_generation;
+
+	RenderingDevice *rd = RD::get_singleton();
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (rd == nullptr || mesh_storage == nullptr || !p_mesh.is_valid()) {
+		return false;
+	}
+
+	const SplineDeformPose &pose = p_instance->spline_deform;
+	const uint32_t surface_count = mesh_storage->mesh_get_surface_count(p_mesh);
+	if (surface_count == 0u) {
+		return false;
+	}
+
+	auto align16 = [](uint32_t p_v) -> uint32_t {
+		return (p_v + (NEXTGI_RT_ALIGNMENT - 1u)) & ~(NEXTGI_RT_ALIGNMENT - 1u);
+	};
+
+	auto build_part_from_payload = [&](const LocalVector<uint8_t> &p_payload, uint32_t p_triangle_count, LocalVector<NextGIRTPartGeometry> &p_geoms) -> bool {
+		if (p_payload.is_empty() || p_geoms.is_empty() || p_triangle_count == 0u) {
+			return false;
+		}
+		const NextGIArenaAllocator::Allocation alloc = mesh_storage->mesh_nextgi_rt_arena_allocate(p_payload.size());
+		if (!alloc.is_valid()) {
+			return false;
+		}
+		const RID chunk_buffer = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(alloc.chunk);
+		if (chunk_buffer.is_null()) {
+			mesh_storage->mesh_nextgi_rt_arena_free(alloc);
+			return false;
+		}
+		rd->buffer_update(chunk_buffer, alloc.offset, p_payload.size(), p_payload.ptr());
+
+		LocalVector<RD::AccelerationStructureGeometry> rd_geoms;
+		rd_geoms.resize(p_geoms.size());
+		for (uint32_t i = 0; i < p_geoms.size(); i++) {
+			p_geoms[i].vertex_offset += alloc.offset;
+			p_geoms[i].index_offset += alloc.offset;
+			if (p_geoms[i].has_stage2_cards) {
+				p_geoms[i].group_offset += alloc.offset;
+			}
+			RD::AccelerationStructureGeometry &g = rd_geoms[i];
+			g.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
+			g.vertex_buffer = chunk_buffer;
+			g.vertex_offset = p_geoms[i].vertex_offset;
+			g.vertex_stride = sizeof(float) * 3u;
+			g.vertex_count = p_geoms[i].vertex_count;
+			g.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+			g.index_buffer = chunk_buffer;
+			g.index_offset = p_geoms[i].index_offset;
+			g.index_count = p_geoms[i].triangle_count * 3u;
+			g.index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+		}
+
+		const BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT;
+		const RID blas = rd->blas_create(Span<RD::AccelerationStructureGeometry>(rd_geoms.ptr(), rd_geoms.size()), flags);
+		if (!blas.is_valid()) {
+			mesh_storage->mesh_nextgi_rt_arena_free(alloc);
+			return false;
+		}
+		rd->blas_build(blas);
+		r_built_blas++;
+		r_built_triangles += p_triangle_count;
+
+		SplinePart part;
+		part.blas = blas;
+		part.chunk_buffer = chunk_buffer;
+		part.allocation = alloc;
+		part.triangle_count = p_triangle_count;
+		part.geometries = p_geoms;
+		r_entry.parts.push_back(part);
+		return true;
+	};
+
+	const RenderingServerTypes::VirtualGeometryDesc *vgd = RSG::virtual_mesh_storage != nullptr ? RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh) : nullptr;
+	const bool has_vgd_proxy = vgd != nullptr && !vgd->rt_proxy_positions.is_empty() && !vgd->rt_proxy_indices.is_empty() && (vgd->rt_proxy_parts.size() >= 4) && ((vgd->rt_proxy_parts.size() % 4) == 0);
+	uint32_t covered_surfaces_mask = 0u;
+
+	if (has_vgd_proxy) {
+		const uint32_t part_count = uint32_t(vgd->rt_proxy_parts.size()) / 4u;
+		const uint32_t total_proxy_vertices = uint32_t(vgd->rt_proxy_positions.size()) / 3u;
+		const uint32_t total_proxy_indices = uint32_t(vgd->rt_proxy_indices.size()) / 4u;
+		const uint32_t vgd_surface_count = part_count > 0u ? (uint32_t(vgd->rt_proxy_surface_ranges.size()) / (2u * part_count)) : 0u;
+		const uint32_t map_surfaces = MIN(vgd_surface_count, surface_count);
+		const bool has_cards = !vgd->card_descriptors.is_empty();
+		const bool has_group_table = vgd->rt_proxy_triangle_groups.size() >= int64_t((total_proxy_indices / 3u) * sizeof(uint16_t));
+		const float proxy_eps = vgd->rt_proxy_eps * MAX(pose.up_max_stretch[3], 1.0f);
+
+		for (uint32_t p = 0; p < part_count; p++) {
+			const int32_t raw_v_off = vgd->rt_proxy_parts[p * 4 + 0];
+			const int32_t raw_v_cnt = vgd->rt_proxy_parts[p * 4 + 1];
+			const int32_t raw_i_off = vgd->rt_proxy_parts[p * 4 + 2];
+			const int32_t raw_i_cnt = vgd->rt_proxy_parts[p * 4 + 3];
+			if (raw_v_off < 0 || raw_v_cnt <= 0 || raw_i_off < 0 || raw_i_cnt <= 0) {
+				continue;
+			}
+			const uint32_t v_off = uint32_t(raw_v_off);
+			const uint32_t v_cnt = uint32_t(raw_v_cnt);
+			const uint32_t i_off = uint32_t(raw_i_off);
+			const uint32_t i_cnt = uint32_t(raw_i_cnt);
+			if (uint64_t(v_off) + v_cnt > total_proxy_vertices || uint64_t(i_off) + i_cnt > total_proxy_indices || (i_cnt % 3u) != 0u) {
+				continue;
+			}
+
+			struct ProxyRange {
+				uint32_t surface = 0;
+				uint32_t first_triangle = 0;
+				uint32_t triangle_count = 0;
+				uint32_t group_rel = 0;
+			};
+			LocalVector<ProxyRange> ranges;
+			uint32_t part_tris = 0u;
+			for (uint32_t s = 0; s < map_surfaces; s++) {
+				const RID mat = mesh_storage->mesh_surface_get_material(p_mesh, s);
+				if (nextgi_rt_material_is_alpha(mat)) {
+					continue;
+				}
+				const int32_t raw_first = vgd->rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 0];
+				const int32_t raw_cnt = vgd->rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 1];
+				if (raw_first < 0 || raw_cnt <= 0) {
+					continue;
+				}
+				const uint32_t first_idx = uint32_t(raw_first);
+				const uint32_t idx_cnt = uint32_t(raw_cnt);
+				if (uint64_t(first_idx) + idx_cnt > i_cnt || (first_idx % 3u) != 0u || (idx_cnt % 3u) != 0u) {
+					continue;
+				}
+				ProxyRange range;
+				range.surface = s;
+				range.first_triangle = first_idx / 3u;
+				range.triangle_count = idx_cnt / 3u;
+				ranges.push_back(range);
+				part_tris += range.triangle_count;
+				if (s < 32u) {
+					covered_surfaces_mask |= (1u << s);
+				}
+			}
+			if (ranges.is_empty() || part_tris == 0u || part_tris > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+				continue;
+			}
+
+			uint32_t cursor = 0u;
+			const uint32_t pos_rel = 0u;
+			cursor = align16(v_cnt * sizeof(float) * 3u);
+			const uint32_t idx_rel = cursor;
+			cursor = align16(idx_rel + i_cnt * sizeof(uint32_t));
+			if (has_cards && has_group_table) {
+				for (ProxyRange &range : ranges) {
+					range.group_rel = cursor;
+					cursor = align16(cursor + range.triangle_count * sizeof(uint16_t));
+				}
+			}
+
+			LocalVector<uint8_t> payload;
+			payload.resize(cursor);
+			memset(payload.ptr(), 0, cursor);
+			float *dst_pos = reinterpret_cast<float *>(payload.ptr() + pos_rel);
+			const float *src_pos = vgd->rt_proxy_positions.ptr() + uint64_t(v_off) * 3u;
+			for (uint32_t v = 0; v < v_cnt; v++) {
+				const Vector3 deformed = spline_deform_position(pose, Vector3(src_pos[v * 3 + 0], src_pos[v * 3 + 1], src_pos[v * 3 + 2]));
+				dst_pos[v * 3 + 0] = float(deformed.x);
+				dst_pos[v * 3 + 1] = float(deformed.y);
+				dst_pos[v * 3 + 2] = float(deformed.z);
+			}
+			memcpy(payload.ptr() + idx_rel, vgd->rt_proxy_indices.ptr() + uint64_t(i_off) * 4u, uint64_t(i_cnt) * sizeof(uint32_t));
+
+			LocalVector<NextGIRTPartGeometry> geoms;
+			const uint32_t part_first_tri_global = i_off / 3u;
+			for (const ProxyRange &range : ranges) {
+				if (has_cards && has_group_table) {
+					memcpy(payload.ptr() + range.group_rel, vgd->rt_proxy_triangle_groups.ptr() + uint64_t(part_first_tri_global + range.first_triangle) * sizeof(uint16_t), uint64_t(range.triangle_count) * sizeof(uint16_t));
+				}
+				NextGIRTPartGeometry g;
+				g.surface = range.surface;
+				g.first_triangle = 0u;
+				g.triangle_count = range.triangle_count;
+				g.is_proxy_surface = true;
+				g.has_stage2_cards = has_cards && has_group_table;
+				g.vertex_offset = pos_rel;
+				g.vertex_count = v_cnt;
+				g.index_offset = idx_rel + range.first_triangle * 3u * sizeof(uint32_t);
+				g.group_offset = g.has_stage2_cards ? range.group_rel : 0u;
+				g.eps = proxy_eps;
+				geoms.push_back(g);
+			}
+			build_part_from_payload(payload, part_tris, geoms);
+		}
+	}
+
+	// Legacy meshes (or outside-mask surfaces of hybrid virtual meshes).
+	for (uint32_t s = 0; s < surface_count; s++) {
+		if (has_vgd_proxy && s < 32u && (covered_surfaces_mask & (1u << s)) != 0u) {
+			continue;
+		}
+		const RID mat = mesh_storage->mesh_surface_get_material(p_mesh, s);
+		if (nextgi_rt_material_is_alpha(mat)) {
+			continue;
+		}
+		Vector<float> positions;
+		Vector<uint32_t> indices;
+		if (!mesh_storage->mesh_nextgi_get_cpu_geometry(p_mesh, s, positions, indices)) {
+			continue;
+		}
+		const uint32_t v_cnt = uint32_t(positions.size()) / 3u;
+		const uint32_t total_tris = uint32_t(indices.size()) / 3u;
+		if (v_cnt == 0u || total_tris == 0u) {
+			continue;
+		}
+		MeshStorage::NextGIRTSurfaceInfo surf_info;
+		float surf_eps = 0.01f;
+		if (mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, s, surf_info)) {
+			surf_eps = surf_info.eps;
+		}
+		surf_eps *= MAX(pose.up_max_stretch[3], 1.0f);
+
+		Vector<float> deformed_positions;
+		deformed_positions.resize(positions.size());
+		float *dst_p = deformed_positions.ptrw();
+		const float *src_p = positions.ptr();
+		for (uint32_t v = 0; v < v_cnt; v++) {
+			const Vector3 deformed = spline_deform_position(pose, Vector3(src_p[v * 3 + 0], src_p[v * 3 + 1], src_p[v * 3 + 2]));
+			dst_p[v * 3 + 0] = float(deformed.x);
+			dst_p[v * 3 + 1] = float(deformed.y);
+			dst_p[v * 3 + 2] = float(deformed.z);
+		}
+
+		uint32_t tri_offset = 0u;
+		while (tri_offset < total_tris) {
+			const uint32_t take_tris = MIN(total_tris - tri_offset, uint32_t(NEXTGI_RT_MAX_TRIANGLES_PER_BLAS));
+			const uint32_t pos_rel = 0u;
+			const uint32_t idx_rel = align16(v_cnt * sizeof(float) * 3u);
+			const uint32_t total_bytes = align16(idx_rel + take_tris * 3u * sizeof(uint32_t));
+			LocalVector<uint8_t> payload;
+			payload.resize(total_bytes);
+			memset(payload.ptr(), 0, total_bytes);
+			memcpy(payload.ptr() + pos_rel, deformed_positions.ptr(), uint64_t(v_cnt) * sizeof(float) * 3u);
+			memcpy(payload.ptr() + idx_rel, indices.ptr() + uint64_t(tri_offset) * 3u, uint64_t(take_tris) * 3u * sizeof(uint32_t));
+
+			LocalVector<NextGIRTPartGeometry> geoms;
+			NextGIRTPartGeometry g;
+			g.surface = s;
+			g.first_triangle = 0u;
+			g.triangle_count = take_tris;
+			g.is_proxy_surface = true;
+			g.has_stage2_cards = false;
+			g.vertex_offset = pos_rel;
+			g.vertex_count = v_cnt;
+			g.index_offset = idx_rel;
+			g.group_offset = 0u;
+			g.eps = surf_eps;
+			geoms.push_back(g);
+			build_part_from_payload(payload, take_tris, geoms);
+			tri_offset += take_tris;
+		}
+	}
+
+	return !r_entry.parts.is_empty();
+}
+
 void NextGIRTScene::free_far_field() {
 	if (far_field != nullptr) {
 		far_field->free();
@@ -1065,6 +1364,11 @@ void NextGIRTScene::free() {
 		RD::get_singleton()->free_rid(vertex_offset_dummy_instance_buffer);
 		vertex_offset_dummy_instance_buffer = RID();
 	}
+	// GodotNext: spline_meshes (#161).
+	for (KeyValue<uint64_t, SplineEntry> &entry : spline_entries) {
+		_free_spline_entry(entry.value);
+	}
+	spline_entries.clear();
 	if (sdf_stream != nullptr) {
 		sdf_stream->free_resources();
 		memdelete(sdf_stream);
@@ -2374,6 +2678,130 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			continue;
 		}
 
+		// GodotNext: spline_meshes (#161). Per-instance deformed RT proxy BLAS, rebuilt whenever spline params change.
+		if (geometry_instance->spline_deform_active) {
+			const uint64_t spline_key = (uint64_t(uintptr_t(geometry_instance)) << 8u) ^ uint64_t(fed.element_index);
+			SplineEntry *entry = spline_entries.getptr(spline_key);
+			if (entry == nullptr) {
+				SplineEntry created;
+				spline_entries.insert(spline_key, created);
+				entry = spline_entries.getptr(spline_key);
+			}
+			if (entry->mesh != mesh || entry->spline_generation != geometry_instance->spline_deform_generation || !_spline_entry_alive(*entry)) {
+				_rebuild_spline_entry(*entry, mesh, geometry_instance, stats.blas_build_count, stats.blas_build_triangles);
+			}
+			entry->last_frame = frame;
+
+			const Transform3D transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+			const Vector3 scale = transform.basis.get_scale_abs();
+			const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
+			const bool has_vgd_cards = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh) != nullptr && !RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh)->card_descriptors.is_empty();
+			bool entered_tlas = false;
+			uint32_t first_rt_fields[6] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, 0u, UINT32_MAX, UINT32_MAX };
+
+			for (const SplinePart &part : entry->parts) {
+				if (!part.blas.is_valid() || part.geometries.is_empty()) {
+					continue;
+				}
+				if (instance_records.size() >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
+					break;
+				}
+				const uint32_t record_index = instance_records.size();
+				NextGIInstanceRecord record;
+				for (int row = 0; row < 3; row++) {
+					record.object_to_world[row * 4 + 0] = transform.basis.rows[row][0];
+					record.object_to_world[row * 4 + 1] = transform.basis.rows[row][1];
+					record.object_to_world[row * 4 + 2] = transform.basis.rows[row][2];
+				}
+				record.object_to_world[3] = transform.origin.x;
+				record.object_to_world[7] = transform.origin.y;
+				record.object_to_world[11] = transform.origin.z;
+				record.surface_base = surface_records.size();
+				record.surface_count = part.geometries.size();
+				record.rt_flags = NEXTGI_RT_FLAG_STATIC | (fed.lightmapped ? uint32_t(NEXTGI_RT_FLAG_LIGHTMAPPED) : 0);
+				record.tlas_index = record_index;
+				record.arena_chunk = part.allocation.chunk;
+				record.card_set = NextGISRC::get_instance_card_set(geometry_instance);
+				if (record.card_set == UINT32_MAX) {
+					record.card_set = NextGISRC::get_mesh_card_set(mesh);
+				}
+
+				float eps_rt = 0.0f;
+				uint32_t first_vertex_offset = 0u;
+				bool have_first_vertex_offset = false;
+				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+					NextGISurfaceRecord surface_record;
+					eps_rt = MAX(eps_rt, part_geometry.eps);
+					surface_record.vertex_offset = part_geometry.vertex_offset;
+					surface_record.index_offset = part_geometry.index_offset;
+					surface_record.triangle_count = part_geometry.triangle_count;
+					if (part_geometry.has_stage2_cards) {
+						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | part_geometry.group_offset;
+					} else if (has_vgd_cards) {
+						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
+					} else {
+						surface_record.flags = 0u;
+					}
+					if (!have_first_vertex_offset) {
+						first_vertex_offset = surface_record.vertex_offset;
+						have_first_vertex_offset = true;
+					}
+					surface_records.push_back(surface_record);
+					if (surface_sources_wanted) {
+						surface_sources.push_back({ geometry_instance, mesh, part_geometry.surface });
+					}
+					if (hit_records) {
+						hit_materials->add_fallback_surfaces(1);
+					}
+				}
+				record.origin_offset = nextgi_rt_origin_offset(eps_rt, max_scale);
+				_queue_pages(geometry_instance, record, fed.element_index);
+				instance_records.push_back(record);
+
+				RD::AccelerationStructureInstance tlas_instance;
+				tlas_instance.transform = transform;
+				tlas_instance.id = record_index;
+				const uint32_t shadow_alpha_base = _push_shadow_part(geometry_instance, mesh, part.geometries, fed.shadow_layers);
+				tlas_instance.mask = nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
+				stats.shadow_unallocated_instances += (tlas_instance.mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
+				if (shadow_alpha_base != UINT32_MAX) {
+					shadow_alpha_bits |= tlas_instance.mask;
+					stats.shadow_alpha_instances++;
+				}
+				if (shadow_check_sources_enabled) {
+					_push_shadow_check_source(geometry_instance, mesh, part.geometries, transform, fed.shadow_layers);
+				}
+				tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record_index, record.card_set, fed.element_index == UINT32_MAX) : 0;
+				tlas_instance.flags = shadow_alpha_base != UINT32_MAX ? RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT : RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+				tlas_instance.blas = part.blas;
+				_check_shadow_word(tlas_instance.id + 1);
+				tlas_instances.push_back(tlas_instance);
+
+				if (geometry_instance->nextgi_record_index == UINT32_MAX) {
+					geometry_instance->nextgi_record_index = record_index;
+				}
+				if (!entered_tlas) {
+					first_rt_fields[0] = record_index;
+					first_rt_fields[1] = uint32_t(part.blas.get_local_index());
+					first_rt_fields[2] = record.arena_chunk;
+					first_rt_fields[3] = first_vertex_offset;
+					first_rt_fields[4] = record.page_table;
+					first_rt_fields[5] = record.card_set;
+				}
+				entered_tlas = true;
+			}
+			if (geometry_instance->nextgeo_record_index != UINT32_MAX && RSG::virtual_mesh_storage != nullptr && fed.element_index == 0) {
+				RSG::virtual_mesh_storage->instance_record_set_rt(geometry_instance->nextgeo_record_index, first_rt_fields);
+				RSG::virtual_mesh_storage->instance_record_set_rt_flags(geometry_instance->nextgeo_record_index, entered_tlas ? RendererVirtualMeshStorage::RECORD_RT_STATIC : 0u);
+			}
+			if (entered_tlas) {
+				stats.coverage.numerator++;
+			} else {
+				stats.coverage.blas_pending++;
+			}
+			continue;
+		}
+
 		// A dirty mesh is built in this frame's later "AS builds" phase and enters the
 		// TLAS next frame; its parts are skipped here (nextgi_rt_part_enters_tlas).
 		bool blas_dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
@@ -2767,7 +3195,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		bool native_parts = using_wpo_parts;
 		float native_eps = 0.0f;
 		if (!using_wpo_parts && native != nullptr && !parts->is_empty() && (*parts)[0].is_proxy) {
-			const NextGeoRTNativeExclusion exclusion = nextgeo_rt_native_exclusion(geometry_instance->mesh_instance.is_valid(), _nextgeo_rt_native_vertex_offset(geometry_instance, mesh), _nextgeo_rt_native_legacy_surfaces(mesh, *parts));
+			const NextGeoRTNativeExclusion exclusion = nextgeo_rt_native_exclusion(geometry_instance->mesh_instance.is_valid(), _nextgeo_rt_native_vertex_offset(geometry_instance, mesh), _nextgeo_rt_native_legacy_surfaces(mesh, *parts), geometry_instance->spline_deform_active);
 			const uint64_t instance_key = (uint64_t(uintptr_t(geometry_instance)) << 8u) ^ uint64_t(fed.element_index);
 			const LocalVector<MeshStorage::NextGIRTPart> *selected = native->select(mesh, instance_key, transform.xform(mesh_storage->mesh_get_aabb(mesh)), transform, camera_origin, exclusion, native_eps);
 			if (selected != nullptr) {
@@ -3384,6 +3812,22 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				_free_vertex_offset_part(*wpart);
 			}
 			vertex_offset_parts.erase(key);
+		}
+	}
+	// GodotNext: spline_meshes (#161). Free deformed spline BLASes absent past the drop-out window.
+	{
+		LocalVector<uint64_t> stale_splines;
+		for (const KeyValue<uint64_t, SplineEntry> &entry : spline_entries) {
+			if (entry.value.last_frame + NEXTGI_RT_ABSENT_FRAMES < frame) {
+				stale_splines.push_back(entry.key);
+			}
+		}
+		for (uint64_t key : stale_splines) {
+			SplineEntry *entry = spline_entries.getptr(key);
+			if (entry != nullptr) {
+				_free_spline_entry(*entry);
+			}
+			spline_entries.erase(key);
 		}
 	}
 

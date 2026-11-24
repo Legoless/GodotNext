@@ -46,6 +46,7 @@
 #include "servers/rendering/rendering_method.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server_types.h"
+#include "servers/rendering/storage/spline_deform.h"
 #include "servers/rendering/storage/utilities.h"
 
 class RenderingLightCuller;
@@ -500,6 +501,10 @@ public:
 		float vertex_offset_bound = 0.0f;
 		float vertex_offset_disable_distance = 0.0f;
 		bool rt_evaluate_vertex_offset = false;
+		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Per-instance cubic Hermite spline deformation.
+		bool spline_deform_active = false;
+		uint64_t spline_deform_generation = 0;
+		SplineDeformPose spline_deform;
 
 		Transform3D transform;
 		bool teleported = false;
@@ -1228,6 +1233,8 @@ public:
 	// GodotNext: nextgeo_vertex_offset (#164).
 	virtual void instance_geometry_set_vertex_offset_disable_distance(RID p_instance, float p_distance);
 	virtual void instance_geometry_set_rt_evaluate_vertex_offset(RID p_instance, bool p_enable);
+	// GodotNext: spline_meshes (#161).
+	virtual void instance_geometry_set_spline_deform(RID p_instance, const Dictionary &p_params);
 
 	virtual void instance_geometry_set_shader_parameter(RID p_instance, const StringName &p_parameter, const Variant &p_value);
 	virtual void instance_geometry_get_shader_parameter_list(RID p_instance, List<PropertyInfo> *p_parameters) const;

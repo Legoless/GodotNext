@@ -44,6 +44,7 @@
 
 class RenderDataRD;
 class RenderGeometryInstance;
+class RenderGeometryInstanceBase;
 class NextGISDFStream;
 class NextGIFarField;
 
@@ -620,6 +621,24 @@ private:
 	bool _vertex_offset_part_blas_alive(const VertexOffsetPart &p_part) const;
 	void _free_vertex_offset_part(VertexOffsetPart &p_part);
 	RID _get_vertex_offset_pipeline(RID p_shader);
+	// GodotNext: spline_meshes (#161). Per-instance deformed RT proxy BLASes, rebuilt when spline params change.
+	struct SplinePart {
+		RID blas;
+		RID chunk_buffer;
+		NextGIArenaAllocator::Allocation allocation;
+		uint32_t triangle_count = 0;
+		LocalVector<NextGIRTPartGeometry> geometries;
+	};
+	struct SplineEntry {
+		RID mesh;
+		uint64_t spline_generation = 0;
+		uint64_t last_frame = 0;
+		LocalVector<SplinePart> parts;
+	};
+	HashMap<uint64_t, SplineEntry> spline_entries;
+	bool _spline_entry_alive(const SplineEntry &p_entry) const;
+	void _free_spline_entry(SplineEntry &p_entry);
+	bool _rebuild_spline_entry(SplineEntry &r_entry, RID p_mesh, const RenderGeometryInstanceBase *p_instance, uint32_t &r_built_blas, uint32_t &r_built_triangles);
 	LocalVector<PendingCompact> pending_compactions;
 	HashMap<RID, uint64_t> mesh_last_tlas_frame;
 	bool as_memory_exceeded = false;

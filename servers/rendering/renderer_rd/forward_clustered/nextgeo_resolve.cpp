@@ -413,6 +413,7 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	const RID bucket_buf = bucket_table_buffer.is_valid() ? bucket_table_buffer : dummy_buffer;
 	const RID tiles_buf = tile_list_buffer.is_valid() ? tile_list_buffer : dummy_buffer;
 	const RID inst_buf = instance_data_buffer.is_valid() ? instance_data_buffer : dummy_buffer;
+	const RID spline_buf = p_storage->get_spline_buffer().is_valid() ? p_storage->get_spline_buffer() : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, vis_tex));
@@ -424,6 +425,7 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tiles_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, inst_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, spline_buf));
 
 	return uniform_set_cache->get_cache_vec(p_shader_rid, RenderForwardClustered::TRANSFORMS_UNIFORM_SET, uniforms);
 }
@@ -589,6 +591,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_buffer;
 	const RID bucket_buf = bucket_table_buffer.is_valid() ? bucket_table_buffer : dummy_buffer;
 	const RID inst_buf = instance_data_buffer.is_valid() ? instance_data_buffer : dummy_buffer;
+	const RID spline_buf = p_storage->get_spline_buffer().is_valid() ? p_storage->get_spline_buffer() : dummy_buffer;
 
 	// The resolve set of the tile quads, with the pixel list at binding 7, the bin state and the images.
 	LocalVector<RD::Uniform> resolve_uniforms;
@@ -607,6 +610,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 			resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, COMPUTE_IMAGE_BINDING_BASE + i, p_compute.images[i]));
 		}
 	}
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, spline_buf));
 
 	for (uint32_t i = 0; i < buckets.size(); i++) {
 		const MaterialBucket &bucket = buckets[i];
