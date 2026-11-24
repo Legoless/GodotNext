@@ -57,6 +57,8 @@ struct Light {
 	RSE::LightBakeMode bake_mode = RSE::LIGHT_BAKE_DYNAMIC;
 	// GodotNext: vsm_settings_debug (#221). Stored only: Compatibility keeps the shadow atlas.
 	RSE::LightShadowMethod shadow_method = RSE::LIGHT_SHADOW_METHOD_PROJECT;
+	// GodotNext: megalights_visibility (#146). Stored only in Compatibility renderer.
+	RSE::LightMegaLightsShadowMethod megalights_shadow_method = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
 	uint32_t max_sdfgi_cascade = 2;
 	uint32_t cull_mask = 0xFFFFFFFF;
 	uint32_t shadow_caster_mask = 0xFFFFFFFF;
@@ -352,6 +354,9 @@ public:
 	// GodotNext: vsm_settings_debug (#221).
 	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) override;
 	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const override;
+	// GodotNext: megalights_visibility (#146).
+	virtual void light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) override;
+	virtual RSE::LightMegaLightsShadowMethod light_get_megalights_shadow_method(RID p_light) const override;
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) override {}
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) override {}
 	virtual bool light_get_allow_contact_shadows(RID p_light) const override { return false; }

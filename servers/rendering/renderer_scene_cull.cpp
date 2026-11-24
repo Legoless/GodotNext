@@ -39,11 +39,13 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
-// GodotNext: light_grid (#139).
+// GodotNext: light_grid (#139) / megalights_visibility (#146).
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -4703,6 +4705,35 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
+		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4). When MegaLights is active for this
+		// view and any shadow-casting light requests megalights_shadow_method == VIRTUAL, activate VSM on demand
+		// (keeping zero allocations when MegaLights is off).
+		const bool ml_view_active = p_reflection_probe.is_null() && (RendererRD::MegaLightsInputs::is_requested() || RendererRD::MegaLights::has_pending_check());
+		if (ml_view_active && !scene_render->is_vsm_active() && RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+			bool ml_wants_vsm = false;
+			for (Instance *dir_ins : scenario->directional_lights) {
+				if (!dir_ins->visible || !(dir_ins->layer_mask & p_visible_layers)) {
+					continue;
+				}
+				if (RSG::light_storage->light_has_shadow(dir_ins->base) &&
+						RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) != RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY &&
+						RSG::light_storage->light_get_megalights_shadow_method(dir_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL) {
+					ml_wants_vsm = true;
+					break;
+				}
+			}
+			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size() && !ml_wants_vsm; i++) {
+				Instance *pos_ins = scene_cull_result.lights[i];
+				if (RSG::light_storage->light_has_shadow(pos_ins->base) &&
+						RSG::light_storage->light_get_megalights_shadow_method(pos_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL) {
+					ml_wants_vsm = true;
+				}
+			}
+			if (ml_wants_vsm) {
+				RendererRD::VirtualShadowMapStorage::get_singleton()->request_activation();
+			}
+		}
+
 		// GodotNext: vsm_non_nanite (#218), vsm_caching (#212). Tick O(D) dynamic VSM casters,
 		// publish swept-bounds invalidations once per scenario frame, and collect per-light casters.
 		if (p_reflection_probe.is_null() && scene_render->is_vsm_active()) {
@@ -4760,10 +4791,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (dir_light == nullptr || !RSG::light_storage->light_has_shadow(dir_ins->base) || RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
 					continue;
 				}
-				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141). Only lights whose shadow method resolves to VIRTUAL
-				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL).
+				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose shadow method resolves to VIRTUAL
+				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
 				const RSE::LightShadowMethod dir_sm = RSG::light_storage->light_get_shadow_method(dir_ins->base);
-				const bool dir_vsm = RendererVirtualShadowMapStorage::light_uses_vsm(dir_sm) ||
+				const bool dir_ml_vsm = ml_view_active && RSG::light_storage->light_get_megalights_shadow_method(dir_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+				const bool dir_vsm = dir_ml_vsm || RendererVirtualShadowMapStorage::light_uses_vsm(dir_sm) ||
 						(scene_render->rt_light_in_overflow_fallback(dir_light->instance, p_render_buffers) &&
 								RendererVirtualShadowMapStorage::light_uses_vsm_fallback(dir_sm));
 				if (!dir_vsm) {
@@ -4886,10 +4918,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (pos_light == nullptr || !RSG::light_storage->light_has_shadow(pos_ins->base)) {
 					continue;
 				}
-				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141). Only lights whose shadow method resolves to VIRTUAL
-				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL).
+				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose shadow method resolves to VIRTUAL
+				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
 				const RSE::LightShadowMethod pos_sm = RSG::light_storage->light_get_shadow_method(pos_ins->base);
-				const bool pos_vsm = RendererVirtualShadowMapStorage::light_uses_vsm(pos_sm) ||
+				const bool pos_ml_vsm = ml_view_active && RSG::light_storage->light_get_megalights_shadow_method(pos_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+				const bool pos_vsm = pos_ml_vsm || RendererVirtualShadowMapStorage::light_uses_vsm(pos_sm) ||
 						(scene_render->rt_light_in_overflow_fallback(pos_light->instance, p_render_buffers) &&
 								RendererVirtualShadowMapStorage::light_uses_vsm_fallback(pos_sm));
 				if (!pos_vsm) {
@@ -5005,11 +5038,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.vsm_static_mode_invalidations = scenario->vsm_static_mode_invalidations;
 		}
 
-		// GodotNext: nextgi_rt_registry / rt_shadows (#141).
+		// GodotNext: nextgi_rt_registry / rt_shadows (#141) / megalights_visibility (#146).
 		// One selection per scenario per frame, within rt_scene_radius of the first view's camera.
 		// No frustum cull: an instance behind the camera and inside the radius stays in the TLAS.
 		sdfgi_update_data.nextgi_rt_instances = &scene_cull_result.nextgi_rt_instances;
 		const bool nextgi_env = p_environment.is_valid() && scene_render->environment_get_nextgi_enabled(p_environment);
+		const bool ml_view_active = p_reflection_probe.is_null() && (RendererRD::MegaLightsInputs::is_requested() || RendererRD::MegaLights::has_pending_check());
 		bool rt_shadows_need_tlas = false;
 		if (!nextgi_env && p_using_shadows && p_reflection_probe.is_null() && scene_render->rt_view_samples(p_render_buffers, false, p_camera_data->view_count)) {
 			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size() && !rt_shadows_need_tlas; i++) {
@@ -5034,7 +5068,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 			}
 		}
-		if (p_reflection_probe.is_null() && (nextgi_env || rt_shadows_need_tlas)) {
+		// GodotNext: megalights_visibility (#146). Standalone MegaLights views without NextGI also need the near-field TLAS.
+		const bool ml_need_tlas = !nextgi_env && ml_view_active && p_using_shadows && RendererVirtualShadowMapStorage::is_rt_available();
+		if (p_reflection_probe.is_null() && (nextgi_env || rt_shadows_need_tlas || ml_need_tlas)) {
 			const uint64_t frame = RSG::rasterizer->get_frame_number();
 			if (scenario->nextgi_rt_selection_frame != frame) {
 				scenario->nextgi_dirty_published = scenario->nextgi_dirty_writing;
@@ -5067,7 +5103,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 				for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
 					Instance *instance = E->self();
-					const bool standalone_shadow_caster = !nextgi_env && rt_shadows_need_tlas && instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF;
+					const bool standalone_shadow_caster = !nextgi_env && (rt_shadows_need_tlas || ml_need_tlas) && instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF;
 					if (!instance->visible || !(instance->baked_light || instance->dynamic_gi || standalone_shadow_caster)) {
 						continue;
 					}
@@ -5334,7 +5370,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				scenario->nextgi_rt_denominator = not_in_scene + instance_cap + dynamic_excluded + selected;
 			}
 			scene_cull_result.nextgi_far_sources.clear();
-			if (bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field"))) {
+			const bool far_field_enabled = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field")) ||
+					bool(GLOBAL_GET("rendering/megalights/far_field")) ||
+					RendererRD::MegaLights::check_wants_far_field();
+			if (far_field_enabled) {
 				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 				RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 				const float near_distance = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
@@ -5469,6 +5508,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					const float ldist = float(pos_ins->transform.origin.distance_to(camera_position)) + RSG::light_storage->light_get_param(pos_ins->base, RSE::LIGHT_PARAM_RANGE);
 					df_max_radius = MAX(df_max_radius, MAX(ldist, 200.0f));
 				}
+			}
+			// GodotNext: megalights_visibility (#146). Collect static SDF instances when MegaLights SWRT continuation is enabled.
+			const bool ml_swrt_needed = ml_view_active &&
+					(bool(GLOBAL_GET("rendering/megalights/swrt_continuation")) || RendererRD::MegaLights::check_wants_swrt());
+			if (ml_swrt_needed) {
+				df_max_radius = MAX(df_max_radius, 200.0f);
 			}
 			if (df_max_radius > 0.0f) {
 				const float collect_radius = CLAMP(df_max_radius, 200.0f, 3200.0f);

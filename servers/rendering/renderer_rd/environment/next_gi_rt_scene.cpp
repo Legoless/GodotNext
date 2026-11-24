@@ -41,6 +41,8 @@
 
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_geometry_instance.h"
+// GodotNext: megalights_visibility (#146)
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 // GodotNext: nextgi_hit_groups (#130)
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
@@ -48,6 +50,7 @@
 // GodotNext: nextgeo_rt_native (#156)
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_instances.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -1469,8 +1472,10 @@ void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_dat
 			add(feed->nextgi_static_light_instances[i], false);
 		}
 	}
-	// GodotNext: rt_shadows (#141). Also include standalone RT-shadowed view lights (regardless of bake mode)
-	// so they receive 6-bit dynamic TLAS caster masks and take the opaque fast path whenever possible.
+	// GodotNext: rt_shadows (#141) / megalights_visibility (#146). Also include standalone RT-shadowed and
+	// MegaLights ray-traced view lights (regardless of bake mode) so they receive 6-bit dynamic TLAS caster
+	// masks (opaque fast path + #130 material retrace).
+	const bool ml_alloc_active = MegaLightsInputs::is_requested() || MegaLights::has_pending_check();
 	if (p_render_data != nullptr && p_render_data->lights != nullptr && light_storage != nullptr && RendererVirtualShadowMapStorage::is_rt_available()) {
 		for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
 			const RID li = (*p_render_data->lights)[i];
@@ -1484,7 +1489,9 @@ void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_dat
 			if (light_storage->light_get_type(light) == RSE::LIGHT_DIRECTIONAL && light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
 				continue;
 			}
-			if (!RendererVirtualShadowMapStorage::light_uses_rt(light_storage->light_get_shadow_method(light))) {
+			const bool rt_light = RendererVirtualShadowMapStorage::light_uses_rt(light_storage->light_get_shadow_method(light));
+			const bool ml_rt_light = ml_alloc_active && light_storage->light_get_megalights_shadow_method(light) != RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+			if (!rt_light && !ml_rt_light) {
 				continue;
 			}
 			masks.push_back(light_storage->light_get_shadow_caster_mask(light));
@@ -2233,7 +2240,10 @@ bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_insta
 }
 
 void NextGIRTScene::_update_far_records(const ::RenderDataRD *p_render_data, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces) {
-	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field"))) {
+	const bool far_enabled = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field")) ||
+			bool(GLOBAL_GET("rendering/megalights/far_field")) ||
+			MegaLights::check_wants_far_field();
+	if (!far_enabled) {
 		if (far_field != nullptr) {
 			far_field->free();
 			memdelete(far_field);

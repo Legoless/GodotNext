@@ -2442,6 +2442,25 @@ Dictionary RenderingServer::megalights_get_check_result() {
 #endif
 }
 
+Dictionary RenderingServer::megalights_get_tier_info() {
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4, GM-8).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	return RendererRD::MegaLights::get_tier_info();
+#else
+	Dictionary info;
+	info["tier"] = String("UNAVAILABLE");
+	info["backend"] = String("none");
+	info["experimental"] = false;
+	info["experimental_label"] = String();
+	info["inline_ray_query_only"] = false;
+	info["swrt_extension"] = false;
+	info["far_field_enabled"] = false;
+	info["screen_traces_enabled"] = false;
+	info["reason"] = String("UNSUPPORTED_RENDERER");
+	return info;
+#endif
+}
+
 Dictionary RenderingServer::virtual_shadow_maps_get_tier_info() {
 	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). Valid on every renderer: without the Forward+
 	// storage the reason is UNSUPPORTED_RENDERER.
@@ -2836,6 +2855,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_bake_mode", "light", "bake_mode"), &RenderingServer::light_set_bake_mode);
 	// GodotNext: vsm_settings_debug (#221)
 	ClassDB::bind_method(D_METHOD("light_set_shadow_method", "light", "method"), &RenderingServer::light_set_shadow_method);
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	ClassDB::bind_method(D_METHOD("light_set_megalights_shadow_method", "light", "method"), &RenderingServer::light_set_megalights_shadow_method);
 	ClassDB::bind_method(D_METHOD("light_set_max_sdfgi_cascade", "light", "cascade"), &RenderingServer::light_set_max_sdfgi_cascade);
 	ClassDB::bind_method(D_METHOD("light_set_allow_contact_shadows", "light", "enable"), &RenderingServer::light_set_allow_contact_shadows);
 	// GodotNext: light_source_parity (#140, plan §21.3 contract M8).
@@ -2917,6 +2938,12 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_MAX);
+
+	// GodotNext: megalights_visibility (#146).
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_RAY_TRACED);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_OMNI_SHADOW_CUBE);
@@ -3227,6 +3254,8 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2).
 	ClassDB::bind_method(D_METHOD("megalights_request_check", "options"), &RenderingServer::megalights_request_check, DEFVAL(Dictionary()));
 	ClassDB::bind_method(D_METHOD("megalights_get_check_result"), &RenderingServer::megalights_get_check_result);
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4, GM-8).
+	ClassDB::bind_method(D_METHOD("megalights_get_tier_info"), &RenderingServer::megalights_get_tier_info);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);
@@ -4250,6 +4279,13 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/megalights/directional_lights", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/megalights/falloff_cull_threshold", PROPERTY_HINT_RANGE, "0.0,0.1,0.0001,or_greater"), 0.001);
 	GLOBAL_DEF("rendering/megalights/reference_mode", false);
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4, GM-1, GM-8, GM-12, budget M-4).
+	// Hi-Z screen trace toggle, distant screen-trace length for far pixels, optional far-field TLAS continuation
+	// (off by default), and non-RT SWRT global-SDF continuation extension (off by default where UE requires HWRT).
+	GLOBAL_DEF("rendering/megalights/screen_traces", true);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/megalights/distant_screen_traces_length", PROPERTY_HINT_RANGE, "0.0,100.0,0.1,or_greater,suffix:m"), 4.0);
+	GLOBAL_DEF("rendering/megalights/far_field", false);
+	GLOBAL_DEF("rendering/megalights/swrt_continuation", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);

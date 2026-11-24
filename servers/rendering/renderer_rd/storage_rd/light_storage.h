@@ -90,6 +90,8 @@ private:
 		bool allow_contact_shadows = true;
 		// GodotNext: vsm_settings_debug (#221).
 		RSE::LightShadowMethod shadow_method = RSE::LIGHT_SHADOW_METHOD_PROJECT;
+		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+		RSE::LightMegaLightsShadowMethod megalights_shadow_method = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
 		// GodotNext: light_source_parity (#140).
 		RID ies_profile;
 		bool ies_use_intensity = false;
@@ -296,6 +298,8 @@ private:
 	// GodotNext: megalights_sampling (#142). Shadow caster masks of the directional lights written
 	// by update_light_buffers() (0 when shadow is disabled), for ml_reference.glsl trace_shadow().
 	LocalVector<uint32_t> directional_light_caster_masks;
+	// GodotNext: megalights_visibility (#146). Per-light MegaLights shadow method for directional lights.
+	LocalVector<RSE::LightMegaLightsShadowMethod> directional_light_megalights_shadow_methods;
 	RID directional_light_buffer;
 
 	/* REFLECTION PROBE */
@@ -592,6 +596,9 @@ public:
 	// GodotNext: vsm_settings_debug (#221).
 	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) override;
 	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const override;
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	virtual void light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) override;
+	virtual RSE::LightMegaLightsShadowMethod light_get_megalights_shadow_method(RID p_light) const override;
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) override;
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) override;
 	virtual bool light_get_allow_contact_shadows(RID p_light) const override;
@@ -938,6 +945,13 @@ public:
 	// GodotNext: megalights_sampling (#142). Shadow caster masks (0 if shadows disabled) in view buffer order:
 	// omni [0..omni), spot [omni..omni+spot), area [omni+spot..omni+spot+area), directional [..+p_directional_count).
 	void get_view_light_shadow_caster_masks(uint32_t p_directional_count, LocalVector<uint32_t> &r_masks) const;
+	// GodotNext: megalights_visibility (#146). Per-light shadow policy in view buffer order.
+	struct MegaLightsLightPolicy {
+		uint32_t caster_mask = 0u;
+		RSE::LightMegaLightsShadowMethod shadow_method = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
+		bool vsm_sampleable = false;
+	};
+	void get_view_light_megalights_policies(uint32_t p_directional_count, LocalVector<MegaLightsLightPolicy> &r_policies) const;
 	RID get_omni_light_buffer() { return omni_light_buffer; }
 	RID get_spot_light_buffer() { return spot_light_buffer; }
 	RID get_area_light_buffer() { return area_light_buffer; }

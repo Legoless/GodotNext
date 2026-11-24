@@ -31,6 +31,8 @@
 #include "next_gi_far_field.h"
 
 #include "core/math/math_funcs.h"
+// GodotNext: megalights_visibility (#146).
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 
 #include <thirdparty/meshoptimizer/meshoptimizer.h>
 
@@ -401,7 +403,10 @@ void NextGIFarField::init(RendererRD::NextGIRTScene *p_owner) {
 }
 
 void NextGIFarField::update(const RenderDataRD *p_render_data, LocalVector<RendererRD::NextGIInstanceRecord> &r_records, LocalVector<RendererRD::NextGISurfaceRecord> &r_surfaces) {
-	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field")) || p_render_data == nullptr || p_render_data->sdfgi_update_data == nullptr) {
+	const bool far_enabled = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field")) ||
+			bool(GLOBAL_GET("rendering/megalights/far_field")) ||
+			RendererRD::MegaLights::check_wants_far_field();
+	if (!far_enabled || p_render_data == nullptr || p_render_data->sdfgi_update_data == nullptr) {
 		free();
 		return;
 	}

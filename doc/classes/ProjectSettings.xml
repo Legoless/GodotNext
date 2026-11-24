@@ -3614,6 +3614,9 @@
 		<member name="rendering/megalights/directional_lights" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], MegaLights includes [DirectionalLight3D] nodes in its per-pixel weighted light sampling alongside local lights. By default ([code]false[/code]), directional lights stay on the dedicated shadow map path (Virtual Shadow Maps or cascaded shadow maps) while MegaLights samples local lights.
 		</member>
+		<member name="rendering/megalights/distant_screen_traces_length" type="float" setter="" getter="" default="4.0">
+			World-space Hi-Z screen-trace length (in meters) used by MegaLights for distant pixels beyond the near screen-trace band when [member rendering/megalights/screen_traces] is [code]true[/code]. Longer screen traces resolve distant occluders in screen space before falling back to ray queries.
+		</member>
 		<member name="rendering/megalights/downsample" type="int" setter="" getter="" default="1">
 			Controls the sampling resolution for MegaLights light selection:
 			- [code]0[/code] ([b]Full[/b]): Samples every full-resolution pixel each frame.
@@ -3622,11 +3625,20 @@
 		<member name="rendering/megalights/falloff_cull_threshold" type="float" setter="" getter="" default="0.001">
 			Minimum distance-attenuation threshold below which MegaLights skips evaluating a candidate light during per-pixel sample generation. Higher values discard distant, negligible lights earlier for faster sampling; [code]0.0[/code] disables falloff early culling.
 		</member>
+		<member name="rendering/megalights/far_field" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], MegaLights shadow rays that exit the near-field hardware ray-tracing scene radius continue against the NextGI far-field TLAS (opaque per-cell proxies) when the far field is available. Off by default.
+		</member>
 		<member name="rendering/megalights/reference_mode" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables MegaLights exhaustive reference mode: instead of stochastic light sampling, every pixel evaluates all influencing lights with stochastic ray-traced visibility ([code]trace_shadow()[/code]) and accumulates an unbiased running mean across frames for ground-truth verification.
 		</member>
 		<member name="rendering/megalights/samples_per_pixel" type="int" setter="" getter="" default="4">
 			Number of weighted reservoir light samples generated per sampling pixel each frame by MegaLights (range [code]1[/code] to [code]16[/code]). Higher counts reduce direct-lighting variance at the cost of more visibility traces and sample buffer memory.
+		</member>
+		<member name="rendering/megalights/screen_traces" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], MegaLights marches a short Hi-Z depth screen-space trace before dispatching hardware ray queries or virtual shadow map lookups. Samples occluded in screen space write visibility [code]0[/code] and their hit distance immediately and are skipped by ray tracing; unresolved samples continue to the ray-traced or VSM pass.
+		</member>
+		<member name="rendering/megalights/swrt_continuation" type="bool" setter="" getter="" default="false">
+			Optional GodotNext extension for devices without hardware ray tracing. When [code]true[/code] and hardware ray queries are unavailable, unresolved MegaLights visibility samples trace the global SDF clipmap instead of skipping off-screen continuation (requires [member rendering/global_illumination/mesh_sdf/generate] enabled). Off by default.
 		</member>
 		<member name="rendering/mesh_lod/lod_change/threshold_pixels" type="float" setter="" getter="" default="1.0">
 			The automatic LOD bias to use for meshes rendered within the [ReflectionProbe]. Higher values will use less detailed versions of meshes that have LOD variations generated. If set to [code]0.0[/code], automatic LOD is disabled. Increase [member rendering/mesh_lod/lod_change/threshold_pixels] to improve performance at the cost of geometry detail.

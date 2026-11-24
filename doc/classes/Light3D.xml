@@ -143,6 +143,9 @@
 			Secondary multiplier multiplied with [member light_energy] then used with the [Environment]'s volumetric fog (if enabled). If set to [code]0.0[/code], computing volumetric fog will be skipped for this light, which can improve performance for large amounts of lights when volumetric fog is enabled.
 			[b]Note:[/b] To prevent short-lived dynamic light effects from poorly interacting with volumetric fog, lights used in those effects should have [member light_volumetric_fog_energy] set to [code]0.0[/code] unless [member Environment.volumetric_fog_temporal_reprojection_enabled] is disabled (or unless the reprojection amount is significantly lowered).
 		</member>
+		<member name="megalights_shadow_method" type="int" setter="set_megalights_shadow_method" getter="get_megalights_shadow_method" enum="Light3D.MegaLightsShadowMethod" default="0">
+			Controls how MegaLights evaluates shadow visibility for samples that select this light. [constant MEGALIGHTS_SHADOW_METHOD_AUTO] and [constant MEGALIGHTS_SHADOW_METHOD_RAY_TRACED] use the MegaLights screen-trace plus ray-traced visibility chain (near-field hardware ray query with alpha cutout and material retrace, optional far-field continuation, or optional software ray-tracing global SDF continuation on non-RT tiers). [constant MEGALIGHTS_SHADOW_METHOD_VIRTUAL] skips ray queries for this light and samples its Virtual Shadow Map with Shadow Map Ray Tracing (2 SMRT rays) when virtual shadow maps are available on Forward+; otherwise it falls back to the ray-traced MegaLights visibility chain and shows a configuration warning.
+		</member>
 		<member name="shadow_bias" type="float" setter="set_param" getter="get_param" default="0.1">
 			Used to adjust shadow appearance. Too small a value results in self-shadowing ("shadow acne"), while too large a value causes shadows to separate from casters ("peter-panning"). Adjust as needed.
 		</member>
@@ -301,6 +304,15 @@
 		</constant>
 		<constant name="SHADOW_METHOD_DISTANCE_FIELD" value="4" enum="ShadowMethod">
 			Distance-field shadows traced through the PS global and mesh SDFs on Forward+ when [member ProjectSettings.rendering/global_illumination/mesh_sdf/generate] is enabled, with soft penumbras driven by [member light_size] or [member light_angular_distance]. Falls back to [constant SHADOW_METHOD_PROJECT] when unavailable.
+		</constant>
+		<constant name="MEGALIGHTS_SHADOW_METHOD_AUTO" value="0" enum="MegaLightsShadowMethod">
+			Automatically uses the MegaLights ray-traced visibility chain (Hi-Z screen trace followed by near-field ray query, optional far-field continuation, or non-RT SWRT continuation when enabled).
+		</constant>
+		<constant name="MEGALIGHTS_SHADOW_METHOD_RAY_TRACED" value="1" enum="MegaLightsShadowMethod">
+			Explicitly uses the MegaLights ray-traced visibility chain for this light.
+		</constant>
+		<constant name="MEGALIGHTS_SHADOW_METHOD_VIRTUAL" value="2" enum="MegaLightsShadowMethod">
+			Skips ray queries for this light in MegaLights and evaluates its Virtual Shadow Map with Shadow Map Ray Tracing (2 SMRT rays) when virtual shadow maps are available on Forward+; falls back to the ray-traced visibility chain elsewhere.
 		</constant>
 	</constants>
 </class>

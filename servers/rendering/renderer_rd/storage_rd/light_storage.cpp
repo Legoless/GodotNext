@@ -463,6 +463,25 @@ RSE::LightShadowMethod LightStorage::light_get_shadow_method(RID p_light) const 
 	return light->shadow_method;
 }
 
+void LightStorage::light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) {
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	ERR_FAIL_INDEX(int(p_method), int(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_MAX));
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	if (light->megalights_shadow_method == p_method) {
+		return;
+	}
+	light->megalights_shadow_method = p_method;
+	light->version++;
+	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+}
+
+RSE::LightMegaLightsShadowMethod LightStorage::light_get_megalights_shadow_method(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO);
+	return light->megalights_shadow_method;
+}
+
 void LightStorage::light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) {
 	Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL(light);
@@ -1213,11 +1232,15 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				light_data.shadow_opacity = (p_using_shadows && light->shadow)
 						? light->param[RSE::LIGHT_PARAM_SHADOW_OPACITY]
 						: 0.0;
-				// GodotNext: megalights_sampling (#142). Record directional caster mask in buffer order.
+				// GodotNext: megalights_sampling (#142) / megalights_visibility (#146). Record directional caster mask and method in buffer order.
 				if (directional_light_caster_masks.size() <= r_directional_light_count) {
 					directional_light_caster_masks.resize(r_directional_light_count + 1);
 				}
 				directional_light_caster_masks[r_directional_light_count] = (p_using_shadows && light->shadow) ? light->shadow_caster_mask : 0u;
+				if (directional_light_megalights_shadow_methods.size() <= r_directional_light_count) {
+					directional_light_megalights_shadow_methods.resize(r_directional_light_count + 1);
+				}
+				directional_light_megalights_shadow_methods[r_directional_light_count] = light->megalights_shadow_method;
 				// GodotNext: light_function_atlas (#138).
 				light_data.light_function_index = (lfa != nullptr && light->light_function.is_valid())
 						? lfa->append_view_entry(light_instance->light, LightFunctionAtlasPacker::MODE_DIRECTIONAL, light_transform, light->light_function_scale, 45.0f)
@@ -1300,10 +1323,11 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						}
 						VirtualShadowMapStorage::LightUpdate update;
 						update.kind = RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL;
-						// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141). Only lights whose method resolves to VIRTUAL
-						// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL).
-						const bool vsm_eligible = rt_in_overflow ? RendererVirtualShadowMapStorage::light_uses_vsm_fallback(light->shadow_method) : (!wants_rt && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method));
-						update.casts_shadow = light->shadow && !df_full && vsm_eligible;
+						// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose method resolves to VIRTUAL
+						// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
+						const bool ml_vsm = vsm->get_megalights_view_active() && light->megalights_shadow_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+						const bool vsm_eligible = ml_vsm || (rt_in_overflow ? RendererVirtualShadowMapStorage::light_uses_vsm_fallback(light->shadow_method) : (!wants_rt && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method)));
+						update.casts_shadow = light->shadow && (!df_full || ml_vsm) && vsm_eligible;
 						update.transform = light_transform;
 						update.camera_position = p_camera_transform.origin;
 						update.max_distance = max_distance;
@@ -1706,9 +1730,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				const RendererVirtualShadowMapStorage::MapKind kind = type == RSE::LIGHT_OMNI ? RendererVirtualShadowMapStorage::MAP_KIND_OMNI : (type == RSE::LIGHT_SPOT ? RendererVirtualShadowMapStorage::MAP_KIND_SPOT : RendererVirtualShadowMapStorage::MAP_KIND_AREA);
 				VirtualShadowMapStorage::LightUpdate update;
 				update.kind = kind;
-				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141). Only lights whose method resolves to VIRTUAL
-				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL).
-				const bool vsm_eligible = rt_in_overflow ? RendererVirtualShadowMapStorage::light_uses_vsm_fallback(light->shadow_method) : (!wants_rt_local && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method));
+				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose method resolves to VIRTUAL
+				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
+				const bool ml_vsm = vsm->get_megalights_view_active() && light->megalights_shadow_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+				const bool vsm_eligible = ml_vsm || (rt_in_overflow ? RendererVirtualShadowMapStorage::light_uses_vsm_fallback(light->shadow_method) : (!wants_rt_local && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method)));
 				update.casts_shadow = light->shadow && vsm_eligible;
 				update.transform = light_transform;
 				update.camera_position = p_camera_transform.origin;
@@ -2056,6 +2081,44 @@ void LightStorage::get_view_light_shadow_caster_masks(uint32_t p_directional_cou
 	}
 	for (uint32_t i = 0; i < dir_count; i++) {
 		r_masks[out++] = directional_light_caster_masks[i];
+	}
+}
+
+void LightStorage::get_view_light_megalights_policies(uint32_t p_directional_count, LocalVector<MegaLightsLightPolicy> &r_policies) const {
+	// GodotNext: megalights_visibility (#146). Per-light MegaLights visibility policy in GPU view buffer order.
+	const uint32_t dir_count = MIN(p_directional_count, uint32_t(directional_light_caster_masks.size()));
+	r_policies.resize(omni_light_count + spot_light_count + area_light_count + dir_count);
+	uint32_t out = 0;
+	for (uint32_t i = 0; i < omni_light_count; i++) {
+		const Light *light = omni_light_sort != nullptr ? omni_light_sort[i].light : nullptr;
+		MegaLightsLightPolicy p;
+		p.caster_mask = (light != nullptr && light->shadow) ? light->shadow_caster_mask : 0u;
+		p.shadow_method = light != nullptr ? light->megalights_shadow_method : RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
+		p.vsm_sampleable = omni_lights != nullptr && (omni_lights[i].vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) != 0u;
+		r_policies[out++] = p;
+	}
+	for (uint32_t i = 0; i < spot_light_count; i++) {
+		const Light *light = spot_light_sort != nullptr ? spot_light_sort[i].light : nullptr;
+		MegaLightsLightPolicy p;
+		p.caster_mask = (light != nullptr && light->shadow) ? light->shadow_caster_mask : 0u;
+		p.shadow_method = light != nullptr ? light->megalights_shadow_method : RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
+		p.vsm_sampleable = spot_lights != nullptr && (spot_lights[i].vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) != 0u;
+		r_policies[out++] = p;
+	}
+	for (uint32_t i = 0; i < area_light_count; i++) {
+		const Light *light = area_light_sort != nullptr ? area_light_sort[i].light : nullptr;
+		MegaLightsLightPolicy p;
+		p.caster_mask = (light != nullptr && light->shadow) ? light->shadow_caster_mask : 0u;
+		p.shadow_method = light != nullptr ? light->megalights_shadow_method : RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
+		p.vsm_sampleable = area_lights != nullptr && (area_lights[i].vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) != 0u;
+		r_policies[out++] = p;
+	}
+	for (uint32_t i = 0; i < dir_count; i++) {
+		MegaLightsLightPolicy p;
+		p.caster_mask = directional_light_caster_masks[i];
+		p.shadow_method = i < directional_light_megalights_shadow_methods.size() ? directional_light_megalights_shadow_methods[i] : RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
+		p.vsm_sampleable = directional_lights != nullptr && (directional_lights[i].vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) != 0u;
+		r_policies[out++] = p;
 	}
 }
 

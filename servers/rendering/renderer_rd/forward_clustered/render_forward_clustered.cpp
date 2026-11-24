@@ -2677,13 +2677,17 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	if (rb.is_valid() && ss_effects && (p_use_ssil || p_use_ssr || p_use_nextgi)) {
 		ss_effects->allocate_last_frame_buffer(rb, p_use_ssil, p_use_ssr, p_use_nextgi);
 	}
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	const bool megalights_view = megalights_inputs_active && !p_render_data->reflection_probe.is_valid() && rb.is_valid() && rb->get_view_count() == 1 && rb_data.is_valid() && rb->has_megalights_inputs();
+	const bool megalights_uses_rt = megalights_view && RendererVirtualShadowMapStorage::is_rt_available();
+
 	if (p_use_nextgi && rb.is_valid()) {
 		next_gi.set_active_debug_view(RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode()));
 		_render_nextgi_translucency_mark(p_render_data);
-		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution(), rt_shadows_view);
-	} else if (rt_shadows_view && rb.is_valid()) {
-		// GodotNext: rt_shadows (#141). Standalone HWRT ray-traced shadows prepare the RT scene TLAS
-		// and shadow visibility tables without running NextGI diffuse/reflection passes.
+		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution(), rt_shadows_view || megalights_uses_rt);
+	} else if ((rt_shadows_view || megalights_uses_rt) && rb.is_valid()) {
+		// GodotNext: rt_shadows (#141) / megalights_visibility (#146). Standalone HWRT shadows and
+		// MegaLights prepare the RT scene TLAS and shadow visibility tables without NextGI GI passes.
 		next_gi.prepare_rt_scene_for_shadows(p_render_data);
 	}
 
@@ -2752,6 +2756,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	RendererRD::VirtualShadowMapStorage *vsm_storage = RendererRD::VirtualShadowMapStorage::get_singleton();
 	if (vsm_storage != nullptr) {
 		vsm_storage->set_view_samples(vsm_sample_view);
+		vsm_storage->set_megalights_view_active(megalights_view);
 		const RendererVirtualShadowMapStorage::PoolQuality df_quality = vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality();
 		vsm_storage->set_df_view_enabled(df_shadows_view, RendererVirtualShadowMapStorage::df_read_max_lights(df_quality));
 	}
@@ -2771,6 +2776,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			vsm_storage->record_projection_view(vsm_atlas_passes, vsm_atlas_passes_skipped, vsm_local_culled);
 		}
 		vsm_storage->set_view_samples(false);
+		vsm_storage->set_megalights_view_active(false);
 	}
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
@@ -2806,36 +2812,6 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 		if (!p_render_data->reflection_probe.is_valid() && RendererRD::LightGrid::consume_check_request()) {
 			RendererRD::LightGrid::store_check_result(current_cluster_builder->run_packed_grid_check());
-		}
-	}
-
-	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2).
-	// Run per-pixel weighted light sampling (or reference accumulation / GPU verification check)
-	// after the prepass and packed froxel light grid are built, leaving Forward+ Set 1 untouched
-	// for #141/#143.
-	if (megalights_inputs_active && !p_render_data->reflection_probe.is_valid() && rb.is_valid() && rb->get_view_count() == 1 && rb_data.is_valid() && rb->has_megalights_inputs()) {
-		const RID ml_depth = rb->get_depth_texture(0);
-		const RID ml_normal_roughness = (p_normal_roughness_slices != nullptr && p_normal_roughness_slices[0].is_valid()) ? p_normal_roughness_slices[0] : rb_data->get_normal_roughness(0);
-		const RID ml_albedo = rb->get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO, 0, 0);
-		const RID ml_material = rb->get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL, 0, 0);
-		if (ml_depth.is_valid() && ml_normal_roughness.is_valid() && ml_albedo.is_valid() && ml_material.is_valid()) {
-			if (mega_lights == nullptr) {
-				mega_lights = memnew(RendererRD::MegaLights);
-			}
-			RendererRD::MegaLights::FrameInputs ml_inputs;
-			ml_inputs.render_data = p_render_data;
-			ml_inputs.depth_texture = ml_depth;
-			ml_inputs.normal_roughness_texture = ml_normal_roughness;
-			ml_inputs.ml_albedo_texture = ml_albedo;
-			ml_inputs.ml_material_texture = ml_material;
-			ml_inputs.dfg_lut_texture = dfg_lut.texture;
-			ml_inputs.ltc_lut1_texture = texture_storage->texture_get_rd_texture(ltc.lut1_texture);
-			ml_inputs.ltc_lut2_texture = texture_storage->texture_get_rd_texture(ltc.lut2_texture);
-			ml_inputs.light_function_atlas = &light_function_atlas;
-			ml_inputs.next_gi = &next_gi;
-			ml_inputs.flip_y = p_render_data->scene_data->flip_y;
-			ml_inputs.use_soft_shadows = true;
-			mega_lights->render_sampling(ml_inputs, rb);
 		}
 	}
 
@@ -2905,7 +2881,6 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			}
 			rt_shadows->end_view();
 		}
-		next_gi.compact_after_traces();
 	} else {
 		rt_bind_mask = RID();
 		rt_bind_lookup = RID();
@@ -2913,6 +2888,78 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		if (vsm_storage != nullptr) {
 			vsm_storage->record_rt_shadow_stats(RendererRD::VirtualShadowMapStorage::RTShadowStats());
 		}
+	}
+
+	// GodotNext: megalights_sampling (#142, M3) / megalights_visibility (#146, M4).
+	// Runs after prepass, packed light grid, VSM raster/projection, and TLAS preparation, and before
+	// next_gi.compact_after_traces(), leaving Forward+ Set 1 untouched for #143.
+	if (megalights_view) {
+		const RID ml_depth = rb->get_depth_texture(0);
+		const RID ml_normal_roughness = (p_normal_roughness_slices != nullptr && p_normal_roughness_slices[0].is_valid()) ? p_normal_roughness_slices[0] : rb_data->get_normal_roughness(0);
+		const RID ml_albedo = rb->get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO, 0, 0);
+		const RID ml_material = rb->get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL, 0, 0);
+		if (ml_depth.is_valid() && ml_normal_roughness.is_valid() && ml_albedo.is_valid() && ml_material.is_valid()) {
+			if (mega_lights == nullptr) {
+				mega_lights = memnew(RendererRD::MegaLights);
+			}
+			RID ml_hiz;
+			uint32_t ml_hiz_mips = 1u;
+			if (ss_effects != nullptr && (bool(GLOBAL_GET("rendering/megalights/screen_traces")) || RendererRD::MegaLights::has_pending_check())) {
+				ss_effects->build_hiz(rb);
+				if (rb->has_texture(RB_SCOPE_SSR, RB_HIZ)) {
+					const RD::TextureFormat hiz_fmt = RD::get_singleton()->texture_get_format(rb->get_texture(RB_SCOPE_SSR, RB_HIZ));
+					ml_hiz_mips = MAX(hiz_fmt.mipmaps, 1u);
+					ml_hiz = rb->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, 0, 0, 1, ml_hiz_mips);
+				}
+			}
+
+			NextGISWRTTrace *ml_swrt = nullptr;
+			NextGIVoxelLighting *ml_voxel_lighting = nullptr;
+			const bool ml_want_swrt = bool(GLOBAL_GET("rendering/megalights/swrt_continuation")) || RendererRD::MegaLights::check_wants_swrt();
+			if (ml_want_swrt && RendererVirtualShadowMapStorage::is_df_available()) {
+				if (p_use_nextgi && next_gi.get_tier_result().tier == RendererRD::NextGI::TIER_SOFTWARE && next_gi.get_swrt_trace() != nullptr && next_gi.get_swrt_trace()->is_ready()) {
+					ml_swrt = next_gi.get_swrt_trace();
+					ml_voxel_lighting = next_gi.get_voxel_lighting();
+					ml_swrt->prepare_df_view(p_render_data, ml_voxel_lighting, false);
+				} else {
+					if (df_swrt_trace == nullptr) {
+						df_swrt_trace = memnew(NextGISWRTTrace);
+					}
+					if (!df_shadows_view) {
+						df_swrt_trace->update_scene_for_df(p_render_data, NextGIGlobalSDF::BASE_LEVELS);
+						df_swrt_trace->prepare_df_view(p_render_data, nullptr, false);
+					}
+					ml_swrt = df_swrt_trace;
+				}
+			}
+
+			RendererRD::MegaLights::FrameInputs ml_inputs;
+			ml_inputs.render_data = p_render_data;
+			ml_inputs.depth_texture = ml_depth;
+			ml_inputs.normal_roughness_texture = ml_normal_roughness;
+			ml_inputs.ml_albedo_texture = ml_albedo;
+			ml_inputs.ml_material_texture = ml_material;
+			ml_inputs.dfg_lut_texture = dfg_lut.texture;
+			ml_inputs.ltc_lut1_texture = texture_storage->texture_get_rd_texture(ltc.lut1_texture);
+			ml_inputs.ltc_lut2_texture = texture_storage->texture_get_rd_texture(ltc.lut2_texture);
+			ml_inputs.light_function_atlas = &light_function_atlas;
+			ml_inputs.next_gi = &next_gi;
+			ml_inputs.flip_y = p_render_data->scene_data->flip_y;
+			ml_inputs.use_soft_shadows = true;
+			ml_inputs.hiz_texture = ml_hiz;
+			ml_inputs.hiz_mip_count = ml_hiz_mips;
+			ml_inputs.swrt_trace = ml_swrt;
+			ml_inputs.voxel_lighting = ml_voxel_lighting;
+			ml_inputs.vsm_blue_noise_texture = vsm_projection_blue_noise;
+			ml_inputs.vsm_sample_view = vsm_sample_view;
+			ml_inputs.surface_thickness = float(GLOBAL_GET("rendering/lights_and_shadows/contact_shadow/surface_thickness"));
+			ml_inputs.quality_level = int(vsm_storage != nullptr && vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality());
+			mega_lights->render_sampling(ml_inputs, rb);
+		}
+	}
+
+	if (rt_shadows_view || megalights_uses_rt) {
+		next_gi.compact_after_traces();
 	}
 
 	if (rb_data.is_valid()) {

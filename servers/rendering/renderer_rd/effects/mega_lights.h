@@ -30,16 +30,16 @@
 
 #pragma once
 
-// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2, budget M-3).
-// MegaLights sampling core: per-pixel weighted reservoir sampling over the #139 packed froxel
-// light grid, full/half downsampled 2x2 rotating sampling, 8x8 tile visible-light guiding with
-// unbiased minimum weight floor, falloff early cull, 64x64x32 spatio-temporal blue noise, and
-// exhaustive reference mode with trace_shadow() accumulation.
-//
-// Everything in MegaLightsMath / MegaLightsViewData interfaces is clean and device-free where
-// applicable so CPU doctests run without a GPU, and GPU buffers expose clean contracts ready
-// for #146 (visibility chain), #135 (denoiser), and #143 (Forward+ color composite).
+// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2, budget M-3)
+// and megalights_visibility (#146, plan §21.3 contract M4, GM-1, GM-8, GM-12, budget M-4).
+// MegaLights sampling core + visibility chain: per-pixel weighted reservoir sampling over the #139
+// packed froxel light grid, Hi-Z screen-space shadow trace, 2x2 block ray deduplication & stream
+// compaction, near-field ray query via #145 trace_shadow() (with alpha cutout + #130 material
+// retrace), optional #126 far-field TLAS continuation, optional #182 SWRT global-SDF continuation
+// on the non-RT tier, per-light VSM-method sampling via #222 vsm_shadow() (SMRT 2 rays), packed
+// RGBA8 transmittance + R16F hit-distance outputs ready for #135 denoiser, and 8x8 tile guiding.
 
+#include "core/math/color.h"
 #include "core/math/math_funcs.h"
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
@@ -52,11 +52,14 @@
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_enums.h"
 
 #include <cstdint>
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
+class NextGISWRTTrace;
+class NextGIVoxelLighting;
 
 namespace RendererRD {
 
@@ -75,6 +78,8 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 
 	RID sample_buffer;
 	RID visibility_buffer;
+	// GodotNext: megalights_visibility (#146). Per-sample R16F hit distance (2DArray, layer = k, miss = 65504.0).
+	RID hit_distance_texture;
 	RID guiding_buffers[2];
 	uint32_t guiding_write_index = 0;
 	bool guiding_has_history = false;
@@ -94,9 +99,21 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 	RID light_shadow_policy_buffer;
 	uint32_t light_shadow_policy_capacity = 0;
 
+	// GodotNext: megalights_visibility (#146). Lazy per-view visibility working buffers (0 allocated when off).
+	RID vis_params_ubo;
+	RID vis_counters_buffer;
+	RID vis_indirect_buffer;
+	RID vis_vsm_params_buffer;
+	RID vis_ray_list_buffer;
+	RID vis_vsm_list_buffer;
+	RID vis_sample_ray_map_buffer;
+	uint32_t vis_list_capacity = 0;
+	RID vis_retrace_buffer;
+
 	uint32_t frame_index = 0;
 
 	void _free_sampling_buffers();
+	void _free_visibility_buffers();
 	void _free_reference_buffers();
 	void _free_verify_buffers();
 	void _free_transient_buffers();
@@ -106,6 +123,8 @@ public:
 	virtual void free_data() override;
 
 	bool ensure_sampling_buffers(const Size2i &p_internal_size, uint32_t p_samples_per_pixel, uint32_t p_downsample_mode);
+	bool ensure_visibility_buffers(uint32_t p_total_samples);
+	bool ensure_retrace_buffer();
 	bool ensure_reference_buffers(const Size2i &p_internal_size);
 	bool ensure_verify_buffers(const Size2i &p_internal_size);
 	bool ensure_layer_group_buffer(uint32_t p_count);
@@ -123,6 +142,7 @@ public:
 	// Clean buffer contracts for #146 (visibility chain), #135 (denoiser), and #143 (composite).
 	RID get_sample_buffer() const { return sample_buffer; }
 	RID get_visibility_buffer() const { return visibility_buffer; }
+	RID get_hit_distance_texture() const { return hit_distance_texture; }
 	RID get_current_guiding_buffer() const { return guiding_buffers[guiding_write_index]; }
 	RID get_previous_guiding_buffer() const { return guiding_buffers[1u - guiding_write_index]; }
 	bool has_guiding_history() const { return guiding_has_history; }
@@ -143,6 +163,16 @@ public:
 	RID get_layer_group_buffer() const { return layer_group_buffer; }
 	RID get_light_shadow_policy_buffer() const { return light_shadow_policy_buffer; }
 
+	RID get_vis_params_ubo() const { return vis_params_ubo; }
+	RID get_vis_counters_buffer() const { return vis_counters_buffer; }
+	RID get_vis_indirect_buffer() const { return vis_indirect_buffer; }
+	RID get_vis_vsm_params_buffer() const { return vis_vsm_params_buffer; }
+	RID get_vis_ray_list_buffer() const { return vis_ray_list_buffer; }
+	RID get_vis_vsm_list_buffer() const { return vis_vsm_list_buffer; }
+	RID get_vis_sample_ray_map_buffer() const { return vis_sample_ray_map_buffer; }
+	uint32_t get_vis_list_capacity() const { return vis_list_capacity; }
+	RID get_vis_retrace_buffer() const { return vis_retrace_buffer; }
+
 	uint32_t get_frame_index() const { return frame_index; }
 	void set_frame_index(uint32_t p_frame) { frame_index = p_frame; }
 	void advance_frame_index() { frame_index++; }
@@ -159,6 +189,11 @@ public:
 	static constexpr const char *SETTING_DIRECTIONAL_LIGHTS = "rendering/megalights/directional_lights";
 	static constexpr const char *SETTING_FALLOFF_CULL_THRESHOLD = "rendering/megalights/falloff_cull_threshold";
 	static constexpr const char *SETTING_REFERENCE_MODE = "rendering/megalights/reference_mode";
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	static constexpr const char *SETTING_SCREEN_TRACES = "rendering/megalights/screen_traces";
+	static constexpr const char *SETTING_DISTANT_SCREEN_TRACES_LENGTH = "rendering/megalights/distant_screen_traces_length";
+	static constexpr const char *SETTING_FAR_FIELD = "rendering/megalights/far_field";
+	static constexpr const char *SETTING_SWRT_CONTINUATION = "rendering/megalights/swrt_continuation";
 
 	enum DownsampleMode : uint32_t {
 		DOWNSAMPLE_FULL = 0,
@@ -172,6 +207,15 @@ public:
 		LIGHT_TYPE_DIRECTIONAL = 3,
 	};
 
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4, GM-8).
+	enum VisibilityTier : uint32_t {
+		VISIBILITY_TIER_DISABLED = 0,
+		VISIBILITY_TIER_HWRT = 1,
+		VISIBILITY_TIER_HWRT_INLINE_ONLY = 2, // Mac Apple M2+ Experimental (#171)
+		VISIBILITY_TIER_SWRT_EXTENSION = 3, // Non-RT tier global SDF continuation extension
+		VISIBILITY_TIER_SCREEN_ONLY = 4,
+	};
+
 	static constexpr uint32_t DEFAULT_SAMPLES_PER_PIXEL = 4u;
 	static constexpr uint32_t MIN_SAMPLES_PER_PIXEL = 1u;
 	static constexpr uint32_t MAX_SAMPLES_PER_PIXEL = 16u;
@@ -179,6 +223,14 @@ public:
 	static constexpr bool DEFAULT_DIRECTIONAL_LIGHTS = false;
 	static constexpr float DEFAULT_FALLOFF_CULL_THRESHOLD = 0.001f;
 	static constexpr bool DEFAULT_REFERENCE_MODE = false;
+	static constexpr bool DEFAULT_SCREEN_TRACES = true;
+	static constexpr float DEFAULT_DISTANT_SCREEN_TRACES_LENGTH = 4.0f;
+	static constexpr float DEFAULT_NEAR_SCREEN_TRACE_LENGTH = 1.0f;
+	static constexpr float DEFAULT_DISTANT_SCREEN_TRACE_START_DEPTH = 16.0f;
+	static constexpr bool DEFAULT_FAR_FIELD = false;
+	static constexpr bool DEFAULT_SWRT_CONTINUATION = false;
+	static constexpr uint32_t VSM_SMRT_RAYS = 2u;
+	static constexpr float HIT_DISTANCE_MISS = 65504.0f;
 
 	static constexpr uint32_t SAMPLE_INDEX_MASK = 0xFFFFu;
 	static constexpr uint32_t SAMPLE_TYPE_SHIFT = 16u;
@@ -215,12 +267,122 @@ public:
 		GUIDING_FLAG_FORCE_VISIBLE_ONE = 1u << 3u,
 	};
 
+	// GodotNext: megalights_visibility (#146). Policy and visibility flags matching ml_screen_trace.glsl.
+	enum PolicyFlags : uint32_t {
+		POLICY_FLAG_CASTS_SHADOW = 1u << 0u,
+		POLICY_FLAG_USE_VSM = 1u << 1u,
+		POLICY_FLAG_FULL_CASTER_MASK = 1u << 2u,
+	};
+
+	enum VisFlags : uint32_t {
+		VIS_FLAG_SCREEN_TRACES = 1u << 0u,
+		VIS_FLAG_DEDUPE = 1u << 1u,
+		VIS_FLAG_ORTHOGONAL = 1u << 2u,
+		VIS_FLAG_FAR_FIELD = 1u << 3u,
+		VIS_FLAG_SWRT = 1u << 4u,
+		VIS_FLAG_VSM_ENABLED = 1u << 5u,
+		VIS_FLAG_NO_RT_FALLBACK = 1u << 6u,
+		VIS_FLAG_USE_HIZ = 1u << 7u,
+	};
+
 	struct Settings {
 		uint32_t samples_per_pixel = DEFAULT_SAMPLES_PER_PIXEL;
 		DownsampleMode downsample = DEFAULT_DOWNSAMPLE;
 		bool directional_lights = DEFAULT_DIRECTIONAL_LIGHTS;
 		float falloff_cull_threshold = DEFAULT_FALLOFF_CULL_THRESHOLD;
 		bool reference_mode = DEFAULT_REFERENCE_MODE;
+		bool screen_traces = DEFAULT_SCREEN_TRACES;
+		float distant_screen_traces_length = DEFAULT_DISTANT_SCREEN_TRACES_LENGTH;
+		bool far_field = DEFAULT_FAR_FIELD;
+		bool swrt_continuation = DEFAULT_SWRT_CONTINUATION;
+	};
+
+	// std140, 272 bytes. Must match MLVisParams in ml_screen_trace.glsl / ml_trace_*.glsl.
+	struct VisParamsUBO {
+		float inv_projection[16] = {};
+		float depth_projection[16] = {};
+		float inv_view_rows[12] = {};
+		uint32_t screen_sample_size[4] = {};
+		uint32_t sample_config[4] = {};
+		uint32_t light_counts[4] = {};
+		float screen_trace_params[4] = {};
+		uint32_t trace_config[4] = {};
+		float rt_params[4] = {};
+	};
+	static_assert(sizeof(VisParamsUBO) == 272, "MegaLights::VisParamsUBO must match MLVisParams (272 bytes).");
+	static_assert(sizeof(VisParamsUBO) % 16 == 0, "MegaLights::VisParamsUBO must stay 16-byte aligned.");
+
+	// std430, 64 bytes. Must match VSMProjectionParams in ml_trace_vsm.glsl.
+	struct VisVSMProjectionParams {
+		float footprint[4] = {};
+		int32_t bias[4] = {};
+		uint32_t counts[4] = {};
+		uint32_t misc[4] = {};
+	};
+	static_assert(sizeof(VisVSMProjectionParams) == 64, "MegaLights::VisVSMProjectionParams must match VSMProjectionParams.");
+
+	struct VisibilityOptions {
+		bool override_screen_traces = false;
+		bool screen_traces = DEFAULT_SCREEN_TRACES;
+		bool dedupe_enabled = true;
+		bool override_far_field = false;
+		bool far_field = DEFAULT_FAR_FIELD;
+		bool override_swrt = false;
+		bool swrt = DEFAULT_SWRT_CONTINUATION;
+		bool force_no_vsm = false;
+		bool use_explicit_frame_index = false;
+		uint32_t frame_index = 0;
+	};
+
+	struct TierInputs {
+		bool forward_plus = false;
+		bool supports_ray_query = false;
+		bool supports_ray_tracing_pipeline = false;
+		bool is_metal = false;
+		bool is_apple_m2_or_newer = false;
+		bool nextgi_hwrt_available = false;
+		bool df_sdf_available = false;
+		bool swrt_continuation_requested = false;
+		bool vsm_available = false;
+		bool far_field_requested = false;
+		bool screen_traces_enabled = DEFAULT_SCREEN_TRACES;
+	};
+
+	struct TierStatus {
+		VisibilityTier tier = VISIBILITY_TIER_DISABLED;
+		bool experimental = false;
+		bool inline_ray_query_only = false;
+		bool retrace_supported = false;
+		bool far_field_supported = false;
+		bool swrt_extension = false;
+		bool vsm_supported = false;
+		const char *tier_name = "UNAVAILABLE";
+		const char *backend = "none";
+		const char *experimental_label = "";
+		const char *reason = "";
+	};
+
+	// CPU reference structures for 2x2 block ray deduplication & stream compaction doctests.
+	struct DedupeBlockSample {
+		uint32_t light_packed = SAMPLE_INVALID;
+		float linear_depth = -1.0f;
+		float depth_tol = 0.0f;
+		Vector3 world_normal = Vector3(0.0f, 1.0f, 0.0f);
+		Vector3 ray_dir = Vector3(0.0f, 1.0f, 0.0f);
+		float t_resume = 0.0f;
+		bool casts_shadow = true;
+		bool use_vsm = false;
+		bool screen_hit = false;
+	};
+
+	struct DedupeBlockResult {
+		uint32_t ray_count = 0;
+		uint32_t deduped_count = 0;
+		uint32_t vsm_count = 0;
+		uint32_t screen_hit_count = 0;
+		uint32_t unshadowed_count = 0;
+		LocalVector<uint32_t> sample_ray_map;
+		LocalVector<float> ray_min_t_resume;
 	};
 
 	// Packed 16-byte sample matching MLSample (uvec4) in ml_generate_samples.glsl.
@@ -274,6 +436,15 @@ public:
 		NextGI *next_gi = nullptr;
 		bool flip_y = true;
 		bool use_soft_shadows = true;
+		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+		RID hiz_texture;
+		uint32_t hiz_mip_count = 1;
+		NextGISWRTTrace *swrt_trace = nullptr;
+		NextGIVoxelLighting *voxel_lighting = nullptr;
+		RID vsm_blue_noise_texture;
+		bool vsm_sample_view = false;
+		float surface_thickness = 0.01f;
+		int quality_level = 2;
 	};
 
 	// --- Pure, device-free helpers (tested by CPU doctests) ---
@@ -321,6 +492,25 @@ public:
 	// Welford relative standard error helper matching ml_reference.glsl.
 	static float welford_relative_std_error(float p_mean_luma, float p_m2, uint32_t p_sample_count);
 
+	// GodotNext: megalights_visibility (#146). Pure device-free visibility chain helpers.
+	static uint32_t screen_trace_steps_for_quality(int p_quality_level);
+	static float screen_trace_max_distance(float p_linear_depth, float p_near_length, float p_distant_length, float p_distant_start_depth = DEFAULT_DISTANT_SCREEN_TRACE_START_DEPTH);
+	static float screen_trace_surface_thickness(float p_linear_depth, float p_surface_thickness_setting);
+	static float dedupe_depth_tolerance(float p_linear_depth, float p_normal_vs_z, float p_proj_y, uint32_t p_full_height, bool p_downsample_half, bool p_orthogonal);
+	static bool can_dedupe_ray(uint32_t p_light_a, uint32_t p_light_b, float p_depth_a, float p_depth_b, float p_tol_a, float p_tol_b, const Vector3 &p_normal_a, const Vector3 &p_normal_b, const Vector3 &p_dir_a, const Vector3 &p_dir_b);
+	static DedupeBlockResult compact_and_dedupe_2x2_cpu(const DedupeBlockSample *p_samples, uint32_t p_spp, bool p_dedupe_enabled);
+	static bool light_uses_vsm(RSE::LightMegaLightsShadowMethod p_method, bool p_vsm_available);
+	static TierStatus resolve_visibility_tier(const TierInputs &p_inputs);
+	static Dictionary get_tier_info();
+	static uint32_t pack_visibility_rgba8(float p_r, float p_g, float p_b, float p_a = 1.0f);
+	static Color unpack_visibility_rgba8(uint32_t p_packed);
+
+	// Shader variant lists for NextGIBakeShaders and runtime compilation.
+	static Vector<String> get_screen_trace_shader_variant_defines();
+	static Vector<String> get_trace_rays_shader_variant_defines();
+	static Vector<String> get_trace_rays_swrt_shader_variant_defines();
+	static Vector<String> get_trace_vsm_shader_variant_defines();
+
 	// Spatio-temporal blue-noise table accessors (64x64x32 RG8 committed data).
 	static const uint8_t *get_stbn_data();
 	static uint32_t get_stbn_byte_size();
@@ -332,6 +522,8 @@ public:
 	// GPU verification check hook (matching LightGrid / VSM check pattern).
 	static void request_check(const Dictionary &p_options = Dictionary());
 	static bool has_pending_check();
+	static bool check_wants_far_field();
+	static bool check_wants_swrt();
 	static Dictionary get_check_result();
 
 private:
@@ -340,12 +532,17 @@ private:
 
 	bool _ensure_common_shaders();
 	bool _ensure_rt_reference_shader(NextGI *p_next_gi, bool p_use_alpha_textures);
+	bool _ensure_screen_trace_shaders();
+	bool _ensure_trace_rays_shaders(NextGI *p_next_gi);
+	bool _ensure_trace_rays_swrt_shader();
+	bool _ensure_trace_vsm_shader();
 	void _ensure_stbn_texture();
 	void _fill_params_ubo(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_frame_index, bool p_has_guiding, bool p_force_visible_one, float p_falloff_override, ParamsUBO &r_ubo) const;
 	void _upload_layer_group_masks(const Ref<MegaLightsViewData> &p_view) const;
-	void _upload_light_shadow_policies(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, bool p_include_directional) const;
+	void _upload_light_shadow_policies(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, bool p_include_directional, bool p_allow_vsm = true) const;
 	void _build_common_uniforms(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, Vector<RD::Uniform> &r_uniforms) const;
 	void _dispatch_generate(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, bool p_has_guiding, float p_falloff_override);
+	void _dispatch_visibility_chain(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, const VisibilityOptions &p_opts, bool *r_retrace_ran = nullptr);
 	void _dispatch_guiding(const Ref<MegaLightsViewData> &p_view, RID p_visibility_buffer, uint32_t p_frame_index, bool p_force_visible_one);
 	void _dispatch_reference_unshadowed(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_n, float p_falloff_override);
 	void _dispatch_reference_rt(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_n, bool p_force_visible_one, float p_falloff_override);
@@ -356,7 +553,10 @@ public:
 	// Stage 1 (M3): generate K weighted light samples per sampling pixel into view->get_sample_buffer().
 	void generate_samples(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
 
-	// Stage 2 (M3, called after #146 visibility): aggregate visible lights per 8x8 tile for next frame.
+	// Stage 2 (M4): visibility chain (screen trace -> 2x2 dedupe & compaction -> HWRT/SWRT + VSM -> scatter).
+	void trace_visibility(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
+
+	// Stage 3 (M3, called after #146 visibility): aggregate visible lights per 8x8 tile for next frame.
 	void update_guiding(Ref<RenderSceneBuffersRD> p_rb, RID p_visibility_buffer = RID(), bool p_force_visible_one = false);
 
 	// Reference mode (M3, GM-1): exhaustive per-light shading with trace_shadow() accumulated across frames.

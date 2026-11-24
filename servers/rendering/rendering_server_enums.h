@@ -304,6 +304,16 @@ enum LightShadowMethod {
 	LIGHT_SHADOW_METHOD_MAX,
 };
 
+// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+// Per-light shadow method inside MegaLights: AUTO uses MegaLights ray tracing (inline ray query / SWRT),
+// RAY_TRACED forces MegaLights ray tracing, and VIRTUAL skips ray queries and samples VSM via SMRT (2 rays).
+enum LightMegaLightsShadowMethod {
+	LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO,
+	LIGHT_MEGALIGHTS_SHADOW_METHOD_RAY_TRACED,
+	LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL,
+	LIGHT_MEGALIGHTS_SHADOW_METHOD_MAX,
+};
+
 enum LightOmniShadowMode {
 	LIGHT_OMNI_SHADOW_DUAL_PARABOLOID,
 	LIGHT_OMNI_SHADOW_CUBE,

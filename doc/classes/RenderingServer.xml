@@ -2429,6 +2429,14 @@
 				Sets the maximum SDFGI cascade in which the 3D light's indirect lighting is rendered. Higher values allow the light to be rendered in SDFGI further away from the camera.
 			</description>
 		</method>
+		<method name="light_set_megalights_shadow_method">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="method" type="int" enum="RenderingServer.LightMegaLightsShadowMethod" />
+			<description>
+				Sets how MegaLights evaluates shadow visibility for this 3D light. Equivalent to [member Light3D.megalights_shadow_method]. [constant LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL] skips ray queries and evaluates the light's virtual shadow map with Shadow Map Ray Tracing (2 SMRT rays) when virtual shadow maps are available on Forward+; otherwise it falls back to the ray-traced MegaLights visibility chain.
+			</description>
+		</method>
 		<method name="light_set_negative">
 			<return type="void" />
 			<param index="0" name="light" type="RID" />
@@ -2668,6 +2676,12 @@
 			<return type="Dictionary" />
 			<description>
 				Returns the most recent MegaLights sampling core verification result recorded after calling [method megalights_request_check]. Returns an empty [Dictionary] if no check has been requested yet, or a dictionary with [code]"done": false[/code] while multi-frame accumulation is still in progress.
+			</description>
+		</method>
+		<method name="megalights_get_tier_info">
+			<return type="Dictionary" />
+			<description>
+				Returns MegaLights visibility-chain tier and capability information for the active renderer and device, including [code]tier[/code] ([code]"HWRT"[/code], [code]"HWRT_INLINE_ONLY"[/code], [code]"SWRT_EXTENSION"[/code], [code]"SCREEN_ONLY"[/code], or [code]"UNAVAILABLE"[/code]), [code]backend[/code], [code]experimental[/code], [code]experimental_label[/code] (reporting Apple M2+ Metal inline-ray-query-only Experimental status cleanly), [code]inline_ray_query_only[/code], [code]retrace_supported[/code], [code]far_field_enabled[/code], [code]swrt_extension[/code], [code]vsm_supported[/code], [code]screen_traces_enabled[/code], [code]distant_screen_traces_length[/code], and [code]reason[/code].
 			</description>
 		</method>
 		<method name="megalights_request_check">
@@ -5706,6 +5720,18 @@
 		</constant>
 		<constant name="LIGHT_SHADOW_METHOD_MAX" value="5" enum="LightShadowMethod">
 			Represents the size of the [enum LightShadowMethod] enum.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO" value="0" enum="LightMegaLightsShadowMethod">
+			Automatically uses the MegaLights ray-traced visibility chain.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_SHADOW_METHOD_RAY_TRACED" value="1" enum="LightMegaLightsShadowMethod">
+			Explicitly uses the MegaLights ray-traced visibility chain for this light.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL" value="2" enum="LightMegaLightsShadowMethod">
+			Skips ray queries for this light in MegaLights and evaluates its virtual shadow map with Shadow Map Ray Tracing (2 SMRT rays) when virtual shadow maps are available on Forward+; falls back to the ray-traced visibility chain elsewhere.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_SHADOW_METHOD_MAX" value="3" enum="LightMegaLightsShadowMethod">
+			Represents the size of the [enum LightMegaLightsShadowMethod] enum.
 		</constant>
 		<constant name="LIGHT_OMNI_SHADOW_DUAL_PARABOLOID" value="0" enum="LightOmniShadowMode">
 			Use a dual paraboloid shadow map for omni lights.

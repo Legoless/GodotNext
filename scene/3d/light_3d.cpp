@@ -278,6 +278,10 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 		if (wants_virtual && !bool(tier.get("available", false))) {
 			warnings.push_back(vformat(RTR("Virtual shadow maps are not available on this renderer or device (%s). This light uses the shadow atlas."), String(tier.get("reason", ""))));
 		}
+		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+		if (megalights_shadow_method == MEGALIGHTS_SHADOW_METHOD_VIRTUAL && !bool(tier.get("available", false))) {
+			warnings.push_back(vformat(RTR("MegaLights virtual shadow map sampling is not available on this renderer or device (%s). This light falls back to ray-traced MegaLights visibility."), String(tier.get("reason", ""))));
+		}
 	}
 
 	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
@@ -307,6 +311,18 @@ void Light3D::set_shadow_method(ShadowMethod p_method) {
 
 Light3D::ShadowMethod Light3D::get_shadow_method() const {
 	return shadow_method;
+}
+
+void Light3D::set_megalights_shadow_method(MegaLightsShadowMethod p_method) {
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	ERR_FAIL_INDEX(int(p_method), int(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_MAX));
+	megalights_shadow_method = p_method;
+	RS::get_singleton()->light_set_megalights_shadow_method(light, RSE::LightMegaLightsShadowMethod(p_method));
+	update_configuration_warnings();
+}
+
+Light3D::MegaLightsShadowMethod Light3D::get_megalights_shadow_method() const {
+	return megalights_shadow_method;
 }
 
 void Light3D::set_projector(const Ref<Texture2D> &p_texture) {
@@ -531,6 +547,9 @@ void Light3D::_bind_methods() {
 	// GodotNext: vsm_settings_debug (#221).
 	ClassDB::bind_method(D_METHOD("set_shadow_method", "method"), &Light3D::set_shadow_method);
 	ClassDB::bind_method(D_METHOD("get_shadow_method"), &Light3D::get_shadow_method);
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	ClassDB::bind_method(D_METHOD("set_megalights_shadow_method", "method"), &Light3D::set_megalights_shadow_method);
+	ClassDB::bind_method(D_METHOD("get_megalights_shadow_method"), &Light3D::get_megalights_shadow_method);
 
 	ClassDB::bind_method(D_METHOD("set_projector", "projector"), &Light3D::set_projector);
 	ClassDB::bind_method(D_METHOD("get_projector"), &Light3D::get_projector);
@@ -600,6 +619,10 @@ void Light3D::_bind_methods() {
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_start", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_START);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_distance", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
 
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	ADD_GROUP("MegaLights", "megalights_");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "megalights_shadow_method", PROPERTY_HINT_ENUM, "Auto,Ray Traced,Virtual"), "set_megalights_shadow_method", "get_megalights_shadow_method");
+
 	ADD_GROUP("Distance Fade", "distance_fade_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "distance_fade_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_enable_distance_fade", "is_distance_fade_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "distance_fade_begin", PROPERTY_HINT_RANGE, "0.0,4096.0,0.01,or_greater,suffix:m"), "set_distance_fade_begin", "get_distance_fade_begin");
@@ -657,6 +680,11 @@ void Light3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_METHOD_ATLAS);
 	BIND_ENUM_CONSTANT(SHADOW_METHOD_RAY_TRACED);
 	BIND_ENUM_CONSTANT(SHADOW_METHOD_DISTANCE_FIELD);
+
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	BIND_ENUM_CONSTANT(MEGALIGHTS_SHADOW_METHOD_AUTO);
+	BIND_ENUM_CONSTANT(MEGALIGHTS_SHADOW_METHOD_RAY_TRACED);
+	BIND_ENUM_CONSTANT(MEGALIGHTS_SHADOW_METHOD_VIRTUAL);
 }
 
 Light3D::Light3D(RSE::LightType p_type) {

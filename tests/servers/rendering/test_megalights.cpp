@@ -34,7 +34,9 @@ TEST_FORCE_LINK(test_megalights)
 
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
+#include "scene/3d/light_3d.h"
 #include "servers/rendering/renderer_rd/effects/mega_lights.h"
+#include "servers/rendering/rendering_server.h"
 
 #include <cmath>
 #include <cstdint>
@@ -403,4 +405,280 @@ TEST_CASE("[Renderer][MegaLights] Spatio-temporal blue-noise 64x64x32 table qual
 
 	const double r_cross = (cross_sum * inv_n) / var;
 	CHECK(std::abs(r_cross) < 0.02);
+}
+
+TEST_CASE("[Renderer][MegaLights] Visibility chain settings, structs, and packing (#146)") {
+	const ML::Settings defaults = ML::read_settings();
+	CHECK_EQ(defaults.screen_traces, ML::DEFAULT_SCREEN_TRACES);
+	CHECK_EQ(defaults.screen_traces, true);
+	CHECK(Math::is_equal_approx(defaults.distant_screen_traces_length, ML::DEFAULT_DISTANT_SCREEN_TRACES_LENGTH));
+	CHECK_EQ(defaults.far_field, false);
+	CHECK_EQ(defaults.swrt_continuation, false);
+
+	// Validation clamps invalid distant screen trace length back to default and preserves 0.0.
+	ML::Settings s = defaults;
+	s.distant_screen_traces_length = -3.0f;
+	CHECK(Math::is_equal_approx(ML::validate_settings(s).distant_screen_traces_length, ML::DEFAULT_DISTANT_SCREEN_TRACES_LENGTH));
+	s.distant_screen_traces_length = NAN;
+	CHECK(Math::is_equal_approx(ML::validate_settings(s).distant_screen_traces_length, ML::DEFAULT_DISTANT_SCREEN_TRACES_LENGTH));
+	s.distant_screen_traces_length = 0.0f;
+	CHECK_EQ(ML::validate_settings(s).distant_screen_traces_length, 0.0f);
+	s.distant_screen_traces_length = 12.5f;
+	CHECK(Math::is_equal_approx(ML::validate_settings(s).distant_screen_traces_length, 12.5f));
+
+	// GPU struct sizes & alignment contracts.
+	CHECK_EQ(sizeof(ML::VisParamsUBO), 272u);
+	CHECK_EQ(sizeof(ML::VisVSMProjectionParams), 64u);
+	CHECK_EQ(ML::VSM_SMRT_RAYS, 2u);
+
+	// Shader variant counts match bake registration.
+	CHECK_EQ(ML::get_screen_trace_shader_variant_defines().size(), 4);
+	CHECK_EQ(ML::get_trace_rays_shader_variant_defines().size(), 4);
+	CHECK_EQ(ML::get_trace_rays_swrt_shader_variant_defines().size(), 1);
+	CHECK_EQ(ML::get_trace_vsm_shader_variant_defines().size(), 1);
+
+	// RGB transmittance RGBA8 packing roundtrip.
+	const uint32_t packed_zero = ML::pack_visibility_rgba8(0.0f, 0.0f, 0.0f, 1.0f);
+	const Color c_zero = ML::unpack_visibility_rgba8(packed_zero);
+	CHECK(Math::is_equal_approx(c_zero.r, 0.0f));
+	CHECK(Math::is_equal_approx(c_zero.g, 0.0f));
+	CHECK(Math::is_equal_approx(c_zero.b, 0.0f));
+	CHECK(Math::is_equal_approx(c_zero.a, 1.0f));
+
+	const uint32_t packed_one = ML::pack_visibility_rgba8(1.0f, 1.0f, 1.0f, 1.0f);
+	CHECK_EQ(packed_one, 0xFFFFFFFFu);
+
+	const uint32_t packed_rgb = ML::pack_visibility_rgba8(0.25f, 0.5f, 0.75f, 1.0f);
+	const Color c_rgb = ML::unpack_visibility_rgba8(packed_rgb);
+	CHECK(Math::abs(c_rgb.r - 0.25f) < (1.0f / 255.0f));
+	CHECK(Math::abs(c_rgb.g - 0.50f) < (1.0f / 255.0f));
+	CHECK(Math::abs(c_rgb.b - 0.75f) < (1.0f / 255.0f));
+}
+
+TEST_CASE("[Renderer][MegaLights] Per-light MegaLightsShadowMethod and VSM routing (#146)") {
+	// Light3D enum parity with RenderingServer enums.
+	CHECK_EQ(int(Light3D::MEGALIGHTS_SHADOW_METHOD_AUTO), int(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO));
+	CHECK_EQ(int(Light3D::MEGALIGHTS_SHADOW_METHOD_RAY_TRACED), int(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_RAY_TRACED));
+	CHECK_EQ(int(Light3D::MEGALIGHTS_SHADOW_METHOD_VIRTUAL), int(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL));
+
+	// VSM routing helper: only VIRTUAL lights route to VSM, and only when VSM is available.
+	CHECK_FALSE(ML::light_uses_vsm(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO, true));
+	CHECK_FALSE(ML::light_uses_vsm(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_RAY_TRACED, true));
+	CHECK(ML::light_uses_vsm(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL, true));
+	CHECK_FALSE(ML::light_uses_vsm(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL, false));
+
+	// Node property getter/setter roundtrip on DirectionalLight3D and OmniLight3D.
+	DirectionalLight3D *sun = memnew(DirectionalLight3D);
+	CHECK_EQ(sun->get_megalights_shadow_method(), Light3D::MEGALIGHTS_SHADOW_METHOD_AUTO);
+	sun->set_megalights_shadow_method(Light3D::MEGALIGHTS_SHADOW_METHOD_VIRTUAL);
+	CHECK_EQ(sun->get_megalights_shadow_method(), Light3D::MEGALIGHTS_SHADOW_METHOD_VIRTUAL);
+	sun->set_megalights_shadow_method(Light3D::MEGALIGHTS_SHADOW_METHOD_RAY_TRACED);
+	CHECK_EQ(sun->get_megalights_shadow_method(), Light3D::MEGALIGHTS_SHADOW_METHOD_RAY_TRACED);
+	memdelete(sun);
+
+	OmniLight3D *omni = memnew(OmniLight3D);
+	CHECK_EQ(omni->get_megalights_shadow_method(), Light3D::MEGALIGHTS_SHADOW_METHOD_AUTO);
+	omni->set_megalights_shadow_method(Light3D::MEGALIGHTS_SHADOW_METHOD_VIRTUAL);
+	CHECK_EQ(omni->get_megalights_shadow_method(), Light3D::MEGALIGHTS_SHADOW_METHOD_VIRTUAL);
+	memdelete(omni);
+}
+
+TEST_CASE("[Renderer][MegaLights] Screen-trace step presets, distant length, and surface thickness (#146)") {
+	// Quality preset step caps increase monotonically (Low=8, Medium=12, High=16, Epic=24).
+	CHECK_EQ(ML::screen_trace_steps_for_quality(0), 8u);
+	CHECK_EQ(ML::screen_trace_steps_for_quality(1), 12u);
+	CHECK_EQ(ML::screen_trace_steps_for_quality(2), 16u);
+	CHECK_EQ(ML::screen_trace_steps_for_quality(3), 24u);
+	CHECK_EQ(ML::screen_trace_steps_for_quality(-5), 8u);
+	CHECK_EQ(ML::screen_trace_steps_for_quality(10), 24u);
+
+	// Near pixels use short near length; far pixels ramp smoothly across [0.5*start, 2*start] up to distant_screen_traces_length.
+	const float d_near = ML::screen_trace_max_distance(4.0f, 1.0f, 4.0f, 16.0f);
+	const float d_mid = ML::screen_trace_max_distance(16.0f, 1.0f, 4.0f, 16.0f);
+	const float d_far = ML::screen_trace_max_distance(120.0f, 1.0f, 4.0f, 16.0f);
+	CHECK(Math::is_equal_approx(d_near, 1.0f));
+	CHECK(d_mid > d_near);
+	CHECK(d_mid < d_far);
+	CHECK(Math::is_equal_approx(d_far, 4.0f));
+
+	// Setting distant_length = 0 disables distant screen trace for far pixels cleanly.
+	CHECK(Math::is_equal_approx(ML::screen_trace_max_distance(100.0f, 1.0f, 0.0f, 16.0f), 0.0f));
+
+	// Surface thickness scales linearly with view depth while keeping a 2 cm minimum floor.
+	CHECK(Math::is_equal_approx(ML::screen_trace_surface_thickness(0.5f, 0.01f), 0.02f));
+	CHECK(Math::is_equal_approx(ML::screen_trace_surface_thickness(10.0f, 0.01f), 0.10f));
+	CHECK(Math::is_equal_approx(ML::screen_trace_surface_thickness(10.0f, 0.05f), 0.50f));
+	CHECK(Math::is_equal_approx(ML::screen_trace_surface_thickness(10.0f, 0.0f), 0.02f));
+}
+
+TEST_CASE("[Renderer][MegaLights] 2x2 block ray deduplication and stream compaction (#146)") {
+	// 1-texel depth tolerance keeps a 1 cm floor near camera and scales linearly with depth, grazing slope, and half-res stride.
+	const float tol_near = ML::dedupe_depth_tolerance(2.0f, 1.0f, 1.732f, 1080u, false, false);
+	const float tol_mid = ML::dedupe_depth_tolerance(20.0f, 1.0f, 1.732f, 1080u, false, false);
+	const float tol_far = ML::dedupe_depth_tolerance(120.0f, 1.0f, 1.732f, 1080u, false, false);
+	const float tol_half = ML::dedupe_depth_tolerance(20.0f, 1.0f, 1.732f, 1080u, true, false);
+	const float tol_sloped = ML::dedupe_depth_tolerance(20.0f, 0.35f, 1.732f, 1080u, false, false);
+	CHECK(Math::is_equal_approx(tol_near, 0.01f));
+	CHECK(tol_mid > tol_near);
+	CHECK(tol_far > tol_mid * 5.0f);
+	CHECK(tol_half > tol_mid * 1.5f);
+	CHECK(tol_sloped > tol_mid * 1.5f);
+
+	const uint32_t light0 = ML::pack_sample_light(ML::LIGHT_TYPE_OMNI, 7u);
+	const uint32_t light1 = ML::pack_sample_light(ML::LIGHT_TYPE_OMNI, 8u);
+	const Vector3 n_up(0.0f, 1.0f, 0.0f);
+	const Vector3 n_side(1.0f, 0.0f, 0.0f);
+	const Vector3 dir_a = Vector3(0.2f, 0.95f, 0.24f).normalized();
+	const Vector3 dir_b = Vector3(0.21f, 0.95f, 0.23f).normalized();
+	const Vector3 dir_far = Vector3(-0.8f, 0.6f, 0.0f).normalized();
+
+	// Matching light, depth within 1 texel, matching normal and direction -> deduplicate.
+	CHECK(ML::can_dedupe_ray(light0, light0, 10.0f, 10.01f, 0.02f, 0.02f, n_up, n_up, dir_a, dir_b));
+	// Reject different light, depth jump > 1 texel, normal discontinuity, or divergent ray direction.
+	CHECK_FALSE(ML::can_dedupe_ray(light0, light1, 10.0f, 10.01f, 0.02f, 0.02f, n_up, n_up, dir_a, dir_b));
+	CHECK_FALSE(ML::can_dedupe_ray(light0, light0, 10.0f, 10.50f, 0.02f, 0.02f, n_up, n_up, dir_a, dir_b));
+	CHECK_FALSE(ML::can_dedupe_ray(light0, light0, 10.0f, 10.01f, 0.02f, 0.02f, n_up, n_side, dir_a, dir_b));
+	CHECK_FALSE(ML::can_dedupe_ray(light0, light0, 10.0f, 10.01f, 0.02f, 0.02f, n_up, n_up, dir_a, dir_far));
+	CHECK_FALSE(ML::can_dedupe_ray(ML::SAMPLE_INVALID, ML::SAMPLE_INVALID, 10.0f, 10.0f, 0.02f, 0.02f, n_up, n_up, dir_a, dir_a));
+
+	// Full 2x2 block (4 pixels x 2 spp = 8 samples):
+	//  - Slot k=0 across all 4 pixels picks light0 on same flat surface (depth diff <= tol) -> 1 ray + 3 deduped!
+	//    Pixel 2 has smaller t_resume (0.35 vs 0.85) -> merged ray keeps conservative min t_resume = 0.35!
+	//  - Slot k=1:
+	//    pixel 0: screen hit -> screen_hit_count = 1 (0 rays)
+	//    pixel 1: VSM light -> vsm_count = 1 (0 rays)
+	//    pixel 2: unshadowed light -> unshadowed_count = 1 (0 rays)
+	//    pixel 3: unresolved light1 at different depth -> 1 separate ray.
+	ML::DedupeBlockSample block[8];
+	for (uint32_t p = 0; p < 4u; p++) {
+		ML::DedupeBlockSample &s0 = block[p * 2u + 0u];
+		s0.light_packed = light0;
+		s0.linear_depth = 10.0f + float(p) * 0.004f;
+		s0.depth_tol = 0.025f;
+		s0.world_normal = n_up;
+		s0.ray_dir = dir_a;
+		s0.t_resume = (p == 2u) ? 0.35f : 0.85f;
+		s0.casts_shadow = true;
+		s0.use_vsm = false;
+		s0.screen_hit = false;
+	}
+	block[0 * 2u + 1u] = { light1, 10.0f, 0.025f, n_up, dir_a, 0.5f, true, false, true }; // screen hit
+	block[1 * 2u + 1u] = { light1, 10.0f, 0.025f, n_up, dir_a, 0.5f, true, true, false }; // VSM
+	block[2 * 2u + 1u] = { light1, 10.0f, 0.025f, n_up, dir_a, 0.5f, false, false, false }; // unshadowed
+	block[3 * 2u + 1u] = { light1, 14.0f, 0.025f, n_up, dir_far, 0.9f, true, false, false }; // separate ray
+
+	const ML::DedupeBlockResult with_dedupe = ML::compact_and_dedupe_2x2_cpu(block, 2u, true);
+	CHECK_EQ(with_dedupe.ray_count, 2u);
+	CHECK_EQ(with_dedupe.deduped_count, 3u);
+	CHECK_EQ(with_dedupe.screen_hit_count, 1u);
+	CHECK_EQ(with_dedupe.vsm_count, 1u);
+	CHECK_EQ(with_dedupe.unshadowed_count, 1u);
+	REQUIRE_EQ(with_dedupe.ray_min_t_resume.size(), 2u);
+	CHECK(Math::is_equal_approx(with_dedupe.ray_min_t_resume[0], 0.35f));
+	CHECK(Math::is_equal_approx(with_dedupe.ray_min_t_resume[1], 0.90f));
+	// All 4 pixels' slot-0 samples map to ray 0; pixel 1 slot 1 gets VSM tag (0x80000000 | 0); pixel 3 slot 1 maps to ray 1.
+	for (uint32_t p = 0; p < 4u; p++) {
+		CHECK_EQ(with_dedupe.sample_ray_map[p * 2u + 0u], 0u);
+	}
+	CHECK_EQ(with_dedupe.sample_ray_map[0 * 2u + 1u], ML::SAMPLE_INVALID);
+	CHECK_EQ(with_dedupe.sample_ray_map[1 * 2u + 1u], 0x80000000u);
+	CHECK_EQ(with_dedupe.sample_ray_map[2 * 2u + 1u], ML::SAMPLE_INVALID);
+	CHECK_EQ(with_dedupe.sample_ray_map[3 * 2u + 1u], 1u);
+
+	// Disabling dedupe keeps all 5 unresolved non-VSM rays distinct.
+	const ML::DedupeBlockResult no_dedupe = ML::compact_and_dedupe_2x2_cpu(block, 2u, false);
+	CHECK_EQ(no_dedupe.ray_count, 5u);
+	CHECK_EQ(no_dedupe.deduped_count, 0u);
+	CHECK_EQ(no_dedupe.vsm_count, 1u);
+	CHECK_EQ(no_dedupe.screen_hit_count, 1u);
+	CHECK_EQ(no_dedupe.unshadowed_count, 1u);
+}
+
+TEST_CASE("[Renderer][MegaLights] Visibility tier gating (HWRT, Mac M2+ Experimental, SWRT extension, VSM) (#146)") {
+	// 1. Desktop Vulkan/D3D12 HWRT with RT pipeline -> full HWRT with retrace & optional far field.
+	ML::TierInputs desktop_hwrt;
+	desktop_hwrt.forward_plus = true;
+	desktop_hwrt.supports_ray_query = true;
+	desktop_hwrt.supports_ray_tracing_pipeline = true;
+	desktop_hwrt.is_metal = false;
+	desktop_hwrt.nextgi_hwrt_available = true;
+	desktop_hwrt.vsm_available = true;
+	desktop_hwrt.far_field_requested = true;
+	const ML::TierStatus st_desktop = ML::resolve_visibility_tier(desktop_hwrt);
+	CHECK_EQ(st_desktop.tier, ML::VISIBILITY_TIER_HWRT);
+	CHECK_FALSE(st_desktop.experimental);
+	CHECK_FALSE(st_desktop.inline_ray_query_only);
+	CHECK(st_desktop.retrace_supported);
+	CHECK(st_desktop.far_field_supported);
+	CHECK_FALSE(st_desktop.swrt_extension);
+	CHECK(st_desktop.vsm_supported);
+	CHECK_EQ(String(st_desktop.tier_name), String("HWRT"));
+
+	// 2. Mac Apple M2+ Metal (#171): inline ray query only, cleanly labelled Experimental, no RT pipeline retrace.
+	ML::TierInputs mac_m2;
+	mac_m2.forward_plus = true;
+	mac_m2.supports_ray_query = true;
+	mac_m2.supports_ray_tracing_pipeline = false;
+	mac_m2.is_metal = true;
+	mac_m2.is_apple_m2_or_newer = true;
+	mac_m2.nextgi_hwrt_available = true;
+	mac_m2.vsm_available = true;
+	const ML::TierStatus st_mac_m2 = ML::resolve_visibility_tier(mac_m2);
+	CHECK_EQ(st_mac_m2.tier, ML::VISIBILITY_TIER_HWRT_INLINE_ONLY);
+	CHECK(st_mac_m2.experimental);
+	CHECK(st_mac_m2.inline_ray_query_only);
+	CHECK_FALSE(st_mac_m2.retrace_supported);
+	CHECK_FALSE(st_mac_m2.far_field_supported);
+	CHECK(st_mac_m2.vsm_supported);
+	CHECK_EQ(String(st_mac_m2.tier_name), String("HWRT_INLINE_ONLY"));
+	CHECK(String(st_mac_m2.experimental_label).contains("Experimental"));
+	CHECK(String(st_mac_m2.experimental_label).contains("Apple M2+"));
+
+	// 3. Mac Apple M1 (no M2+ inline RT) with SWRT continuation enabled -> labeled SWRT extension.
+	ML::TierInputs mac_m1_swrt;
+	mac_m1_swrt.forward_plus = true;
+	mac_m1_swrt.supports_ray_query = false;
+	mac_m1_swrt.is_metal = true;
+	mac_m1_swrt.is_apple_m2_or_newer = false;
+	mac_m1_swrt.df_sdf_available = true;
+	mac_m1_swrt.swrt_continuation_requested = true;
+	mac_m1_swrt.vsm_available = true;
+	const ML::TierStatus st_swrt = ML::resolve_visibility_tier(mac_m1_swrt);
+	CHECK_EQ(st_swrt.tier, ML::VISIBILITY_TIER_SWRT_EXTENSION);
+	CHECK(st_swrt.swrt_extension);
+	CHECK_FALSE(st_swrt.experimental);
+	CHECK_FALSE(st_swrt.retrace_supported);
+	CHECK(st_swrt.vsm_supported);
+	CHECK_EQ(String(st_swrt.tier_name), String("SWRT_EXTENSION"));
+
+	// 4. Non-RT tier with SWRT continuation off (default) -> screen-only tier.
+	ML::TierInputs non_rt_default = mac_m1_swrt;
+	non_rt_default.swrt_continuation_requested = false;
+	const ML::TierStatus st_screen = ML::resolve_visibility_tier(non_rt_default);
+	CHECK_EQ(st_screen.tier, ML::VISIBILITY_TIER_SCREEN_ONLY);
+	CHECK_FALSE(st_screen.swrt_extension);
+	CHECK_EQ(String(st_screen.tier_name), String("SCREEN_ONLY"));
+
+	// 5. Non-Forward+ renderer -> unavailable cleanly.
+	ML::TierInputs mobile;
+	mobile.forward_plus = false;
+	mobile.supports_ray_query = true;
+	const ML::TierStatus st_mobile = ML::resolve_visibility_tier(mobile);
+	CHECK_EQ(st_mobile.tier, ML::VISIBILITY_TIER_DISABLED);
+	CHECK_EQ(String(st_mobile.tier_name), String("UNAVAILABLE"));
+
+	// 6. RenderingServer.megalights_get_tier_info() exposes all expected inspection keys cleanly.
+	const Dictionary info = RenderingServer::get_singleton()->megalights_get_tier_info();
+	CHECK(info.has("tier"));
+	CHECK(info.has("backend"));
+	CHECK(info.has("experimental"));
+	CHECK(info.has("experimental_label"));
+	CHECK(info.has("inline_ray_query_only"));
+	CHECK(info.has("retrace_supported"));
+	CHECK(info.has("far_field_enabled"));
+	CHECK(info.has("swrt_extension"));
+	CHECK(info.has("vsm_supported"));
+	CHECK(info.has("screen_traces_enabled"));
+	CHECK(info.has("distant_screen_traces_length"));
+	CHECK(info.has("reason"));
 }

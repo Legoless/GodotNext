@@ -36,9 +36,14 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
-// GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169), rt_shadows (#141)
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169), rt_shadows (#141), megalights_visibility (#146)
 #include "servers/rendering/renderer_rd/effects/denoise.h"
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/effects/path_tracer.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_screen_trace.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays_swrt.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_vsm.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/path_tracer_sky_cdf.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_shadow.glsl.gen.h"
@@ -53,6 +58,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/path_tracer.glsl.gen.h"
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 using namespace RendererRD;
 
@@ -79,6 +85,11 @@ struct NextGIBakeShaders::Instances {
 	NextgiDenoiseShadowShaderRD denoise_shadow;
 	// GodotNext: path_tracer_lights_camera (#169). Sky 2D CDF importance sampling builder (plain compute, no ray query).
 	PathTracerSkyCdfShaderRD path_tracer_sky_cdf;
+	// GodotNext: megalights_visibility (#146). MegaLights screen trace, ray query, SWRT continuation, and VSM trace.
+	MlScreenTraceShaderRD ml_screen_trace;
+	MlTraceRaysShaderRD ml_trace_rays;
+	MlTraceRaysSwrtShaderRD ml_trace_rays_swrt;
+	MlTraceVsmShaderRD ml_trace_vsm;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
@@ -112,6 +123,12 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->rt_shadows, NextGIRTShadows::get_trace_shader_variant_defines()); // GodotNext: rt_shadows (#141)
 	_add(instances->denoise_shadow, NextGIDenoise::get_shadow_shader_variant_defines()); // GodotNext: rt_shadows (#141)
 	_add(instances->path_tracer_sky_cdf, PathTracer::get_sky_cdf_shader_variant_defines()); // GodotNext: path_tracer_lights_camera (#169)
+	// GodotNext: megalights_visibility (#146).
+	_add(instances->ml_screen_trace, MegaLights::get_screen_trace_shader_variant_defines());
+	_add(instances->ml_trace_rays, MegaLights::get_trace_rays_shader_variant_defines());
+	_add(instances->ml_trace_rays_swrt, MegaLights::get_trace_rays_swrt_shader_variant_defines());
+	instances->ml_trace_vsm.initialize(MegaLights::get_trace_vsm_shader_variant_defines(), RendererVirtualShadowMapStorage::get_glsl_defines());
+	_add_initialized(instances->ml_trace_vsm);
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {

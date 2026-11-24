@@ -32,25 +32,35 @@
 
 #include "core/config/project_settings.h"
 #include "core/os/mutex.h"
+#include "core/os/os.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/sort_array.h"
 #include "servers/rendering/renderer_rd/effects/megalights_stbn.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_generate_samples.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_guiding.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/ml_reference.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_screen_trace.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays_swrt.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_vsm.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_function_atlas.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #include <cmath>
 #include <cstring>
@@ -149,6 +159,7 @@ void MegaLightsViewData::_free_sampling_buffers() {
 	RD *rd = RD::get_singleton();
 	ml_free_rid(rd, sample_buffer);
 	ml_free_rid(rd, visibility_buffer);
+	ml_free_rid(rd, hit_distance_texture);
 	ml_free_rid(rd, guiding_buffers[0]);
 	ml_free_rid(rd, guiding_buffers[1]);
 	sample_grid_size = Size2i();
@@ -156,6 +167,19 @@ void MegaLightsViewData::_free_sampling_buffers() {
 	samples_per_pixel = 0;
 	guiding_write_index = 0;
 	guiding_has_history = false;
+}
+
+void MegaLightsViewData::_free_visibility_buffers() {
+	RD *rd = RD::get_singleton();
+	ml_free_rid(rd, vis_params_ubo);
+	ml_free_rid(rd, vis_counters_buffer);
+	ml_free_rid(rd, vis_indirect_buffer);
+	ml_free_rid(rd, vis_vsm_params_buffer);
+	ml_free_rid(rd, vis_ray_list_buffer);
+	ml_free_rid(rd, vis_vsm_list_buffer);
+	ml_free_rid(rd, vis_sample_ray_map_buffer);
+	vis_list_capacity = 0;
+	ml_free_rid(rd, vis_retrace_buffer);
 }
 
 void MegaLightsViewData::_free_reference_buffers() {
@@ -190,6 +214,7 @@ void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
 	const Size2i new_size = p_render_buffers->get_internal_size();
 	if (new_size != internal_size) {
 		_free_sampling_buffers();
+		_free_visibility_buffers();
 		_free_reference_buffers();
 		_free_verify_buffers();
 		internal_size = new_size;
@@ -199,6 +224,7 @@ void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
 
 void MegaLightsViewData::free_data() {
 	_free_sampling_buffers();
+	_free_visibility_buffers();
 	_free_reference_buffers();
 	_free_verify_buffers();
 	_free_transient_buffers();
@@ -246,12 +272,80 @@ bool MegaLightsViewData::ensure_sampling_buffers(const Size2i &p_internal_size, 
 	guiding_buffers[0] = rd->storage_buffer_create(guiding_bytes);
 	guiding_buffers[1] = rd->storage_buffer_create(guiding_bytes);
 
-	ERR_FAIL_COND_V(!sample_buffer.is_valid() || !visibility_buffer.is_valid() || !guiding_buffers[0].is_valid() || !guiding_buffers[1].is_valid(), false);
+	// GodotNext: megalights_visibility (#146). Per-sample R16F hit distance (2DArray, layer = sample k, miss = 65504.0).
+	RD::TextureFormat htf;
+	htf.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+	htf.format = RD::DATA_FORMAT_R16_SFLOAT;
+	htf.width = uint32_t(sample_grid_size.x);
+	htf.height = uint32_t(sample_grid_size.y);
+	htf.depth = 1;
+	htf.array_layers = spp;
+	htf.mipmaps = 1;
+	htf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	hit_distance_texture = rd->texture_create(htf, RD::TextureView());
 
+	ERR_FAIL_COND_V(!sample_buffer.is_valid() || !visibility_buffer.is_valid() || !hit_distance_texture.is_valid() || !guiding_buffers[0].is_valid() || !guiding_buffers[1].is_valid(), false);
+
+	rd->texture_clear(hit_distance_texture, Color(MegaLights::HIT_DISTANCE_MISS, 0.0f, 0.0f, 0.0f), 0, 1, 0, spp);
 	rd->buffer_clear(guiding_buffers[0], 0, guiding_bytes);
 	rd->buffer_clear(guiding_buffers[1], 0, guiding_bytes);
 	guiding_write_index = 0;
 	guiding_has_history = false;
+	return true;
+}
+
+bool MegaLightsViewData::ensure_visibility_buffers(uint32_t p_total_samples) {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	const uint32_t required = MAX(p_total_samples, 64u);
+
+	if (!vis_params_ubo.is_valid()) {
+		vis_params_ubo = rd->uniform_buffer_create(sizeof(MegaLights::VisParamsUBO));
+		ERR_FAIL_COND_V(!vis_params_ubo.is_valid(), false);
+	}
+	if (!vis_counters_buffer.is_valid()) {
+		vis_counters_buffer = rd->storage_buffer_create(8u * sizeof(uint32_t));
+		ERR_FAIL_COND_V(!vis_counters_buffer.is_valid(), false);
+		rd->buffer_clear(vis_counters_buffer, 0, 8u * sizeof(uint32_t));
+	}
+	if (!vis_indirect_buffer.is_valid()) {
+		vis_indirect_buffer = rd->storage_buffer_create(2u * 4u * sizeof(uint32_t), Span<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		ERR_FAIL_COND_V(!vis_indirect_buffer.is_valid(), false);
+		rd->buffer_clear(vis_indirect_buffer, 0, 2u * 4u * sizeof(uint32_t));
+	}
+	if (!vis_vsm_params_buffer.is_valid()) {
+		vis_vsm_params_buffer = rd->storage_buffer_create(sizeof(MegaLights::VisVSMProjectionParams));
+		ERR_FAIL_COND_V(!vis_vsm_params_buffer.is_valid(), false);
+		rd->buffer_clear(vis_vsm_params_buffer, 0, sizeof(MegaLights::VisVSMProjectionParams));
+	}
+
+	if (vis_ray_list_buffer.is_valid() && vis_vsm_list_buffer.is_valid() && vis_sample_ray_map_buffer.is_valid() && vis_list_capacity >= required) {
+		return true;
+	}
+
+	ml_free_rid(rd, vis_ray_list_buffer);
+	ml_free_rid(rd, vis_vsm_list_buffer);
+	ml_free_rid(rd, vis_sample_ray_map_buffer);
+	vis_list_capacity = required;
+
+	vis_ray_list_buffer = rd->storage_buffer_create(vis_list_capacity * 2u * sizeof(uint32_t));
+	vis_vsm_list_buffer = rd->storage_buffer_create(vis_list_capacity * sizeof(uint32_t));
+	vis_sample_ray_map_buffer = rd->storage_buffer_create(vis_list_capacity * sizeof(uint32_t));
+	ERR_FAIL_COND_V(!vis_ray_list_buffer.is_valid() || !vis_vsm_list_buffer.is_valid() || !vis_sample_ray_map_buffer.is_valid(), false);
+	return true;
+}
+
+bool MegaLightsViewData::ensure_retrace_buffer() {
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (vis_retrace_buffer.is_valid()) {
+		return true;
+	}
+	const uint32_t bytes = nextgi_shadow_retrace_buffer_size(NEXTGI_SHADOW_RETRACE_MAX_RECORDS);
+	vis_retrace_buffer = rd->storage_buffer_create(bytes);
+	ERR_FAIL_COND_V(!vis_retrace_buffer.is_valid(), false);
+	const uint32_t header[4] = { 0u, 0u, 0u, 0u };
+	rd->buffer_update(vis_retrace_buffer, 0, sizeof(header), header);
 	return true;
 }
 
@@ -338,7 +432,7 @@ bool MegaLightsViewData::ensure_light_shadow_policy_buffer(uint32_t p_count) {
 	}
 	ml_free_rid(rd, light_shadow_policy_buffer);
 	light_shadow_policy_capacity = MAX(required * 2u, 64u);
-	light_shadow_policy_buffer = rd->storage_buffer_create(light_shadow_policy_capacity * 2u * sizeof(uint32_t));
+	light_shadow_policy_buffer = rd->storage_buffer_create(light_shadow_policy_capacity * 4u * sizeof(uint32_t));
 	return light_shadow_policy_buffer.is_valid();
 }
 
@@ -391,6 +485,11 @@ MegaLights::Settings MegaLights::validate_settings(const Settings &p_settings) {
 	if (!Math::is_finite(out.falloff_cull_threshold) || out.falloff_cull_threshold < 0.0f) {
 		out.falloff_cull_threshold = DEFAULT_FALLOFF_CULL_THRESHOLD;
 	}
+	if (!Math::is_finite(out.distant_screen_traces_length) || out.distant_screen_traces_length < 0.0f) {
+		out.distant_screen_traces_length = DEFAULT_DISTANT_SCREEN_TRACES_LENGTH;
+	} else {
+		out.distant_screen_traces_length = CLAMP(out.distant_screen_traces_length, 0.0f, 64.0f);
+	}
 	return out;
 }
 
@@ -414,6 +513,18 @@ MegaLights::Settings MegaLights::read_settings() {
 	}
 	if (ps->has_setting(SETTING_REFERENCE_MODE)) {
 		s.reference_mode = bool(ps->get_setting(SETTING_REFERENCE_MODE));
+	}
+	if (ps->has_setting(SETTING_SCREEN_TRACES)) {
+		s.screen_traces = bool(ps->get_setting(SETTING_SCREEN_TRACES));
+	}
+	if (ps->has_setting(SETTING_DISTANT_SCREEN_TRACES_LENGTH)) {
+		s.distant_screen_traces_length = float(ps->get_setting(SETTING_DISTANT_SCREEN_TRACES_LENGTH));
+	}
+	if (ps->has_setting(SETTING_FAR_FIELD)) {
+		s.far_field = bool(ps->get_setting(SETTING_FAR_FIELD));
+	}
+	if (ps->has_setting(SETTING_SWRT_CONTINUATION)) {
+		s.swrt_continuation = bool(ps->get_setting(SETTING_SWRT_CONTINUATION));
 	}
 	return validate_settings(s);
 }
@@ -641,6 +752,294 @@ float MegaLights::welford_relative_std_error(float p_mean_luma, float p_m2, uint
 	return float(std_err / double(p_mean_luma));
 }
 
+// GodotNext: megalights_visibility (#146). Pure device-free visibility chain helpers.
+
+uint32_t MegaLights::screen_trace_steps_for_quality(int p_quality_level) {
+	if (p_quality_level <= 0) {
+		return 8u; // Low
+	}
+	if (p_quality_level == 1) {
+		return 12u; // Medium
+	}
+	if (p_quality_level == 2) {
+		return 16u; // High
+	}
+	return 24u; // Epic
+}
+
+float MegaLights::screen_trace_max_distance(float p_linear_depth, float p_near_length, float p_distant_length, float p_distant_start_depth) {
+	const float near_len = MAX(p_near_length, 0.0f);
+	const float dist_len = MAX(p_distant_length, 0.0f);
+	const float start_d = MAX(p_distant_start_depth, 0.1f);
+	const float edge0 = start_d * 0.5f;
+	const float edge1 = start_d * 2.0f;
+	const float t = CLAMP((MAX(p_linear_depth, 0.0f) - edge0) / MAX(edge1 - edge0, 1e-4f), 0.0f, 1.0f);
+	const float s = t * t * (3.0f - 2.0f * t);
+	return Math::lerp(near_len, dist_len, s);
+}
+
+float MegaLights::screen_trace_surface_thickness(float p_linear_depth, float p_surface_thickness_setting) {
+	return MAX(0.02f, MAX(p_linear_depth, 0.0f) * MAX(p_surface_thickness_setting, 0.001f));
+}
+
+float MegaLights::dedupe_depth_tolerance(float p_linear_depth, float p_normal_vs_z, float p_proj_y, uint32_t p_full_height, bool p_downsample_half, bool p_orthogonal) {
+	const float denom = MAX(Math::abs(p_proj_y) * float(MAX(p_full_height, 1u)), 1e-4f);
+	const float pixel_world = p_orthogonal ? (2.0f / denom) : (2.0f * MAX(p_linear_depth, 1e-4f) / denom);
+	const float step_scale = p_downsample_half ? 2.0f : 1.0f;
+	const float nz = CLAMP(p_normal_vs_z, -1.0f, 1.0f);
+	const float slope_factor = CLAMP(std::sqrt(MAX(1.0f - nz * nz, 0.0f)) / MAX(Math::abs(nz), 0.25f), 0.5f, 2.5f);
+	return MAX(pixel_world * step_scale * slope_factor, 0.01f);
+}
+
+bool MegaLights::can_dedupe_ray(uint32_t p_light_a, uint32_t p_light_b, float p_depth_a, float p_depth_b, float p_tol_a, float p_tol_b, const Vector3 &p_normal_a, const Vector3 &p_normal_b, const Vector3 &p_dir_a, const Vector3 &p_dir_b) {
+	if (p_light_a == SAMPLE_INVALID || p_light_a != p_light_b) {
+		return false;
+	}
+	if (!(p_depth_a > 0.0f) || !(p_depth_b > 0.0f)) {
+		return false;
+	}
+	if (Math::abs(p_depth_a - p_depth_b) > MAX(p_tol_a, p_tol_b)) {
+		return false;
+	}
+	if (p_normal_a.normalized().dot(p_normal_b.normalized()) < 0.90f) {
+		return false;
+	}
+	if (p_dir_a.normalized().dot(p_dir_b.normalized()) < 0.995f) {
+		return false;
+	}
+	return true;
+}
+
+MegaLights::DedupeBlockResult MegaLights::compact_and_dedupe_2x2_cpu(const DedupeBlockSample *p_samples, uint32_t p_spp, bool p_dedupe_enabled) {
+	DedupeBlockResult res;
+	const uint32_t spp = CLAMP(p_spp, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
+	const uint32_t total = 4u * spp;
+	res.sample_ray_map.resize(total);
+	for (uint32_t i = 0; i < total; i++) {
+		res.sample_ray_map[i] = 0xFFFFFFFFu;
+	}
+	if (p_samples == nullptr) {
+		return res;
+	}
+
+	uint32_t active_light[4][MAX_SAMPLES_PER_PIXEL];
+	uint32_t leader_ray[4][MAX_SAMPLES_PER_PIXEL];
+	for (uint32_t sub = 0; sub < 4u; sub++) {
+		for (uint32_t k = 0; k < spp; k++) {
+			active_light[sub][k] = SAMPLE_INVALID;
+			leader_ray[sub][k] = 0xFFFFFFFFu;
+			const uint32_t idx = sub * spp + k;
+			const DedupeBlockSample &s = p_samples[idx];
+			if (s.light_packed == SAMPLE_INVALID || !(s.linear_depth > 0.0f)) {
+				continue;
+			}
+			if (!s.casts_shadow) {
+				res.unshadowed_count++;
+				continue;
+			}
+			if (s.use_vsm) {
+				res.sample_ray_map[idx] = 0x80000000u | res.vsm_count;
+				res.vsm_count++;
+				continue;
+			}
+			if (s.screen_hit) {
+				res.screen_hit_count++;
+				continue;
+			}
+			active_light[sub][k] = s.light_packed;
+		}
+	}
+
+	for (uint32_t sub = 0; sub < 4u; sub++) {
+		for (uint32_t k = 0; k < spp; k++) {
+			const uint32_t my_light = active_light[sub][k];
+			if (my_light == SAMPLE_INVALID) {
+				continue;
+			}
+			const uint32_t idx = sub * spp + k;
+			const DedupeBlockSample &s = p_samples[idx];
+			uint32_t assigned = 0xFFFFFFFFu;
+
+			if (p_dedupe_enabled && sub > 0u) {
+				for (uint32_t pass = 0u; pass < 2u && assigned == 0xFFFFFFFFu; pass++) {
+					for (uint32_t prev = 0u; prev < sub && assigned == 0xFFFFFFFFu; prev++) {
+						const uint32_t k_begin = (pass == 0u) ? k : 0u;
+						const uint32_t k_end = (pass == 0u) ? (k + 1u) : spp;
+						for (uint32_t ok = k_begin; ok < k_end; ok++) {
+							if (leader_ray[prev][ok] == 0xFFFFFFFFu) {
+								continue;
+							}
+							const DedupeBlockSample &o = p_samples[prev * spp + ok];
+							if (can_dedupe_ray(my_light, active_light[prev][ok], s.linear_depth, o.linear_depth, s.depth_tol, o.depth_tol, s.world_normal, o.world_normal, s.ray_dir, o.ray_dir)) {
+								assigned = leader_ray[prev][ok];
+								break;
+							}
+						}
+					}
+				}
+			}
+
+			if (assigned != 0xFFFFFFFFu) {
+				res.sample_ray_map[idx] = assigned;
+				res.ray_min_t_resume[assigned] = MIN(res.ray_min_t_resume[assigned], MAX(s.t_resume, 0.0f));
+				res.deduped_count++;
+			} else {
+				const uint32_t ray_idx = res.ray_count++;
+				leader_ray[sub][k] = ray_idx;
+				res.sample_ray_map[idx] = ray_idx;
+				res.ray_min_t_resume.push_back(MAX(s.t_resume, 0.0f));
+			}
+		}
+	}
+	return res;
+}
+
+bool MegaLights::light_uses_vsm(RSE::LightMegaLightsShadowMethod p_method, bool p_vsm_available) {
+	return p_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL && p_vsm_available;
+}
+
+MegaLights::TierStatus MegaLights::resolve_visibility_tier(const TierInputs &p_inputs) {
+	TierStatus st;
+	st.vsm_supported = p_inputs.vsm_available;
+	if (!p_inputs.forward_plus) {
+		st.tier = VISIBILITY_TIER_DISABLED;
+		st.tier_name = "UNAVAILABLE";
+		st.backend = "none";
+		st.reason = "UNSUPPORTED_RENDERER";
+		return st;
+	}
+
+	if (p_inputs.supports_ray_query && p_inputs.nextgi_hwrt_available) {
+		if (p_inputs.is_metal) {
+			if (p_inputs.is_apple_m2_or_newer) {
+				st.tier = VISIBILITY_TIER_HWRT_INLINE_ONLY;
+				st.experimental = true;
+				st.inline_ray_query_only = true;
+				st.retrace_supported = false;
+				st.far_field_supported = p_inputs.far_field_requested;
+				st.tier_name = "HWRT_INLINE_ONLY";
+				st.backend = "metal_ray_query";
+				st.experimental_label = "Experimental (Apple M2+ inline ray query only)";
+				st.reason = "METAL_INLINE_RAY_QUERY_EXPERIMENTAL";
+				return st;
+			}
+		} else {
+			st.tier = VISIBILITY_TIER_HWRT;
+			st.experimental = false;
+			st.inline_ray_query_only = false;
+			st.retrace_supported = p_inputs.supports_ray_tracing_pipeline;
+			st.far_field_supported = p_inputs.far_field_requested;
+			st.tier_name = "HWRT";
+			st.backend = "hwrt_ray_query";
+			st.reason = "HWRT_RAY_QUERY_AVAILABLE";
+			return st;
+		}
+	}
+
+	if (p_inputs.swrt_continuation_requested && p_inputs.df_sdf_available) {
+		st.tier = VISIBILITY_TIER_SWRT_EXTENSION;
+		st.swrt_extension = true;
+		st.tier_name = "SWRT_EXTENSION";
+		st.backend = "swrt_global_sdf";
+		st.experimental_label = "Extension (SWRT global SDF continuation)";
+		st.reason = "NON_RT_SWRT_CONTINUATION_EXTENSION";
+		return st;
+	}
+
+	st.tier = VISIBILITY_TIER_SCREEN_ONLY;
+	st.tier_name = "SCREEN_ONLY";
+	st.backend = "screen_trace";
+	st.reason = p_inputs.swrt_continuation_requested ? "SWRT_SDF_UNAVAILABLE" : "NO_HWRT_RAY_QUERY";
+	return st;
+}
+
+Dictionary MegaLights::get_tier_info() {
+	TierInputs in;
+	RD *rd = RD::get_singleton();
+	const Settings s = read_settings();
+	in.forward_plus = rd != nullptr;
+	in.screen_traces_enabled = s.screen_traces;
+	in.far_field_requested = s.far_field;
+	in.swrt_continuation_requested = s.swrt_continuation;
+	in.vsm_available = RendererVirtualShadowMapStorage::is_vsm_available();
+	in.df_sdf_available = RendererVirtualShadowMapStorage::is_df_available();
+
+	if (rd != nullptr) {
+		in.supports_ray_query = rd->has_feature(RD::SUPPORTS_RAY_QUERY);
+		in.supports_ray_tracing_pipeline = rd->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE);
+		const String api = rd->get_device_api_name().to_lower();
+		const String dev_name = rd->get_device_name();
+		in.is_metal = api.contains("metal") || (OS::get_singleton() != nullptr && OS::get_singleton()->get_name() == "macOS" && !api.contains("vulkan"));
+		if (in.is_metal) {
+			// Apple M2+ supports hardware inline ray queries via #171 (M1 does not expose SUPPORTS_RAY_QUERY).
+			in.is_apple_m2_or_newer = in.supports_ray_query && !dev_name.contains("Apple M1");
+		}
+	}
+	in.nextgi_hwrt_available = RendererVirtualShadowMapStorage::is_rt_available();
+
+	const TierStatus st = resolve_visibility_tier(in);
+	Dictionary info;
+	info["tier"] = String(st.tier_name);
+	info["backend"] = String(st.backend);
+	info["experimental"] = st.experimental;
+	info["experimental_label"] = String(st.experimental_label);
+	info["inline_ray_query_only"] = st.inline_ray_query_only;
+	info["retrace_supported"] = st.retrace_supported;
+	info["swrt_extension"] = st.swrt_extension;
+	info["far_field_enabled"] = st.far_field_supported;
+	info["screen_traces_enabled"] = in.screen_traces_enabled;
+	info["distant_screen_traces_length"] = double(s.distant_screen_traces_length);
+	info["vsm_supported"] = st.vsm_supported;
+	info["reason"] = String(st.reason);
+	return info;
+}
+
+uint32_t MegaLights::pack_visibility_rgba8(float p_r, float p_g, float p_b, float p_a) {
+	const uint32_t r = uint32_t(Math::round(CLAMP(p_r, 0.0f, 1.0f) * 255.0f));
+	const uint32_t g = uint32_t(Math::round(CLAMP(p_g, 0.0f, 1.0f) * 255.0f));
+	const uint32_t b = uint32_t(Math::round(CLAMP(p_b, 0.0f, 1.0f) * 255.0f));
+	const uint32_t a = uint32_t(Math::round(CLAMP(p_a, 0.0f, 1.0f) * 255.0f));
+	return r | (g << 8u) | (b << 16u) | (a << 24u);
+}
+
+Color MegaLights::unpack_visibility_rgba8(uint32_t p_packed) {
+	return Color(
+			float(p_packed & 0xFFu) / 255.0f,
+			float((p_packed >> 8u) & 0xFFu) / 255.0f,
+			float((p_packed >> 16u) & 0xFFu) / 255.0f,
+			float((p_packed >> 24u) & 0xFFu) / 255.0f);
+}
+
+Vector<String> MegaLights::get_screen_trace_shader_variant_defines() {
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_SCREEN_TRACE\n");
+	modes.push_back("\n#define MODE_FINALIZE\n");
+	modes.push_back("\n#define MODE_RETRACE_RESOLVE\n");
+	modes.push_back("\n#define MODE_RESOLVE_VISIBILITY\n");
+	return modes;
+}
+
+Vector<String> MegaLights::get_trace_rays_shader_variant_defines() {
+	Vector<String> variants;
+	variants.push_back("");
+	variants.push_back("\n#define NEXTGI_SHADOW_ALPHA_TEXTURES\n");
+	variants.push_back("\n#define ML_USE_FAR_FIELD\n");
+	variants.push_back("\n#define NEXTGI_SHADOW_ALPHA_TEXTURES\n#define ML_USE_FAR_FIELD\n");
+	return variants;
+}
+
+Vector<String> MegaLights::get_trace_rays_swrt_shader_variant_defines() {
+	Vector<String> variants;
+	variants.push_back("");
+	return variants;
+}
+
+Vector<String> MegaLights::get_trace_vsm_shader_variant_defines() {
+	Vector<String> variants;
+	variants.push_back("");
+	return variants;
+}
+
 const uint8_t *MegaLights::get_stbn_data() {
 	return megalights_stbn_data;
 }
@@ -693,6 +1092,18 @@ bool MegaLights::has_pending_check() {
 	return st.active;
 }
 
+bool MegaLights::check_wants_far_field() {
+	MegaLightsCheckState &st = ml_check_state();
+	MutexLock lock(st.mutex);
+	return st.active && bool(st.options.get("far_field", false));
+}
+
+bool MegaLights::check_wants_swrt() {
+	MegaLightsCheckState &st = ml_check_state();
+	MutexLock lock(st.mutex);
+	return st.active && bool(st.options.get("swrt", false));
+}
+
 Dictionary MegaLights::get_check_result() {
 	MegaLightsCheckState &st = ml_check_state();
 	MutexLock lock(st.mutex);
@@ -728,6 +1139,40 @@ struct MegaLights::GPUState {
 	bool ref_rt_alpha_failed = false;
 	RID shadow_texture_set;
 	RID shadow_texture_set_table;
+
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	enum ScreenTraceMode : uint32_t {
+		SCREEN_TRACE_MODE_TRACE = 0,
+		SCREEN_TRACE_MODE_FINALIZE = 1,
+		SCREEN_TRACE_MODE_RETRACE_RESOLVE = 2,
+		SCREEN_TRACE_MODE_RESOLVE = 3,
+		SCREEN_TRACE_MODE_MAX = 4,
+	};
+	MlScreenTraceShaderRD vis_screen_shader;
+	RID vis_screen_version;
+	RID vis_screen_pipelines[SCREEN_TRACE_MODE_MAX];
+	bool vis_screen_initialized = false;
+	bool vis_screen_failed = false;
+
+	MlTraceRaysShaderRD vis_trace_rays_shader;
+	RID vis_trace_rays_version;
+	RID vis_trace_rays_pipelines[4];
+	bool vis_trace_rays_initialized = false;
+	bool vis_trace_rays_failed = false;
+	RID vis_shadow_texture_set;
+	RID vis_shadow_texture_set_table;
+
+	MlTraceRaysSwrtShaderRD vis_trace_swrt_shader;
+	RID vis_trace_swrt_version;
+	RID vis_trace_swrt_pipeline;
+	bool vis_trace_swrt_initialized = false;
+	bool vis_trace_swrt_failed = false;
+
+	MlTraceVsmShaderRD vis_trace_vsm_shader;
+	RID vis_trace_vsm_version;
+	RID vis_trace_vsm_pipeline;
+	bool vis_trace_vsm_initialized = false;
+	bool vis_trace_vsm_failed = false;
 
 	RID stbn_texture;
 	RID dummy_storage_buffer;
@@ -791,6 +1236,41 @@ void MegaLights::free_resources() {
 			gpu->ref_rt_alpha_version = RID();
 		}
 
+		// GodotNext: megalights_visibility (#146).
+		if (gpu->vis_shadow_texture_set.is_valid() && rd->uniform_set_is_valid(gpu->vis_shadow_texture_set)) {
+			rd->free_rid(gpu->vis_shadow_texture_set);
+		}
+		gpu->vis_shadow_texture_set = RID();
+		gpu->vis_shadow_texture_set_table = RID();
+
+		for (uint32_t i = 0; i < GPUState::SCREEN_TRACE_MODE_MAX; i++) {
+			ml_free_rid(rd, gpu->vis_screen_pipelines[i]);
+		}
+		if (gpu->vis_screen_version.is_valid()) {
+			gpu->vis_screen_shader.version_free(gpu->vis_screen_version);
+			gpu->vis_screen_version = RID();
+		}
+
+		for (uint32_t i = 0; i < 4u; i++) {
+			ml_free_rid(rd, gpu->vis_trace_rays_pipelines[i]);
+		}
+		if (gpu->vis_trace_rays_version.is_valid()) {
+			gpu->vis_trace_rays_shader.version_free(gpu->vis_trace_rays_version);
+			gpu->vis_trace_rays_version = RID();
+		}
+
+		ml_free_rid(rd, gpu->vis_trace_swrt_pipeline);
+		if (gpu->vis_trace_swrt_version.is_valid()) {
+			gpu->vis_trace_swrt_shader.version_free(gpu->vis_trace_swrt_version);
+			gpu->vis_trace_swrt_version = RID();
+		}
+
+		ml_free_rid(rd, gpu->vis_trace_vsm_pipeline);
+		if (gpu->vis_trace_vsm_version.is_valid()) {
+			gpu->vis_trace_vsm_shader.version_free(gpu->vis_trace_vsm_version);
+			gpu->vis_trace_vsm_version = RID();
+		}
+
 		ml_free_rid(rd, gpu->stbn_texture);
 		ml_free_rid(rd, gpu->dummy_storage_buffer);
 	}
@@ -800,6 +1280,14 @@ void MegaLights::free_resources() {
 	gpu->ref_rt_failed = false;
 	gpu->ref_rt_alpha_initialized = false;
 	gpu->ref_rt_alpha_failed = false;
+	gpu->vis_screen_initialized = false;
+	gpu->vis_screen_failed = false;
+	gpu->vis_trace_rays_initialized = false;
+	gpu->vis_trace_rays_failed = false;
+	gpu->vis_trace_swrt_initialized = false;
+	gpu->vis_trace_swrt_failed = false;
+	gpu->vis_trace_vsm_initialized = false;
+	gpu->vis_trace_vsm_failed = false;
 }
 
 void MegaLights::_ensure_stbn_texture() {
@@ -947,6 +1435,118 @@ bool MegaLights::_ensure_rt_reference_shader(NextGI *p_next_gi, bool p_use_alpha
 	return true;
 }
 
+bool MegaLights::_ensure_screen_trace_shaders() {
+	if (gpu->vis_screen_initialized) {
+		return true;
+	}
+	if (gpu->vis_screen_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	gpu->vis_screen_shader.initialize(get_screen_trace_shader_variant_defines());
+	gpu->vis_screen_version = gpu->vis_screen_shader.version_create(false);
+	if (!gpu->vis_screen_version.is_valid()) {
+		gpu->vis_screen_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_screen_trace.glsl failed to compile.");
+	}
+	for (uint32_t i = 0; i < GPUState::SCREEN_TRACE_MODE_MAX; i++) {
+		gpu->vis_screen_pipelines[i] = rd->compute_pipeline_create(gpu->vis_screen_shader.version_get_shader(gpu->vis_screen_version, int(i)));
+		if (!gpu->vis_screen_pipelines[i].is_valid()) {
+			gpu->vis_screen_failed = true;
+			return false;
+		}
+	}
+	gpu->vis_screen_initialized = true;
+	return true;
+}
+
+bool MegaLights::_ensure_trace_rays_shaders(NextGI *p_next_gi) {
+	if (gpu->vis_trace_rays_initialized) {
+		return true;
+	}
+	if (gpu->vis_trace_rays_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	if (rd == nullptr || !rd->has_feature(RD::SUPPORTS_RAY_QUERY)) {
+		return false;
+	}
+	if (p_next_gi != nullptr && !p_next_gi->can_initialize_ray_query_shaders()) {
+		return false;
+	}
+	gpu->vis_trace_rays_shader.initialize(get_trace_rays_shader_variant_defines());
+	gpu->vis_trace_rays_version = gpu->vis_trace_rays_shader.version_create(false);
+	if (!gpu->vis_trace_rays_version.is_valid()) {
+		gpu->vis_trace_rays_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_trace_rays.glsl failed to compile.");
+	}
+	if (p_next_gi != nullptr) {
+		p_next_gi->notify_ray_query_shader_initialized();
+	}
+	for (uint32_t i = 0; i < 4u; i++) {
+		gpu->vis_trace_rays_pipelines[i] = rd->compute_pipeline_create(gpu->vis_trace_rays_shader.version_get_shader(gpu->vis_trace_rays_version, int(i)));
+		if (!gpu->vis_trace_rays_pipelines[i].is_valid()) {
+			gpu->vis_trace_rays_failed = true;
+			return false;
+		}
+	}
+	gpu->vis_trace_rays_initialized = true;
+	return true;
+}
+
+bool MegaLights::_ensure_trace_rays_swrt_shader() {
+	if (gpu->vis_trace_swrt_initialized) {
+		return true;
+	}
+	if (gpu->vis_trace_swrt_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	gpu->vis_trace_swrt_shader.initialize(get_trace_rays_swrt_shader_variant_defines());
+	gpu->vis_trace_swrt_version = gpu->vis_trace_swrt_shader.version_create(false);
+	if (!gpu->vis_trace_swrt_version.is_valid()) {
+		gpu->vis_trace_swrt_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_trace_rays_swrt.glsl failed to compile.");
+	}
+	gpu->vis_trace_swrt_pipeline = rd->compute_pipeline_create(gpu->vis_trace_swrt_shader.version_get_shader(gpu->vis_trace_swrt_version, 0));
+	if (!gpu->vis_trace_swrt_pipeline.is_valid()) {
+		gpu->vis_trace_swrt_failed = true;
+		return false;
+	}
+	gpu->vis_trace_swrt_initialized = true;
+	return true;
+}
+
+bool MegaLights::_ensure_trace_vsm_shader() {
+	if (gpu->vis_trace_vsm_initialized) {
+		return true;
+	}
+	if (gpu->vis_trace_vsm_failed) {
+		return false;
+	}
+	RD *rd = RD::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	ERR_FAIL_NULL_V(light_storage, false);
+	const String defines = RendererVirtualShadowMapStorage::get_glsl_defines() +
+			"\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(light_storage->get_max_directional_lights()) + "\n";
+	gpu->vis_trace_vsm_shader.initialize(get_trace_vsm_shader_variant_defines(), defines);
+	gpu->vis_trace_vsm_version = gpu->vis_trace_vsm_shader.version_create(false);
+	if (!gpu->vis_trace_vsm_version.is_valid()) {
+		gpu->vis_trace_vsm_failed = true;
+		ERR_FAIL_V_MSG(false, "MegaLights: ml_trace_vsm.glsl failed to compile.");
+	}
+	gpu->vis_trace_vsm_pipeline = rd->compute_pipeline_create(gpu->vis_trace_vsm_shader.version_get_shader(gpu->vis_trace_vsm_version, 0));
+	if (!gpu->vis_trace_vsm_pipeline.is_valid()) {
+		gpu->vis_trace_vsm_failed = true;
+		return false;
+	}
+	gpu->vis_trace_vsm_initialized = true;
+	return true;
+}
+
 void MegaLights::_fill_params_ubo(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, uint32_t p_frame_index, uint32_t p_ref_frame_index, bool p_has_guiding, bool p_force_visible_one, float p_falloff_override, ParamsUBO &r_ubo) const {
 	const RenderDataRD *rd_data = p_inputs.render_data;
 	const RenderSceneDataRD *scene_data = rd_data->scene_data;
@@ -1033,35 +1633,45 @@ void MegaLights::_upload_layer_group_masks(const Ref<MegaLightsViewData> &p_view
 	}
 }
 
-void MegaLights::_upload_light_shadow_policies(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, bool p_include_directional) const {
+void MegaLights::_upload_light_shadow_policies(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, bool p_include_directional, bool p_allow_vsm) const {
 	RD *rd = RD::get_singleton();
 	LightStorage *light_storage = LightStorage::get_singleton();
 	NextGIRTScene *rt_scene = p_inputs.next_gi != nullptr ? p_inputs.next_gi->get_rt_scene() : nullptr;
 
-	LocalVector<uint32_t> caster_masks;
+	LocalVector<LightStorage::MegaLightsLightPolicy> policies;
 	const uint32_t dir_count = p_include_directional ? p_inputs.render_data->directional_light_count : 0u;
-	light_storage->get_view_light_shadow_caster_masks(dir_count, caster_masks);
+	light_storage->get_view_light_megalights_policies(dir_count, policies);
 
-	const uint32_t count = MAX(uint32_t(caster_masks.size()), 1u);
+	const uint32_t count = MAX(uint32_t(policies.size()), 1u);
 	if (!p_view->ensure_light_shadow_policy_buffer(count)) {
 		return;
 	}
 
 	LocalVector<uint32_t> policy_words;
-	policy_words.resize(count * 2u);
-	for (uint32_t i = 0; i < caster_masks.size(); i++) {
-		const uint32_t cm = caster_masks[i];
-		if (cm != 0u && rt_scene != nullptr) {
-			policy_words[i * 2u] = rt_scene->get_shadow_light_mode(cm);
-			policy_words[i * 2u + 1u] = cm & NEXTGI_SHADOW_LAYER_MASK;
-		} else {
-			policy_words[i * 2u] = 0u;
-			policy_words[i * 2u + 1u] = 0u;
+	policy_words.resize(count * 4u);
+	for (uint32_t i = 0; i < policies.size(); i++) {
+		const LightStorage::MegaLightsLightPolicy &p = policies[i];
+		const uint32_t cm = p.caster_mask & NEXTGI_SHADOW_LAYER_MASK;
+		uint32_t flags = 0u;
+		if (p.caster_mask != 0u) {
+			flags |= POLICY_FLAG_CASTS_SHADOW;
 		}
+		if (p_allow_vsm && light_uses_vsm(p.shadow_method, p.vsm_sampleable)) {
+			flags |= POLICY_FLAG_USE_VSM;
+		}
+		if (cm == NEXTGI_SHADOW_LAYER_MASK) {
+			flags |= POLICY_FLAG_FULL_CASTER_MASK;
+		}
+		policy_words[i * 4u + 0u] = (p.caster_mask != 0u && rt_scene != nullptr) ? rt_scene->get_shadow_light_mode(p.caster_mask) : 0u;
+		policy_words[i * 4u + 1u] = cm;
+		policy_words[i * 4u + 2u] = flags;
+		policy_words[i * 4u + 3u] = 0u;
 	}
-	if (caster_masks.is_empty()) {
+	if (policies.is_empty()) {
 		policy_words[0] = 0u;
 		policy_words[1] = 0u;
+		policy_words[2] = 0u;
+		policy_words[3] = 0u;
 	}
 	rd->buffer_update(p_view->get_light_shadow_policy_buffer(), 0, policy_words.size() * sizeof(uint32_t), policy_words.ptr());
 }
@@ -1149,6 +1759,371 @@ void MegaLights::_dispatch_generate(const FrameInputs &p_inputs, const Ref<MegaL
 	rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
 	rd->compute_list_dispatch_threads(cl, uint32_t(sample_size.x), uint32_t(sample_size.y), 1u);
 	rd->compute_list_end();
+}
+
+void MegaLights::_dispatch_visibility_chain(const FrameInputs &p_inputs, const Ref<MegaLightsViewData> &p_view, const Settings &p_settings, const VisibilityOptions &p_opts, bool *r_retrace_ran) {
+	if (r_retrace_ran != nullptr) {
+		*r_retrace_ran = false;
+	}
+	RD *rd = RD::get_singleton();
+	UniformSetCacheRD *usc = UniformSetCacheRD::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_COND(rd == nullptr || usc == nullptr || light_storage == nullptr || texture_storage == nullptr || material_storage == nullptr);
+
+	if (!_ensure_screen_trace_shaders()) {
+		return;
+	}
+
+	const Size2i full_size = p_view->get_internal_size();
+	const Size2i sample_size = p_view->get_sample_grid_size();
+	const uint32_t spp = p_view->get_samples_per_pixel();
+	const uint32_t total_samples = MAX(uint32_t(sample_size.x) * uint32_t(sample_size.y) * spp, 1u);
+	if (!p_view->ensure_visibility_buffers(total_samples)) {
+		return;
+	}
+
+	const RenderDataRD *rd_data = p_inputs.render_data;
+	const RenderSceneDataRD *scene_data = rd_data->scene_data;
+	const uint32_t frame_index = p_opts.use_explicit_frame_index ? p_opts.frame_index : p_view->get_frame_index();
+
+	const bool use_screen_traces = p_opts.override_screen_traces ? p_opts.screen_traces : p_settings.screen_traces;
+	const bool want_far_field = p_opts.override_far_field ? p_opts.far_field : p_settings.far_field;
+	const bool want_swrt = p_opts.override_swrt ? p_opts.swrt : p_settings.swrt_continuation;
+
+	NextGIRTScene *rt_scene = p_inputs.next_gi != nullptr ? p_inputs.next_gi->get_rt_scene() : nullptr;
+	const bool hwrt_tlas_ready = rt_scene != nullptr && rt_scene->is_tlas_traceable() && rt_scene->get_tlas().is_valid() &&
+			rt_scene->get_shadow_instance_buffer().is_valid() && rt_scene->get_shadow_alpha_buffer().is_valid();
+	const bool swrt_ready = want_swrt && p_inputs.swrt_trace != nullptr && p_inputs.swrt_trace->is_ready() && _ensure_trace_rays_swrt_shader();
+	const bool hwrt_ready = !swrt_ready && hwrt_tlas_ready && _ensure_trace_rays_shaders(p_inputs.next_gi);
+
+	VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+	const bool vsm_buffers_ready = !p_opts.force_no_vsm && p_inputs.vsm_sample_view && vsm != nullptr && vsm->is_active() &&
+			vsm->get_table_capacity() > 0u && vsm->get_map_buffers_capacity() == vsm->get_table_capacity() &&
+			vsm->get_pool_texture().is_valid() && vsm->get_page_table_buffer().is_valid() &&
+			vsm->get_map_data_buffer().is_valid() && vsm->get_map_state_buffer().is_valid() &&
+			vsm->get_coarse_miss_buffer().is_valid() && _ensure_trace_vsm_shader();
+
+	NextGIFarField *far_field = (hwrt_ready && want_far_field && rt_scene != nullptr) ? rt_scene->get_far_field() : nullptr;
+	const bool use_far_field = far_field != nullptr && far_field->is_trace_ready() && far_field->get_tlas().is_valid();
+
+	// Upload per-light shadow policies (with VSM routing flag when VSM is active & allowed).
+	_upload_light_shadow_policies(p_inputs, p_view, p_settings.directional_lights, vsm_buffers_ready);
+
+	// Fill MLVisParams UBO.
+	const Projection depth_proj = NextGIViewMath::depth_projection(scene_data->cam_projection, p_inputs.flip_y, scene_data->taa_jitter);
+	const Projection inv_proj = depth_proj.inverse();
+	VisParamsUBO ubo;
+	MaterialStorage::store_camera(inv_proj, ubo.inv_projection);
+	MaterialStorage::store_camera(depth_proj, ubo.depth_projection);
+	MaterialStorage::store_transform_transposed_3x4(scene_data->cam_transform, ubo.inv_view_rows);
+
+	ubo.screen_sample_size[0] = uint32_t(full_size.x);
+	ubo.screen_sample_size[1] = uint32_t(full_size.y);
+	ubo.screen_sample_size[2] = uint32_t(sample_size.x);
+	ubo.screen_sample_size[3] = uint32_t(sample_size.y);
+
+	uint32_t vis_flags = 0u;
+	if (use_screen_traces) {
+		vis_flags |= VIS_FLAG_SCREEN_TRACES;
+	}
+	if (p_opts.dedupe_enabled) {
+		vis_flags |= VIS_FLAG_DEDUPE;
+	}
+	if (scene_data->cam_orthogonal) {
+		vis_flags |= VIS_FLAG_ORTHOGONAL;
+	}
+	if (use_far_field) {
+		vis_flags |= VIS_FLAG_FAR_FIELD;
+	}
+	if (swrt_ready) {
+		vis_flags |= VIS_FLAG_SWRT;
+	}
+	if (vsm_buffers_ready) {
+		vis_flags |= VIS_FLAG_VSM_ENABLED;
+	}
+	if (!hwrt_ready && !swrt_ready) {
+		vis_flags |= VIS_FLAG_NO_RT_FALLBACK;
+	}
+	if (p_inputs.hiz_texture.is_valid() && p_inputs.hiz_mip_count > 1u) {
+		vis_flags |= VIS_FLAG_USE_HIZ;
+	}
+
+	ubo.sample_config[0] = spp;
+	ubo.sample_config[1] = p_view->get_downsample_mode();
+	ubo.sample_config[2] = frame_index;
+	ubo.sample_config[3] = vis_flags;
+
+	ubo.light_counts[0] = light_storage->get_omni_light_count();
+	ubo.light_counts[1] = light_storage->get_spot_light_count();
+	ubo.light_counts[2] = light_storage->get_area_light_count();
+	ubo.light_counts[3] = p_settings.directional_lights ? rd_data->directional_light_count : 0u;
+
+	const float dist_len = p_settings.distant_screen_traces_length;
+	const float near_len = MIN(DEFAULT_NEAR_SCREEN_TRACE_LENGTH, dist_len);
+	ubo.screen_trace_params[0] = MAX(p_inputs.surface_thickness, 0.001f);
+	ubo.screen_trace_params[1] = near_len;
+	ubo.screen_trace_params[2] = dist_len;
+	ubo.screen_trace_params[3] = DEFAULT_DISTANT_SCREEN_TRACE_START_DEPTH;
+
+	ubo.trace_config[0] = screen_trace_steps_for_quality(p_inputs.quality_level);
+	ubo.trace_config[1] = p_inputs.hiz_mip_count > 0u ? (p_inputs.hiz_mip_count - 1u) : 0u;
+	ubo.trace_config[2] = p_view->get_vis_list_capacity();
+	ubo.trace_config[3] = p_view->get_vis_list_capacity();
+
+	const float near_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
+	const float far_distance = float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance"));
+	ubo.rt_params[0] = MAX(near_radius, 1.0f);
+	ubo.rt_params[1] = MAX(far_distance, near_radius + 1.0f);
+	ubo.rt_params[2] = float(scene_data->z_far);
+	ubo.rt_params[3] = float(NextGISWRTTrace::MAX_STEPS);
+
+	rd->buffer_update(p_view->get_vis_params_ubo(), 0, sizeof(ubo), &ubo);
+	rd->buffer_clear(p_view->get_vis_counters_buffer(), 0, 8u * sizeof(uint32_t));
+
+	const RID default_black = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID depth_tex = p_inputs.depth_texture.is_valid() ? p_inputs.depth_texture : default_black;
+	const RID nr_tex = p_inputs.normal_roughness_texture.is_valid() ? p_inputs.normal_roughness_texture : default_black;
+	const RID hiz_tex = p_inputs.hiz_texture.is_valid() ? p_inputs.hiz_texture : depth_tex;
+	const RID sampler_nearest = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	rd->draw_command_begin_label("MegaLights Visibility Chain");
+
+	// Pass 1: Hi-Z screen trace, 2x2 block ray dedupe, and stream compaction into ray_list & vsm_list.
+	{
+		const RID shader_rid = gpu->vis_screen_shader.version_get_shader(gpu->vis_screen_version, GPUState::SCREEN_TRACE_MODE_TRACE);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_vis_params_ubo()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, depth_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, nr_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, hiz_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4, sampler_nearest));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_view->get_sample_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_view->get_light_shadow_policy_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_view->get_vis_counters_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_view->get_vis_ray_list_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_view->get_vis_vsm_list_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, p_view->get_vis_sample_ray_map_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, p_view->get_visibility_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, p_view->get_hit_distance_texture()));
+		const RID set = usc->get_cache_vec(shader_rid, 0, u);
+		if (set.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->vis_screen_pipelines[GPUState::SCREEN_TRACE_MODE_TRACE]);
+			rd->compute_list_bind_uniform_set(cl, set, 0);
+			rd->compute_list_dispatch_threads(cl, uint32_t(sample_size.x), uint32_t(sample_size.y), 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	// Pass 2: Build indirect dispatch arguments for ray list and VSM list.
+	{
+		const RID shader_rid = gpu->vis_screen_shader.version_get_shader(gpu->vis_screen_version, GPUState::SCREEN_TRACE_MODE_FINALIZE);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_vis_params_ubo()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_view->get_vis_counters_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_view->get_vis_indirect_buffer()));
+		const RID set = usc->get_cache_vec(shader_rid, 0, u);
+		if (set.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->vis_screen_pipelines[GPUState::SCREEN_TRACE_MODE_FINALIZE]);
+			rd->compute_list_bind_uniform_set(cl, set, 0);
+			rd->compute_list_dispatch(cl, 1u, 1u, 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	// Pass 3a: Trace compacted ray list via SWRT global SDF (non-RT extension) OR HWRT ray query (+ optional far-field & #130 retrace).
+	if (swrt_ready) {
+		const RID shader_rid = gpu->vis_trace_swrt_shader.version_get_shader(gpu->vis_trace_swrt_version, 0);
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_vis_params_ubo()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, depth_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, nr_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, sampler_nearest));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, p_view->get_sample_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_view->get_light_shadow_policy_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_view->get_vis_counters_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_view->get_vis_ray_list_buffer()));
+		const RID set0 = usc->get_cache_vec(shader_rid, 0, u);
+		const RID set1 = p_inputs.swrt_trace->create_trace_uniform_set(shader_rid, 1, true, p_inputs.voxel_lighting);
+		if (set0.is_valid() && set1.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->vis_trace_swrt_pipeline);
+			rd->compute_list_bind_uniform_set(cl, set0, 0);
+			rd->compute_list_bind_uniform_set(cl, set1, 1);
+			rd->compute_list_dispatch_indirect(cl, p_view->get_vis_indirect_buffer(), 0);
+			rd->compute_list_end();
+		}
+		if (set1.is_valid()) {
+			rd->free_rid(set1);
+		}
+	} else if (hwrt_ready && p_view->ensure_retrace_buffer()) {
+		const bool use_alpha = rt_scene->wants_shadow_alpha_variant() && rd->has_feature(RD::SUPPORTS_BINDLESS) && rt_scene->ensure_shadow_texture_table().is_valid();
+		NextGIHitMaterials *hit_materials = (p_inputs.next_gi != nullptr && p_inputs.next_gi->get_hit_availability_for(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE) == NEXTGI_HIT_AVAILABLE) ? p_inputs.next_gi->get_hit_materials() : nullptr;
+		const uint32_t retrace_capacity = (hit_materials != nullptr && rt_scene->wants_shadow_retrace() && hit_materials->has_current_records()) ? uint32_t(NEXTGI_SHADOW_RETRACE_MAX_RECORDS) : 0u;
+		const uint32_t retrace_header[4] = { 0u, retrace_capacity, 0u, 0u };
+		rd->buffer_update(p_view->get_vis_retrace_buffer(), 0, sizeof(retrace_header), retrace_header);
+
+		const int variant = (use_alpha ? 1 : 0) | (use_far_field ? 2 : 0);
+		const RID shader_rid = gpu->vis_trace_rays_shader.version_get_shader(gpu->vis_trace_rays_version, variant);
+
+		LocalVector<RD::Uniform> u;
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_vis_params_ubo()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, depth_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, nr_tex));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, sampler_nearest));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, p_view->get_sample_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_view->get_light_shadow_policy_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_view->get_vis_counters_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_view->get_vis_ray_list_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 8, rt_scene->get_tlas()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, rt_scene->get_shadow_instance_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, rt_scene->get_shadow_alpha_buffer()));
+		u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, p_view->get_vis_retrace_buffer()));
+
+		if (use_alpha) {
+			LocalVector<RD::Uniform> alpha_uniforms;
+			rt_scene->append_shadow_alpha_uniforms(12, 16, alpha_uniforms);
+			for (uint32_t i = 0; i < alpha_uniforms.size(); i++) {
+				u.push_back(alpha_uniforms[i]);
+			}
+			const RID table = rt_scene->ensure_shadow_texture_table();
+			if (gpu->vis_shadow_texture_set.is_null() || gpu->vis_shadow_texture_set_table != table || !rd->uniform_set_is_valid(gpu->vis_shadow_texture_set)) {
+				if (gpu->vis_shadow_texture_set.is_valid() && rd->uniform_set_is_valid(gpu->vis_shadow_texture_set)) {
+					rd->free_rid(gpu->vis_shadow_texture_set);
+				}
+				RD::Uniform table_uniform(RD::UNIFORM_TYPE_BINDLESS_TABLE, 0, table);
+				gpu->vis_shadow_texture_set = rd->uniform_set_create(table_uniform, shader_rid, 1);
+				gpu->vis_shadow_texture_set_table = table;
+			}
+		}
+		if (use_far_field) {
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 17, far_field->get_tlas()));
+		}
+
+		const RID set0 = usc->get_cache_vec(shader_rid, 0, u);
+		if (set0.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->vis_trace_rays_pipelines[variant]);
+			rd->compute_list_bind_uniform_set(cl, set0, 0);
+			if (use_alpha && gpu->vis_shadow_texture_set.is_valid()) {
+				rd->compute_list_bind_uniform_set(cl, gpu->vis_shadow_texture_set, 1);
+			}
+			rd->compute_list_dispatch_indirect(cl, p_view->get_vis_indirect_buffer(), 0);
+			rd->compute_list_end();
+		}
+
+		// Optional Pass 3b: #145/#130 material retrace for custom shader alpha/discard casters.
+		if (retrace_capacity > 0u && hit_materials != nullptr &&
+				hit_materials->trace_shadow_retrace(rt_scene, p_view->get_vis_retrace_buffer(), retrace_capacity, float(scene_data->time))) {
+			const RID resolve_shader = gpu->vis_screen_shader.version_get_shader(gpu->vis_screen_version, GPUState::SCREEN_TRACE_MODE_RETRACE_RESOLVE);
+			LocalVector<RD::Uniform> ru;
+			ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_view->get_vis_retrace_buffer()));
+			ru.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_view->get_vis_ray_list_buffer()));
+			const RID rset = usc->get_cache_vec(resolve_shader, 0, ru);
+			if (rset.is_valid()) {
+				RD::ComputeListID cl = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(cl, gpu->vis_screen_pipelines[GPUState::SCREEN_TRACE_MODE_RETRACE_RESOLVE]);
+				rd->compute_list_bind_uniform_set(cl, rset, 0);
+				rd->compute_list_dispatch(cl, (retrace_capacity + 63u) / 64u, 1u, 1u);
+				rd->compute_list_end();
+				if (r_retrace_ran != nullptr) {
+					*r_retrace_ran = true;
+				}
+			}
+		}
+	}
+
+	// Pass 4: VSM-method lights (megalights_shadow_method == VIRTUAL), SMRT rays = 2, zero ray queries.
+	if (vsm_buffers_ready) {
+		VisVSMProjectionParams vp;
+		const Projection &cam_proj = scene_data->cam_projection;
+		const float size_x = 2.0f / (Math::abs(float(cam_proj.columns[0][0])) * float(MAX(full_size.x, 1)));
+		const float size_y = 2.0f / (Math::abs(float(cam_proj.columns[1][1])) * float(MAX(full_size.y, 1)));
+		if (cam_proj.is_orthogonal()) {
+			vp.footprint[0] = 0.0f;
+			vp.footprint[1] = MIN(size_x, size_y);
+		} else {
+			vp.footprint[0] = MIN(size_x, size_y);
+			vp.footprint[1] = 0.0f;
+		}
+		vp.bias[0] = vsm->get_lod_bias_directional();
+		vp.bias[1] = vsm->get_lod_bias_local();
+		vp.counts[0] = vsm->get_table_capacity();
+		vp.counts[1] = VSM_SMRT_RAYS; // Local SMRT rays = 2 (plan §21.3 M4).
+		vp.counts[2] = VSM_SMRT_RAYS; // Directional SMRT rays = 2 (plan §21.3 M4).
+		vp.counts[3] = MAX(RendererVirtualShadowMapStorage::smrt_preset_steps(vsm->get_quality()), 1u);
+		vp.misc[0] = 0u;
+		rd->buffer_update(p_view->get_vis_vsm_params_buffer(), 0, sizeof(vp), &vp);
+
+		const RID shader_rid = gpu->vis_trace_vsm_shader.version_get_shader(gpu->vis_trace_vsm_version, 0);
+		const RID vsm_bn = p_inputs.vsm_blue_noise_texture.is_valid() ? p_inputs.vsm_blue_noise_texture : default_black;
+		LocalVector<RD::Uniform> vu;
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_vis_params_ubo()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, depth_tex));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, nr_tex));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, sampler_nearest));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, p_view->get_sample_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_view->get_vis_counters_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_view->get_vis_vsm_list_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_view->get_visibility_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_view->get_hit_distance_texture()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, light_storage->get_omni_light_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, light_storage->get_spot_light_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, light_storage->get_area_light_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 12, light_storage->get_directional_light_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 13, vsm->get_pool_texture()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, vsm->get_page_table_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm->get_map_data_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, vsm->get_map_state_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, p_view->get_vis_vsm_params_buffer()));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 18, vsm_bn));
+		vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, vsm->get_coarse_miss_buffer()));
+		const RID vset = usc->get_cache_vec(shader_rid, 0, vu);
+		if (vset.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->vis_trace_vsm_pipeline);
+			rd->compute_list_bind_uniform_set(cl, vset, 0);
+			rd->compute_list_dispatch_indirect(cl, p_view->get_vis_indirect_buffer(), 16);
+			rd->compute_list_end();
+		}
+	}
+
+	// Pass 5: Scatter compacted ray_list outputs to all leader and 2x2 deduplicated follower samples.
+	if (hwrt_ready || swrt_ready) {
+		const RID shader_rid = gpu->vis_screen_shader.version_get_shader(gpu->vis_screen_version, GPUState::SCREEN_TRACE_MODE_RESOLVE);
+		LocalVector<RD::Uniform> su;
+		su.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_view->get_vis_params_ubo()));
+		su.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_view->get_vis_sample_ray_map_buffer()));
+		su.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_view->get_vis_ray_list_buffer()));
+		su.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, p_view->get_visibility_buffer()));
+		su.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, p_view->get_hit_distance_texture()));
+		const RID sset = usc->get_cache_vec(shader_rid, 0, su);
+		if (sset.is_valid()) {
+			RD::ComputeListID cl = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(cl, gpu->vis_screen_pipelines[GPUState::SCREEN_TRACE_MODE_RESOLVE]);
+			rd->compute_list_bind_uniform_set(cl, sset, 0);
+			rd->compute_list_dispatch(cl, (total_samples + 63u) / 64u, 1u, 1u);
+			rd->compute_list_end();
+		}
+	}
+
+	rd->draw_command_end_label();
+}
+
+void MegaLights::trace_visibility(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb) {
+	if (p_inputs.render_data == nullptr || p_inputs.render_data->scene_data == nullptr || p_rb.is_null()) {
+		return;
+	}
+	Ref<MegaLightsViewData> view = get_view_data(p_rb.ptr());
+	if (view.is_null() || !view->get_sample_buffer().is_valid()) {
+		return;
+	}
+	const Settings settings = read_settings();
+	VisibilityOptions opts;
+	_dispatch_visibility_chain(p_inputs, view, settings, opts);
 }
 
 void MegaLights::_dispatch_guiding(const Ref<MegaLightsViewData> &p_view, RID p_visibility_buffer, uint32_t p_frame_index, bool p_force_visible_one) {
@@ -1786,6 +2761,227 @@ Dictionary MegaLights::_run_check(const FrameInputs &p_inputs, const Ref<MegaLig
 		return res;
 	}
 
+	if (mode == "visibility_chain") {
+		const bool use_screen_traces = bool(p_options.get("screen_traces", cfg.screen_traces));
+		const bool use_dedupe = bool(p_options.get("dedupe", true));
+		const bool use_far_field = bool(p_options.get("far_field", false));
+		const bool use_swrt = bool(p_options.get("swrt", false));
+		const bool compare_bruteforce = bool(p_options.get("compare_bruteforce", true));
+		const bool wait_for_tlas = bool(p_options.get("wait_for_tlas", !use_swrt));
+		const bool wait_for_far_field = bool(p_options.get("wait_for_far_field", use_far_field));
+		const bool wait_for_swrt = bool(p_options.get("wait_for_swrt", use_swrt));
+		const bool wait_for_vsm = bool(p_options.get("wait_for_vsm", false));
+		const bool wait_for_retrace = bool(p_options.get("wait_for_retrace", false));
+
+		NextGIRTScene *rt_scene = p_inputs.next_gi != nullptr ? p_inputs.next_gi->get_rt_scene() : nullptr;
+		const bool tlas_ready = rt_scene != nullptr && rt_scene->is_tlas_traceable() && rt_scene->get_tlas().is_valid() &&
+				rt_scene->get_shadow_instance_buffer().is_valid() && rt_scene->get_shadow_alpha_buffer().is_valid();
+		NextGIFarField *far_field = rt_scene != nullptr ? rt_scene->get_far_field() : nullptr;
+		const bool far_field_ready = far_field != nullptr && far_field->is_trace_ready() && far_field->get_tlas().is_valid();
+		const bool swrt_ready = p_inputs.swrt_trace != nullptr && p_inputs.swrt_trace->is_ready() && p_inputs.swrt_trace->get_instance_count() > 0u;
+		VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+		const bool vsm_ready = p_inputs.vsm_sample_view && vsm != nullptr && vsm->is_active() && vsm->get_marked_view_count() > 0u;
+		NextGIHitMaterials *hit_materials = (p_inputs.next_gi != nullptr && p_inputs.next_gi->get_hit_availability_for(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE) == NEXTGI_HIT_AVAILABLE) ? p_inputs.next_gi->get_hit_materials() : nullptr;
+		const bool retrace_ready = hit_materials != nullptr && rt_scene != nullptr && rt_scene->wants_shadow_retrace() && hit_materials->has_current_records();
+
+		const bool still_waiting = (wait_for_tlas && !tlas_ready) ||
+				(wait_for_far_field && !far_field_ready) ||
+				(wait_for_swrt && !swrt_ready) ||
+				(wait_for_vsm && !vsm_ready) ||
+				(wait_for_retrace && !retrace_ready);
+		if (still_waiting) {
+			st.wait_frames++;
+			if (st.wait_frames < 120u) {
+				Dictionary waiting;
+				waiting["done"] = false;
+				waiting["mode"] = mode;
+				waiting["wait_frames"] = int(st.wait_frames);
+				waiting["tlas_ready"] = tlas_ready;
+				waiting["far_field_ready"] = far_field_ready;
+				waiting["swrt_ready"] = swrt_ready;
+				waiting["vsm_ready"] = vsm_ready;
+				waiting["retrace_ready"] = retrace_ready;
+				return waiting;
+			}
+			Dictionary err;
+			err["done"] = true;
+			err["mode"] = mode;
+			err["tlas_ready"] = tlas_ready;
+			err["far_field_ready"] = far_field_ready;
+			err["swrt_ready"] = swrt_ready;
+			err["vsm_ready"] = vsm_ready;
+			err["retrace_ready"] = retrace_ready;
+			err["error"] = "Timed out waiting for visibility chain prerequisites.";
+			return err;
+		}
+
+		// Step 1: Generate samples once on the current view so both visibility chain & brute-force share exact samples.
+		p_view->reset_guiding();
+		_dispatch_generate(p_inputs, p_view, cfg, 0u, false, cfg.falloff_cull_threshold);
+
+		const Vector<uint8_t> sample_bytes = rd->buffer_get_data(p_view->get_sample_buffer());
+		const SampleGPU *samples = reinterpret_cast<const SampleGPU *>(sample_bytes.ptr());
+		const uint32_t total_samples = uint32_t(sample_bytes.size() / sizeof(SampleGPU));
+
+		// Step 2: Run the MegaLights visibility chain with requested options.
+		VisibilityOptions chain_opts;
+		chain_opts.override_screen_traces = true;
+		chain_opts.screen_traces = use_screen_traces;
+		chain_opts.dedupe_enabled = use_dedupe;
+		chain_opts.override_far_field = true;
+		chain_opts.far_field = use_far_field;
+		chain_opts.override_swrt = true;
+		chain_opts.swrt = use_swrt;
+		chain_opts.force_no_vsm = false;
+		chain_opts.use_explicit_frame_index = true;
+		chain_opts.frame_index = 0u;
+		bool retrace_ran = false;
+		_dispatch_visibility_chain(p_inputs, p_view, cfg, chain_opts, &retrace_ran);
+
+		const Vector<uint8_t> vis_bytes = rd->buffer_get_data(p_view->get_visibility_buffer());
+		const uint32_t *vis_words = reinterpret_cast<const uint32_t *>(vis_bytes.ptr());
+		const Vector<uint8_t> ctr_bytes = rd->buffer_get_data(p_view->get_vis_counters_buffer());
+		const uint32_t *ctrs = reinterpret_cast<const uint32_t *>(ctr_bytes.ptr());
+
+		// Also verify hit_distance_texture readback (R16F 2DArray, layer = k) and guiding feed!
+		uint64_t finite_hit_dists = 0;
+		double hit_dist_sum = 0.0;
+		const Size2i sgrid = p_view->get_sample_grid_size();
+		for (uint32_t k = 0; k < cfg.samples_per_pixel; k++) {
+			const Vector<uint8_t> hd_bytes = rd->texture_get_data(p_view->get_hit_distance_texture(), k);
+			const uint16_t *hd_half = reinterpret_cast<const uint16_t *>(hd_bytes.ptr());
+			const uint32_t texels = uint32_t(hd_bytes.size() / sizeof(uint16_t));
+			for (uint32_t i = 0; i < texels; i++) {
+				const float d = Math::half_to_float(hd_half[i]);
+				if (Math::is_finite(d) && d < HIT_DISTANCE_MISS * 0.99f && d >= 0.0f) {
+					finite_hit_dists++;
+					hit_dist_sum += double(d);
+				}
+			}
+		}
+
+		// Verify visibility_buffer feeds cleanly into ml_guiding.glsl.
+		_dispatch_guiding(p_view, p_view->get_visibility_buffer(), 0u, false);
+		const Vector<uint8_t> g_bytes = rd->buffer_get_data(p_view->get_current_guiding_buffer());
+		const uint32_t *g_words = reinterpret_cast<const uint32_t *>(g_bytes.ptr());
+		const Size2i tdims = p_view->get_guiding_tile_dims();
+		const uint32_t tcount = uint32_t(tdims.x * tdims.y);
+		uint32_t guiding_non_empty = 0u;
+		uint64_t guiding_vis_sum = 0;
+		for (uint32_t t = 0; t < tcount; t++) {
+			const uint32_t base = t * GUIDING_TILE_WORDS;
+			if (g_words[base + 0u] > 0u) {
+				guiding_non_empty++;
+			}
+			guiding_vis_sum += g_words[base + 1u];
+		}
+
+		uint64_t valid_count = 0;
+		uint64_t visible_count = 0;
+		uint64_t occluded_count = 0;
+		uint64_t partial_count = 0;
+		for (uint32_t i = 0; i < total_samples; i++) {
+			if (samples[i].light_packed == SAMPLE_INVALID) {
+				continue;
+			}
+			valid_count++;
+			const float v = unpack_visibility_rgba8(vis_words[i]).r;
+			if (v > 0.9f) {
+				visible_count++;
+			} else if (v < 0.1f) {
+				occluded_count++;
+			} else {
+				partial_count++;
+			}
+		}
+
+		Dictionary res;
+		res["done"] = true;
+		res["mode"] = mode;
+		res["tlas_ready"] = tlas_ready;
+		res["far_field_ready"] = far_field_ready;
+		res["swrt_ready"] = swrt_ready;
+		res["vsm_ready"] = vsm_ready;
+		res["retrace_ran"] = retrace_ran;
+		res["sample_grid_width"] = sgrid.x;
+		res["sample_grid_height"] = sgrid.y;
+		res["samples_per_pixel"] = int(cfg.samples_per_pixel);
+		res["valid_samples"] = int64_t(valid_count);
+		res["visible_samples"] = int64_t(visible_count);
+		res["occluded_samples"] = int64_t(occluded_count);
+		res["partial_samples"] = int64_t(partial_count);
+		res["ray_count"] = int64_t(ctrs[0]);
+		res["vsm_count"] = int64_t(ctrs[1]);
+		res["screen_hit_count"] = int64_t(ctrs[2]);
+		res["deduped_count"] = int64_t(ctrs[3]);
+		res["unshadowed_count"] = int64_t(ctrs[4]);
+		res["far_field_count"] = int64_t(ctrs[5]);
+		res["retrace_appended_count"] = int64_t(ctrs[6]);
+		res["counter_valid_samples"] = int64_t(ctrs[7]);
+		res["finite_hit_dist_count"] = int64_t(finite_hit_dists);
+		res["mean_hit_dist"] = finite_hit_dists > 0 ? (hit_dist_sum / double(finite_hit_dists)) : 0.0;
+		res["guiding_non_empty_tiles"] = int(guiding_non_empty);
+		res["guiding_visible_sum"] = int64_t(guiding_vis_sum);
+
+		// Step 3: Optional brute-force trace_shadow() comparison on the EXACT same sample_buffer!
+		if (compare_bruteforce && tlas_ready) {
+			VisibilityOptions brute_opts;
+			brute_opts.override_screen_traces = true;
+			brute_opts.screen_traces = false;
+			brute_opts.dedupe_enabled = false;
+			brute_opts.override_far_field = true;
+			brute_opts.far_field = use_far_field;
+			brute_opts.override_swrt = true;
+			brute_opts.swrt = false;
+			brute_opts.force_no_vsm = true;
+			brute_opts.use_explicit_frame_index = true;
+			brute_opts.frame_index = 0u;
+			_dispatch_visibility_chain(p_inputs, p_view, cfg, brute_opts);
+
+			const Vector<uint8_t> brute_vis_bytes = rd->buffer_get_data(p_view->get_visibility_buffer());
+			const uint32_t *brute_vis = reinterpret_cast<const uint32_t *>(brute_vis_bytes.ptr());
+			const Vector<uint8_t> brute_ctr_bytes = rd->buffer_get_data(p_view->get_vis_counters_buffer());
+			const uint32_t *brute_ctrs = reinterpret_cast<const uint32_t *>(brute_ctr_bytes.ptr());
+
+			uint64_t matched = 0;
+			uint64_t false_occ = 0;
+			uint64_t false_lit = 0;
+			uint64_t brute_vis_cnt = 0;
+			uint64_t brute_occ_cnt = 0;
+			for (uint32_t i = 0; i < total_samples; i++) {
+				if (samples[i].light_packed == SAMPLE_INVALID) {
+					continue;
+				}
+				const bool c_vis = unpack_visibility_rgba8(vis_words[i]).r > 0.5f;
+				const bool b_vis = unpack_visibility_rgba8(brute_vis[i]).r > 0.5f;
+				if (b_vis) {
+					brute_vis_cnt++;
+				} else {
+					brute_occ_cnt++;
+				}
+				if (c_vis == b_vis) {
+					matched++;
+				} else if (!c_vis && b_vis) {
+					false_occ++;
+				} else {
+					false_lit++;
+				}
+			}
+
+			res["brute_ray_count"] = int64_t(brute_ctrs[0]);
+			res["brute_visible_samples"] = int64_t(brute_vis_cnt);
+			res["brute_occluded_samples"] = int64_t(brute_occ_cnt);
+			res["matched_samples"] = int64_t(matched);
+			res["false_occlusion_samples"] = int64_t(false_occ);
+			res["false_lit_samples"] = int64_t(false_lit);
+			res["match_rate"] = valid_count > 0 ? (double(matched) / double(valid_count)) : 1.0;
+			res["false_occlusion_rate"] = valid_count > 0 ? (double(false_occ) / double(valid_count)) : 0.0;
+			res["false_lit_rate"] = valid_count > 0 ? (double(false_lit) / double(valid_count)) : 0.0;
+			res["ray_reduction_fraction"] = brute_ctrs[0] > 0u ? (1.0 - double(ctrs[0]) / double(brute_ctrs[0])) : 0.0;
+		}
+		return res;
+	}
+
 	if (mode == "falloff_cull") {
 		const float low_thresh = float(p_options.get("low_threshold", 0.0));
 		const float high_thresh = float(p_options.get("high_threshold", 0.2));
@@ -1900,7 +3096,7 @@ void MegaLights::render_sampling(const FrameInputs &p_inputs, Ref<RenderSceneBuf
 	}
 
 	generate_samples(p_inputs, p_rb);
-	// Until #146 visibility chain populates visibility_buffer, callers invoke update_guiding()
-	// after visibility; advance frame index for next frame's 2x2 downsample rotation & STBN slice.
+	trace_visibility(p_inputs, p_rb);
+	update_guiding(p_rb, view->get_visibility_buffer(), false);
 	view->advance_frame_index();
 }

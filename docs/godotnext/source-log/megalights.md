@@ -190,6 +190,55 @@ Contract decisions for M3:
   High=4, Epic=8), `downsample = 1` (`Half`, 2×2 Bayer cycle `(0,0),(1,1),(1,0),(0,1)`),
   `directional_lights = false`, `falloff_cull_threshold = 0.001`, `reference_mode = false`.
 
+### MegaLights visibility chain (#146, contract M4, GM-1, GM-8, GM-12, budget M-4), 2026-11-24
+
+Written from first principles using plan §21.3 contract M4 (GM-1, GM-8, GM-12, budget M-4), issue #146,
+and GodotNext's own subsystems: #142 MegaLights sampling core (`ml_generate_samples.glsl`, `ml_guiding.glsl`,
+`MegaLights` / `MegaLightsViewData`), #145 `nextgi_shadow_ray_inc.glsl` (`trace_shadow()`, 6-bit TLAS caster
+masks, bindless alpha cutout), #130 material retrace hit groups (`NextGIHitMaterials::dispatch_shadow_retrace`),
+#126 far-field TLAS (`NextGIFarField`), #182 global SDF clipmaps (`nextgi_sdf_trace_inc.glsl`, `NextGISWRTTrace`),
+#222 Virtual Shadow Maps (`vsm_smrt_inc.glsl`, `vsm_shadow_directional()`, `vsm_shadow_local()`), #171 Metal
+inline ray query tier rules, and Godot's Hi-Z depth pyramid (`ss_effects->build_hiz`) and SSCS
+`rendering/lights_and_shadows/contact_shadow/surface_thickness` setting. No Unreal Engine source or shaders,
+UE plugins, NvRTX, or third-party visibility-chain implementations were consulted.
+
+Contract decisions for M4:
+- **Hi-Z screen trace (`ml_screen_trace.glsl`):** Marches a short view-space segment against the Hi-Z depth
+  pyramid (`MAX` steps per quality preset: Low=8, Medium=12, High=16, Epic=24), blending from a short near
+  trace length (`1.0 m`) to `rendering/megalights/distant_screen_traces_length` (default `4.0 m`) for distant
+  pixels beyond `16 m` linear depth. Uses Hi-Z mip for empty-space skipping and always confirms hits against
+  exact mip-0 depth using the project's `rendering/lights_and_shadows/contact_shadow/surface_thickness`
+  thickness band (`max(0.02, scene_z * surface_thickness)`), with a grazing-angle guard (`dot(N, L) >= 0.12`)
+  and `>= 1.5 px` start offset so screen-trace false occlusion stays well below 0.5%. Screen hits write
+  `visibility = 0` and their world-space hit distance immediately and are excluded from ray tracing.
+- **2×2 block ray deduplication and stream compaction (`ml_screen_trace.glsl`):** Within each 2×2 sample
+  block, unresolved non-VSM samples are compacted into a dense `ray_list` (`MLVisRay`, 32 B) while merging
+  samples that select the same light with origins within 1 texel of slope-aware depth tolerance, matching
+  normals (`dot >= 0.90`), and aligned ray directions (`dot >= 0.995`), tracking the conservative minimum
+  resume distance across merged followers. Samples belonging to `Light3D.MEGALIGHTS_SHADOW_METHOD_VIRTUAL`
+  lights are compacted into a separate `vsm_list` (`MLVisVSMItem`, 8 B) and never enter `ray_list`.
+- **Single-dispatch ray query + #130 retrace + optional far field (`ml_trace_rays.glsl`):** One indirect
+  compute dispatch over `ray_list` calls #145 `trace_shadow()` for near-field HWRT + bindless alpha cutout
+  and appends material-retrace requests to a shared retrace buffer resolved via #130
+  `NextGIHitMaterials::dispatch_shadow_retrace()` + `MODE_RETRACE_RESOLVE`. When `rendering/megalights/far_field`
+  is enabled (off by default) and the #126 far-field TLAS is ready, rays exiting the near-field radius continue
+  against the far-field TLAS.
+- **Optional non-RT SWRT continuation (`ml_trace_rays_swrt.glsl`):** Compiled as a separate non-ray-query
+  shader (zero `GL_EXT_ray_query` requirement) so non-RT devices compile cleanly. When
+  `rendering/megalights/swrt_continuation` is enabled (off by default; labeled as a GodotNext extension on
+  the non-RT tier) and hardware ray queries are unavailable, unresolved rays trace the #182 global SDF clipmap
+  starting from the screen-trace exit distance (`t_resume` pulled back by 8 cm).
+- **VSM-method lights (`ml_trace_vsm.glsl`):** Compiled as a separate non-ray-query shader. On-demand VSM
+  activation allocates virtual maps for `MEGALIGHTS_SHADOW_METHOD_VIRTUAL` lights when MegaLights is active
+  (leaving zero allocations when MegaLights is off), and `ml_trace_vsm.glsl` evaluates `vsm_shadow_directional()` /
+  `vsm_shadow_local()` with SMRT rays fixed to `2` plus `vsm_transmittance_*()` for hit distance.
+- **Outputs & guiding feedback:** Writes packed RGB transmittance (`RGBA8`) into `visibility_buffer` and
+  per-sample hit distance (`R16_SFLOAT` 2DArray, layer = sample index, miss = `65504.0`) into
+  `hit_distance_texture` ready for #135 denoiser, and feeds `visibility_buffer` directly into #142's
+  `ml_guiding.glsl`. Mac Apple M2+ inline-ray-query-only devices (#171) are reported cleanly as
+  `HWRT_INLINE_ONLY` with `experimental = true` and `retrace_supported = false` via
+  `RenderingServer.megalights_get_tier_info()`. Forward+ Set 1 bindings remain untouched (reserved for #143).
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

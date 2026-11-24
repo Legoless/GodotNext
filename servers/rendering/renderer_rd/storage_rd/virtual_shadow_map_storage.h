@@ -315,6 +315,9 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 
 	// GodotNext: vsm_projection (#222).
 	bool view_samples = false;
+	// GodotNext: megalights_visibility (#146). True while the current view has MegaLights active so
+	// lights with megalights_shadow_method == VIRTUAL allocate VSM maps.
+	bool megalights_view_active = false;
 	uint32_t view_sampled_lights = 0;
 	// GodotNext: vsm_local_lights (#216). Per-view local and distant local VSM light counters.
 	uint32_t view_local_lights = 0;
@@ -447,6 +450,9 @@ public:
 		}
 	}
 	bool get_view_samples() const { return view_samples; }
+	// GodotNext: megalights_visibility (#146).
+	void set_megalights_view_active(bool p_active) { megalights_view_active = p_active; }
+	bool get_megalights_view_active() const { return megalights_view_active; }
 	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Per-view DF shadow mask layer allocation.
 	void set_df_view_enabled(bool p_enabled, uint32_t p_max_lights = DF_MAX_LIGHTS_PER_VIEW);
 	bool get_df_view_enabled() const { return df_view_enabled; }

@@ -359,6 +359,8 @@ public:
 	virtual void light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mode) = 0;
 	// GodotNext: vsm_settings_debug (#221).
 	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) = 0;
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	virtual void light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) = 0;
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) = 0;
 
 	// Omni light
@@ -626,6 +628,8 @@ public:
 	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2). GPU check for MegaLights sampling core.
 	virtual void megalights_request_check(const Dictionary &p_options = Dictionary());
 	virtual Dictionary megalights_get_check_result();
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4, GM-8). MegaLights visibility tier and Mac Experimental status.
+	virtual Dictionary megalights_get_tier_info();
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;
@@ -1218,6 +1222,8 @@ VARIANT_ENUM_CAST_EXT(RSE::LightParam, RenderingServer::LightParam);
 VARIANT_ENUM_CAST_EXT(RSE::LightBakeMode, RenderingServer::LightBakeMode);
 // GodotNext: vsm_settings_debug (#221).
 VARIANT_ENUM_CAST_EXT(RSE::LightShadowMethod, RenderingServer::LightShadowMethod);
+// GodotNext: megalights_visibility (#146).
+VARIANT_ENUM_CAST_EXT(RSE::LightMegaLightsShadowMethod, RenderingServer::LightMegaLightsShadowMethod);
 VARIANT_ENUM_CAST_EXT(RSE::LightOmniShadowMode, RenderingServer::LightOmniShadowMode);
 VARIANT_ENUM_CAST_EXT(RSE::LightDirectionalShadowMode, RenderingServer::LightDirectionalShadowMode);
 VARIANT_ENUM_CAST_EXT(RSE::LightDirectionalSkyMode, RenderingServer::LightDirectionalSkyMode);

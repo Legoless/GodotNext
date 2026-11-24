@@ -93,6 +93,13 @@ public:
 		SHADOW_METHOD_DISTANCE_FIELD = RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD,
 	};
 
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4). Same values as RenderingServer.LightMegaLightsShadowMethod.
+	enum MegaLightsShadowMethod {
+		MEGALIGHTS_SHADOW_METHOD_AUTO = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO,
+		MEGALIGHTS_SHADOW_METHOD_RAY_TRACED = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_RAY_TRACED,
+		MEGALIGHTS_SHADOW_METHOD_VIRTUAL = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL,
+	};
+
 private:
 	Color color;
 	real_t param[PARAM_MAX] = {};
@@ -111,6 +118,8 @@ private:
 	BakeMode bake_mode = BAKE_DYNAMIC;
 	// GodotNext: vsm_settings_debug (#221).
 	ShadowMethod shadow_method = SHADOW_METHOD_PROJECT;
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	MegaLightsShadowMethod megalights_shadow_method = MEGALIGHTS_SHADOW_METHOD_AUTO;
 	Ref<Texture2D> projector;
 	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 	Ref<Material> light_function;
@@ -198,6 +207,10 @@ public:
 	void set_shadow_method(ShadowMethod p_method);
 	ShadowMethod get_shadow_method() const;
 
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	void set_megalights_shadow_method(MegaLightsShadowMethod p_method);
+	MegaLightsShadowMethod get_megalights_shadow_method() const;
+
 	void set_projector(const Ref<Texture2D> &p_texture);
 	Ref<Texture2D> get_projector() const;
 
@@ -223,6 +236,8 @@ VARIANT_ENUM_CAST(Light3D::Param);
 VARIANT_ENUM_CAST(Light3D::BakeMode);
 // GodotNext: vsm_settings_debug (#221).
 VARIANT_ENUM_CAST(Light3D::ShadowMethod);
+// GodotNext: megalights_visibility (#146).
+VARIANT_ENUM_CAST(Light3D::MegaLightsShadowMethod);
 
 class DirectionalLight3D : public Light3D {
 	GDCLASS(DirectionalLight3D, Light3D);

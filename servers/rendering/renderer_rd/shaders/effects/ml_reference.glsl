@@ -62,10 +62,10 @@ layout(set = 0, binding = 22) uniform accelerationStructureEXT ml_shadow_tlas;
 #endif
 #include "../environment/nextgi_shadow_ray_inc.glsl"
 
-// Per-light shadow policy words (light_mask_mode, caster_mask) in order:
+// Per-light shadow policy words (light_mask_mode, caster_mask, flags, light_type) in order:
 // [0..omni_count), [omni..omni+spot), [omni+spot..omni+spot+area), [total_local..total_local+dir).
 layout(set = 0, binding = 25, std430) restrict readonly buffer MLLightShadowPolicies {
-	uvec2 data[];
+	uvec4 data[];
 }
 ml_light_shadow_policies;
 
@@ -73,7 +73,7 @@ float ml_reference_visibility(vec3 p_origin_ws, vec3 p_dir_ws, float p_tmax, uin
 	if (p_force_visible) {
 		return 1.0;
 	}
-	uvec2 policy = ml_light_shadow_policies.data[p_policy_idx];
+	uvec4 policy = ml_light_shadow_policies.data[p_policy_idx];
 	return trace_shadow(p_origin_ws, p_dir_ws, p_tmax, policy.x, policy.y);
 }
 

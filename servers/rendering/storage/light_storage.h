@@ -74,6 +74,9 @@ public:
 	// GodotNext: vsm_settings_debug (#221). The stored method; RendererVirtualShadowMapStorage resolves it.
 	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) = 0;
 	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const = 0;
+	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
+	virtual void light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) = 0;
+	virtual RSE::LightMegaLightsShadowMethod light_get_megalights_shadow_method(RID p_light) const = 0;
 	// False for the dummy renderer (headless runs, imports, exports), which draws no shadows: it prints no VSM
 	// fallback line and no shadow-method warning.
 	virtual bool draws_shadows() const { return true; }

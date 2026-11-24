@@ -61,6 +61,11 @@ TEST_FORCE_LINK(test_nextgi)
 #include "servers/rendering/renderer_rd/environment/next_gi_bake_shaders.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
+// GodotNext: megalights_visibility (#146)
+#include "servers/rendering/renderer_rd/shaders/effects/ml_screen_trace.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_rays_swrt.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/ml_trace_vsm.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -274,29 +279,34 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 	CHECK(NextgiRqSelftestShaderRD().requires_ray_query());
 	CHECK(PathTracerShaderRD().requires_ray_query()); // GodotNext: path_tracer (#167)
 	CHECK(NextgiRtShadowsShaderRD().requires_ray_query()); // GodotNext: rt_shadows (#141)
+	CHECK(MlTraceRaysShaderRD().requires_ray_query()); // GodotNext: megalights_visibility (#146)
+	CHECK_FALSE(MlScreenTraceShaderRD().requires_ray_query());
+	CHECK_FALSE(MlTraceRaysSwrtShaderRD().requires_ray_query());
+	CHECK_FALSE(MlTraceVsmShaderRD().requires_ray_query());
 }
 
 // GodotNext: nextgi_vulkan (#50)
 TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141), path_tracer_lights_camera (#169).
-	REQUIRE(versions.size() == 16);
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141), path_tracer_lights_camera (#169), megalights_visibility (#146).
+	REQUIRE(versions.size() == 20);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	const char *expected[16] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+	const char *expected[20] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
 		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD",
-		"PathTracerShaderRD", "PathTracerDenoiseShaderRD", "NextgiRtShadowAllocShaderRD", "NextgiRtShadowsShaderRD", "NextgiDenoiseShadowShaderRD", "PathTracerSkyCdfShaderRD" };
-	for (int i = 0; i < 16; i++) {
+		"PathTracerShaderRD", "PathTracerDenoiseShaderRD", "NextgiRtShadowAllocShaderRD", "NextgiRtShadowsShaderRD", "NextgiDenoiseShadowShaderRD", "PathTracerSkyCdfShaderRD",
+		"MlScreenTraceShaderRD", "MlTraceRaysShaderRD", "MlTraceRaysSwrtShaderRD", "MlTraceVsmShaderRD" };
+	for (int i = 0; i < 20; i++) {
 		CHECK_EQ(names[i], String(expected[i]));
 	}
 	// The hardware instances and the self-test need ray query; the software siblings, path-tracer denoiser,
-	// RT-shadow alloc/denoise passes, and sky CDF builder bake everywhere (#261, #168, #141, #169).
-	for (int i = 0; i < 16; i++) {
-		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14 || i == 15;
+	// RT-shadow alloc/denoise passes, sky CDF builder, and MegaLights screen/SWRT/VSM passes bake everywhere (#261, #168, #141, #169, #146).
+	for (int i = 0; i < 20; i++) {
+		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14 || i == 15 || i == 16 || i == 18 || i == 19;
 		CHECK_EQ(versions[i].first->requires_ray_query(), !no_ray_query);
 	}
 

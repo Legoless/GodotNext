@@ -12,10 +12,12 @@ if "RD_GLSL" in env["BUILDERS"]:
 
     # make sure we recompile shaders if include files change
     env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + ["#glsl_builders.py"])
-    # GodotNext: megalights_sampling (#142). ml_reference.glsl includes nextgi_shadow_ray_inc.glsl from ../environment/.
+    # GodotNext: megalights_sampling (#142) / megalights_visibility (#146).
+    # MegaLights ray shaders include nextgi_shadow_ray_inc.glsl and nextgi_sdf_trace_inc.glsl from ../environment/.
     env_includes = [str(f) for f in Glob("../environment/*_inc.glsl")]
-    if "ml_reference.glsl" in glsl_files:
-        env.Depends("ml_reference.glsl.gen.h", env_includes)
+    for ml_env_shader in ["ml_reference.glsl", "ml_trace_rays.glsl", "ml_trace_rays_swrt.glsl"]:
+        if ml_env_shader in glsl_files:
+            env.Depends(ml_env_shader + ".gen.h", env_includes)
 
     # compile shaders
     for glsl_file in glsl_files:
