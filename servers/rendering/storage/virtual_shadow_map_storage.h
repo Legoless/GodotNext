@@ -561,6 +561,7 @@ public:
 		CACHE_DYNAMIC_VERTEX_TIME = 1u << 8,
 		CACHE_DYNAMIC_DEPTH = 1u << 9,
 		CACHE_DYNAMIC_MODE_ALWAYS = 1u << 10,
+		CACHE_DYNAMIC_FOLIAGE_WIND = 1u << 11,
 	};
 	struct CacheClassificationInput {
 		RSE::ShadowCacheInvalidation mode = RSE::SHADOW_CACHE_INVALIDATION_AUTO;
@@ -570,6 +571,7 @@ public:
 		bool has_mesh_instance = false;
 		bool is_particles = false;
 		bool is_dynamic_multimesh = false;
+		bool has_foliage_wind = false;
 		uint32_t shader_dynamic_flags = 0;
 	};
 	static uint32_t classify_shadow_cache_dynamic(const CacheClassificationInput &p_input);

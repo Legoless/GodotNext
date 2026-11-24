@@ -294,6 +294,7 @@
 // GodotNext: vgd_register
 #include "scene/resources/3d/virtual_geometry_assembly.h"
 #include "scene/resources/3d/virtual_geometry_data.h"
+#include "scene/resources/3d/virtual_geometry_wind.h"
 // GodotNext: mesh_sdf_register
 #include "scene/resources/3d/mesh_distance_field.h"
 #include "scene/resources/3d/world_3d.h"
@@ -916,6 +917,7 @@ void register_scene_types() {
 	// GodotNext: vgd_register
 	GDREGISTER_CLASS(VirtualGeometryAssembly);
 	GDREGISTER_CLASS(VirtualGeometryData);
+	GDREGISTER_CLASS(VirtualGeometryWind);
 	// GodotNext: mesh_sdf_register
 	GDREGISTER_CLASS(MeshDistanceField);
 	GDREGISTER_CLASS(AudioStreamPlayer3D);

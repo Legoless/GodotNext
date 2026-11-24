@@ -33,6 +33,7 @@
 #include "core/math/math_funcs.h"
 #include "core/math/vector3.h"
 #include "core/typedefs.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 
 #include <cmath>
 #include <cstring>
@@ -306,6 +307,206 @@ inline bool nextgeo_skinned_within_rt_refit_range(const Vector3 &p_camera_origin
 		return false;
 	}
 	return float(p_camera_origin.distance_squared_to(p_instance_origin)) <= p_rt_range * p_rt_range;
+}
+
+// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
+// CPU reference matching `nextgeo_wind_bone_matrix()` in `skinning_inc.glsl` bit-for-bit.
+// Evaluates one procedural wind bone's 3x4 row-major transform directly from (wind params,
+// TIME / prev_TIME, instance transform origin seed, bone rest data) with 0 palette bytes.
+inline void nextgeo_wind_eval_bone_matrix(
+		const RendererVirtualMeshStorage::WindParamsGPU &p_params,
+		const RendererVirtualMeshStorage::WindMeshGPU &p_mesh,
+		uint32_t p_bone_idx,
+		const float p_inst_transform[3][4],
+		bool p_previous,
+		float r_rows[12]) {
+	// Default identity 3x4.
+	r_rows[0] = 1.0f;
+	r_rows[1] = 0.0f;
+	r_rows[2] = 0.0f;
+	r_rows[3] = 0.0f;
+	r_rows[4] = 0.0f;
+	r_rows[5] = 1.0f;
+	r_rows[6] = 0.0f;
+	r_rows[7] = 0.0f;
+	r_rows[8] = 0.0f;
+	r_rows[9] = 0.0f;
+	r_rows[10] = 1.0f;
+	r_rows[11] = 0.0f;
+
+	if ((p_params.flags & RendererVirtualMeshStorage::WIND_PARAM_FLAG_ENABLED) == 0u ||
+			!(p_params.strength > 0.0f) ||
+			p_mesh.bone_count == 0u ||
+			p_bone_idx >= p_mesh.bone_count ||
+			p_bone_idx >= RendererVirtualMeshStorage::WIND_MAX_BONES) {
+		return;
+	}
+
+	const RendererVirtualMeshStorage::WindBoneGPU &bone = p_mesh.bones[p_bone_idx];
+	if (!(bone.max_sway > 0.0f)) {
+		return;
+	}
+
+	// Normalized world wind direction.
+	float wdx = p_params.direction[0];
+	float wdy = p_params.direction[1];
+	float wdz = p_params.direction[2];
+	const float wd_len = std::sqrt(wdx * wdx + wdy * wdy + wdz * wdz);
+	if (wd_len > 1.0e-5f) {
+		wdx /= wd_len;
+		wdy /= wd_len;
+		wdz /= wd_len;
+	} else {
+		wdx = 1.0f;
+		wdy = 0.0f;
+		wdz = 0.0f;
+	}
+
+	// Transform world wind direction into instance-local space via transpose of scaled columns.
+	const float c0x = p_inst_transform[0][0], c0y = p_inst_transform[1][0], c0z = p_inst_transform[2][0];
+	const float c1x = p_inst_transform[0][1], c1y = p_inst_transform[1][1], c1z = p_inst_transform[2][1];
+	const float c2x = p_inst_transform[0][2], c2y = p_inst_transform[1][2], c2z = p_inst_transform[2][2];
+	const float d0 = MAX(c0x * c0x + c0y * c0y + c0z * c0z, 1.0e-8f);
+	const float d1 = MAX(c1x * c1x + c1y * c1y + c1z * c1z, 1.0e-8f);
+	const float d2 = MAX(c2x * c2x + c2y * c2y + c2z * c2z, 1.0e-8f);
+	float ldx = (c0x * wdx + c0y * wdy + c0z * wdz) / d0;
+	float ldy = (c1x * wdx + c1y * wdy + c1z * wdz) / d1;
+	float ldz = (c2x * wdx + c2y * wdy + c2z * wdz) / d2;
+	const float ld_len = std::sqrt(ldx * ldx + ldy * ldy + ldz * ldz);
+	if (ld_len > 1.0e-5f) {
+		ldx /= ld_len;
+		ldy /= ld_len;
+		ldz /= ld_len;
+	} else {
+		ldx = 1.0f;
+		ldy = 0.0f;
+		ldz = 0.0f;
+	}
+
+	// Deterministic spatial phase seed from instance world origin.
+	const float ox = p_inst_transform[0][3];
+	const float oy = p_inst_transform[1][3];
+	const float oz = p_inst_transform[2][3];
+	const float origin_along_wind = ox * wdx + oy * wdy + oz * wdz;
+	const float spatial_phase = origin_along_wind * 0.35f + (ox * 0.17f + oy * 0.07f + oz * 0.23f);
+
+	const float t = p_previous ? p_params.prev_time : p_params.time;
+	const float freq = MAX(p_params.gust_frequency, 0.05f);
+	const float stiff = CLAMP(bone.stiffness, 0.0f, 1.0f);
+	const float w_freq = freq * (1.0f + 1.35f * bone.branch_weight) * (1.3f - 0.5f * stiff);
+	const float phase = t * (6.28318530718f * w_freq) * 0.25f + spatial_phase + bone.sway_phase;
+	const float gust_phase = t * (6.28318530718f * freq * 0.12f) - origin_along_wind * 0.15f;
+	const float gust = 0.65f + 0.35f * std::sin(gust_phase);
+	const float primary = 0.45f + 0.55f * std::sin(phase);
+	const float flutter = 0.15f * bone.branch_weight * std::sin(phase * 2.17f + bone.sway_phase * 1.7f);
+	const float raw_amp = (primary * gust + flutter) * p_params.strength * (1.15f - 0.5f * stiff);
+	const float signed_norm = raw_amp / (1.0f + std::abs(raw_amp));
+	const float disp = signed_norm * bone.max_sway;
+
+	const float lever = MAX(bone.lever_length, 0.25f);
+	const float angle = CLAMP(disp / lever, -1.04719755f, 1.04719755f);
+	if (std::abs(angle) <= 1.0e-7f) {
+		return;
+	}
+
+	// Bone rest axis (normalized).
+	float ax = bone.axis[0], ay = bone.axis[1], az = bone.axis[2];
+	const float a_len = std::sqrt(ax * ax + ay * ay + az * az);
+	if (a_len > 1.0e-5f) {
+		ax /= a_len;
+		ay /= a_len;
+		az /= a_len;
+	} else {
+		ax = 0.0f;
+		ay = 1.0f;
+		az = 0.0f;
+	}
+
+	// Rotation axis = cross(bone_axis, local_wind_dir), with orthogonal fallback when aligned.
+	float rx = ay * ldz - az * ldy;
+	float ry = az * ldx - ax * ldz;
+	float rz = ax * ldy - ay * ldx;
+	float r_len = std::sqrt(rx * rx + ry * ry + rz * rz);
+	if (r_len < 1.0e-4f) {
+		const float fx = std::abs(ay) < 0.9f ? 0.0f : 1.0f;
+		const float fy = std::abs(ay) < 0.9f ? 1.0f : 0.0f;
+		const float fz = 0.0f;
+		rx = ay * fz - az * fy;
+		ry = az * fx - ax * fz;
+		rz = ax * fy - ay * fx;
+		r_len = std::sqrt(rx * rx + ry * ry + rz * rz);
+	}
+	if (r_len <= 1.0e-6f) {
+		return;
+	}
+	rx /= r_len;
+	ry /= r_len;
+	rz /= r_len;
+
+	// Rodrigues rotation around (rx, ry, rz) by `angle`, pivoted at bone.rest_pos.
+	const float c = std::cos(angle);
+	const float s = std::sin(angle);
+	const float omc = 1.0f - c;
+
+	const float r00 = c + rx * rx * omc;
+	const float r01 = rx * ry * omc - rz * s;
+	const float r02 = rx * rz * omc + ry * s;
+	const float r10 = ry * rx * omc + rz * s;
+	const float r11 = c + ry * ry * omc;
+	const float r12 = ry * rz * omc - rx * s;
+	const float r20 = rz * rx * omc - ry * s;
+	const float r21 = rz * ry * omc + rx * s;
+	const float r22 = c + rz * rz * omc;
+
+	const float px = bone.rest_pos[0];
+	const float py = bone.rest_pos[1];
+	const float pz = bone.rest_pos[2];
+
+	r_rows[0] = r00;
+	r_rows[1] = r01;
+	r_rows[2] = r02;
+	r_rows[3] = px - (r00 * px + r01 * py + r02 * pz);
+
+	r_rows[4] = r10;
+	r_rows[5] = r11;
+	r_rows[6] = r12;
+	r_rows[7] = py - (r10 * px + r11 * py + r12 * pz);
+
+	r_rows[8] = r20;
+	r_rows[9] = r21;
+	r_rows[10] = r22;
+	r_rows[11] = pz - (r20 * px + r21 * py + r22 * pz);
+}
+
+inline bool nextgeo_wind_eval_vertex_lbs_raw(
+		const uint8_t *p_page_bytes,
+		uint32_t p_page_size,
+		uint32_t p_skin_byte_offset,
+		uint32_t p_vert_count,
+		uint32_t p_v_idx,
+		const RendererVirtualMeshStorage::WindParamsGPU &p_params,
+		const RendererVirtualMeshStorage::WindMeshGPU &p_mesh,
+		const float p_inst_transform[3][4],
+		bool p_previous,
+		Vector3 &r_pos,
+		Vector3 *r_normal = nullptr,
+		Vector3 *r_tangent = nullptr) {
+	if ((p_params.flags & RendererVirtualMeshStorage::WIND_PARAM_FLAG_ENABLED) == 0u ||
+			!(p_params.strength > 0.0f) ||
+			p_mesh.bone_count == 0u) {
+		return false;
+	}
+	float palette[RendererVirtualMeshStorage::WIND_MAX_BONES * 12u];
+	const uint32_t bcount = MIN(p_mesh.bone_count, RendererVirtualMeshStorage::WIND_MAX_BONES);
+	for (uint32_t b = 0; b < bcount; b++) {
+		nextgeo_wind_eval_bone_matrix(p_params, p_mesh, b, p_inst_transform, p_previous, palette + b * 12u);
+	}
+	return nextgeo_skin_vertex_lbs_raw(p_page_bytes, p_page_size, p_skin_byte_offset, p_vert_count, p_v_idx, palette, bcount, r_pos, r_normal, r_tangent);
+}
+
+inline AABB nextgeo_wind_inflate_aabb(const AABB &p_aabb, float p_max_sway, float p_instance_scale = 1.0f) {
+	const float margin = (Math::is_finite(p_max_sway) && p_max_sway > 0.0f) ? (p_max_sway * Math::abs(p_instance_scale)) : 0.0f;
+	return margin > 0.0f ? p_aabb.grow(margin) : p_aabb;
 }
 
 } // namespace RendererRD

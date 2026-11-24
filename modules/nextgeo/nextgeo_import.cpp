@@ -39,6 +39,7 @@
 #include "core/math/aabb.h"
 #include "scene/resources/3d/importer_mesh.h"
 #include "scene/resources/3d/virtual_geometry_data.h"
+#include "scene/resources/3d/virtual_geometry_wind.h"
 #include "scene/resources/mesh.h"
 
 // Stage-2 card descriptors and the fixed RT proxy are filled below.
@@ -155,7 +156,7 @@ static void _copy_triangle_surface(const Array &p_arrays, uint64_t p_flags, Next
 	}
 }
 
-Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages) {
+Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages) {
 	r_vgd.unref();
 	r_pages.clear();
 	ERR_FAIL_NULL_V(p_mesh, ERR_INVALID_PARAMETER);
@@ -186,6 +187,107 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 		return ERR_INVALID_DATA;
 	}
 
+	// GodotNext: nextgeo_foliage_wind (#152). Generate procedural wind skeleton (1 trunk + <= 8 branches)
+	// and write #159 4-influence skinning data so `.ngm` clusters carry vertex wind bone weights.
+	Ref<VirtualGeometryWind> wind_resource;
+	if (p_wind) {
+		PackedVector3Array all_positions;
+		PackedInt32Array all_src_bones;
+		PackedFloat32Array all_src_weights;
+		int src_inf = 0;
+		bool all_have_src_skin = true;
+		for (int i = 0; i < input.surfaces.size(); i++) {
+			const NextGeoSurfaceInput &s = input.surfaces[i];
+			if (!s.eligible || s.positions.is_empty()) {
+				continue;
+			}
+			const int vcount = s.positions.size();
+			const int prev_size = all_positions.size();
+			all_positions.resize(prev_size + vcount);
+			for (int v = 0; v < vcount; v++) {
+				all_positions.write[prev_size + v] = s.positions[v];
+			}
+			if (s.skin_influences != 4u && s.skin_influences != 8u) {
+				all_have_src_skin = false;
+			} else if (src_inf == 0) {
+				src_inf = int(s.skin_influences);
+			} else if (uint32_t(src_inf) != s.skin_influences) {
+				all_have_src_skin = false;
+			}
+		}
+		if (!all_positions.is_empty()) {
+			wind_resource.instantiate();
+			PackedInt32Array remap_table;
+			bool used_skeleton = false;
+			if (all_have_src_skin && src_inf > 0 && !p_wind_bone_rest_positions.is_empty() && p_wind_bone_parents.size() == p_wind_bone_rest_positions.size()) {
+				for (int i = 0; i < input.surfaces.size(); i++) {
+					const NextGeoSurfaceInput &s = input.surfaces[i];
+					if (!s.eligible || s.positions.is_empty()) {
+						continue;
+					}
+					const int prev_n = all_src_bones.size();
+					const int add_n = s.positions.size() * src_inf;
+					if (s.bones.size() == add_n && s.weights.size() == add_n) {
+						all_src_bones.resize(prev_n + add_n);
+						all_src_weights.resize(prev_n + add_n);
+						for (int k = 0; k < add_n; k++) {
+							all_src_bones.write[prev_n + k] = s.bones[k];
+							all_src_weights.write[prev_n + k] = s.weights[k];
+						}
+					} else {
+						all_have_src_skin = false;
+						break;
+					}
+				}
+				if (all_have_src_skin && wind_resource->generate_from_skeleton(p_wind_bone_rest_positions, p_wind_bone_parents, all_positions, all_src_bones, all_src_weights, src_inf, remap_table) == OK) {
+					used_skeleton = true;
+				}
+			}
+			if (!used_skeleton) {
+				const Error wind_err = wind_resource->generate_from_geometry(all_positions);
+				if (wind_err != OK) {
+					return wind_err;
+				}
+			}
+			// Populate #159 4-influence skinning weights on every surface with vertices (including ineligible
+			// border-lock surfaces so nextgeo_build_dag sees a consistent skin_influences across surfaces).
+			const int wind_bones = wind_resource->get_bone_count();
+			for (int i = 0; i < input.surfaces.size(); i++) {
+				NextGeoSurfaceInput &s = input.surfaces.write[i];
+				if (s.positions.is_empty()) {
+					continue;
+				}
+				PackedInt32Array dst_bones;
+				PackedFloat32Array dst_weights;
+				if (used_skeleton && (s.skin_influences == 4u || s.skin_influences == 8u) && s.bones.size() == s.positions.size() * int(s.skin_influences) && s.weights.size() == s.positions.size() * int(s.skin_influences)) {
+					PackedInt32Array src_b;
+					PackedFloat32Array src_w;
+					src_b.resize(s.bones.size());
+					src_w.resize(s.weights.size());
+					for (int k = 0; k < s.bones.size(); k++) {
+						src_b.write[k] = s.bones[k];
+						src_w.write[k] = s.weights[k];
+					}
+					VirtualGeometryWind::remap_vertex_skinning(src_b, src_w, s.skin_influences, remap_table, wind_bones, dst_bones, dst_weights);
+				} else {
+					PackedVector3Array surf_pos;
+					surf_pos.resize(s.positions.size());
+					for (int v = 0; v < s.positions.size(); v++) {
+						surf_pos.write[v] = s.positions[v];
+					}
+					wind_resource->compute_vertex_skinning_arrays(surf_pos, dst_bones, dst_weights);
+				}
+				s.bones.resize(dst_bones.size());
+				s.weights.resize(dst_weights.size());
+				for (int k = 0; k < dst_bones.size(); k++) {
+					s.bones.write[k] = dst_bones[k];
+					s.weights.write[k] = dst_weights[k];
+				}
+				s.skin_influences = VirtualGeometryWind::SKIN_INFLUENCES;
+			}
+		}
+	}
+
 	NextGeoBuildOutput output;
 	Error err = nextgeo_build_dag(input, output);
 	if (err != OK) {
@@ -203,6 +305,9 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 		r_vgd.unref();
 		r_pages.clear();
 		return err;
+	}
+	if (wind_resource.is_valid()) {
+		r_vgd->set_wind(wind_resource);
 	}
 
 	// Fixed RT proxy (plan §7.1): the error-only DAG cut at

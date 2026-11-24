@@ -2488,6 +2488,34 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 				}
 			}
 		}
+		// GodotNext: nextgeo_foliage_wind (#152). Forward per-mesh procedural wind skeleton (<= 9 bones).
+		Ref<VirtualGeometryWind> wind_res = virtual_geometry->get_wind();
+		if (wind_res.is_valid() && wind_res->get_bone_count() > 0) {
+			const int wb_count = wind_res->get_bone_count();
+			const PackedVector3Array wb_pos = wind_res->get_bone_rest_positions();
+			const PackedVector3Array wb_axis = wind_res->get_bone_axes();
+			const PackedFloat32Array wb_stiff = wind_res->get_bone_stiffness();
+			const PackedFloat32Array wb_phase = wind_res->get_bone_sway_phases();
+			const PackedFloat32Array wb_sway = wind_res->get_bone_max_sway();
+			const PackedFloat32Array wb_lever = wind_res->get_bone_lever_lengths();
+			const float asset_sway = wind_res->get_max_sway();
+			float max_b_sway = asset_sway;
+			desc.wind_bones.resize(wb_count);
+			for (int i = 0; i < wb_count; i++) {
+				RenderingServerTypes::VirtualGeometryDesc::WindBoneDesc bdesc;
+				bdesc.rest_position = i < wb_pos.size() ? wb_pos[i] : Vector3();
+				bdesc.axis = i < wb_axis.size() ? wb_axis[i] : Vector3(0.0f, 1.0f, 0.0f);
+				bdesc.stiffness = i < wb_stiff.size() ? wb_stiff[i] : 0.5f;
+				bdesc.sway_phase = i < wb_phase.size() ? wb_phase[i] : 0.0f;
+				bdesc.max_sway = i < wb_sway.size() ? wb_sway[i] : asset_sway;
+				bdesc.lever_length = i < wb_lever.size() ? MAX(wb_lever[i], 0.25f) : 1.0f;
+				max_b_sway = MAX(max_b_sway, bdesc.max_sway);
+				desc.wind_bones.write[i] = bdesc;
+			}
+			desc.wind_max_sway = max_b_sway;
+			desc.wind_base_height = wind_res->get_base_height();
+			desc.wind_top_height = wind_res->get_top_height();
+		}
 		const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
 		for (int index = 0; index < eligibility.size() && index < 32; index++) {
 			if (eligibility[index] == 1) {

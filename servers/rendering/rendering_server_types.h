@@ -172,6 +172,20 @@ struct VirtualGeometryDesc {
 	};
 	Vector<AssemblyPartDesc> assembly_parts;
 	Vector<AssemblyChildDesc> assembly_children;
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
+	// Optional procedural wind skeleton per virtual mesh (1 trunk + <= 8 branches, 0 bytes per-instance palette).
+	struct WindBoneDesc {
+		Vector3 rest_position;
+		float lever_length = 1.0f;
+		Vector3 axis = Vector3(0.0f, 1.0f, 0.0f);
+		float stiffness = 0.5f;
+		float max_sway = 0.0f;
+		float sway_phase = 0.0f;
+	};
+	Vector<WindBoneDesc> wind_bones;
+	float wind_max_sway = 0.0f;
+	float wind_base_height = 0.0f;
+	float wind_top_height = 1.0f;
 };
 
 /* STATUS INFORMATION */

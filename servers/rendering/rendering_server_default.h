@@ -1074,6 +1074,8 @@ public:
 	FUNC2(scenario_set_camera_attributes, RID, RID)
 	FUNC2(scenario_set_fallback_environment, RID, RID)
 	FUNC2(scenario_set_compositor, RID, RID)
+	// GodotNext: nextgeo_foliage_wind (#152)
+	FUNC4(scenario_set_wind, RID, const Vector3 &, float, float)
 
 	/* INSTANCING API */
 	FUNCRIDSPLIT(instance)

@@ -6471,6 +6471,17 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		if (p_render_data == nullptr || !p_render_data->reflection_probe.is_valid()) {
 			RSG::virtual_mesh_storage->nextgeo_reset_counters();
 		}
+		// GodotNext: nextgeo_foliage_wind (#152). Update per-scenario wind params and TIME / prev_TIME
+		// before flush() so shadows, VSM, main cull, raster, velocity export, and resolve share one consistent snapshot.
+		{
+			const bool foliage_wind_enabled = RendererVirtualMeshStorage::is_foliage_wind_enabled();
+			const Vector3 wind_dir = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_direction : Vector3(1.0f, 0.0f, 0.0f);
+			const float wind_strength = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_strength : 0.0f;
+			const float wind_gust = (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) ? p_render_data->sdfgi_update_data->wind_gust_frequency : 1.0f;
+			const float cur_time = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? float(p_render_data->scene_data->time) : 0.0f;
+			const float step = (p_render_data != nullptr && p_render_data->scene_data != nullptr) ? float(p_render_data->scene_data->time_step) : 0.0f;
+			RSG::virtual_mesh_storage->set_wind_params(wind_dir, wind_strength, wind_gust, cur_time, cur_time - step, foliage_wind_enabled);
+		}
 		// GodotNext: nextgeo_instance_records (#75). Upload dirty records
 		// before this frame's views inspect record buffers; idempotent after
 		// the first view.
@@ -10780,12 +10791,14 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	}
 	route_facts.skeleton = ginstance->data->skeleton.is_valid();
 	route_facts.blend_shapes = mesh_storage->mesh_get_blend_shape_count(p_mesh) > 0;
-	// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). Admit skinned virtual geometry
-	// when the mesh carries #159 cluster skinning data and a valid 3D skeleton is attached.
+	// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8) / nextgeo_foliage_wind (#152).
+	// Admit skinned virtual geometry when the mesh carries #159 cluster skinning data and either has
+	// a procedural VirtualGeometryWind skeleton (0 palette bytes) or a valid 3D skeleton is attached.
 	if (route_facts.mesh_has_virtual_geometry && route_facts.skeleton && RSG::virtual_mesh_storage != nullptr) {
-		route_facts.mesh_skinned_virtual_geometry = RSG::virtual_mesh_storage->mesh_is_skinned_virtual_geometry(p_mesh) &&
+		const bool wind_mesh = RSG::virtual_mesh_storage->mesh_has_wind(p_mesh);
+		route_facts.mesh_skinned_virtual_geometry = wind_mesh || (RSG::virtual_mesh_storage->mesh_is_skinned_virtual_geometry(p_mesh) &&
 				mesh_storage->skeleton_get_bone_count(ginstance->data->skeleton) > 0 &&
-				!mesh_storage->skeleton_is_2d(ginstance->data->skeleton);
+				!mesh_storage->skeleton_is_2d(ginstance->data->skeleton));
 	}
 	route_facts.instance_uniforms = ginstance->shader_uniforms_offset >= 0;
 	route_facts.lightmapped = ginstance->lightmap_instance.is_valid();
@@ -10833,7 +10846,8 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	uint32_t raster_bin = 0;
 	if (route.virtual_geometry && admit_programmable) {
 		RendererVirtualMeshStorage::RasterBinKey bin_key;
-		bin_key.features = material_raster_features | (ginstance->spline_deform_active ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_SPLINE) : 0u) | ((route_facts.skeleton && route_facts.mesh_skinned_virtual_geometry) ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_SKINNED) : 0u);
+		const bool wind_skinned = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_wind(p_mesh);
+		bin_key.features = material_raster_features | (ginstance->spline_deform_active ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_SPLINE) : 0u) | (((route_facts.skeleton && route_facts.mesh_skinned_virtual_geometry) || wind_skinned) ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_SKINNED) : 0u);
 		bin_key.shader_version = p_material->shader_data->version;
 		bin_key.material = p_material->get_self();
 		raster_bin = RSG::virtual_mesh_storage->raster_bin_acquire(bin_key);

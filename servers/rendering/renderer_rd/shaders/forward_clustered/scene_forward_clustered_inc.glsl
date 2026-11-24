@@ -995,7 +995,21 @@ layout(set = 2, binding = 19, std430) restrict readonly buffer NextGeoClusterSki
 }
 nextgeo_cluster_skin;
 
+// GodotNext: nextgeo_foliage_wind (#152). Bindings 24..25 hold per-scenario wind params and per-mesh wind skeletons (22..23 reserved).
+layout(set = 2, binding = 24, std430) restrict readonly buffer NextGeoWindParams {
+	vec4 direction_strength;
+	vec4 time_gust_flags;
+	uvec4 meta;
+}
+nextgeo_wind_params;
+
+layout(set = 2, binding = 25, std430) restrict readonly buffer NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+nextgeo_wind_meshes;
+
 #define NEXTGEO_SKIN_PAGES_DATA nextgeo_pages.data
+#define NEXTGEO_HAS_WIND_BUFFERS
 // clang-format off
 #include "../nextgeo/skinning_inc.glsl"
 // clang-format on

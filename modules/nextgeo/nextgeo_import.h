@@ -32,6 +32,7 @@
 
 #include "core/object/ref_counted.h"
 #include "core/templates/vector.h"
+#include "core/variant/variant.h"
 
 class ImporterMesh;
 class VirtualGeometryData;
@@ -45,4 +46,8 @@ class VirtualGeometryData;
 // AABB and the surface count cover every source surface, so an ineligible
 // surface gets a [0, 0] range in every part. Stage-2 SRC card descriptors and
 // per-triangle group IDs are populated from the proxy cut's cluster groups (#77).
-Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+// When `p_wind` is true (#152), builds a procedural VirtualGeometryWind skeleton
+// (1 trunk + <= 8 branches) either from `p_wind_bone_rest_positions`/`p_wind_bone_parents`
+// or from bind-pose geometry, populates #159 4-influence skinning weights, and attaches
+// the wind resource to `r_vgd`.
+Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);

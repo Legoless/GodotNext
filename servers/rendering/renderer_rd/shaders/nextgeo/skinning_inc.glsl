@@ -247,3 +247,226 @@ void nextgeo_skin_vertex(inout vec3 r_pos, inout vec3 r_normal, inout vec3 r_tan
 		r_tangent = t_sk / t_len;
 	}
 }
+
+// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
+// In-shader procedural bone evaluation per instance (0 bytes per-instance skin palette memory).
+// Matches RendererRD::nextgeo_wind_eval_bone_matrix() in nextgeo_skinning.h bit-for-bit.
+#ifdef NEXTGEO_HAS_WIND_BUFFERS
+#ifndef NEXTGEO_WIND_HELPERS_DEFINED
+#define NEXTGEO_WIND_HELPERS_DEFINED
+bool nextgeo_wind_enabled() {
+	return (floatBitsToUint(nextgeo_wind_params.time_gust_flags.w) & NEXTGEO_WIND_PARAM_FLAG_ENABLED) != 0u;
+}
+
+float nextgeo_wind_mesh_max_sway(uint p_mesh_idx) {
+	if (!nextgeo_wind_enabled() || p_mesh_idx >= nextgeo_wind_params.meta.x) {
+		return 0.0;
+	}
+	uvec4 hdr = nextgeo_wind_meshes.data[p_mesh_idx].header;
+	return hdr.x > 0u ? uintBitsToFloat(hdr.y) : 0.0;
+}
+
+bool nextgeo_wind_mesh_active(uint p_mesh_idx) {
+	if (!nextgeo_wind_enabled() || !(nextgeo_wind_params.direction_strength.w > 0.0) || p_mesh_idx >= nextgeo_wind_params.meta.x) {
+		return false;
+	}
+	return nextgeo_wind_meshes.data[p_mesh_idx].header.x > 0u;
+}
+#endif
+
+void nextgeo_wind_bone_matrix(uint p_mesh_idx, uint p_bone_idx, vec4 p_inst_transform[3], bool p_use_prev, out vec4 r_r0, out vec4 r_r1, out vec4 r_r2) {
+	r_r0 = vec4(1.0, 0.0, 0.0, 0.0);
+	r_r1 = vec4(0.0, 1.0, 0.0, 0.0);
+	r_r2 = vec4(0.0, 0.0, 1.0, 0.0);
+
+	if (!nextgeo_wind_mesh_active(p_mesh_idx)) {
+		return;
+	}
+	uint bcount = min(nextgeo_wind_meshes.data[p_mesh_idx].header.x, NEXTGEO_WIND_MAX_BONES);
+	if (p_bone_idx >= bcount) {
+		return;
+	}
+	NextGeoWindBone bone = nextgeo_wind_meshes.data[p_mesh_idx].bones[p_bone_idx];
+	float max_sway = bone.sway_phase_branch.x;
+	if (!(max_sway > 0.0)) {
+		return;
+	}
+
+	vec3 wdir = nextgeo_wind_params.direction_strength.xyz;
+	float wd_len = length(wdir);
+	wdir = wd_len > 1.0e-5 ? (wdir / wd_len) : vec3(1.0, 0.0, 0.0);
+
+	// Transform world wind direction into instance-local space via transpose of scaled basis columns.
+	vec3 c0 = vec3(p_inst_transform[0].x, p_inst_transform[1].x, p_inst_transform[2].x);
+	vec3 c1 = vec3(p_inst_transform[0].y, p_inst_transform[1].y, p_inst_transform[2].y);
+	vec3 c2 = vec3(p_inst_transform[0].z, p_inst_transform[1].z, p_inst_transform[2].z);
+	vec3 ldir = vec3(
+			dot(c0, wdir) / max(dot(c0, c0), 1.0e-8),
+			dot(c1, wdir) / max(dot(c1, c1), 1.0e-8),
+			dot(c2, wdir) / max(dot(c2, c2), 1.0e-8));
+	float ld_len = length(ldir);
+	ldir = ld_len > 1.0e-5 ? (ldir / ld_len) : vec3(1.0, 0.0, 0.0);
+
+	// Deterministic per-instance phase seed from world origin (no per-instance buffer memory).
+	vec3 inst_origin = vec3(p_inst_transform[0].w, p_inst_transform[1].w, p_inst_transform[2].w);
+	float origin_along_wind = dot(inst_origin, wdir);
+	float spatial_phase = origin_along_wind * 0.35 + dot(inst_origin, vec3(0.17, 0.07, 0.23));
+
+	float t = p_use_prev ? nextgeo_wind_params.time_gust_flags.y : nextgeo_wind_params.time_gust_flags.x;
+	float freq = max(nextgeo_wind_params.time_gust_flags.z, 0.05);
+	float stiff = clamp(bone.axis_stiffness.w, 0.0, 1.0);
+	float branch_w = bone.sway_phase_branch.z;
+	float sway_phase = bone.sway_phase_branch.y;
+	float w_freq = freq * (1.0 + 1.35 * branch_w) * (1.3 - 0.5 * stiff);
+	float phase = t * (6.28318530718 * w_freq) * 0.25 + spatial_phase + sway_phase;
+	float gust_phase = t * (6.28318530718 * freq * 0.12) - origin_along_wind * 0.15;
+	float gust = 0.65 + 0.35 * sin(gust_phase);
+	float primary = 0.45 + 0.55 * sin(phase);
+	float flutter = 0.15 * branch_w * sin(phase * 2.17 + sway_phase * 1.7);
+	float raw_amp = (primary * gust + flutter) * nextgeo_wind_params.direction_strength.w * (1.15 - 0.5 * stiff);
+	float signed_norm = raw_amp / (1.0 + abs(raw_amp));
+	float disp = signed_norm * max_sway;
+
+	float lever = max(bone.rest_pos_lever.w, 0.25);
+	float angle = clamp(disp / lever, -1.04719755, 1.04719755);
+	if (abs(angle) <= 1.0e-7) {
+		return;
+	}
+
+	vec3 baxis = bone.axis_stiffness.xyz;
+	float a_len = length(baxis);
+	baxis = a_len > 1.0e-5 ? (baxis / a_len) : vec3(0.0, 1.0, 0.0);
+
+	vec3 raxis = cross(baxis, ldir);
+	float r_len = length(raxis);
+	if (r_len < 1.0e-4) {
+		vec3 fallback = abs(baxis.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+		raxis = cross(baxis, fallback);
+		r_len = length(raxis);
+	}
+	if (r_len <= 1.0e-6) {
+		return;
+	}
+	raxis /= r_len;
+
+	float c = cos(angle);
+	float s = sin(angle);
+	float omc = 1.0 - c;
+	vec3 row0 = vec3(c + raxis.x * raxis.x * omc, raxis.x * raxis.y * omc - raxis.z * s, raxis.x * raxis.z * omc + raxis.y * s);
+	vec3 row1 = vec3(raxis.y * raxis.x * omc + raxis.z * s, c + raxis.y * raxis.y * omc, raxis.y * raxis.z * omc - raxis.x * s);
+	vec3 row2 = vec3(raxis.z * raxis.x * omc - raxis.y * s, raxis.z * raxis.y * omc + raxis.x * s, c + raxis.z * raxis.z * omc);
+
+	vec3 pivot = bone.rest_pos_lever.xyz;
+	r_r0 = vec4(row0, pivot.x - dot(row0, pivot));
+	r_r1 = vec4(row1, pivot.y - dot(row1, pivot));
+	r_r2 = vec4(row2, pivot.z - dot(row2, pivot));
+}
+
+bool nextgeo_wind_blend_matrix(uint p_mesh_idx, vec4 p_inst_transform[3], uint p_cluster_table_idx, uint p_vert_idx, uint p_vert_count, bool p_use_prev, out vec4 r_r0, out vec4 r_r1, out vec4 r_r2) {
+	r_r0 = vec4(1.0, 0.0, 0.0, 0.0);
+	r_r1 = vec4(0.0, 1.0, 0.0, 0.0);
+	r_r2 = vec4(0.0, 0.0, 1.0, 0.0);
+
+	if (!nextgeo_wind_mesh_active(p_mesh_idx) || p_vert_idx >= p_vert_count) {
+		return false;
+	}
+	uint skin_off = NEXTGEO_CLUSTER_SKIN_DATA[p_cluster_table_idx];
+	if (skin_off == 0xFFFFFFFFu) {
+		return false;
+	}
+	uint bone_count = nextgeo_skin_read_u8(skin_off + 0u);
+	uint influences = nextgeo_skin_read_u8(skin_off + 1u);
+	if (bone_count == 0u || (influences != 4u && influences != 8u)) {
+		return false;
+	}
+
+	uint wind_bones = min(nextgeo_wind_meshes.data[p_mesh_idx].header.x, NEXTGEO_WIND_MAX_BONES);
+	uint bone_table_base = skin_off + 4u;
+	uint idx_base = bone_table_base + bone_count * 26u + p_vert_idx * influences;
+	uint w_base = bone_table_base + bone_count * 26u + p_vert_count * influences + p_vert_idx * influences * 2u;
+
+	vec4 acc0 = vec4(0.0);
+	vec4 acc1 = vec4(0.0);
+	vec4 acc2 = vec4(0.0);
+	float w_sum = 0.0;
+	for (uint k = 0u; k < influences; k++) {
+		uint w_u16 = nextgeo_skin_read_u16(w_base + k * 2u);
+		if (w_u16 == 0u) {
+			continue;
+		}
+		uint local_bone = nextgeo_skin_read_u8(idx_base + k);
+		if (local_bone >= bone_count) {
+			continue;
+		}
+		uint global_bone = nextgeo_skin_read_u16(bone_table_base + local_bone * 26u);
+		if (global_bone >= wind_bones) {
+			continue;
+		}
+		float w = float(w_u16) * (1.0 / 65535.0);
+		vec4 br0;
+		vec4 br1;
+		vec4 br2;
+		nextgeo_wind_bone_matrix(p_mesh_idx, global_bone, p_inst_transform, p_use_prev, br0, br1, br2);
+		acc0 += br0 * w;
+		acc1 += br1 * w;
+		acc2 += br2 * w;
+		w_sum += w;
+	}
+	if (!(w_sum > 0.0)) {
+		return false;
+	}
+	float inv_w = 1.0 / w_sum;
+	r_r0 = acc0 * inv_w;
+	r_r1 = acc1 * inv_w;
+	r_r2 = acc2 * inv_w;
+	return true;
+}
+
+vec3 nextgeo_wind_position(vec3 p_pos, uint p_mesh_idx, vec4 p_inst_transform[3], uint p_cluster_table_idx, uint p_vert_idx, uint p_vert_count, bool p_use_prev) {
+	vec4 r0;
+	vec4 r1;
+	vec4 r2;
+	if (!nextgeo_wind_blend_matrix(p_mesh_idx, p_inst_transform, p_cluster_table_idx, p_vert_idx, p_vert_count, p_use_prev, r0, r1, r2)) {
+		return p_pos;
+	}
+	return vec3(
+			dot(r0.xyz, p_pos) + r0.w,
+			dot(r1.xyz, p_pos) + r1.w,
+			dot(r2.xyz, p_pos) + r2.w);
+}
+
+void nextgeo_wind_vertex(inout vec3 r_pos, inout vec3 r_normal, inout vec3 r_tangent, uint p_mesh_idx, vec4 p_inst_transform[3], uint p_cluster_table_idx, uint p_vert_idx, uint p_vert_count, bool p_use_prev) {
+	vec4 r0;
+	vec4 r1;
+	vec4 r2;
+	if (!nextgeo_wind_blend_matrix(p_mesh_idx, p_inst_transform, p_cluster_table_idx, p_vert_idx, p_vert_count, p_use_prev, r0, r1, r2)) {
+		return;
+	}
+	r_pos = vec3(
+			dot(r0.xyz, r_pos) + r0.w,
+			dot(r1.xyz, r_pos) + r1.w,
+			dot(r2.xyz, r_pos) + r2.w);
+
+	vec3 c0 = cross(r1.xyz, r2.xyz);
+	vec3 c1 = cross(r2.xyz, r0.xyz);
+	vec3 c2 = cross(r0.xyz, r1.xyz);
+	float det = dot(r0.xyz, c0);
+	vec3 n_sk;
+	if (abs(det) > 1.0e-10) {
+		float sgn = det < 0.0 ? -1.0 : 1.0;
+		n_sk = vec3(dot(c0, r_normal), dot(c1, r_normal), dot(c2, r_normal)) * sgn;
+	} else {
+		n_sk = vec3(dot(r0.xyz, r_normal), dot(r1.xyz, r_normal), dot(r2.xyz, r_normal));
+	}
+	float n_len = length(n_sk);
+	if (n_len > 1.0e-12) {
+		r_normal = n_sk / n_len;
+	}
+
+	vec3 t_sk = vec3(dot(r0.xyz, r_tangent), dot(r1.xyz, r_tangent), dot(r2.xyz, r_tangent));
+	float t_len = length(t_sk);
+	if (t_len > 1.0e-12) {
+		r_tangent = t_sk / t_len;
+	}
+}
+#endif

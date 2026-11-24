@@ -58,7 +58,14 @@ private:
 	Ref<CameraAttributes> camera_attributes;
 	Ref<Compositor> compositor;
 
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10). Global scenario wind parameters.
+	Vector3 wind_direction = Vector3(1.0f, 0.0f, 0.0f);
+	float wind_strength = 0.0f;
+	float wind_gust_frequency = 1.0f;
+
 	HashSet<Camera3D *> cameras;
+
+	void _update_wind();
 
 protected:
 	static void _bind_methods();
@@ -86,6 +93,16 @@ public:
 
 	void set_compositor(const Ref<Compositor> &p_compositor);
 	Ref<Compositor> get_compositor() const;
+
+	// GodotNext: nextgeo_foliage_wind (#152).
+	void set_wind_direction(const Vector3 &p_direction);
+	Vector3 get_wind_direction() const;
+
+	void set_wind_strength(float p_strength);
+	float get_wind_strength() const;
+
+	void set_wind_gust_frequency(float p_frequency);
+	float get_wind_gust_frequency() const;
 
 	_FORCE_INLINE_ const HashSet<Camera3D *> &get_cameras() const { return cameras; }
 

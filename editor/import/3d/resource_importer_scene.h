@@ -241,6 +241,8 @@ class ResourceImporterScene : public ResourceImporter {
 	// GodotNext: nextgeo_foliage_instancing (#151)
 	bool _ngm_preserve_area = false;
 	bool _ngm_assembly = false;
+	// GodotNext: nextgeo_foliage_wind (#152)
+	bool _ngm_wind = false;
 	bool _ngm_single_mesh = false;
 	Array _ngm_entries;
 	List<String> *_ngm_gen_files = nullptr;

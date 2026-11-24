@@ -3957,6 +3957,16 @@
 				Sets the fallback environment to be used by this scenario. The fallback environment is used if no environment is set. Internally, this is used by the editor to provide a default environment.
 			</description>
 		</method>
+		<method name="scenario_set_wind">
+			<return type="void" />
+			<param index="0" name="scenario" type="RID" />
+			<param index="1" name="direction" type="Vector3" />
+			<param index="2" name="strength" type="float" />
+			<param index="3" name="gust_frequency" type="float" />
+			<description>
+				Sets the global wind parameters ([param direction], [param strength], and [param gust_frequency]) for the visual [param scenario]. Used by procedural foliage wind in NextGeo shaders when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled. See also [member World3D.wind_direction], [member World3D.wind_strength], and [member World3D.wind_gust_frequency].
+			</description>
+		</method>
 		<method name="screen_space_roughness_limiter_set_active">
 			<return type="void" />
 			<param index="0" name="enable" type="bool" />

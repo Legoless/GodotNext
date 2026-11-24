@@ -145,6 +145,20 @@ layout(set = 0, binding = 14, std430) buffer restrict readonly NextGeoClusterSki
 }
 nextgeo_cluster_skin;
 
+// GodotNext: nextgeo_foliage_wind (#152). Bindings 15..16 hold per-scenario wind params and per-mesh wind skeletons.
+layout(set = 0, binding = 15, std430) buffer restrict readonly NextGeoWindParams {
+	vec4 direction_strength;
+	vec4 time_gust_flags;
+	uvec4 meta;
+}
+nextgeo_wind_params;
+
+layout(set = 0, binding = 16, std430) buffer restrict readonly NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+nextgeo_wind_meshes;
+
+#define NEXTGEO_HAS_WIND_BUFFERS
 // clang-format off
 #include "nextgeo/skinning_inc.glsl"
 // clang-format on
@@ -203,6 +217,8 @@ void main() {
 				uintBitsToFloat(pages.data[pos_word + 2u]));
 		if ((record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u) {
 			local_pos = nextgeo_skin_position(local_pos, pair.x, mesh.page_table_offset + local_cluster, tid, vert_count, false);
+		} else if (nextgeo_wind_mesh_active(record.virtual_mesh)) {
+			local_pos = nextgeo_wind_position(local_pos, record.virtual_mesh, record.transform, mesh.page_table_offset + local_cluster, tid, vert_count, false);
 		}
 		if (has_spline) {
 			local_pos = spline_deform_position(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, local_pos);

@@ -422,6 +422,8 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_buffer;
 	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
 	const RID attr_buf = p_storage->get_instance_attributes_buffer().is_valid() ? p_storage->get_instance_attributes_buffer() : dummy_buffer;
+	const RID wind_params_buf = p_storage->get_wind_params_buffer().is_valid() ? p_storage->get_wind_params_buffer() : dummy_buffer;
+	const RID wind_meshes_buf = p_storage->get_wind_meshes_buffer().is_valid() ? p_storage->get_wind_meshes_buffer() : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, vis_tex));
@@ -442,6 +444,9 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, patches_buf));
 	// GodotNext: nextgeo_foliage_instancing (#151). Binding 21 holds per-record INSTANCE_COLOR/CUSTOM/ID.
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, attr_buf));
+	// GodotNext: nextgeo_foliage_wind (#152). Bindings 24..25 hold wind params and per-mesh wind skeletons (22..23 reserved).
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, wind_params_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, wind_meshes_buf));
 
 	return uniform_set_cache->get_cache_vec(p_shader_rid, RenderForwardClustered::TRANSFORMS_UNIFORM_SET, uniforms);
 }
@@ -615,6 +620,8 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_buffer;
 	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
 	const RID attr_buf = p_storage->get_instance_attributes_buffer().is_valid() ? p_storage->get_instance_attributes_buffer() : dummy_buffer;
+	const RID wind_params_buf = p_storage->get_wind_params_buffer().is_valid() ? p_storage->get_wind_params_buffer() : dummy_buffer;
+	const RID wind_meshes_buf = p_storage->get_wind_meshes_buffer().is_valid() ? p_storage->get_wind_meshes_buffer() : dummy_buffer;
 
 	// The resolve set of the tile quads, with the pixel list at binding 7, the bin state and the images.
 	LocalVector<RD::Uniform> resolve_uniforms;
@@ -639,6 +646,8 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, cluster_skin_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, patches_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, attr_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, wind_params_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, wind_meshes_buf));
 
 	for (uint32_t i = 0; i < buckets.size(); i++) {
 		const MaterialBucket &bucket = buckets[i];

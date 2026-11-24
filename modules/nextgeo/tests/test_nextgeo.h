@@ -33,11 +33,15 @@
 #include "../nextgeo_bvh.h"
 #include "../nextgeo_cut.h"
 #include "../nextgeo_dag_builder.h"
+#include "../nextgeo_import.h"
 
 #include "core/math/math_funcs.h"
 #include "core/math/random_pcg.h"
 #include "core/math/transform_3d.h"
 #include "core/templates/hash_set.h"
+#include "scene/resources/3d/importer_mesh.h"
+#include "scene/resources/3d/virtual_geometry_data.h"
+#include "scene/resources/3d/virtual_geometry_wind.h"
 #include "tests/test_macros.h"
 
 #include <cfloat>
@@ -1370,6 +1374,177 @@ TEST_CASE("[NextGeo] Preserve Area restores coarse foliage area and clamps at 1.
 		source_area += 0.5 * double((v1 - v0).cross(v2 - v0).length());
 	}
 	CHECK(area_on <= source_area * 1.05);
+}
+
+TEST_CASE("[NextGeo][FoliageWind] Offline import wind skeleton generation and #159 cluster skinning") {
+	// Build a procedural tree mesh (trunk + canopy) and import with virtual_geometry/wind enabled.
+	PackedVector3Array verts;
+	PackedVector3Array norms;
+	PackedVector2Array uvs;
+	PackedInt32Array indices;
+
+	constexpr int RADIAL = 16;
+	constexpr int RINGS = 24;
+	const int cols = RADIAL + 1;
+	for (int r = 0; r <= RINGS; r++) {
+		const float v = float(r) / float(RINGS);
+		const float y = v * 5.0f;
+		const float radius = v < 0.4f ? 0.25f : (0.25f + 1.8f * Math::sin((v - 0.4f) / 0.6f * float(Math::PI)));
+		for (int c = 0; c <= RADIAL; c++) {
+			const float u = float(c) / float(RADIAL);
+			const float ang = u * float(Math::TAU);
+			const float ca = Math::cos(ang);
+			const float sa = Math::sin(ang);
+			verts.push_back(Vector3(ca * radius, y, sa * radius));
+			norms.push_back(Vector3(ca, 0.15f, sa).normalized());
+			uvs.push_back(Vector2(u, v));
+		}
+	}
+	for (int r = 0; r < RINGS; r++) {
+		for (int c = 0; c < RADIAL; c++) {
+			const int i0 = r * cols + c;
+			const int i1 = i0 + 1;
+			const int i2 = (r + 1) * cols + c;
+			const int i3 = i2 + 1;
+			indices.push_back(i0);
+			indices.push_back(i2);
+			indices.push_back(i1);
+			indices.push_back(i1);
+			indices.push_back(i2);
+			indices.push_back(i3);
+		}
+	}
+
+	// Case 1: unskinned geometry -> procedural trunk + <=8 branch bones generated from bind-pose geometry.
+	{
+		Array arr;
+		arr.resize(Mesh::ARRAY_MAX);
+		arr[Mesh::ARRAY_VERTEX] = verts;
+		arr[Mesh::ARRAY_NORMAL] = norms;
+		arr[Mesh::ARRAY_TEX_UV] = uvs;
+		arr[Mesh::ARRAY_INDEX] = indices;
+
+		Ref<ImporterMesh> imp;
+		imp.instantiate();
+		imp->add_surface(Mesh::PRIMITIVE_TRIANGLES, arr);
+		PackedByteArray eligible;
+		eligible.push_back(1);
+
+		Ref<VirtualGeometryData> vgd;
+		Vector<Vector<uint8_t>> pages;
+		REQUIRE(nextgeo_import_build(imp.ptr(), eligible, false, true, PackedVector3Array(), PackedInt32Array(), vgd, pages) == OK);
+		REQUIRE(vgd.is_valid());
+		CHECK(vgd->get_skin_influences() == VirtualGeometryWind::SKIN_INFLUENCES);
+		Ref<VirtualGeometryWind> wind = vgd->get_wind();
+		REQUIRE(wind.is_valid());
+		CHECK(wind->get_bone_count() >= 2);
+		CHECK(wind->get_bone_count() <= VirtualGeometryWind::MAX_BONES);
+		CHECK(wind->get_max_sway() > 0.0f);
+		CHECK(vgd->get_cluster_count() > 0);
+		CHECK(!pages.is_empty());
+
+		// Verify every page's #159 cluster skinning blocks contain valid global bone indices (< wind->get_bone_count()).
+		uint32_t skin_blocks_checked = 0;
+		for (const Vector<uint8_t> &page : pages) {
+			REQUIRE(page.size() >= 16);
+			uint32_t cluster_count = 0;
+			uint32_t skin_bytes = 0;
+			memcpy(&cluster_count, page.ptr() + 0u, sizeof(uint32_t));
+			memcpy(&skin_bytes, page.ptr() + 12u, sizeof(uint32_t));
+			REQUIRE(skin_bytes > 0u);
+			REQUIRE(skin_bytes <= uint32_t(page.size()));
+			uint32_t cursor = uint32_t(page.size()) - skin_bytes;
+			for (uint32_t ci = 0; ci < cluster_count; ci++) {
+				const uint32_t rec_off = 16u + ci * 80u;
+				REQUIRE(rec_off + 80u <= uint32_t(page.size()));
+				const uint8_t vcount = page[rec_off + 76u];
+				REQUIRE(cursor + 4u <= uint32_t(page.size()));
+				const uint8_t bcount = page[cursor + 0u];
+				const uint8_t inf = page[cursor + 1u];
+				CHECK(bcount >= 1u);
+				CHECK(bcount <= uint8_t(wind->get_bone_count()));
+				CHECK(inf == 4u);
+				const uint32_t block_bytes = 4u + uint32_t(bcount) * 26u + uint32_t(vcount) * uint32_t(inf) * 3u;
+				REQUIRE(cursor + block_bytes <= uint32_t(page.size()));
+				for (uint8_t b = 0; b < bcount; b++) {
+					uint16_t gb = 0;
+					memcpy(&gb, page.ptr() + cursor + 4u + uint32_t(b) * 26u, sizeof(uint16_t));
+					CHECK(gb < uint16_t(wind->get_bone_count()));
+				}
+				cursor += block_bytes;
+				skin_blocks_checked++;
+			}
+			CHECK(cursor == uint32_t(page.size()));
+		}
+		CHECK(skin_blocks_checked == uint32_t(vgd->get_cluster_count()));
+	}
+
+	// Case 2: rigged mesh with 12-bone skeleton -> derived & clamped to <= 9 wind bones.
+	{
+		constexpr int SRC_BONES = 12;
+		PackedVector3Array skel_rest;
+		PackedInt32Array skel_parents;
+		skel_rest.resize(SRC_BONES);
+		skel_parents.resize(SRC_BONES);
+		skel_rest.write[0] = Vector3(0.0f, 0.0f, 0.0f);
+		skel_parents.write[0] = -1;
+		skel_rest.write[1] = Vector3(0.0f, 2.0f, 0.0f);
+		skel_parents.write[1] = 0;
+		for (int b = 2; b < SRC_BONES; b++) {
+			const float ang = float(b - 2) * float(Math::TAU) / float(SRC_BONES - 2);
+			skel_rest.write[b] = Vector3(Math::cos(ang) * 1.2f, 3.0f + float(b % 2) * 0.8f, Math::sin(ang) * 1.2f);
+			skel_parents.write[b] = 1;
+		}
+		PackedInt32Array sb;
+		PackedFloat32Array sw;
+		sb.resize(verts.size() * 4);
+		sw.resize(verts.size() * 4);
+		for (int i = 0; i < verts.size(); i++) {
+			int best_b = 0;
+			float best_d2 = FLT_MAX;
+			for (int b = 0; b < SRC_BONES; b++) {
+				const float d2 = float(verts[i].distance_squared_to(skel_rest[b]));
+				if (d2 < best_d2) {
+					best_d2 = d2;
+					best_b = b;
+				}
+			}
+			sb.write[i * 4 + 0] = best_b;
+			sb.write[i * 4 + 1] = skel_parents[best_b] >= 0 ? skel_parents[best_b] : 0;
+			sb.write[i * 4 + 2] = 0;
+			sb.write[i * 4 + 3] = 0;
+			sw.write[i * 4 + 0] = 0.7f;
+			sw.write[i * 4 + 1] = 0.3f;
+			sw.write[i * 4 + 2] = 0.0f;
+			sw.write[i * 4 + 3] = 0.0f;
+		}
+
+		Array arr;
+		arr.resize(Mesh::ARRAY_MAX);
+		arr[Mesh::ARRAY_VERTEX] = verts;
+		arr[Mesh::ARRAY_NORMAL] = norms;
+		arr[Mesh::ARRAY_TEX_UV] = uvs;
+		arr[Mesh::ARRAY_BONES] = sb;
+		arr[Mesh::ARRAY_WEIGHTS] = sw;
+		arr[Mesh::ARRAY_INDEX] = indices;
+
+		Ref<ImporterMesh> imp;
+		imp.instantiate();
+		imp->add_surface(Mesh::PRIMITIVE_TRIANGLES, arr);
+		PackedByteArray eligible;
+		eligible.push_back(1);
+
+		Ref<VirtualGeometryData> vgd;
+		Vector<Vector<uint8_t>> pages;
+		REQUIRE(nextgeo_import_build(imp.ptr(), eligible, false, true, skel_rest, skel_parents, vgd, pages) == OK);
+		REQUIRE(vgd.is_valid());
+		CHECK(vgd->get_skin_influences() == VirtualGeometryWind::SKIN_INFLUENCES);
+		Ref<VirtualGeometryWind> wind = vgd->get_wind();
+		REQUIRE(wind.is_valid());
+		CHECK(wind->get_bone_count() <= VirtualGeometryWind::MAX_BONES);
+		CHECK(wind->get_bone_count() >= 2);
+		CHECK(wind->get_max_sway() > 0.0f);
+	}
 }
 
 } // namespace TestNextGeo

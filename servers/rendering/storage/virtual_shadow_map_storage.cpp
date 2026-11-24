@@ -1654,6 +1654,9 @@ uint32_t RendererVirtualShadowMapStorage::classify_shadow_cache_dynamic(const Ca
 	if (p_input.is_dynamic_multimesh) {
 		reasons |= CACHE_DYNAMIC_MULTIMESH;
 	}
+	if (p_input.has_foliage_wind) {
+		reasons |= CACHE_DYNAMIC_FOLIAGE_WIND;
+	}
 	reasons |= p_input.shader_dynamic_flags & (CACHE_DYNAMIC_VERTEX | CACHE_DYNAMIC_ANIMATED | CACHE_DYNAMIC_MAIN_CAMERA | CACHE_DYNAMIC_VERTEX_TIME | CACHE_DYNAMIC_DEPTH);
 	return reasons;
 }

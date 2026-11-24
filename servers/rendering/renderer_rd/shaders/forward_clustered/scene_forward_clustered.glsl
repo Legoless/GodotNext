@@ -4489,6 +4489,7 @@ void main() {
 	vec2 _ng_uv2_c[3];
 	vec4 _ng_col_c[3];
 	bool _ng_is_skinned = (_ng_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	bool _ng_is_wind = !_ng_is_skinned && nextgeo_wind_mesh_active(_ng_record.virtual_mesh);
 	uint _ng_cluster_table_idx = _ng_mesh.page_table_offset + _ng_local_cluster;
 
 	vec3 _ng_s_pos[3];
@@ -4655,6 +4656,11 @@ void main() {
 				if ((_ng_layout & 0x04u) != 0u) {
 					_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
 				}
+			} else if (_ng_is_wind && !_ng_is_patch) {
+				nextgeo_wind_vertex(_ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_record.virtual_mesh, _ng_record.prev_transform, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, true);
+				if ((_ng_layout & 0x04u) != 0u) {
+					_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+				}
 			}
 			if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u && !_ng_is_patch) {
 				spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].previous, _ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_p_bin);
@@ -4678,6 +4684,11 @@ void main() {
 
 		if (_ng_is_skinned && !_ng_is_patch) {
 			nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
+			if ((_ng_layout & 0x04u) != 0u) {
+				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+			}
+		} else if (_ng_is_wind && !_ng_is_patch) {
+			nextgeo_wind_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_record.virtual_mesh, _ng_record.transform, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
 			if ((_ng_layout & 0x04u) != 0u) {
 				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
 			}

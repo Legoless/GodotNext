@@ -31,5 +31,14 @@
 		<member name="space" type="RID" setter="" getter="get_space">
 			The World3D's physics space.
 		</member>
+		<member name="wind_direction" type="Vector3" setter="set_wind_direction" getter="get_wind_direction" default="Vector3(1, 0, 0)">
+			Global world-space wind direction vector forwarded to the scenario via [method RenderingServer.scenario_set_wind]. Used by procedural foliage wind when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled.
+		</member>
+		<member name="wind_gust_frequency" type="float" setter="set_wind_gust_frequency" getter="get_wind_gust_frequency" default="1.0">
+			Global wind gust oscillation frequency multiplier in Hertz forwarded to the scenario via [method RenderingServer.scenario_set_wind].
+		</member>
+		<member name="wind_strength" type="float" setter="set_wind_strength" getter="get_wind_strength" default="0.0">
+			Global wind strength multiplier forwarded to the scenario via [method RenderingServer.scenario_set_wind]. A value of [code]0.0[/code] disables wind displacement.
+		</member>
 	</members>
 </class>

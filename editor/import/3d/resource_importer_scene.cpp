@@ -2353,8 +2353,8 @@ Error ResourceImporterScene::_save_virtual_geometry_single_mesh(const String &p_
 	}
 
 	const String key = _ngm_source_path + "::" + importer_mesh->get_name();
-	// GodotNext: nextgeo_skinned / nextgeo_foliage_instancing (#151)
-	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries, _ngm_skinned, _ngm_preserve_area);
+	// GodotNext: nextgeo_skinned / nextgeo_foliage_instancing (#151) / nextgeo_foliage_wind (#152)
+	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries, _ngm_skinned, _ngm_preserve_area, _ngm_wind);
 	Ref<ArrayMesh> mesh = importer_mesh->get_mesh();
 	ERR_FAIL_COND_V_MSG(mesh.is_null(), ERR_INVALID_DATA, "Cannot save single mesh from '" + p_source_file + "'.");
 	mesh->set_path(save_file_path, true);
@@ -2429,6 +2429,8 @@ void ResourceImporterScene::get_internal_import_options(InternalImportCategory p
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry_skinned", PROPERTY_HINT_ENUM, "Default,Enable (Experimental),Disable"), 0));
 			// GodotNext: nextgeo_foliage_instancing (#151)
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "virtual_geometry/preserve_area", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
+			// GodotNext: nextgeo_foliage_wind (#152)
+			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "virtual_geometry/wind", PROPERTY_HINT_ENUM, "Default,Enable (Experimental),Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "lods/normal_merge_angle", PROPERTY_HINT_RANGE, "0,180,1,degrees"), 20.0f));
 			// GodotNext: mesh_sdf_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/distance_fields", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
@@ -2789,6 +2791,8 @@ void ResourceImporterScene::get_import_options(const String &p_path, List<Import
 	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10)
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/virtual_geometry_assembly"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "virtual_geometry/preserve_area"), false));
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10)
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "virtual_geometry/wind"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/create_shadow_meshes"), true));
 	// GodotNext: mesh_sdf_import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_distance_fields"), bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/generate"))));
@@ -2900,6 +2904,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 				bool virtual_geometry_skinned = _ngm_skinned;
 				// GodotNext: nextgeo_foliage_instancing (#151)
 				bool virtual_geometry_preserve_area = _ngm_preserve_area;
+				// GodotNext: nextgeo_foliage_wind (#152)
+				bool virtual_geometry_wind = _ngm_wind;
 
 				String mesh_id = importer_mesh->get_meta("import_id", importer_mesh->get_name());
 
@@ -2989,6 +2995,15 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 							virtual_geometry_preserve_area = false;
 						}
 					}
+					// GodotNext: nextgeo_foliage_wind (#152)
+					if (!_ngm_single_mesh && mesh_settings.has("virtual_geometry/wind")) {
+						int wind_override = mesh_settings["virtual_geometry/wind"];
+						if (wind_override == MESH_OVERRIDE_ENABLE) {
+							virtual_geometry_wind = true;
+						} else if (wind_override == MESH_OVERRIDE_DISABLE) {
+							virtual_geometry_wind = false;
+						}
+					}
 
 					if (bool(mesh_settings.get("save_to_file/enabled", false))) {
 						save_to_file = mesh_settings.get("save_to_file/path", String());
@@ -3056,8 +3071,50 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 					} else {
 						ngm_path = ResourceUID::ensure_path(save_to_file) + ".ngm";
 					}
-					// GodotNext: nextgeo_skinned / nextgeo_foliage_instancing (#151)
-					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries, virtual_geometry_skinned, virtual_geometry_preserve_area);
+					// GodotNext: nextgeo_skinned / nextgeo_foliage_instancing (#151) / nextgeo_foliage_wind (#152)
+					PackedVector3Array wind_bone_rest_positions;
+					PackedInt32Array wind_bone_parents;
+					if (virtual_geometry_wind) {
+						const Ref<Skin> src_skin = src_mesh_node->get_skin();
+						if (src_skin.is_valid()) {
+							const Node *skel_node = src_mesh_node->get_node_or_null(src_mesh_node->get_skeleton_path());
+							const Skeleton3D *skel = Object::cast_to<Skeleton3D>(skel_node);
+							const int bind_count = src_skin->get_bind_count();
+							if (skel != nullptr && bind_count > 0) {
+								wind_bone_rest_positions.resize(bind_count);
+								wind_bone_parents.resize(bind_count);
+								HashMap<int, int> skel_to_bind;
+								LocalVector<int> bind_to_skel;
+								bind_to_skel.resize(bind_count);
+								for (int b = 0; b < bind_count; b++) {
+									const String bname = src_skin->get_bind_name(b);
+									const int sidx = bname.is_empty() ? src_skin->get_bind_bone(b) : skel->find_bone(bname);
+									bind_to_skel[b] = sidx;
+									if (sidx >= 0 && !skel_to_bind.has(sidx)) {
+										skel_to_bind[sidx] = b;
+									}
+									// Skin bind_pose is inverse-bind (mesh -> bone), so its inverse origin is the joint in mesh space.
+									wind_bone_rest_positions.write[b] = src_skin->get_bind_pose(b).affine_inverse().origin;
+								}
+								for (int b = 0; b < bind_count; b++) {
+									int parent_bind = -1;
+									int sidx = bind_to_skel[b];
+									if (sidx >= 0 && sidx < skel->get_bone_count()) {
+										int p = skel->get_bone_parent(sidx);
+										while (p >= 0 && p < skel->get_bone_count()) {
+											if (skel_to_bind.has(p)) {
+												parent_bind = skel_to_bind[p];
+												break;
+											}
+											p = skel->get_bone_parent(p);
+										}
+									}
+									wind_bone_parents.write[b] = parent_bind;
+								}
+							}
+						}
+					}
+					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries, virtual_geometry_skinned, virtual_geometry_preserve_area, virtual_geometry_wind, wind_bone_rest_positions, wind_bone_parents);
 				}
 
 				if (generate_lods) {
@@ -3637,6 +3694,8 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	// GodotNext: nextgeo_foliage_instancing (#151)
 	_ngm_preserve_area = p_options.has("virtual_geometry/preserve_area") && bool(p_options["virtual_geometry/preserve_area"]);
 	_ngm_assembly = p_options.has("meshes/virtual_geometry_assembly") && bool(p_options["meshes/virtual_geometry_assembly"]);
+	// GodotNext: nextgeo_foliage_wind (#152)
+	_ngm_wind = p_options.has("virtual_geometry/wind") && bool(p_options["virtual_geometry/wind"]);
 	_ngm_single_mesh = _ngm_generate && _scene_import_type == "ArrayMesh";
 	_ngm_gen_files = r_gen_files;
 

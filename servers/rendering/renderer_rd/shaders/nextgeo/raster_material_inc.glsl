@@ -129,16 +129,30 @@ layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoClusterSki
 }
 nextgeo_cluster_skin;
 
-#define NEXTGEO_SKIN_PAGES_DATA nextgeo_pages.data
-// clang-format off
-#include "skinning_inc.glsl"
-// clang-format on
-
 // GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10). Per-record INSTANCE_COLOR, INSTANCE_CUSTOM, and INSTANCE_ID.
 layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoInstanceAttrs {
 	NextGeoInstanceAttributes data[];
 }
 nextgeo_instance_attrs;
+
+// GodotNext: nextgeo_foliage_wind (#152). Bindings 12..13 hold per-scenario wind params and per-mesh wind skeletons.
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoWindParams {
+	vec4 direction_strength;
+	vec4 time_gust_flags;
+	uvec4 meta;
+}
+nextgeo_wind_params;
+
+layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+nextgeo_wind_meshes;
+
+#define NEXTGEO_SKIN_PAGES_DATA nextgeo_pages.data
+#define NEXTGEO_HAS_WIND_BUFFERS
+// clang-format off
+#include "skinning_inc.glsl"
+// clang-format on
 
 /* Set 1: the scene environment the material code reads, as scene_forward_clustered_inc.glsl names it. */
 
@@ -874,6 +888,13 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 		if ((_ng_layout & 0x04u) != 0u) {
 			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
 		}
+	} else if (nextgeo_wind_mesh_active(_ng_record.virtual_mesh)) {
+		NextGeoMeshRecord _ng_sk_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
+		uint _ng_sk_cluster_idx = _ng_sk_mesh.page_table_offset + (p_entry.y - _ng_sk_mesh.cluster_offset);
+		nextgeo_wind_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_record.virtual_mesh, _ng_record.transform, _ng_sk_cluster_idx, p_v_idx, _ng_vert_count, false);
+		if ((_ng_layout & 0x04u) != 0u) {
+			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+		}
 	}
 
 	vec2 _ng_c_uv = vec2(0.0);
@@ -1037,6 +1058,13 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 			NextGeoMeshRecord _ng_sk_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
 			uint _ng_sk_cluster_idx = _ng_sk_mesh.page_table_offset + (p_entry.y - _ng_sk_mesh.cluster_offset);
 			nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, p_entry.x, _ng_sk_cluster_idx, _ng_v_idx, _ng_vert_count, false);
+			if ((_ng_layout & 0x04u) != 0u) {
+				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+			}
+		} else if (nextgeo_wind_mesh_active(_ng_record.virtual_mesh)) {
+			NextGeoMeshRecord _ng_sk_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
+			uint _ng_sk_cluster_idx = _ng_sk_mesh.page_table_offset + (p_entry.y - _ng_sk_mesh.cluster_offset);
+			nextgeo_wind_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_record.virtual_mesh, _ng_record.transform, _ng_sk_cluster_idx, _ng_v_idx, _ng_vert_count, false);
 			if ((_ng_layout & 0x04u) != 0u) {
 				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
 			}

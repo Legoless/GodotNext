@@ -70,6 +70,7 @@ void VirtualMeshStorage::free_resources() {
 	_reset_skin_palette();
 	_reset_skin_instances();
 	_reset_cluster_skin();
+	_reset_wind();
 }
 
 uint64_t VirtualMeshStorage::_get_max_storage_buffer_range() const {
@@ -530,6 +531,82 @@ void VirtualMeshStorage::_reset_splines() {
 	}
 	spline_buffer = RID();
 	spline_buffer_capacity = 0;
+}
+
+RID VirtualMeshStorage::get_wind_params_buffer() const {
+	if (wind_params_buffer.is_null()) {
+		RenderingDevice *rd = RD::get_singleton();
+		if (rd != nullptr) {
+			WindParamsGPU init_params = wind_params;
+			wind_params_buffer = rd->storage_buffer_create(sizeof(WindParamsGPU), Span<uint8_t>(reinterpret_cast<uint8_t *>(&init_params), sizeof(WindParamsGPU)));
+		}
+	}
+	return wind_params_buffer;
+}
+
+RID VirtualMeshStorage::get_wind_meshes_buffer() const {
+	if (wind_meshes_buffer.is_null()) {
+		RenderingDevice *rd = RD::get_singleton();
+		if (rd != nullptr) {
+			WindMeshGPU zero_mesh;
+			wind_meshes_buffer = rd->storage_buffer_create(sizeof(WindMeshGPU), Span<uint8_t>(reinterpret_cast<uint8_t *>(&zero_mesh), sizeof(WindMeshGPU)));
+			wind_meshes_capacity = wind_meshes_buffer.is_valid() ? 1u : 0u;
+		}
+	}
+	return wind_meshes_buffer;
+}
+
+void VirtualMeshStorage::_upload_wind_params(const WindParamsGPU &p_params) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	RID buf = get_wind_params_buffer();
+	if (buf.is_valid()) {
+		rd->buffer_update(buf, 0, sizeof(WindParamsGPU), &p_params);
+	}
+}
+
+void VirtualMeshStorage::_upload_wind_meshes(uint32_t p_first, uint32_t p_count) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_count == 0) {
+		return;
+	}
+	const uint32_t required = MAX(uint32_t(wind_meshes.size()), 1u);
+	if (wind_meshes_buffer.is_null() || wind_meshes_capacity < required) {
+		if (wind_meshes_buffer.is_valid()) {
+			rd->free_rid(wind_meshes_buffer);
+			wind_meshes_buffer = RID();
+		}
+		uint32_t new_cap = MAX(wind_meshes_capacity, 1u);
+		while (new_cap < required) {
+			new_cap *= 2u;
+		}
+		wind_meshes_buffer = rd->storage_buffer_create(new_cap * sizeof(WindMeshGPU));
+		ERR_FAIL_COND(wind_meshes_buffer.is_null());
+		wind_meshes_capacity = new_cap;
+		if (!wind_meshes.is_empty()) {
+			rd->buffer_update(wind_meshes_buffer, 0, wind_meshes.size() * sizeof(WindMeshGPU), wind_meshes.ptr());
+		}
+		return;
+	}
+	ERR_FAIL_COND(p_first + p_count > wind_meshes_capacity);
+	rd->buffer_update(wind_meshes_buffer, p_first * sizeof(WindMeshGPU), p_count * sizeof(WindMeshGPU), wind_meshes.ptr() + p_first);
+}
+
+void VirtualMeshStorage::_reset_wind() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		if (wind_params_buffer.is_valid()) {
+			rd->free_rid(wind_params_buffer);
+		}
+		if (wind_meshes_buffer.is_valid()) {
+			rd->free_rid(wind_meshes_buffer);
+		}
+	}
+	wind_params_buffer = RID();
+	wind_meshes_buffer = RID();
+	wind_meshes_capacity = 0;
 }
 
 } // namespace RendererRD

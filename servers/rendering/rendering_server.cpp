@@ -2297,6 +2297,8 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 		stats["resident_pages"] = int64_t(RSG::virtual_mesh_storage->get_resident_page_count());
 		stats["pinned_pages"] = int64_t(RSG::virtual_mesh_storage->get_pinned_page_count());
 		stats["page_upload_ms"] = RSG::virtual_mesh_storage->get_last_page_upload_ms();
+		stats["skin_palette_used_bones"] = int64_t(RSG::virtual_mesh_storage->get_palette_arena_used_bones());
+		stats["skin_palette_bytes"] = int64_t(uint64_t(RSG::virtual_mesh_storage->get_palette_arena_bone_capacity()) * 3u * 16u);
 	}
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 	RendererRD::NextGeoDebug::fill_debug_stats(stats);
@@ -3706,6 +3708,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("scenario_set_fallback_environment", "scenario", "environment"), &RenderingServer::scenario_set_fallback_environment);
 	ClassDB::bind_method(D_METHOD("scenario_set_camera_attributes", "scenario", "effects"), &RenderingServer::scenario_set_camera_attributes);
 	ClassDB::bind_method(D_METHOD("scenario_set_compositor", "scenario", "compositor"), &RenderingServer::scenario_set_compositor);
+	// GodotNext: nextgeo_foliage_wind (#152)
+	ClassDB::bind_method(D_METHOD("scenario_set_wind", "scenario", "direction", "strength", "gust_frequency"), &RenderingServer::scenario_set_wind);
 
 	/* INSTANCE */
 
@@ -4420,6 +4424,9 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10). EXPERIMENTAL Nanite Assemblies
 	// (GPU expansion of instance -> part -> sub-part, <= 2 levels). Off by default.
 	GLOBAL_DEF("rendering/nextgeo/experimental/assemblies", false);
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10). EXPERIMENTAL procedural wind through
+	// Nanite skinning (1 trunk + <= 8 branch bones evaluated in shader with 0 bytes per-instance palette).
+	GLOBAL_DEF("rendering/nextgeo/experimental/foliage_wind", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

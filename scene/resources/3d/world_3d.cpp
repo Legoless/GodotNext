@@ -152,6 +152,53 @@ Ref<Compositor> World3D::get_compositor() const {
 	return compositor;
 }
 
+void World3D::_update_wind() {
+	if (scenario.is_valid() && RS::get_singleton() != nullptr) {
+		RS::get_singleton()->scenario_set_wind(scenario, wind_direction, wind_strength, wind_gust_frequency);
+	}
+}
+
+void World3D::set_wind_direction(const Vector3 &p_direction) {
+	if (wind_direction == p_direction) {
+		return;
+	}
+	wind_direction = p_direction;
+	_update_wind();
+	emit_changed();
+}
+
+Vector3 World3D::get_wind_direction() const {
+	return wind_direction;
+}
+
+void World3D::set_wind_strength(float p_strength) {
+	const float clamped = MAX(p_strength, 0.0f);
+	if (wind_strength == clamped) {
+		return;
+	}
+	wind_strength = clamped;
+	_update_wind();
+	emit_changed();
+}
+
+float World3D::get_wind_strength() const {
+	return wind_strength;
+}
+
+void World3D::set_wind_gust_frequency(float p_frequency) {
+	const float clamped = MAX(p_frequency, 0.0f);
+	if (wind_gust_frequency == clamped) {
+		return;
+	}
+	wind_gust_frequency = clamped;
+	_update_wind();
+	emit_changed();
+}
+
+float World3D::get_wind_gust_frequency() const {
+	return wind_gust_frequency;
+}
+
 #ifndef PHYSICS_3D_DISABLED
 PhysicsDirectSpaceState3D *World3D::get_direct_space_state() {
 	return PhysicsServer3D::get_singleton()->space_get_direct_state(get_space());
@@ -170,12 +217,23 @@ void World3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_fallback_environment"), &World3D::get_fallback_environment);
 	ClassDB::bind_method(D_METHOD("set_camera_attributes", "attributes"), &World3D::set_camera_attributes);
 	ClassDB::bind_method(D_METHOD("get_camera_attributes"), &World3D::get_camera_attributes);
+	// GodotNext: nextgeo_foliage_wind (#152)
+	ClassDB::bind_method(D_METHOD("set_wind_direction", "direction"), &World3D::set_wind_direction);
+	ClassDB::bind_method(D_METHOD("get_wind_direction"), &World3D::get_wind_direction);
+	ClassDB::bind_method(D_METHOD("set_wind_strength", "strength"), &World3D::set_wind_strength);
+	ClassDB::bind_method(D_METHOD("get_wind_strength"), &World3D::get_wind_strength);
+	ClassDB::bind_method(D_METHOD("set_wind_gust_frequency", "frequency"), &World3D::set_wind_gust_frequency);
+	ClassDB::bind_method(D_METHOD("get_wind_gust_frequency"), &World3D::get_wind_gust_frequency);
 #ifndef PHYSICS_3D_DISABLED
 	ClassDB::bind_method(D_METHOD("get_direct_space_state"), &World3D::get_direct_space_state);
 #endif // PHYSICS_3D_DISABLED
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "environment", PROPERTY_HINT_RESOURCE_TYPE, Environment::get_class_static()), "set_environment", "get_environment");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "fallback_environment", PROPERTY_HINT_RESOURCE_TYPE, Environment::get_class_static()), "set_fallback_environment", "get_fallback_environment");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "camera_attributes", PROPERTY_HINT_RESOURCE_TYPE, "CameraAttributesPractical,CameraAttributesPhysical"), "set_camera_attributes", "get_camera_attributes");
+	ADD_GROUP("Wind", "wind_");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "wind_direction"), "set_wind_direction", "get_wind_direction");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "wind_strength", PROPERTY_HINT_RANGE, "0,10,0.01,or_greater"), "set_wind_strength", "get_wind_strength");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "wind_gust_frequency", PROPERTY_HINT_RANGE, "0,10,0.01,or_greater"), "set_wind_gust_frequency", "get_wind_gust_frequency");
 	ADD_PROPERTY(PropertyInfo(Variant::RID, "space", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "", "get_space");
 #ifndef NAVIGATION_3D_DISABLED
 	ADD_PROPERTY(PropertyInfo(Variant::RID, "navigation_map", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "", "get_navigation_map");

@@ -218,6 +218,10 @@ per-part RT TLAS expansion, and VSM `ASSEMBLY` / `VSM_ASSEMBLY` table parity —
 implementation built directly on GodotNext's #75, #76, #80, #154, #155, #158, #162, #164, #217,
 and #43/#52 infrastructure. Copied files: none.
 
+## Foliage wind through Nanite skinning (#152)
+
+No outside input. Procedural foliage wind through Nanite skinning (#152, plan §21.4 contract N10, GN-7, GN-12) — the `VirtualGeometryWind` resource (`scene/resources/3d/virtual_geometry_wind.{h,cpp}`) storing 1 trunk bone plus `<= 8` branch bones (`<= 9` total) with a conservative `max_sway` bound, offline generation from bind-pose geometry or imported glTF skeletons via the `virtual_geometry/wind` import option writing into `#159`'s `.ngm` cluster skinning blocks, `World3D` wind properties (`wind_direction`, `wind_strength`, `wind_gust_frequency`) and `RenderingServer::scenario_set_wind()`, compact per-mesh GPU wind descriptors (`WindMeshGPU`) plus per-scenario wind parameters (`WindParamsGPU`) behind `rendering/nextgeo/experimental/foliage_wind` (default `false`), in-shader procedural bone evaluation (`skinning_inc.glsl`, matching `nextgeo_skinning.h`'s CPU reference) using 0 bytes of per-instance skin palette arena memory across SW/HW-VS/HW-mesh/programmable raster bins, visibility export and Stage A/B resolve (current + previous-time velocity), conservative `max_sway` cull bounds inflation on CPU and GPU (`instance_cull.glsl`, `cluster_cull.glsl`, `CPU_cut_hash`), and VSM dynamic-layer routing (`CACHE_DYNAMIC_FOLIAGE_WIND`) — is an original implementation built directly on GodotNext's #159/#160 skinning format and shaders, #151 MultiMesh instancing, #154/#155/#162 rasterizers, and #212/#217 VSM x Nanite pipeline. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

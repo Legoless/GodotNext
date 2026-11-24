@@ -417,6 +417,10 @@ public:
 		uint64_t vsm_static_mode_invalidations = 0;
 		// GodotNext: df_shadows (#214). Shadow-casting mesh/MultiMesh instances for PS global/mesh SDF shadows.
 		const LocalVector<NextGIRTInstance> *df_sdf_instances = nullptr;
+		// GodotNext: nextgeo_foliage_wind (#152). Per-scenario World3D wind parameters.
+		Vector3 wind_direction = Vector3(1.0f, 0.0f, 0.0f);
+		float wind_strength = 0.0f;
+		float wind_gust_frequency = 1.0f;
 	};
 
 	struct CameraData {

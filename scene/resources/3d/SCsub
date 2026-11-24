@@ -13,6 +13,7 @@ env.add_source_files(env.scene_sources, "skin.cpp")
 # GodotNext: vgd_source
 env.add_source_files(env.scene_sources, "virtual_geometry_assembly.cpp")
 env.add_source_files(env.scene_sources, "virtual_geometry_data.cpp")
+env.add_source_files(env.scene_sources, "virtual_geometry_wind.cpp")
 # GodotNext: mesh_sdf_source
 env.add_source_files(env.scene_sources, "mesh_distance_field.cpp")
 env.add_source_files(env.scene_sources, "sky_material.cpp")

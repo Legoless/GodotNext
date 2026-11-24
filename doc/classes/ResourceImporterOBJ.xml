@@ -43,6 +43,9 @@
 		<member name="virtual_geometry/preserve_area" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], triangles of each simplified virtual-geometry cluster group are scaled about their centroids (clamped to [code]1.5[/code]x) so the simplified group preserves the source group's surface area across coarse LODs. Useful for thin foliage cards and leaves.
 		</member>
+		<member name="virtual_geometry/wind" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], generates a procedural [VirtualGeometryWind] skeleton (one trunk bone plus up to 8 branch bones) from the mesh geometry and stores its vertex skinning weights in the [code].ngm[/code] sidecar for in-shader foliage wind evaluation.
+		</member>
 		<member name="virtual_geometry_fallback_mode" type="int" setter="" getter="" default="0">
 			How authored surfaces are stored after a virtual geometry build. [b]retain_authored[/b] (the default) keeps the imported surfaces. [b]strip_authored_to_coarse[/b] replaces virtualized surfaces with the coarse root cut.
 		</member>

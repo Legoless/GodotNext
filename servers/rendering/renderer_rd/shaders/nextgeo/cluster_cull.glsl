@@ -23,6 +23,46 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #include "raster_features_inc.glsl"
 // clang-format on
 
+#if !defined(CUT_HASH) && !defined(VSM_SETUP)
+// GodotNext: nextgeo_foliage_wind (#152). Bindings 27..28 hold wind params and per-mesh wind skeletons (29..30 reserved).
+layout(set = 0, binding = 27, std430) buffer restrict readonly NextGeoWindParams {
+	vec4 direction_strength;
+	vec4 time_gust_flags;
+	uvec4 meta;
+}
+nextgeo_wind_params;
+
+layout(set = 0, binding = 28, std430) buffer restrict readonly NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+nextgeo_wind_meshes;
+
+#define NEXTGEO_HAS_WIND_BUFFERS
+#define NEXTGEO_WIND_HELPERS_DEFINED
+bool nextgeo_wind_enabled() {
+	return (floatBitsToUint(nextgeo_wind_params.time_gust_flags.w) & NEXTGEO_WIND_PARAM_FLAG_ENABLED) != 0u;
+}
+
+float nextgeo_wind_mesh_max_sway(uint p_mesh_idx) {
+	if (!nextgeo_wind_enabled() || p_mesh_idx >= nextgeo_wind_params.meta.x) {
+		return 0.0;
+	}
+	uvec4 hdr = nextgeo_wind_meshes.data[p_mesh_idx].header;
+	return hdr.x > 0u ? uintBitsToFloat(hdr.y) : 0.0;
+}
+
+bool nextgeo_wind_mesh_active(uint p_mesh_idx) {
+	if (!nextgeo_wind_enabled() || !(nextgeo_wind_params.direction_strength.w > 0.0) || p_mesh_idx >= nextgeo_wind_params.meta.x) {
+		return false;
+	}
+	return nextgeo_wind_meshes.data[p_mesh_idx].header.x > 0u;
+}
+#elif defined(VSM_SETUP)
+float nextgeo_wind_mesh_max_sway(uint p_mesh_idx) {
+	return 0.0;
+}
+#endif
+
 #ifdef CLUSTER_CULL
 // GodotNext: nextgeo_skinned_runtime (#160). Shared across VSM_VIEW and main/shadow CLUSTER_CULL
 // before #ifdef VSM_VIEW so glsl_builders.py's include-once expansion exposes skinning_inc.glsl
@@ -338,7 +378,7 @@ uint vsm_instance_layer(NextGeoInstanceRecord p_record, uint p_cull_flags, bool 
 	if (mode == NEXTGEO_RECORD_VSM_CACHE_STATIC || mode == NEXTGEO_RECORD_VSM_CACHE_RIGID) {
 		return 0u;
 	}
-	bool is_dynamic = ((p_record.flags & (NEXTGEO_RECORD_VSM_DYNAMIC | NEXTGEO_RECORD_RT_SKINNED | NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) != 0u) || vsm_record_moved(p_record) || p_dynamic_material;
+	bool is_dynamic = ((p_record.flags & (NEXTGEO_RECORD_VSM_DYNAMIC | NEXTGEO_RECORD_RT_SKINNED | NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) != 0u) || (nextgeo_wind_mesh_max_sway(p_record.virtual_mesh) > 0.0) || vsm_record_moved(p_record) || p_dynamic_material;
 	return is_dynamic ? 1u : 0u;
 }
 
@@ -383,9 +423,9 @@ float vsm_projected_error_skinned(NextGeoInstanceRecord p_record, vec4 p_lod_sph
 		distance = max(length(closest - light_origin), max(md.near_w, 1.0e-5));
 	} else {
 		vec3 center = vsm_instance_point(p_record, p_lod_sphere.xyz);
-		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
-		// Inflate sphere radius by displacement and vertex-offset bounds.
-		float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164), nextgeo_foliage_wind (#152) x vsm_nanite (#217).
+		// Inflate sphere radius by displacement, vertex-offset, and foliage wind sway bounds.
+		float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 		float radius = (p_lod_sphere.w + expand) * scale;
 		distance = max(length(center - light_origin) - radius, max(md.near_w, 1.0e-5));
 	}
@@ -538,9 +578,9 @@ bool vsm_local_aabb_page_bounds(NextGeoInstanceRecord p_record, vec3 lmin, vec3 
 		spline_deform_local_aabb(sp, lmin, lmax);
 	}
 #endif
-	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
-	// Inflate local bounds by displacement and vertex-offset bounds.
-	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164), nextgeo_foliage_wind (#152) x vsm_nanite (#217).
+	// Inflate local bounds by displacement, vertex-offset, and foliage wind sway bounds.
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 	lmin -= vec3(expand);
 	lmax += vec3(expand);
 	vec3 corners[8];
@@ -690,8 +730,8 @@ void main() {
 	vec2 px_max;
 	float min_depth;
 	bool straddles_near;
-	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
-	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
+	// GodotNext: nextgeo_vertex_offset (#164), nextgeo_foliage_wind (#152). Inflate instance AABB by (vertex_offset_max + wind_max_sway) * max_scale.
+	float wpo_margin = (nextgeo_record_vertex_offset_bound(record) + nextgeo_wind_mesh_max_sway(record.virtual_mesh)) * abs(record.world_aabb_min.w);
 	if (!vsm_world_aabb_page_bounds(record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_max.xyz + vec3(wpo_margin), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
 		return;
 	}
@@ -724,7 +764,7 @@ bool vsm_sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_b
 		return (p_max_edge * p_scale / page_texel) < threshold;
 	}
 	vec3 center = vsm_instance_point(p_record, p_bounds.xyz);
-	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 	float w_min = vsm_row(md.row3, center) - (p_bounds.w + expand) * p_scale;
 	if (!(w_min > md.near_w)) {
 		return false;
@@ -927,7 +967,7 @@ void main() {
 				spline_deform_bounds_sphere(sp, bounds.xyz, bounds.w);
 				max_edge *= sp.up_max_stretch.w;
 			}
-			float expand = max(record.prev_world_aabb_max.w, 0.0) + (has_wpo ? nextgeo_record_vertex_offset_bound(record) : 0.0);
+			float expand = max(record.prev_world_aabb_max.w, 0.0) + (has_wpo ? nextgeo_record_vertex_offset_bound(record) : 0.0) + nextgeo_wind_mesh_max_sway(record.virtual_mesh);
 			vec2 px_min;
 			vec2 px_max;
 			float min_depth;
@@ -1315,8 +1355,8 @@ float projected_error_params_skinned(NextGeoInstanceRecord p_record, vec4 p_lod_
 		distance = max(length(closest - p_camera.xyz), p_view.z);
 	} else {
 		vec3 center = instance_point(p_record, p_lod_sphere.xyz);
-		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
-		float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164), nextgeo_foliage_wind (#152). Inflate sphere radius by displacement, WPO, and wind sway bounds.
+		float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 		float radius = (p_lod_sphere.w + expand) * scale;
 		distance = max(length(center - p_camera.xyz) - radius, p_view.z);
 	}
@@ -1366,7 +1406,7 @@ bool mesh_group_refine_ok(uint p_mesh_idx, uint p_group_idx) {
 // GodotNext: nextgeo_skinned_runtime (#160). Frustum and Phase-2 Hi-Z culling of skinned
 // cluster bone-bound union AABBs transformed to world space.
 bool skin_aabb_visible_planes(NextGeoInstanceRecord p_record, vec3 p_lmin, vec3 p_lmax, vec4 p_frustum[6]) {
-	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 	vec3 lmin = p_lmin - vec3(disp_bound);
 	vec3 lmax = p_lmax + vec3(disp_bound);
 	vec3 corners[8];
@@ -1394,7 +1434,7 @@ bool skin_aabb_hiz_occluded(NextGeoInstanceRecord p_record, vec3 p_lmin, vec3 p_
 	if (params.phase == 0u || (cull.cull.w & 1u) == 0u) {
 		return false;
 	}
-	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 	vec3 lmin = p_lmin - vec3(disp_bound);
 	vec3 lmax = p_lmax + vec3(disp_bound);
 	vec2 uv_min = vec2(2.0);
@@ -1446,8 +1486,8 @@ bool sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_bound
 		return false;
 	}
 	vec3 center = instance_point(p_record, p_bounds.xyz);
-	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate cluster culling sphere by displacement and WPO bounds.
-	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164), nextgeo_foliage_wind (#152). Inflate cluster culling sphere by displacement, WPO, and wind sway bounds.
+	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record) + nextgeo_wind_mesh_max_sway(p_record.virtual_mesh);
 	float z_min = dot(center - cull.camera.xyz, cull.raster_forward.xyz) - (p_bounds.w + expand) * p_scale;
 	if (!(z_min > cull.raster_forward.w)) {
 		return false;
@@ -1729,8 +1769,8 @@ void main() {
 									spline_deform_bounds_sphere(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, req_lod.xyz, req_lod.w);
 								}
 								vec3 center = instance_point(record, req_lod.xyz);
-								// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
-								float expand = max(record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(record);
+								// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164), nextgeo_foliage_wind (#152). Inflate sphere radius by displacement, WPO, and wind sway bounds.
+								float expand = max(record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(record) + nextgeo_wind_mesh_max_sway(record.virtual_mesh);
 								float dist = max(length(center - cull.camera.xyz) - (req_lod.w + expand) * scale, 0.0);
 								uint req_slot = atomicAdd(page_requests.data[0], 1u);
 								if (req_slot < page_requests.data[1]) {

@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="VirtualGeometryWind" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Procedural foliage wind skeleton attached to a [VirtualGeometryData] resource.
+	</brief_description>
+	<description>
+		Stores a compact procedural wind skeleton for virtualized foliage assets: one trunk bone (index [code]0[/code]) plus up to [constant MAX_BRANCH_BONES] ([code]8[/code]) branch bones, for at most [constant MAX_BONES] ([code]9[/code]) bones per asset, together with a conservative [member max_sway] cull bound.
+		When [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled, NextGeo shaders evaluate every bone's sway transform directly on the GPU from [World3D] wind parameters ([member World3D.wind_direction], [member World3D.wind_strength], [member World3D.wind_gust_frequency]), the frame time, and each instance's world transform, allocating zero bytes of per-instance skin palette arena memory.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_bone">
+			<return type="int" enum="Error" />
+			<param index="0" name="rest_position" type="Vector3" />
+			<param index="1" name="axis" type="Vector3" />
+			<param index="2" name="stiffness" type="float" default="0.5" />
+			<param index="3" name="sway_phase" type="float" default="0.0" />
+			<param index="4" name="max_sway" type="float" default="0.25" />
+			<param index="5" name="lever_length" type="float" default="1.0" />
+			<description>
+				Appends a procedural wind bone (up to [constant MAX_BONES]) with its bind-pose pivot [param rest_position], bone [param axis], [param stiffness] in [code][0, 1][/code], phase offset [param sway_phase], local sway amplitude bound [param max_sway], and [param lever_length].
+			</description>
+		</method>
+		<method name="clear">
+			<return type="void" />
+			<description>
+				Clears all procedural wind bones and resets [member max_sway] to [code]0.0[/code].
+			</description>
+		</method>
+		<method name="compute_vertex_skinning" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="positions" type="PackedVector3Array" />
+			<description>
+				Computes four-influence bone indices and normalized weights for each bind-pose vertex position in [param positions] against this wind skeleton. Returns a [Dictionary] with [code]"bones"[/code] ([PackedInt32Array]) and [code]"weights"[/code] ([PackedFloat32Array]).
+			</description>
+		</method>
+		<method name="generate_from_geometry">
+			<return type="int" enum="Error" />
+			<param index="0" name="positions" type="PackedVector3Array" />
+			<param index="1" name="trunk_axis" type="Vector3" default="Vector3(0, 1, 0)" />
+			<param index="2" name="max_sway" type="float" default="-1.0" />
+			<description>
+				Generates one trunk bone and up to [constant MAX_BRANCH_BONES] branch bones from bind-pose vertex [param positions] distributed along [param trunk_axis] and radial azimuth sectors. When [param max_sway] is negative, a conservative default sway bound is derived from the mesh height.
+			</description>
+		</method>
+		<method name="generate_from_skeleton_data">
+			<return type="PackedInt32Array" />
+			<param index="0" name="bone_rest_positions" type="PackedVector3Array" />
+			<param index="1" name="bone_parents" type="PackedInt32Array" />
+			<param index="2" name="positions" type="PackedVector3Array" />
+			<param index="3" name="src_bones" type="PackedInt32Array" />
+			<param index="4" name="src_weights" type="PackedFloat32Array" />
+			<param index="5" name="src_influences" type="int" default="4" />
+			<param index="6" name="max_sway" type="float" default="-1.0" />
+			<description>
+				Derives a procedural wind skeleton (one trunk bone plus up to [constant MAX_BRANCH_BONES] branch bones) from an imported skeleton's rest bone positions and parent indices. Returns a remap table mapping each source bone index to a wind bone index in [code][0, get_bone_count() - 1][/code], or an empty array on failure.
+			</description>
+		</method>
+		<method name="get_bone_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of procedural wind bones in this resource (at most [constant MAX_BONES]).
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="base_height" type="float" setter="set_base_height" getter="get_base_height" default="0.0">
+			Minimum projection along [member trunk_axis] across the asset's bind-pose vertices.
+		</member>
+		<member name="bone_axes" type="PackedVector3Array" setter="set_bone_axes" getter="get_bone_axes" default="PackedVector3Array()">
+			Unit-length local axes for each procedural wind bone.
+		</member>
+		<member name="bone_lever_lengths" type="PackedFloat32Array" setter="set_bone_lever_lengths" getter="get_bone_lever_lengths" default="PackedFloat32Array()">
+			Effective lever lengths (distance from each bone's rest pivot to its farthest influenced vertex, clamped to at least [code]0.25[/code]) used to convert sway amplitude into bend angle without exceeding [member max_sway].
+		</member>
+		<member name="bone_max_sway" type="PackedFloat32Array" setter="set_bone_max_sway" getter="get_bone_max_sway" default="PackedFloat32Array()">
+			Maximum local-space sway amplitude in meters for each procedural wind bone.
+		</member>
+		<member name="bone_rest_positions" type="PackedVector3Array" setter="set_bone_rest_positions" getter="get_bone_rest_positions" default="PackedVector3Array()">
+			Bind-pose pivot positions in mesh-local space for each procedural wind bone.
+		</member>
+		<member name="bone_stiffness" type="PackedFloat32Array" setter="set_bone_stiffness" getter="get_bone_stiffness" default="PackedFloat32Array()">
+			Per-bone stiffness values in [code][0.0, 1.0][/code]. Higher stiffness reduces sway amplitude and slows oscillation frequency.
+		</member>
+		<member name="bone_sway_phases" type="PackedFloat32Array" setter="set_bone_sway_phases" getter="get_bone_sway_phases" default="PackedFloat32Array()">
+			Per-bone oscillation phase offsets in radians to desynchronize branch motion.
+		</member>
+		<member name="max_sway" type="float" setter="set_max_sway" getter="get_max_sway" default="0.0">
+			Conservative local-space sway bound in meters used to inflate CPU and GPU instance, cluster, and virtual shadow map culling bounds when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled.
+		</member>
+		<member name="top_height" type="float" setter="set_top_height" getter="get_top_height" default="1.0">
+			Maximum projection along [member trunk_axis] across the asset's bind-pose vertices.
+		</member>
+		<member name="trunk_axis" type="Vector3" setter="set_trunk_axis" getter="get_trunk_axis" default="Vector3(0, 1, 0)">
+			Primary trunk axis in mesh-local space (typically [code]Vector3(0, 1, 0)[/code]).
+		</member>
+	</members>
+	<constants>
+		<constant name="MAX_BRANCH_BONES" value="8">
+			Maximum number of procedural branch bones per asset (in addition to the trunk bone).
+		</constant>
+		<constant name="MAX_BONES" value="9">
+			Maximum total number of procedural wind bones per asset (1 trunk bone plus up to [constant MAX_BRANCH_BONES] branch bones).
+		</constant>
+		<constant name="SKIN_INFLUENCES" value="4">
+			Number of vertex skinning bone influences written for procedural wind assets.
+		</constant>
+	</constants>
+</class>

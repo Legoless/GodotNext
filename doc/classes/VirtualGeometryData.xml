@@ -91,5 +91,8 @@
 		<member name="surface_fallback_reasons" type="PackedInt32Array" setter="set_surface_fallback_reasons" getter="get_surface_fallback_reasons" default="PackedInt32Array()">
 			One value per source surface. [code]0[/code] means the surface was virtualized, or that import has not recorded a reason yet.
 		</member>
+		<member name="wind" type="VirtualGeometryWind" setter="set_wind" getter="get_wind">
+			Optional procedural foliage wind skeleton (one trunk bone plus up to 8 branch bones) evaluated directly in NextGeo shaders when [member ProjectSettings.rendering/nextgeo/experimental/foliage_wind] is enabled, using zero bytes of per-instance skin palette memory.
+		</member>
 	</members>
 </class>

@@ -134,6 +134,20 @@ layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoClusterSki
 }
 nextgeo_cluster_skin;
 
+// GodotNext: nextgeo_foliage_wind (#152). Bindings 13..14 hold per-scenario wind params and per-mesh wind skeletons.
+layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoWindParams {
+	vec4 direction_strength;
+	vec4 time_gust_flags;
+	uvec4 meta;
+}
+nextgeo_wind_params;
+
+layout(set = 0, binding = 14, std430) buffer restrict readonly NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+nextgeo_wind_meshes;
+
+#define NEXTGEO_HAS_WIND_BUFFERS
 // clang-format off
 #include "skinning_inc.glsl"
 // clang-format on
@@ -222,6 +236,7 @@ void main() {
 	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
 	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
 	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	bool is_wind = !is_skinned && nextgeo_wind_mesh_active(record.virtual_mesh);
 	uint cluster_table_idx = mesh.page_table_offset + local_cluster;
 	bool cull_disabled = ((record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_DOUBLE_SIDED) || ((record.pad1[0] & (1u << surface_id)) != 0u);
 	bool cull_front = (record.pad1[1] & (1u << surface_id)) != 0u;
@@ -241,6 +256,8 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 2u]));
 			if (is_skinned) {
 				lp = nextgeo_skin_position(lp, entry.x, cluster_table_idx, vi, vert_count, false);
+			} else if (is_wind) {
+				lp = nextgeo_wind_position(lp, record.virtual_mesh, record.transform, cluster_table_idx, vi, vert_count, false);
 			}
 			if (has_spline) {
 				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
@@ -277,6 +294,8 @@ void main() {
 			uintBitsToFloat(pages.data[pos_word + 2u]));
 	if (is_skinned) {
 		local_pos = nextgeo_skin_position(local_pos, entry.x, cluster_table_idx, v_idx, vert_count, false);
+	} else if (is_wind) {
+		local_pos = nextgeo_wind_position(local_pos, record.virtual_mesh, record.transform, cluster_table_idx, v_idx, vert_count, false);
 	}
 	if (has_spline) {
 		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
@@ -353,6 +372,7 @@ void main() {
 	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
 	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
 	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	bool is_wind = !is_skinned && nextgeo_wind_mesh_active(record.virtual_mesh);
 	uint cluster_table_idx = mesh.page_table_offset + local_cluster;
 #ifndef DEBUG_BACKFACE
 	if ((bucket_flags & NEXTGEO_BUCKET_CULL_DISABLED) != 0u) {
@@ -372,6 +392,8 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 2u]));
 			if (is_skinned) {
 				lp = nextgeo_skin_position(lp, entry.x, cluster_table_idx, vi, vert_count, false);
+			} else if (is_wind) {
+				lp = nextgeo_wind_position(lp, record.virtual_mesh, record.transform, cluster_table_idx, vi, vert_count, false);
 			}
 			if (has_spline) {
 				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
@@ -406,7 +428,9 @@ void main() {
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
-	vec3 local_pos = is_skinned ? nextgeo_skin_position(bind_pos, entry.x, cluster_table_idx, v_idx, vert_count, false) : bind_pos;
+	vec3 local_pos = is_skinned
+			? nextgeo_skin_position(bind_pos, entry.x, cluster_table_idx, v_idx, vert_count, false)
+			: (is_wind ? nextgeo_wind_position(bind_pos, record.virtual_mesh, record.transform, cluster_table_idx, v_idx, vert_count, false) : bind_pos);
 	if (has_spline) {
 		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
 	}
@@ -425,7 +449,9 @@ void main() {
 #endif
 
 #ifdef WITH_VELOCITY
-	vec3 prev_local_pos = is_skinned ? nextgeo_skin_position(bind_pos, entry.x, cluster_table_idx, v_idx, vert_count, true) : bind_pos;
+	vec3 prev_local_pos = is_skinned
+			? nextgeo_skin_position(bind_pos, entry.x, cluster_table_idx, v_idx, vert_count, true)
+			: (is_wind ? nextgeo_wind_position(bind_pos, record.virtual_mesh, record.prev_transform, cluster_table_idx, v_idx, vert_count, true) : bind_pos);
 	if (has_spline) {
 		prev_local_pos = spline_deform_position(spline_deforms.data[spline_idx].previous, prev_local_pos);
 	}

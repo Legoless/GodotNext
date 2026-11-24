@@ -3667,6 +3667,9 @@
 		<member name="rendering/nextgeo/experimental/assemblies" type="bool" setter="" getter="" default="false" experimental="Nanite Assemblies are experimental and off by default.">
 			Enable GPU expansion of [VirtualGeometryAssembly] payloads attached to [member VirtualGeometryData.assembly] (up to two levels of instanced virtualized parts and child assemblies) in NextGeo visibility, VSM, and ray-tracing passes. Off by default.
 		</member>
+		<member name="rendering/nextgeo/experimental/foliage_wind" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite procedural foliage wind skinning.">
+			Enable in-shader procedural wind bone evaluation for virtualized foliage meshes carrying a [VirtualGeometryWind] resource on [member VirtualGeometryData.wind]. Evaluates up to 1 trunk plus 8 branch bones per asset from [World3D] wind parameters and frame time with zero per-instance skin palette arena memory, inflating CPU/GPU cull bounds by [member VirtualGeometryWind.max_sway] and routing active wind instances to the dynamic virtual shadow map layer. Off by default.
+		</member>
 		<member name="rendering/nextgeo/experimental/tessellation" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite runtime displacement tessellation">
 			Enable experimental runtime displacement tessellation for NextGeo virtual geometry. Displaced materials (spatial shaders with a [code]displacement()[/code] function or [BaseMaterial3D] with [constant BaseMaterial3D.HEIGHTMAP_MODE_DISPLACEMENT] and positive [member Material.displacement_magnitude]) are diced at [member rendering/nextgeo/tessellation/dicing_rate] pixels per edge with crack-free canonical edge factors, rasterized into the 64-bit visibility buffer via software rasterization and a bounded hardware stream, and resolved deterministically during shading. When disabled, zero dicing buffers are allocated and zero dicing passes run.
 		</member>

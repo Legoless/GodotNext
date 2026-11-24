@@ -126,5 +126,8 @@
 		<member name="virtual_geometry/preserve_area" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], triangles of each simplified virtual-geometry cluster group are scaled about their centroids (clamped to [code]1.5[/code]x) so the simplified group preserves the source group's surface area across coarse LODs. Useful for thin foliage cards and leaves.
 		</member>
+		<member name="virtual_geometry/wind" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], generates a procedural [VirtualGeometryWind] skeleton (one trunk bone plus up to 8 branch bones, derived from an imported skeleton when present or from bind-pose geometry otherwise) and stores its vertex skinning weights in the [code].ngm[/code] sidecar for in-shader foliage wind evaluation.
+		</member>
 	</members>
 </class>

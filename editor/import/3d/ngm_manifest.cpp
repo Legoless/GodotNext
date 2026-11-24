@@ -107,9 +107,9 @@ static void _delete_stale(const Array &p_old_entries, const HashSet<String> &p_k
 	}
 }
 
-Error ngm_build_mesh(const Ref<ImporterMesh> &p_mesh, const String &p_ngm_path, const String &p_key, bool p_strip_authored, Array &r_entries, bool p_skinned, bool p_preserve_area) {
+Error ngm_build_mesh(const Ref<ImporterMesh> &p_mesh, const String &p_ngm_path, const String &p_key, bool p_strip_authored, Array &r_entries, bool p_skinned, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents) {
 	ERR_FAIL_COND_V(p_mesh.is_null(), ERR_INVALID_PARAMETER);
-	const Error err = p_mesh->build_virtual_geometry(p_ngm_path, p_skinned, p_preserve_area);
+	const Error err = p_mesh->build_virtual_geometry_with_wind_skeleton(p_ngm_path, p_skinned, p_preserve_area, p_wind, p_wind_bone_rest_positions, p_wind_bone_parents);
 	if (err != OK) {
 		WARN_PRINT(vformat("Virtual geometry build failed for '%s' (error %d). The mesh will import without virtual geometry.", p_key, err));
 		return OK;

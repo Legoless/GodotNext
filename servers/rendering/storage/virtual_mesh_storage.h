@@ -445,6 +445,47 @@ public:
 		float aabb_max[3] = { 0.0f, 0.0f, 0.0f };
 	};
 
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
+	// Shared std430 GPU structs for per-scenario wind parameters and per-mesh procedural wind skeletons
+	// (1 trunk + <= 8 branches, evaluated in-shader per instance with 0 bytes per-instance palette memory).
+	static constexpr uint32_t WIND_MAX_BONES = 9u;
+	static constexpr uint32_t WIND_PARAM_FLAG_ENABLED = 1u << 0;
+
+	struct WindParamsGPU {
+		float direction[3] = { 1.0f, 0.0f, 0.0f };
+		float strength = 0.0f;
+		float time = 0.0f;
+		float prev_time = 0.0f;
+		float gust_frequency = 1.0f;
+		uint32_t flags = 0u;
+		uint32_t mesh_count = 0u;
+		uint32_t pad0 = 0u;
+		uint32_t pad1 = 0u;
+		uint32_t pad2 = 0u;
+	};
+	static_assert(sizeof(WindParamsGPU) == 48, "WindParamsGPU must match GLSL std430 layout (48 bytes).");
+
+	struct WindBoneGPU {
+		float rest_pos[3] = { 0.0f, 0.0f, 0.0f };
+		float lever_length = 1.0f;
+		float axis[3] = { 0.0f, 1.0f, 0.0f };
+		float stiffness = 0.5f;
+		float max_sway = 0.0f;
+		float sway_phase = 0.0f;
+		float branch_weight = 0.0f;
+		float pad = 0.0f;
+	};
+	static_assert(sizeof(WindBoneGPU) == 48, "WindBoneGPU must match GLSL std430 layout (48 bytes).");
+
+	struct WindMeshGPU {
+		uint32_t bone_count = 0u;
+		float max_sway = 0.0f;
+		float base_height = 0.0f;
+		float top_height = 1.0f;
+		WindBoneGPU bones[WIND_MAX_BONES];
+	};
+	static_assert(sizeof(WindMeshGPU) == 448, "WindMeshGPU must match GLSL std430 layout (448 bytes).");
+
 	// GodotNext: nextgeo_residency (#78). CPU mirror of resident cluster
 	// refinement metadata so CPU_cut_hash matches cluster_cull.glsl bit-for-bit.
 	struct ClusterRefineInfo {
@@ -633,6 +674,16 @@ public:
 	uint32_t get_palette_arena_free_block_count() const { return palette_free.size(); }
 	bool has_active_skinned_instances() const { return skin_instances_active; }
 
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10).
+	static bool is_foliage_wind_enabled();
+	bool mesh_has_wind(RID p_mesh) const;
+	bool mesh_index_has_wind(uint32_t p_mesh_index) const;
+	float mesh_get_wind_max_sway(RID p_mesh) const;
+	float mesh_index_get_wind_max_sway(uint32_t p_mesh_index) const;
+	const WindMeshGPU *get_wind_mesh(uint32_t p_mesh_index) const;
+	void set_wind_params(const Vector3 &p_direction, float p_strength, float p_gust_frequency, float p_time, float p_prev_time, bool p_enabled);
+	const WindParamsGPU &get_wind_params() const { return wind_params; }
+
 	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10, GN-7, GN-12).
 	// Bucket slots (O(scene nodes)), per-instance attributes, MultiMesh contiguous GPU ranges, and Assemblies.
 	static bool are_assemblies_enabled();
@@ -676,7 +727,7 @@ public:
 
 	// CPU reference helpers for doctests and CPU_cut_hash parity (#151).
 	static void build_multimesh_element_record_cpu(const Record &p_parent, const InstanceAttributes &p_parent_attr, uint32_t p_parent_record_idx, uint32_t p_element_idx, const float *p_elem_cur, const float *p_elem_prev, uint32_t p_color_offset, uint32_t p_custom_offset, bool p_has_color, bool p_has_custom, bool p_visible, const AABB &p_mesh_local_aabb, Record &r_out_record, InstanceAttributes &r_out_attr);
-	static bool cull_instance_cpu(const Record &p_record, const InstanceAttributes &p_attr, const Record *p_parent_or_null, const float p_frustum[6][4], const Vector3 &p_camera_pos, uint32_t p_cull_mask, bool p_is_shadow_view);
+	static bool cull_instance_cpu(const Record &p_record, const InstanceAttributes &p_attr, const Record *p_parent_or_null, const float p_frustum[6][4], const Vector3 &p_camera_pos, uint32_t p_cull_mask, bool p_is_shadow_view, float p_wind_max_sway = 0.0f);
 	void get_effective_records_cpu(LocalVector<Record> &r_records, LocalVector<InstanceAttributes> &r_attrs) const;
 
 	// Per frame: advance the free list and the temporal history, process page
@@ -775,6 +826,9 @@ public:
 	virtual RID get_skin_palette_buffer() const { return RID(); }
 	virtual RID get_skin_instance_buffer() const { return RID(); }
 	virtual RID get_cluster_skin_buffer() const { return RID(); }
+	// GodotNext: nextgeo_foliage_wind (#152). Per-scenario wind params and per-mesh wind bone rest buffer.
+	virtual RID get_wind_params_buffer() const { return RID(); }
+	virtual RID get_wind_meshes_buffer() const { return RID(); }
 	uint32_t get_record_count() const { return used_slots; }
 	uint32_t get_mesh_record_count() const { return mesh_records.size(); }
 	uint32_t get_max_bvh_levels() const;
@@ -817,6 +871,10 @@ protected:
 	virtual bool _resize_cluster_skin(uint32_t p_bytes) { return true; }
 	virtual void _upload_cluster_skin(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
 	virtual void _reset_cluster_skin() {}
+	// GodotNext: nextgeo_foliage_wind (#152). Per-scenario wind params & per-mesh wind bone table.
+	virtual void _upload_wind_params(const WindParamsGPU &p_params) {}
+	virtual void _upload_wind_meshes(uint32_t p_first, uint32_t p_count) {}
+	virtual void _reset_wind() {}
 	// Renderer-specific bookkeeping after a record slot is reused.
 	virtual void _record_reused(uint32_t p_record) {}
 	// Renderer-specific refusal (for example an out-of-memory RD buffer).
@@ -978,6 +1036,12 @@ protected:
 	LocalVector<SkinInstanceInfo> skin_instances;
 	LocalVector<InstanceAttributes> instance_attributes;
 	LocalVector<MeshRecord> mesh_records;
+	// GodotNext: nextgeo_foliage_wind (#152). Per-mesh procedural wind rest skeletons (indexed by virtual_mesh).
+	LocalVector<WindMeshGPU> wind_meshes;
+	LocalVector<uint8_t> wind_mesh_dirty;
+	bool wind_meshes_dirty = false;
+	WindParamsGPU wind_params;
+	bool wind_params_dirty = true;
 	LocalVector<SlotState> slot_states;
 	LocalVector<uint32_t> free_now;
 	LocalVector<uint32_t> free_next;

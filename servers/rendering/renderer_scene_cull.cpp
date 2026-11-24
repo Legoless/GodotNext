@@ -559,6 +559,14 @@ void RendererSceneCull::scenario_set_compositor(RID p_scenario, RID p_compositor
 	scenario->compositor = p_compositor;
 }
 
+void RendererSceneCull::scenario_set_wind(RID p_scenario, const Vector3 &p_direction, float p_strength, float p_gust_frequency) {
+	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
+	ERR_FAIL_NULL(scenario);
+	scenario->wind_direction = p_direction.length_squared() > real_t(1e-10) ? p_direction.normalized() : Vector3(1.0f, 0.0f, 0.0f);
+	scenario->wind_strength = MAX(Math::is_finite(p_strength) ? p_strength : 0.0f, 0.0f);
+	scenario->wind_gust_frequency = MAX(Math::is_finite(p_gust_frequency) ? p_gust_frequency : 1.0f, 0.0f);
+}
+
 void RendererSceneCull::scenario_set_fallback_environment(RID p_scenario, RID p_environment) {
 	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
 	ERR_FAIL_NULL(scenario);
@@ -2185,6 +2193,32 @@ float RendererSceneCull::_instance_vertex_offset_bound(const Instance *p_instanc
 	return max_wpo;
 }
 
+// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 N10).
+float RendererSceneCull::_instance_wind_bound(const Instance *p_instance) const {
+	if (p_instance == nullptr || RSG::virtual_mesh_storage == nullptr || !RendererVirtualMeshStorage::is_foliage_wind_enabled()) {
+		return 0.0f;
+	}
+	RID mesh;
+	if (p_instance->base_type == RSE::INSTANCE_MESH) {
+		mesh = p_instance->base;
+	} else if (p_instance->base_type == RSE::INSTANCE_MULTIMESH && RSG::mesh_storage != nullptr) {
+		mesh = RSG::mesh_storage->multimesh_get_mesh(p_instance->base);
+	}
+	if (mesh.is_null()) {
+		return 0.0f;
+	}
+	float sway = RSG::virtual_mesh_storage->mesh_get_wind_max_sway(mesh);
+	if (RendererVirtualMeshStorage::are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(mesh)) {
+		const LocalVector<RID> *parts = RSG::virtual_mesh_storage->mesh_get_assembly_unique_part_meshes(mesh);
+		if (parts != nullptr) {
+			for (uint32_t u = 0; u < parts->size(); u++) {
+				sway = MAX(sway, RSG::virtual_mesh_storage->mesh_get_wind_max_sway((*parts)[u]));
+			}
+		}
+	}
+	return sway;
+}
+
 void RendererSceneCull::_instance_record_release(Instance *p_instance) const {
 	if (((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && p_instance->base_data != nullptr) {
 		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
@@ -2223,7 +2257,7 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF;
 			break;
 	}
-	if (p_instance->skeleton.is_valid()) {
+	if (p_instance->skeleton.is_valid() && !(p_instance->virtual_record_mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_wind(p_instance->virtual_record_mesh))) {
 		flags |= RendererVirtualMeshStorage::RECORD_HAS_SKELETON;
 	}
 	if (p_instance->instance_uniforms.location() >= 0 || p_instance->material_overlay.is_valid()) {
@@ -2360,6 +2394,7 @@ uint32_t RendererSceneCull::_vsm_classify_instance(const Instance *p_instance, c
 	input.has_mesh_instance = p_instance->mesh_instance.is_valid();
 	input.is_particles = p_instance->base_type == RSE::INSTANCE_PARTICLES;
 	input.is_dynamic_multimesh = p_instance->base_type == RSE::INSTANCE_MULTIMESH && RSG::mesh_storage->multimesh_is_vsm_dynamic(p_instance->base);
+	input.has_foliage_wind = _instance_wind_bound(p_instance) > 0.0f;
 	input.shader_dynamic_flags = p_geom->vsm_shader_dynamic_flags;
 	return RendererVirtualShadowMapStorage::classify_shadow_cache_dynamic(input);
 }
@@ -2480,14 +2515,15 @@ void RendererSceneCull::_instance_record_set_transform(Instance *p_instance, con
 	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
 		return;
 	}
-	// GodotNext: nextgeo_vertex_offset (#164). Keep Record's world AABB uninflated by vertex_offset_bound so
-	// distance cutoffs measure against base bounds while instance_cull.glsl, VSM_SEED, and CPU_cut_hash
-	// explicitly inflate by vertex_offset_bound * instance_max_scale without double-inflating.
+	// GodotNext: nextgeo_vertex_offset (#164) & nextgeo_foliage_wind (#152). Keep Record's world AABB
+	// uninflated by vertex_offset_bound and wind_bound so distance cutoffs measure against base bounds
+	// while instance_cull.glsl, VSM_SEED, and CPU_cut_hash explicitly inflate by (wpo + wind_max_sway) * scale.
 	AABB record_world_aabb = p_world_aabb;
-	if (p_instance->vertex_offset_bound > 0.0f) {
+	const float dynamic_margin = p_instance->vertex_offset_bound + p_instance->wind_bound;
+	if (dynamic_margin > 0.0f) {
 		AABB base_local = p_instance->aabb;
-		base_local.position += Vector3(1.0f, 1.0f, 1.0f) * p_instance->vertex_offset_bound;
-		base_local.size = (base_local.size - Vector3(2.0f, 2.0f, 2.0f) * p_instance->vertex_offset_bound).maxf(0.0f);
+		base_local.position += Vector3(1.0f, 1.0f, 1.0f) * dynamic_margin;
+		base_local.size = (base_local.size - Vector3(2.0f, 2.0f, 2.0f) * dynamic_margin).maxf(0.0f);
 		record_world_aabb = p_transform.xform(base_local);
 	}
 	RSG::virtual_mesh_storage->instance_record_set_transform(p_instance->virtual_record, p_transform, record_world_aabb, p_visible, p_instance->teleported, p_instance->lod_bias);
@@ -3060,6 +3096,11 @@ void RendererSceneCull::_update_instance_aabb(Instance *p_instance) const {
 	p_instance->vertex_offset_bound = _instance_vertex_offset_bound(p_instance);
 	if (p_instance->vertex_offset_bound > 0.0f) {
 		new_aabb.grow_by(p_instance->vertex_offset_bound);
+	}
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 N10). Inflate CPU frustum & VSM dynamic invalidation bounds by declared max_sway.
+	p_instance->wind_bound = _instance_wind_bound(p_instance);
+	if (p_instance->wind_bound > 0.0f) {
+		new_aabb.grow_by(p_instance->wind_bound);
 	}
 
 	p_instance->aabb = new_aabb;
@@ -5036,6 +5077,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.vsm_invalidation_count = scenario->vsm_invalidations_published.size();
 			sdfgi_update_data.vsm_invalidation_epoch = scenario->vsm_invalidation_epoch;
 			sdfgi_update_data.vsm_static_mode_invalidations = scenario->vsm_static_mode_invalidations;
+			// GodotNext: nextgeo_foliage_wind (#152). Per-scenario World3D wind state.
+			sdfgi_update_data.wind_direction = scenario->wind_direction;
+			sdfgi_update_data.wind_strength = scenario->wind_strength;
+			sdfgi_update_data.wind_gust_frequency = scenario->wind_gust_frequency;
 		}
 
 		// GodotNext: nextgi_rt_registry / rt_shadows (#141) / megalights_visibility (#146).
@@ -6269,10 +6314,11 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 		// GodotNext: nextgeo_foliage_instancing (#151). Re-sync virtual record, MultiMesh GPU range, and Assembly bucket slots on dependency updates.
 		_instance_record_attach(p_instance);
 		_instance_record_update_state(p_instance);
-		// GodotNext: nextgeo_displacement (#150) & nextgeo_vertex_offset (#164). Re-inflate bounds if displacement or WPO max changed.
+		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) & nextgeo_foliage_wind (#152). Re-inflate bounds if changed.
 		const float new_disp_bound = _instance_displacement_bound(p_instance);
 		const float new_wpo_bound = _instance_vertex_offset_bound(p_instance);
-		if (new_disp_bound != p_instance->displacement_bound || new_wpo_bound != p_instance->vertex_offset_bound) {
+		const float new_wind_bound = _instance_wind_bound(p_instance);
+		if (new_disp_bound != p_instance->displacement_bound || new_wpo_bound != p_instance->vertex_offset_bound || new_wind_bound != p_instance->wind_bound) {
 			_update_instance_aabb(p_instance);
 		}
 		if (RSG::virtual_mesh_storage != nullptr && p_instance->virtual_record != UINT32_MAX) {
@@ -6311,6 +6357,11 @@ void RendererSceneCull::update() {
 	const bool assemblies_changed = last_assemblies_enabled >= 0 && (current_assemblies_enabled != (last_assemblies_enabled != 0));
 	last_assemblies_enabled = current_assemblies_enabled ? 1 : 0;
 
+	// GodotNext: nextgeo_foliage_wind (#152). Refresh wind instances (AABBs & VSM dynamic layer) when experimental toggle flips.
+	const bool current_foliage_wind_enabled = RendererVirtualMeshStorage::is_foliage_wind_enabled();
+	const bool foliage_wind_changed = last_foliage_wind_enabled >= 0 && (current_foliage_wind_enabled != (last_foliage_wind_enabled != 0));
+	last_foliage_wind_enabled = current_foliage_wind_enabled ? 1 : 0;
+
 	uint32_t rid_count = scenario_owner.get_rid_count();
 	RID *rids = (RID *)alloca(sizeof(RID) * rid_count);
 	scenario_owner.fill_owned_buffer(rids);
@@ -6318,7 +6369,7 @@ void RendererSceneCull::update() {
 		Scenario *s = scenario_owner.get_or_null(rids[i]);
 		s->indexers[Scenario::INDEXER_GEOMETRY].optimize_incremental(indexer_update_iterations);
 		s->indexers[Scenario::INDEXER_VOLUMES].optimize_incremental(indexer_update_iterations);
-		if (wpo_default_changed || assemblies_changed) {
+		if (wpo_default_changed || assemblies_changed || foliage_wind_changed) {
 			for (SelfList<Instance> *E = s->instances.first(); E; E = E->next()) {
 				Instance *inst = E->self();
 				if (inst->virtual_record == UINT32_MAX) {
@@ -6329,6 +6380,15 @@ void RendererSceneCull::update() {
 				}
 				if (assemblies_changed && RSG::virtual_mesh_storage != nullptr && inst->virtual_record_mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_assembly(inst->virtual_record_mesh)) {
 					_instance_record_attach(inst);
+					_instance_queue_update(inst, true, true);
+					if (((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && inst->base_data != nullptr) {
+						InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(inst->base_data);
+						if (geom->geometry_instance != nullptr) {
+							geom->geometry_instance->_mark_dirty();
+						}
+					}
+				}
+				if (foliage_wind_changed && RSG::virtual_mesh_storage != nullptr && inst->virtual_record_mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_wind(inst->virtual_record_mesh)) {
 					_instance_queue_update(inst, true, true);
 					if (((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && inst->base_data != nullptr) {
 						InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(inst->base_data);

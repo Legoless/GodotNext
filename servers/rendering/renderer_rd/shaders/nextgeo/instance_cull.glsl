@@ -232,6 +232,27 @@ layout(set = 0, binding = 10, std430) buffer restrict readonly InstanceAttrs {
 }
 instance_attrs;
 
+// GodotNext: nextgeo_foliage_wind (#152). Inflate instance AABBs by declared wind max_sway when active.
+layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoWindParams {
+	vec4 direction_strength;
+	vec4 time_gust_flags;
+	uvec4 meta;
+}
+nextgeo_wind_params;
+
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoWindMeshes {
+	NextGeoWindMesh data[];
+}
+nextgeo_wind_meshes;
+
+float instance_wind_max_sway(uint p_mesh_idx) {
+	if ((floatBitsToUint(nextgeo_wind_params.time_gust_flags.w) & NEXTGEO_WIND_PARAM_FLAG_ENABLED) == 0u || p_mesh_idx >= nextgeo_wind_params.meta.x) {
+		return 0.0;
+	}
+	uvec4 hdr = nextgeo_wind_meshes.data[p_mesh_idx].header;
+	return hdr.x > 0u ? uintBitsToFloat(hdr.y) : 0.0;
+}
+
 bool multimesh_parent_visible_planes(vec4 frustum[6], NextGeoInstanceRecord p_record, NextGeoInstanceAttributes p_attr) {
 	if ((p_record.flags & NEXTGEO_RECORD_MULTIMESH_ELEMENT) == 0u || p_attr.meta.x == 0xFFFFFFFFu) {
 		return true;
@@ -240,8 +261,8 @@ bool multimesh_parent_visible_planes(vec4 frustum[6], NextGeoInstanceRecord p_re
 	if ((parent.flags & (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE)) != (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE)) {
 		return false;
 	}
-	float parent_wpo = nextgeo_record_vertex_offset_bound(parent) * abs(parent.world_aabb_min.w);
-	return aabb_visible_planes(frustum, parent.world_aabb_min.xyz - vec3(parent_wpo), parent.world_aabb_max.xyz + vec3(parent_wpo));
+	float parent_margin = (nextgeo_record_vertex_offset_bound(parent) + instance_wind_max_sway(p_record.virtual_mesh)) * abs(parent.world_aabb_min.w);
+	return aabb_visible_planes(frustum, parent.world_aabb_min.xyz - vec3(parent_margin), parent.world_aabb_max.xyz + vec3(parent_margin));
 }
 
 #ifdef SHADOW_VIEW
@@ -268,9 +289,9 @@ void main() {
 	if (!multimesh_parent_visible_planes(sc.frustum, record, attr)) {
 		return;
 	}
-	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
-	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
-	if (!aabb_visible_planes(sc.frustum, record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_max.xyz + vec3(wpo_margin))) {
+	// GodotNext: nextgeo_vertex_offset (#164) & nextgeo_foliage_wind (#152). Inflate instance AABB by (wpo + wind max_sway) * max_scale.
+	float margin = (nextgeo_record_vertex_offset_bound(record) + instance_wind_max_sway(record.virtual_mesh)) * abs(record.world_aabb_min.w);
+	if (!aabb_visible_planes(sc.frustum, record.world_aabb_min.xyz - vec3(margin), record.world_aabb_max.xyz + vec3(margin))) {
 		return;
 	}
 	uint cap = sc.cull.z;
@@ -368,10 +389,10 @@ void main() {
 	if (!distance_visible(record, attr)) {
 		return;
 	}
-	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
-	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
-	vec4 w_min = vec4(record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_min.w);
-	vec4 w_max = vec4(record.world_aabb_max.xyz + vec3(wpo_margin), record.world_aabb_max.w);
+	// GodotNext: nextgeo_vertex_offset (#164) & nextgeo_foliage_wind (#152). Inflate instance AABB by (wpo + wind max_sway) * max_scale.
+	float margin = (nextgeo_record_vertex_offset_bound(record) + instance_wind_max_sway(record.virtual_mesh)) * abs(record.world_aabb_min.w);
+	vec4 w_min = vec4(record.world_aabb_min.xyz - vec3(margin), record.world_aabb_min.w);
+	vec4 w_max = vec4(record.world_aabb_max.xyz + vec3(margin), record.world_aabb_max.w);
 	if (!aabb_visible(w_min.xyz, w_max.xyz)) {
 		return;
 	}
@@ -409,14 +430,14 @@ void main() {
 	if (!distance_visible(record, attr)) {
 		return;
 	}
-	// GodotNext: nextgeo_vertex_offset (#164). Inflate instance AABB by vertex_offset_max * max_scale.
-	float wpo_margin = nextgeo_record_vertex_offset_bound(record) * abs(record.world_aabb_min.w);
-	if (!aabb_visible(record.world_aabb_min.xyz - vec3(wpo_margin), record.world_aabb_max.xyz + vec3(wpo_margin))) {
+	// GodotNext: nextgeo_vertex_offset (#164) & nextgeo_foliage_wind (#152). Inflate instance AABB by (wpo + wind max_sway) * max_scale.
+	float margin = (nextgeo_record_vertex_offset_bound(record) + instance_wind_max_sway(record.virtual_mesh)) * abs(record.world_aabb_min.w);
+	if (!aabb_visible(record.world_aabb_min.xyz - vec3(margin), record.world_aabb_max.xyz + vec3(margin))) {
 		return;
 	}
 	atomicAdd(counters.pad[0], 1u); // hiz_tested
-	vec4 prev_min = vec4(record.prev_world_aabb_min.xyz - vec3(wpo_margin), record.prev_world_aabb_min.w);
-	vec4 prev_max = vec4(record.prev_world_aabb_max.xyz + vec3(wpo_margin), record.prev_world_aabb_max.w);
+	vec4 prev_min = vec4(record.prev_world_aabb_min.xyz - vec3(margin), record.prev_world_aabb_min.w);
+	vec4 prev_max = vec4(record.prev_world_aabb_max.xyz + vec3(margin), record.prev_world_aabb_max.w);
 	if (hiz_occluded(prev_min, prev_max, cull.prev_view_proj)) {
 		atomicAdd(counters.pad[1], 1u); // hiz_hit
 		uint slot = atomicAdd(counters.phase2_count, 1u);

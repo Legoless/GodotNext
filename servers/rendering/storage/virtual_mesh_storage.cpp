@@ -582,6 +582,8 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		mesh_order.push_back(p_mesh);
 		mesh_records.push_back(MeshRecord());
 		mesh_record_dirty.push_back(0);
+		wind_meshes.push_back(WindMeshGPU());
+		wind_mesh_dirty.push_back(0);
 	}
 
 	MeshRecord &record = mesh_records[index];
@@ -904,6 +906,45 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	mesh_record_dirty[index] = 1;
 	mesh_records_dirty = true;
 
+	// GodotNext: nextgeo_foliage_wind (#152). Populate compact per-mesh wind bone table (0 palette bytes per instance).
+	WindMeshGPU wm;
+	if (!p_desc.wind_bones.is_empty() && (info.skin_influences == 4u || info.skin_influences == 8u)) {
+		const uint32_t bcount = MIN(uint32_t(p_desc.wind_bones.size()), WIND_MAX_BONES);
+		wm.bone_count = bcount;
+		wm.max_sway = MAX(p_desc.wind_max_sway, 0.0f);
+		wm.base_height = p_desc.wind_base_height;
+		wm.top_height = p_desc.wind_top_height;
+		for (uint32_t b = 0; b < bcount; b++) {
+			const RenderingServerTypes::VirtualGeometryDesc::WindBoneDesc &src = p_desc.wind_bones[int(b)];
+			WindBoneGPU &dst = wm.bones[b];
+			dst.rest_pos[0] = float(src.rest_position.x);
+			dst.rest_pos[1] = float(src.rest_position.y);
+			dst.rest_pos[2] = float(src.rest_position.z);
+			dst.lever_length = MAX(src.lever_length, 0.25f);
+			Vector3 ax = src.axis;
+			if (ax.length_squared() > real_t(1e-10)) {
+				ax.normalize();
+			} else {
+				ax = Vector3(0.0f, 1.0f, 0.0f);
+			}
+			dst.axis[0] = float(ax.x);
+			dst.axis[1] = float(ax.y);
+			dst.axis[2] = float(ax.z);
+			dst.stiffness = CLAMP(src.stiffness, 0.0f, 1.0f);
+			dst.max_sway = MAX(src.max_sway, 0.0f);
+			dst.sway_phase = src.sway_phase;
+			dst.branch_weight = (b == 0u) ? 0.0f : 1.0f;
+			wm.max_sway = MAX(wm.max_sway, dst.max_sway);
+		}
+	}
+	if (index < wind_meshes.size()) {
+		wind_meshes[index] = wm;
+		wind_mesh_dirty[index] = 1;
+		wind_meshes_dirty = true;
+		wind_params.mesh_count = wind_meshes.size();
+		wind_params_dirty = true;
+	}
+
 	// Live records of this mesh pick up the new mask and virtual-mesh index.
 	for (uint32_t slot = 0; slot < used_slots; slot++) {
 		if (!slot_states[slot].allocated || slot_states[slot].gpu_managed || records[slot].virtual_mesh != index) {
@@ -933,6 +974,11 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	mesh_records[*index] = MeshRecord();
 	mesh_record_dirty[*index] = 1;
 	mesh_records_dirty = true;
+	if (*index < wind_meshes.size()) {
+		wind_meshes[*index] = WindMeshGPU();
+		wind_mesh_dirty[*index] = 1;
+		wind_meshes_dirty = true;
+	}
 	MeshInfo *info = meshes.getptr(p_mesh);
 	if (info != nullptr) {
 		_release_assembly_part_refs(*info);
@@ -1492,6 +1538,11 @@ void RendererVirtualMeshStorage::instance_record_set_skeleton(uint32_t p_record,
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
 	}
+	// GodotNext: nextgeo_foliage_wind (#152). Procedural wind meshes evaluate bones in-shader with
+	// 0 bytes of per-instance skin palette arena memory, even when an imported glTF retains a Skeleton3D.
+	if (p_skeleton.is_valid() && mesh_index_has_wind(records[p_record].virtual_mesh)) {
+		p_skeleton = RID();
+	}
 	SlotState &state = slot_states[p_record];
 	if (state.skeleton == p_skeleton) {
 		_sync_record_skin_info(p_record);
@@ -1926,6 +1977,34 @@ void RendererVirtualMeshStorage::flush() {
 			_upload_mesh_records(first, count);
 		}
 		mesh_records_dirty = false;
+	}
+
+	// GodotNext: nextgeo_foliage_wind (#152). Upload per-mesh wind bone skeletons & per-scenario wind params.
+	if (wind_meshes_dirty) {
+		uint32_t first = UINT32_MAX;
+		uint32_t count = 0;
+		for (uint32_t index = 0; index < wind_mesh_dirty.size(); index++) {
+			if (wind_mesh_dirty[index]) {
+				if (first == UINT32_MAX) {
+					first = index;
+				}
+				count++;
+				wind_mesh_dirty[index] = 0;
+			} else if (first != UINT32_MAX) {
+				_upload_wind_meshes(first, count);
+				first = UINT32_MAX;
+				count = 0;
+			}
+		}
+		if (first != UINT32_MAX) {
+			_upload_wind_meshes(first, count);
+		}
+		wind_meshes_dirty = false;
+	}
+	if (wind_params_dirty) {
+		wind_params.mesh_count = wind_meshes.size();
+		_upload_wind_params(wind_params);
+		wind_params_dirty = false;
 	}
 
 	// GodotNext: spline_meshes (#161). Advance spline temporal history and upload dirty entries.
@@ -3579,6 +3658,73 @@ bool RendererVirtualMeshStorage::are_assemblies_enabled() {
 	return bool(ProjectSettings::get_singleton()->get_setting("rendering/nextgeo/experimental/assemblies", false));
 }
 
+bool RendererVirtualMeshStorage::is_foliage_wind_enabled() {
+	if (ProjectSettings::get_singleton() == nullptr) {
+		return false;
+	}
+	return bool(ProjectSettings::get_singleton()->get_setting("rendering/nextgeo/experimental/foliage_wind", false));
+}
+
+bool RendererVirtualMeshStorage::mesh_has_wind(RID p_mesh) const {
+	const uint32_t *idx = mesh_indices.getptr(p_mesh);
+	if (idx == nullptr) {
+		return false;
+	}
+	return mesh_index_has_wind(*idx);
+}
+
+bool RendererVirtualMeshStorage::mesh_index_has_wind(uint32_t p_mesh_index) const {
+	if (p_mesh_index >= wind_meshes.size()) {
+		return false;
+	}
+	return wind_meshes[p_mesh_index].bone_count > 0u;
+}
+
+float RendererVirtualMeshStorage::mesh_get_wind_max_sway(RID p_mesh) const {
+	const uint32_t *idx = mesh_indices.getptr(p_mesh);
+	if (idx == nullptr) {
+		return 0.0f;
+	}
+	return mesh_index_get_wind_max_sway(*idx);
+}
+
+float RendererVirtualMeshStorage::mesh_index_get_wind_max_sway(uint32_t p_mesh_index) const {
+	if (p_mesh_index >= wind_meshes.size() || wind_meshes[p_mesh_index].bone_count == 0u) {
+		return 0.0f;
+	}
+	return wind_meshes[p_mesh_index].max_sway;
+}
+
+const RendererVirtualMeshStorage::WindMeshGPU *RendererVirtualMeshStorage::get_wind_mesh(uint32_t p_mesh_index) const {
+	if (p_mesh_index >= wind_meshes.size() || wind_meshes[p_mesh_index].bone_count == 0u) {
+		return nullptr;
+	}
+	return &wind_meshes[p_mesh_index];
+}
+
+void RendererVirtualMeshStorage::set_wind_params(const Vector3 &p_direction, float p_strength, float p_gust_frequency, float p_time, float p_prev_time, bool p_enabled) {
+	Vector3 dir = p_direction;
+	if (dir.length_squared() > real_t(1e-10)) {
+		dir.normalize();
+	} else {
+		dir = Vector3(1.0f, 0.0f, 0.0f);
+	}
+	WindParamsGPU next;
+	next.direction[0] = float(dir.x);
+	next.direction[1] = float(dir.y);
+	next.direction[2] = float(dir.z);
+	next.strength = MAX(Math::is_finite(p_strength) ? p_strength : 0.0f, 0.0f);
+	next.time = Math::is_finite(p_time) ? p_time : 0.0f;
+	next.prev_time = Math::is_finite(p_prev_time) ? p_prev_time : next.time;
+	next.gust_frequency = MAX(Math::is_finite(p_gust_frequency) ? p_gust_frequency : 1.0f, 0.0f);
+	next.flags = p_enabled ? WIND_PARAM_FLAG_ENABLED : 0u;
+	next.mesh_count = wind_meshes.size();
+	if (memcmp(&wind_params, &next, sizeof(WindParamsGPU)) != 0) {
+		wind_params = next;
+		wind_params_dirty = true;
+	}
+}
+
 bool RendererVirtualMeshStorage::mesh_has_assembly(RID p_mesh) const {
 	const MeshInfo *info = meshes.getptr(p_mesh);
 	return info != nullptr && info->has_assembly;
@@ -4167,7 +4313,7 @@ void RendererVirtualMeshStorage::build_multimesh_element_record_cpu(const Record
 	r_out_attr.meta[3] = p_parent_attr.meta[3];
 }
 
-bool RendererVirtualMeshStorage::cull_instance_cpu(const Record &p_record, const InstanceAttributes &p_attr, const Record *p_parent_or_null, const float p_frustum[6][4], const Vector3 &p_camera_pos, uint32_t p_cull_mask, bool p_is_shadow_view) {
+bool RendererVirtualMeshStorage::cull_instance_cpu(const Record &p_record, const InstanceAttributes &p_attr, const Record *p_parent_or_null, const float p_frustum[6][4], const Vector3 &p_camera_pos, uint32_t p_cull_mask, bool p_is_shadow_view, float p_wind_max_sway) {
 	const bool cast_ok = p_is_shadow_view
 			? ((p_record.flags & RECORD_CAST_SHADOW_MASK) != RECORD_CAST_SHADOW_OFF)
 			: ((p_record.flags & RECORD_CAST_SHADOW_MASK) != RECORD_CAST_SHADOW_SHADOWS_ONLY);
@@ -4200,9 +4346,9 @@ bool RendererVirtualMeshStorage::cull_instance_cpu(const Record &p_record, const
 		if ((p_parent_or_null->flags & (RECORD_VALID | RECORD_VISIBLE)) != (RECORD_VALID | RECORD_VISIBLE)) {
 			return false;
 		}
-		const float parent_wpo = get_record_vertex_offset_bound(*p_parent_or_null) * Math::abs(p_parent_or_null->world_aabb_min[3]);
-		const Vector3 plo(p_parent_or_null->world_aabb_min[0] - parent_wpo, p_parent_or_null->world_aabb_min[1] - parent_wpo, p_parent_or_null->world_aabb_min[2] - parent_wpo);
-		const Vector3 phi(p_parent_or_null->world_aabb_max[0] + parent_wpo, p_parent_or_null->world_aabb_max[1] + parent_wpo, p_parent_or_null->world_aabb_max[2] + parent_wpo);
+		const float parent_margin = (get_record_vertex_offset_bound(*p_parent_or_null) + MAX(p_wind_max_sway, 0.0f)) * Math::abs(p_parent_or_null->world_aabb_min[3]);
+		const Vector3 plo(p_parent_or_null->world_aabb_min[0] - parent_margin, p_parent_or_null->world_aabb_min[1] - parent_margin, p_parent_or_null->world_aabb_min[2] - parent_margin);
+		const Vector3 phi(p_parent_or_null->world_aabb_max[0] + parent_margin, p_parent_or_null->world_aabb_max[1] + parent_margin, p_parent_or_null->world_aabb_max[2] + parent_margin);
 		if (!aabb_visible(plo, phi)) {
 			return false;
 		}
@@ -4224,10 +4370,10 @@ bool RendererVirtualMeshStorage::cull_instance_cpu(const Record &p_record, const
 			}
 		}
 	}
-	// Per-instance frustum test with WPO AABB inflation.
-	const float wpo_margin = get_record_vertex_offset_bound(p_record) * Math::abs(p_record.world_aabb_min[3]);
-	const Vector3 lo(p_record.world_aabb_min[0] - wpo_margin, p_record.world_aabb_min[1] - wpo_margin, p_record.world_aabb_min[2] - wpo_margin);
-	const Vector3 hi(p_record.world_aabb_max[0] + wpo_margin, p_record.world_aabb_max[1] + wpo_margin, p_record.world_aabb_max[2] + wpo_margin);
+	// Per-instance frustum test with WPO and procedural wind sway AABB inflation.
+	const float margin = (get_record_vertex_offset_bound(p_record) + MAX(p_wind_max_sway, 0.0f)) * Math::abs(p_record.world_aabb_min[3]);
+	const Vector3 lo(p_record.world_aabb_min[0] - margin, p_record.world_aabb_min[1] - margin, p_record.world_aabb_min[2] - margin);
+	const Vector3 hi(p_record.world_aabb_max[0] + margin, p_record.world_aabb_max[1] + margin, p_record.world_aabb_max[2] + margin);
 	return aabb_visible(lo, hi);
 }
 

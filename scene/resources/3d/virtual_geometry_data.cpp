@@ -278,6 +278,18 @@ Ref<VirtualGeometryAssembly> VirtualGeometryData::get_assembly() const {
 	return assembly;
 }
 
+void VirtualGeometryData::set_wind(const Ref<VirtualGeometryWind> &p_wind) {
+	if (wind == p_wind) {
+		return;
+	}
+	wind = p_wind;
+	emit_changed();
+}
+
+Ref<VirtualGeometryWind> VirtualGeometryData::get_wind() const {
+	return wind;
+}
+
 void VirtualGeometryData::set_ngm_page_table(uint32_t p_vertex_layout, const PackedInt32Array &p_page_groups) {
 	ngm_vertex_layout = p_vertex_layout;
 	ngm_page_groups = p_page_groups;
@@ -319,6 +331,7 @@ void VirtualGeometryData::reset_state() {
 	page_size = 0;
 	skin_influences = 0;
 	assembly.unref();
+	wind.unref();
 	ngm_vertex_layout = 0;
 	ngm_page_groups.clear();
 }
@@ -378,6 +391,8 @@ void VirtualGeometryData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_skin_influences"), &VirtualGeometryData::get_skin_influences);
 	ClassDB::bind_method(D_METHOD("set_assembly", "assembly"), &VirtualGeometryData::set_assembly);
 	ClassDB::bind_method(D_METHOD("get_assembly"), &VirtualGeometryData::get_assembly);
+	ClassDB::bind_method(D_METHOD("set_wind", "wind"), &VirtualGeometryData::set_wind);
+	ClassDB::bind_method(D_METHOD("get_wind"), &VirtualGeometryData::get_wind);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "format_version"), "set_format_version", "get_format_version");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "dag_header", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_dag_header", "get_dag_header");
@@ -406,4 +421,5 @@ void VirtualGeometryData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "page_size"), "set_page_size", "get_page_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "skin_influences"), "set_skin_influences", "get_skin_influences");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "assembly", PROPERTY_HINT_RESOURCE_TYPE, "VirtualGeometryAssembly"), "set_assembly", "get_assembly");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "wind", PROPERTY_HINT_RESOURCE_TYPE, "VirtualGeometryWind"), "set_wind", "get_wind");
 }

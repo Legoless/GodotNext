@@ -191,7 +191,7 @@ inline bool nextgeo_vsm_transform_moved(const float p_transform[3][4], const flo
 	return false;
 }
 
-inline uint32_t nextgeo_vsm_instance_layer(uint32_t p_record_flags, bool p_moved_this_frame, uint32_t p_vsm_cull_flags, bool p_dynamic_material) {
+inline uint32_t nextgeo_vsm_instance_layer(uint32_t p_record_flags, bool p_moved_this_frame, uint32_t p_vsm_cull_flags, bool p_dynamic_material, bool p_has_foliage_wind = false) {
 	if ((p_vsm_cull_flags & NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK) == 0u) {
 		return 0u;
 	}
@@ -203,7 +203,7 @@ inline uint32_t nextgeo_vsm_instance_layer(uint32_t p_record_flags, bool p_moved
 	if (mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_STATIC || mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_RIGID) {
 		return 0u;
 	}
-	const bool is_dynamic = ((p_record_flags & (RendererVirtualMeshStorage::RECORD_VSM_DYNAMIC | RendererVirtualMeshStorage::RECORD_RT_SKINNED | RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE)) != 0u) || p_moved_this_frame || p_dynamic_material;
+	const bool is_dynamic = ((p_record_flags & (RendererVirtualMeshStorage::RECORD_VSM_DYNAMIC | RendererVirtualMeshStorage::RECORD_RT_SKINNED | RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE)) != 0u) || p_has_foliage_wind || p_moved_this_frame || p_dynamic_material;
 	return is_dynamic ? 1u : 0u;
 }
 

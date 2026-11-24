@@ -368,6 +368,10 @@ public:
 		RID fallback_environment;
 		RID camera_attributes;
 		RID compositor;
+		// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10). Per-scenario World3D wind state.
+		Vector3 wind_direction = Vector3(1.0f, 0.0f, 0.0f);
+		float wind_strength = 0.0f;
+		float wind_gust_frequency = 1.0f;
 		RID reflection_probe_shadow_atlas;
 		RID reflection_atlas;
 		uint64_t used_viewport_visibility_bits;
@@ -453,9 +457,13 @@ public:
 	float _instance_displacement_bound(const Instance *p_instance) const;
 	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Max effective vertex_offset_max across an instance's active materials.
 	float _instance_vertex_offset_bound(const Instance *p_instance) const;
+	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 N10). Max declared procedural wind sway bound (0 when disabled).
+	float _instance_wind_bound(const Instance *p_instance) const;
 	float last_vertex_offset_max_default = -1.0f;
 	// GodotNext: nextgeo_foliage_instancing (#151). Tracks rendering/nextgeo/experimental/assemblies transitions.
 	int8_t last_assemblies_enabled = -1;
+	// GodotNext: nextgeo_foliage_wind (#152). Tracks rendering/nextgeo/experimental/foliage_wind transitions.
+	int8_t last_foliage_wind_enabled = -1;
 	void _process_nextgeo_residency_shadow_dirty();
 	uint64_t last_nextgeo_residency_epoch = 0;
 
@@ -466,6 +474,8 @@ public:
 	virtual void scenario_set_camera_attributes(RID p_scenario, RID p_attributes);
 	virtual void scenario_set_fallback_environment(RID p_scenario, RID p_environment);
 	virtual void scenario_set_compositor(RID p_scenario, RID p_compositor);
+	// GodotNext: nextgeo_foliage_wind (#152)
+	virtual void scenario_set_wind(RID p_scenario, const Vector3 &p_direction, float p_strength, float p_gust_frequency);
 	virtual void scenario_set_reflection_atlas_size(RID p_scenario, int p_reflection_size, int p_reflection_count);
 	virtual bool is_scenario(RID p_scenario) const;
 	virtual RID scenario_get_environment(RID p_scenario);
@@ -510,6 +520,8 @@ public:
 		float vertex_offset_bound = 0.0f;
 		float vertex_offset_disable_distance = 0.0f;
 		bool rt_evaluate_vertex_offset = false;
+		// GodotNext: nextgeo_foliage_wind (#152). Active procedural wind sway bound (meters, 0 when off).
+		float wind_bound = 0.0f;
 		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Per-instance cubic Hermite spline deformation.
 		bool spline_deform_active = false;
 		uint64_t spline_deform_generation = 0;

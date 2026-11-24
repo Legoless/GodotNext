@@ -68,6 +68,10 @@ class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	uint32_t skin_instance_bytes = 0;
 	RID cluster_skin_buffer;
 	uint32_t cluster_skin_bytes = 0;
+	// GodotNext: nextgeo_foliage_wind (#152). Compact per-scenario wind params & per-mesh wind bone SSBOs.
+	mutable RID wind_params_buffer;
+	mutable RID wind_meshes_buffer;
+	mutable uint32_t wind_meshes_capacity = 0;
 	uint32_t buffer_capacity = 0;
 	uint32_t mesh_buffer_capacity = 0;
 
@@ -103,6 +107,9 @@ protected:
 	bool _resize_cluster_skin(uint32_t p_bytes) override;
 	void _upload_cluster_skin(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
 	void _reset_cluster_skin() override;
+	void _upload_wind_params(const WindParamsGPU &p_params) override;
+	void _upload_wind_meshes(uint32_t p_first, uint32_t p_count) override;
+	void _reset_wind() override;
 
 public:
 	VirtualMeshStorage();
@@ -116,6 +123,8 @@ public:
 	RID get_skin_palette_buffer() const override { return skin_palette_buffer; }
 	RID get_skin_instance_buffer() const override { return skin_instance_buffer; }
 	RID get_cluster_skin_buffer() const override { return cluster_skin_buffer; }
+	RID get_wind_params_buffer() const override;
+	RID get_wind_meshes_buffer() const override;
 	RID get_record_buffer() const override { return record_buffer; }
 	RID get_instance_attributes_buffer() const override { return instance_attributes_buffer; }
 	RID get_bucket_surface_masks_buffer() const override { return bucket_surface_masks_buffer; }

@@ -828,6 +828,8 @@ public:
 	virtual void scenario_set_fallback_environment(RID p_scenario, RID p_environment) = 0;
 	virtual void scenario_set_camera_attributes(RID p_scenario, RID p_camera_attributes) = 0;
 	virtual void scenario_set_compositor(RID p_scenario, RID p_compositor) = 0;
+	// GodotNext: nextgeo_foliage_wind (#152).
+	virtual void scenario_set_wind(RID p_scenario, const Vector3 &p_direction, float p_strength, float p_gust_frequency) = 0;
 
 	/* INSTANCING API */
 
