@@ -72,9 +72,12 @@
 #endif
 
 #ifdef WINDOWS_ENABLED
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
-#include <psapi.h>
+#endif
 #include <windows.h>
+
+#include <psapi.h>
 #endif
 
 #include <cstring>
