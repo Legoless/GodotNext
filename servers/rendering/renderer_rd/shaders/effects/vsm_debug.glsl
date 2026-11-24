@@ -68,9 +68,9 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer VSMPageTable {
 }
 vsm_page_table;
 
-#include "servers/rendering/renderer_rd/shaders/vsm_mark_inc.glsl"
-#include "servers/rendering/renderer_rd/shaders/vsm_page_table_inc.glsl"
-#include "servers/rendering/renderer_rd/shaders/vsm_raster_inc.glsl"
+#include "../vsm_mark_inc.glsl"
+#include "../vsm_page_table_inc.glsl"
+#include "../vsm_raster_inc.glsl"
 
 layout(set = 0, binding = 2, std430) restrict readonly buffer VSMMaps {
 	VSMMapData data[];
