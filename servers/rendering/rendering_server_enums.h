@@ -271,6 +271,9 @@ enum LightParam {
 	// GodotNext: df_shadows (#214, plan §21.3 contract S7).
 	LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START,
 	LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE,
+	// GodotNext: light_grid (#139, plan §21.3 contract M2). AreaLight3D barn door culling parameters.
+	LIGHT_PARAM_BARN_DOOR_ANGLE,
+	LIGHT_PARAM_BARN_DOOR_LENGTH,
 	LIGHT_PARAM_MAX,
 };
 

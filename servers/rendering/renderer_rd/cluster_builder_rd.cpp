@@ -30,6 +30,7 @@
 
 #include "cluster_builder_rd.h"
 
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h" // IWYU pragma: keep. RENDER_TIMESTAMP macro uses RSG.
 
@@ -108,6 +109,24 @@ ClusterBuilderSharedDataRD::ClusterBuilderSharedDataRD() {
 		cluster_debug.shader_version = cluster_debug.cluster_debug_shader.version_create();
 		cluster_debug.shader = cluster_debug.cluster_debug_shader.version_get_shader(cluster_debug.shader_version, 0);
 		cluster_debug.shader_pipeline = RD::get_singleton()->compute_pipeline_create(cluster_debug.shader);
+	}
+	{
+		// GodotNext: light_grid (#139, plan §21.3 contract M2).
+		Vector<String> variants;
+		variants.push_back("\n#define MODE_HIZ_8X8\n");
+		variants.push_back("\n#define MODE_HIZ_TILE\n");
+		variants.push_back("\n#define MODE_COARSE\n");
+		variants.push_back("\n#define MODE_FINE\n");
+		light_grid.shader.initialize(variants);
+		light_grid.shader_version = light_grid.shader.version_create();
+		for (int i = 0; i < LightGridBuild::MODE_MAX; i++) {
+			light_grid.shaders[i] = light_grid.shader.version_get_shader(light_grid.shader_version, i);
+			light_grid.pipelines[i] = RD::get_singleton()->compute_pipeline_create(light_grid.shaders[i]);
+		}
+		Vector<uint8_t> dummy_bytes;
+		dummy_bytes.resize(16);
+		memset(dummy_bytes.ptrw(), 0, 16);
+		light_grid.default_dummy_buffer = RD::get_singleton()->storage_buffer_create(16, dummy_bytes);
 	}
 
 	{ // Sphere mesh data.
@@ -249,11 +268,50 @@ ClusterBuilderSharedDataRD::~ClusterBuilderSharedDataRD() {
 	cluster_render.cluster_render_shader.version_free(cluster_render.shader_version);
 	cluster_store.cluster_store_shader.version_free(cluster_store.shader_version);
 	cluster_debug.cluster_debug_shader.version_free(cluster_debug.shader_version);
+	// GodotNext: light_grid (#139).
+	if (light_grid.default_dummy_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(light_grid.default_dummy_buffer);
+		light_grid.default_dummy_buffer = RID();
+	}
+	light_grid.shader.version_free(light_grid.shader_version);
 }
 
 /////////////////////////////
 
+void ClusterBuilderRD::_clear_packed_grid() {
+	RenderingDevice *rd = RD::get_singleton();
+	auto free_if_valid = [&](RID &r_rid) {
+		if (r_rid.is_valid()) {
+			rd->free_rid(r_rid);
+			r_rid = RID();
+		}
+	};
+
+	free_if_valid(packed_params_ubo);
+	free_if_valid(packed_light_buffer);
+	free_if_valid(packed_hiz_mid_buffer);
+	free_if_valid(packed_tile_depth_buffer);
+	free_if_valid(packed_coarse_counts_buffer);
+	free_if_valid(packed_coarse_indices_buffer);
+	free_if_valid(packed_cell_headers_buffer);
+	free_if_valid(packed_index_buffer);
+	free_if_valid(packed_stats_buffer);
+
+	packed_light_capacity = 0;
+	packed_coarse_stride = 0;
+	packed_allocated_screen_size = Size2i();
+	packed_grid_active = false;
+	packed_grid_built = false;
+	packed_grid_has_hiz = false;
+	packed_grid_cull_front = false;
+	packed_lights_cpu.clear();
+	packed_omni_count = 0;
+	packed_spot_count = 0;
+	packed_area_count = 0;
+}
+
 void ClusterBuilderRD::_clear() {
+	_clear_packed_grid();
 	if (cluster_buffer.is_null()) {
 		return;
 	}
@@ -433,6 +491,16 @@ void ClusterBuilderRD::begin(const Transform3D &p_view_transform, const Projecti
 	for (uint32_t i = 0; i < ELEMENT_TYPE_MAX; i++) {
 		cluster_count_by_type[i] = 0;
 	}
+
+	// GodotNext: light_grid (#139). Reset packed grid state for this view.
+	packed_grid_active = false;
+	packed_grid_built = false;
+	packed_grid_has_hiz = false;
+	packed_grid_cull_front = false;
+	packed_lights_cpu.clear();
+	packed_omni_count = 0;
+	packed_spot_count = 0;
+	packed_area_count = 0;
 }
 
 void ClusterBuilderRD::bake_cluster() {
@@ -568,6 +636,387 @@ void ClusterBuilderRD::debug(ElementType p_element) {
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, screen_size.x, screen_size.y, 1);
 
 	RD::get_singleton()->compute_list_end();
+}
+
+// GodotNext: light_grid (#139, plan §21.3 contract M2).
+void ClusterBuilderRD::set_packed_grid_active(bool p_active) {
+	packed_grid_active = p_active;
+	if (!p_active) {
+		packed_grid_built = false;
+		packed_lights_cpu.clear();
+		packed_omni_count = 0;
+		packed_spot_count = 0;
+		packed_area_count = 0;
+	}
+}
+
+void ClusterBuilderRD::add_packed_light(LightType p_type, uint32_t p_per_type_index, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, float p_barn_door_angle_deg, float p_barn_door_length, float p_intensity, bool p_megalights_handled) {
+	if (packed_lights_cpu.size() >= RendererRD::LightGrid::MAX_LIGHTS) {
+		return;
+	}
+	uint32_t lg_type = RendererRD::LightGrid::LIGHT_TYPE_OMNI;
+	if (p_type == LIGHT_TYPE_SPOT) {
+		lg_type = RendererRD::LightGrid::LIGHT_TYPE_SPOT;
+		packed_spot_count++;
+	} else if (p_type == LIGHT_TYPE_AREA) {
+		lg_type = RendererRD::LightGrid::LIGHT_TYPE_AREA;
+		packed_area_count++;
+	} else {
+		packed_omni_count++;
+	}
+	packed_lights_cpu.push_back(RendererRD::LightGrid::make_packed_light(
+			lg_type,
+			p_per_type_index,
+			view_xform,
+			p_transform,
+			p_radius,
+			p_spot_aperture,
+			p_area_size,
+			p_barn_door_angle_deg,
+			p_barn_door_length,
+			p_intensity,
+			p_megalights_handled));
+}
+
+void ClusterBuilderRD::_ensure_packed_grid_buffers(uint32_t p_light_count) {
+	RenderingDevice *rd = RD::get_singleton();
+
+	if (packed_params_ubo.is_null()) {
+		packed_params_ubo = rd->uniform_buffer_create(sizeof(RendererRD::LightGrid::BuildParamsUBO));
+	}
+	if (packed_stats_buffer.is_null()) {
+		packed_stats_buffer = rd->storage_buffer_create(sizeof(RendererRD::LightGrid::GridStats));
+	}
+
+	const uint32_t req_lights = CLAMP(MAX(p_light_count, 1024u), 1024u, RendererRD::LightGrid::MAX_LIGHTS);
+	if (packed_light_buffer.is_null() || req_lights > packed_light_capacity) {
+		if (packed_light_buffer.is_valid()) {
+			rd->free_rid(packed_light_buffer);
+		}
+		packed_light_capacity = MIN(RendererRD::LightGrid::MAX_LIGHTS, Math::next_power_of_2(req_lights));
+		packed_light_buffer = rd->storage_buffer_create(packed_light_capacity * sizeof(RendererRD::LightGrid::PackedLightData));
+	}
+
+	if (packed_allocated_screen_size != screen_size || packed_cell_headers_buffer.is_null()) {
+		auto realloc_buf = [&](RID &r_rid, uint32_t p_bytes) {
+			if (r_rid.is_valid()) {
+				rd->free_rid(r_rid);
+			}
+			r_rid = rd->storage_buffer_create(MAX(p_bytes, 16u));
+		};
+
+		const uint32_t sw = uint32_t(MAX(screen_size.x, 1));
+		const uint32_t sh = uint32_t(MAX(screen_size.y, 1));
+		const uint32_t mid_w = (sw + 7u) / 8u;
+		const uint32_t mid_h = (sh + 7u) / 8u;
+		const Vector3i gdims = RendererRD::LightGrid::compute_grid_dims(screen_size);
+		const Vector3i cdims = RendererRD::LightGrid::compute_coarse_dims(gdims);
+		const uint32_t tiles = uint32_t(gdims.x) * uint32_t(gdims.y);
+		const uint32_t cells = tiles * uint32_t(gdims.z);
+		const uint32_t coarse_cells = uint32_t(cdims.x) * uint32_t(cdims.y) * uint32_t(cdims.z);
+		packed_coarse_stride = RendererRD::LightGrid::COARSE_LIST_CAP;
+
+		realloc_buf(packed_hiz_mid_buffer, mid_w * mid_h * sizeof(float) * 2u);
+		realloc_buf(packed_tile_depth_buffer, tiles * sizeof(float) * 2u);
+		realloc_buf(packed_coarse_counts_buffer, coarse_cells * sizeof(uint32_t));
+		realloc_buf(packed_coarse_indices_buffer, coarse_cells * packed_coarse_stride * sizeof(uint32_t));
+		realloc_buf(packed_cell_headers_buffer, cells * sizeof(RendererRD::LightGrid::CellHeader));
+		realloc_buf(packed_index_buffer, cells * RendererRD::LightGrid::MAX_LIGHTS_PER_CELL * sizeof(uint32_t));
+
+		packed_allocated_screen_size = screen_size;
+	}
+}
+
+void ClusterBuilderRD::bake_packed_light_grid(RID p_depth_texture, RID p_depth_sampler, bool p_cull_front_of_min) {
+	ERR_FAIL_NULL(shared);
+	RENDER_TIMESTAMP("> Bake Packed Light Grid");
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+
+	rd->draw_command_begin_label("Bake Packed Light Grid");
+
+	const uint32_t light_count = packed_lights_cpu.size();
+	_ensure_packed_grid_buffers(light_count);
+
+	const uint32_t sw = uint32_t(MAX(screen_size.x, 1));
+	const uint32_t sh = uint32_t(MAX(screen_size.y, 1));
+	const uint32_t mid_w = (sw + 7u) / 8u;
+	const uint32_t mid_h = (sh + 7u) / 8u;
+
+	packed_grid_dims = RendererRD::LightGrid::compute_grid_dims(screen_size);
+	packed_coarse_dims = RendererRD::LightGrid::compute_coarse_dims(packed_grid_dims);
+	packed_z_params = RendererRD::LightGrid::compute_z_params(z_near, z_far, camera_orthogonal);
+	packed_inv_projection = projection.inverse();
+	packed_grid_has_hiz = p_depth_texture.is_valid() && p_depth_sampler.is_valid();
+	packed_grid_cull_front = packed_grid_has_hiz && p_cull_front_of_min;
+
+	if (light_count > 0u) {
+		rd->buffer_update(packed_light_buffer, 0, light_count * sizeof(RendererRD::LightGrid::PackedLightData), packed_lights_cpu.ptr());
+	}
+
+	RendererRD::LightGrid::BuildParamsUBO ubo = {};
+	RendererRD::LightGrid::store_projection_f32(packed_inv_projection, ubo.inv_projection);
+	ubo.screen_size[0] = sw;
+	ubo.screen_size[1] = sh;
+	ubo.mid_size[0] = mid_w;
+	ubo.mid_size[1] = mid_h;
+	ubo.grid_dims[0] = uint32_t(packed_grid_dims.x);
+	ubo.grid_dims[1] = uint32_t(packed_grid_dims.y);
+	ubo.grid_dims[2] = uint32_t(packed_grid_dims.z);
+	ubo.flags = (camera_orthogonal ? RendererRD::LightGrid::BUILD_FLAG_ORTHOGONAL : 0u) |
+			(packed_grid_has_hiz ? RendererRD::LightGrid::BUILD_FLAG_HAS_HIZ : 0u) |
+			(packed_grid_cull_front ? RendererRD::LightGrid::BUILD_FLAG_CULL_FRONT : 0u);
+	ubo.coarse_dims[0] = uint32_t(packed_coarse_dims.x);
+	ubo.coarse_dims[1] = uint32_t(packed_coarse_dims.y);
+	ubo.coarse_dims[2] = uint32_t(packed_coarse_dims.z);
+	ubo.coarse_stride = packed_coarse_stride;
+	ubo.z_near = packed_z_params.z_near;
+	ubo.z_far = packed_z_params.z_far;
+	ubo.z_scale = packed_z_params.z_scale;
+	ubo.z_bias = packed_z_params.z_bias;
+	ubo.light_count = light_count;
+	ubo.omni_count = packed_omni_count;
+	ubo.spot_count = packed_spot_count;
+	ubo.area_count = packed_area_count;
+
+	rd->buffer_update(packed_params_ubo, 0, sizeof(RendererRD::LightGrid::BuildParamsUBO), &ubo);
+	rd->buffer_clear(packed_stats_buffer, 0, sizeof(RendererRD::LightGrid::GridStats));
+
+	// Pass H1: Reduce prepass depth into 8x8 min/max blocks.
+	if (packed_grid_has_hiz) {
+		LocalVector<RD::Uniform> hiz8_uniforms;
+		hiz8_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_depth_texture));
+		hiz8_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 1, p_depth_sampler));
+		hiz8_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, packed_hiz_mid_buffer));
+		RID hiz8_set = uniform_set_cache->get_cache_vec(shared->light_grid.shaders[ClusterBuilderSharedDataRD::LightGridBuild::MODE_HIZ_8X8], 0, hiz8_uniforms);
+
+		ClusterBuilderSharedDataRD::LightGridBuild::HiZPushConstant pc;
+		pc.screen_size[0] = sw;
+		pc.screen_size[1] = sh;
+		pc.mid_size[0] = mid_w;
+		pc.mid_size[1] = mid_h;
+
+		RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shared->light_grid.pipelines[ClusterBuilderSharedDataRD::LightGridBuild::MODE_HIZ_8X8]);
+		rd->compute_list_bind_uniform_set(cl, hiz8_set, 0);
+		rd->compute_list_set_push_constant(cl, &pc, sizeof(pc));
+		rd->compute_list_dispatch(cl, mid_w, mid_h, 1u);
+		rd->compute_list_end();
+	}
+
+	// Pass H2: Reduce 8x8 blocks into 64x64 tile linear depth min/max bounds (or full [z_near, z_far] without Hi-Z).
+	{
+		LocalVector<RD::Uniform> tile_uniforms;
+		tile_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, packed_params_ubo));
+		tile_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, packed_hiz_mid_buffer));
+		tile_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, packed_tile_depth_buffer));
+		RID tile_set = uniform_set_cache->get_cache_vec(shared->light_grid.shaders[ClusterBuilderSharedDataRD::LightGridBuild::MODE_HIZ_TILE], 0, tile_uniforms);
+
+		RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shared->light_grid.pipelines[ClusterBuilderSharedDataRD::LightGridBuild::MODE_HIZ_TILE]);
+		rd->compute_list_bind_uniform_set(cl, tile_set, 0);
+		rd->compute_list_dispatch(cl, uint32_t(packed_grid_dims.x), uint32_t(packed_grid_dims.y), 1u);
+		rd->compute_list_end();
+	}
+
+	// Pass 1 (Coarse): Bin lights into 4x4x4 froxel coarse cells.
+	{
+		LocalVector<RD::Uniform> coarse_uniforms;
+		coarse_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, packed_params_ubo));
+		coarse_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, packed_light_buffer));
+		coarse_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, packed_tile_depth_buffer));
+		coarse_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, packed_coarse_counts_buffer));
+		coarse_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, packed_coarse_indices_buffer));
+		RID coarse_set = uniform_set_cache->get_cache_vec(shared->light_grid.shaders[ClusterBuilderSharedDataRD::LightGridBuild::MODE_COARSE], 0, coarse_uniforms);
+
+		RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shared->light_grid.pipelines[ClusterBuilderSharedDataRD::LightGridBuild::MODE_COARSE]);
+		rd->compute_list_bind_uniform_set(cl, coarse_set, 0);
+		rd->compute_list_dispatch(cl, uint32_t(packed_coarse_dims.x), uint32_t(packed_coarse_dims.y), uint32_t(packed_coarse_dims.z));
+		rd->compute_list_end();
+	}
+
+	// Pass 2 (Fine): Refine coarse lists into fine froxel cells with Hi-Z depth culling and top-64 overflow keeping.
+	{
+		LocalVector<RD::Uniform> fine_uniforms;
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, packed_params_ubo));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, packed_light_buffer));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, packed_tile_depth_buffer));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, packed_coarse_counts_buffer));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, packed_coarse_indices_buffer));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, packed_cell_headers_buffer));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, packed_index_buffer));
+		fine_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, packed_stats_buffer));
+		RID fine_set = uniform_set_cache->get_cache_vec(shared->light_grid.shaders[ClusterBuilderSharedDataRD::LightGridBuild::MODE_FINE], 0, fine_uniforms);
+
+		RD::ComputeListID cl = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(cl, shared->light_grid.pipelines[ClusterBuilderSharedDataRD::LightGridBuild::MODE_FINE]);
+		rd->compute_list_bind_uniform_set(cl, fine_set, 0);
+		rd->compute_list_dispatch(cl, uint32_t(packed_coarse_dims.x), uint32_t(packed_coarse_dims.y), uint32_t(packed_coarse_dims.z));
+		rd->compute_list_end();
+	}
+
+	packed_grid_built = true;
+
+	rd->draw_command_end_label();
+	RENDER_TIMESTAMP("< Bake Packed Light Grid");
+}
+
+RID ClusterBuilderRD::get_packed_cell_headers_buffer() const {
+	if (is_packed_grid_active() && packed_cell_headers_buffer.is_valid()) {
+		return packed_cell_headers_buffer;
+	}
+	return shared != nullptr ? shared->get_default_light_grid_buffer() : RID();
+}
+
+RID ClusterBuilderRD::get_packed_index_buffer() const {
+	if (is_packed_grid_active() && packed_index_buffer.is_valid()) {
+		return packed_index_buffer;
+	}
+	return shared != nullptr ? shared->get_default_light_grid_buffer() : RID();
+}
+
+uint32_t ClusterBuilderRD::get_packed_grid_flags() const {
+	if (!is_packed_grid_active()) {
+		return 0u;
+	}
+	return RendererRD::LightGrid::GRID_FLAG_ENABLED | (camera_orthogonal ? RendererRD::LightGrid::GRID_FLAG_ORTHOGONAL : 0u);
+}
+
+Dictionary ClusterBuilderRD::run_packed_grid_check() const {
+	Dictionary result;
+	result["ready"] = true;
+	result["packed_active"] = is_packed_grid_active();
+	result["screen_size"] = screen_size;
+	result["light_count"] = int(packed_lights_cpu.size());
+	result["omni_count"] = int(packed_omni_count);
+	result["spot_count"] = int(packed_spot_count);
+	result["area_count"] = int(packed_area_count);
+	result["has_hiz"] = packed_grid_has_hiz;
+	result["cull_front"] = packed_grid_cull_front;
+
+	if (!is_packed_grid_active()) {
+		return result;
+	}
+
+	RenderingDevice *rd = RD::get_singleton();
+	const uint32_t gx = uint32_t(packed_grid_dims.x);
+	const uint32_t gy = uint32_t(packed_grid_dims.y);
+	const uint32_t gz = uint32_t(packed_grid_dims.z);
+	const uint32_t tiles = gx * gy;
+	const uint32_t cells = tiles * gz;
+
+	Vector<uint8_t> hdr_bytes = rd->buffer_get_data(packed_cell_headers_buffer, 0, cells * sizeof(RendererRD::LightGrid::CellHeader));
+	Vector<uint8_t> idx_bytes = rd->buffer_get_data(packed_index_buffer, 0, cells * RendererRD::LightGrid::MAX_LIGHTS_PER_CELL * sizeof(uint32_t));
+	Vector<uint8_t> stats_bytes = rd->buffer_get_data(packed_stats_buffer, 0, sizeof(RendererRD::LightGrid::GridStats));
+	Vector<uint8_t> td_bytes = rd->buffer_get_data(packed_tile_depth_buffer, 0, tiles * sizeof(float) * 2u);
+
+	if (hdr_bytes.size() < int64_t(cells * sizeof(RendererRD::LightGrid::CellHeader)) ||
+			idx_bytes.size() < int64_t(cells * RendererRD::LightGrid::MAX_LIGHTS_PER_CELL * sizeof(uint32_t)) ||
+			stats_bytes.size() < int64_t(sizeof(RendererRD::LightGrid::GridStats)) ||
+			td_bytes.size() < int64_t(tiles * sizeof(float) * 2u)) {
+		result["error"] = "GPU readback buffer size mismatch";
+		return result;
+	}
+
+	const RendererRD::LightGrid::CellHeader *gpu_headers = reinterpret_cast<const RendererRD::LightGrid::CellHeader *>(hdr_bytes.ptr());
+	const uint32_t *gpu_indices = reinterpret_cast<const uint32_t *>(idx_bytes.ptr());
+	RendererRD::LightGrid::GridStats gpu_stats = {};
+	memcpy(&gpu_stats, stats_bytes.ptr(), sizeof(gpu_stats));
+
+	const float *td_floats = reinterpret_cast<const float *>(td_bytes.ptr());
+	LocalVector<Vector2> tile_depths;
+	tile_depths.resize(tiles);
+	for (uint32_t i = 0; i < tiles; i++) {
+		tile_depths[i] = Vector2(td_floats[i * 2u], td_floats[i * 2u + 1u]);
+	}
+
+	float inv_proj_f32[16];
+	RendererRD::LightGrid::store_projection_f32(packed_inv_projection, inv_proj_f32);
+
+	const RendererRD::LightGrid::ReferenceGrid cpu_ref = RendererRD::LightGrid::build_cpu_reference(
+			packed_lights_cpu.ptr(),
+			packed_lights_cpu.size(),
+			packed_omni_count,
+			packed_spot_count,
+			inv_proj_f32,
+			screen_size,
+			z_near,
+			z_far,
+			camera_orthogonal,
+			tile_depths.ptr());
+
+	const RendererRD::LightGrid::GridDiff diff = RendererRD::LightGrid::compare_grids(
+			cpu_ref,
+			gpu_headers,
+			gpu_indices,
+			tile_depths.ptr(),
+			z_near,
+			z_far,
+			camera_orthogonal);
+
+	uint32_t nonempty_cells = 0u;
+	for (uint32_t i = 0; i < cells; i++) {
+		if (gpu_headers[i].count > 0u) {
+			nonempty_cells++;
+		}
+	}
+
+	result["grid_dims"] = packed_grid_dims;
+	result["coarse_dims"] = packed_coarse_dims;
+	result["cell_count"] = int(cells);
+	result["nonempty_cells"] = int(nonempty_cells);
+	result["hiz_occluded_cells"] = int(cpu_ref.hiz_occluded_cells);
+	result["hiz_occluded_nonempty_cells"] = int(diff.hiz_occluded_nonempty_cells);
+	result["missing_lights"] = int(diff.missing_lights);
+	result["extra_lights"] = int(diff.extra_lights);
+	result["mismatched_cells"] = int(diff.mismatched_cells);
+	result["gpu_overflow_cells"] = int(gpu_stats.overflow_cells);
+	result["gpu_overflow_lights"] = int(gpu_stats.overflow_lights);
+	result["gpu_total_assignments"] = int(gpu_stats.total_assignments);
+	result["gpu_max_cell_count"] = int(gpu_stats.max_cell_count);
+	result["cpu_overflow_cells"] = int(cpu_ref.stats.overflow_cells);
+	result["cpu_overflow_lights"] = int(cpu_ref.stats.overflow_lights);
+	result["cpu_total_assignments"] = int(cpu_ref.stats.total_assignments);
+	result["cpu_max_cell_count"] = int(cpu_ref.stats.max_cell_count);
+	if (diff.mismatched_cells > 0u) {
+		for (uint32_t ci = 0; ci < cells; ci++) {
+			const RendererRD::LightGrid::CellHeader ref_h = cpu_ref.headers[ci];
+			const RendererRD::LightGrid::CellHeader gpu_h = gpu_headers[ci];
+			if (ref_h.count != gpu_h.count) {
+				const uint32_t tx = ci % gx;
+				const uint32_t ty = (ci / gx) % gy;
+				const uint32_t tz = ci / (gx * gy);
+				Dictionary mm;
+				mm["cell"] = Vector3i(int(tx), int(ty), int(tz));
+				mm["ref_count"] = int(ref_h.count);
+				mm["gpu_count"] = int(gpu_h.count);
+				mm["tile_depth"] = tile_depths[ty * gx + tx];
+				for (uint32_t r = 0; r < ref_h.count; r++) {
+					const uint32_t entry = cpu_ref.indices[ref_h.offset + r];
+					bool found = false;
+					for (uint32_t g = 0; g < MIN(gpu_h.count, RendererRD::LightGrid::MAX_LIGHTS_PER_CELL); g++) {
+						if (gpu_indices[gpu_h.offset + g] == entry) {
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						const uint32_t gli = RendererRD::LightGrid::entry_to_global_index(entry, packed_omni_count, packed_spot_count);
+						mm["missing_type"] = int(RendererRD::LightGrid::unpack_entry_type(entry));
+						mm["missing_idx"] = int(RendererRD::LightGrid::unpack_entry_index(entry));
+						mm["missing_gli"] = int(gli);
+						mm["missing_radius"] = packed_lights_cpu[gli].radius;
+						mm["missing_pos"] = Vector3(packed_lights_cpu[gli].position[0], packed_lights_cpu[gli].position[1], packed_lights_cpu[gli].position[2]);
+						break;
+					}
+				}
+				result["first_mismatch"] = mm;
+				break;
+			}
+		}
+	}
+	return result;
 }
 
 RID ClusterBuilderRD::get_cluster_buffer() const {

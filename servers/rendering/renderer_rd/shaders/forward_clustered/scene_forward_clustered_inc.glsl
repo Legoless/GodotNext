@@ -406,6 +406,10 @@ struct ImplementationData {
 	float volumetric_fog_inv_length;
 	float volumetric_fog_detail_spread;
 	uint volumetric_fog_pad;
+
+	// GodotNext: light_grid (#139, plan §21.3 contract M2). Packed froxel light grid parameters.
+	uvec4 light_grid_dims; // x: grid_x, y: grid_y, z: z_slices (32), w: flags (bit 0: enabled, bit 1: orthogonal)
+	vec4 light_grid_z_params; // x: z_near, y: z_far, z: z_scale, w: z_bias
 };
 
 layout(set = 1, binding = 1, std140) uniform ImplementationDataBlock {
@@ -635,6 +639,19 @@ vsm_coarse_miss;
 // max 8) and its matching half-res view-space normal + linear-depth guide written by df_shadow.glsl.
 layout(set = 1, binding = 58) uniform texture2DArray df_shadow_mask;
 layout(set = 1, binding = 59) uniform texture2D df_shadow_guide;
+
+// GodotNext: light_grid (#139, plan §21.3 contract M2). Packed per-cell light list buffers
+// (bound to a 16-byte default dummy buffer when the packed light grid is inactive).
+layout(set = 1, binding = 60, std430) buffer restrict readonly PackedLightGridHeaders {
+	uvec2 data[];
+}
+packed_light_grid_headers;
+layout(set = 1, binding = 61, std430) buffer restrict readonly PackedLightGridIndices {
+	uint data[];
+}
+packed_light_grid_indices;
+
+#define FORWARD_CLUSTERED_LIGHT_GRID
 
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #define VSM_PROJECTION

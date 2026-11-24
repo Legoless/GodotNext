@@ -30,9 +30,11 @@
 
 #pragma once
 
+#include "servers/rendering/renderer_rd/light_grid_math.h"
 #include "servers/rendering/renderer_rd/shaders/cluster_debug.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/cluster_render.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/cluster_store.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/light_grid_build.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 
 class ClusterBuilderSharedDataRD {
@@ -128,7 +130,31 @@ class ClusterBuilderSharedDataRD {
 		RID shader_pipeline;
 	} cluster_debug;
 
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+	struct LightGridBuild {
+		enum Mode {
+			MODE_HIZ_8X8,
+			MODE_HIZ_TILE,
+			MODE_COARSE,
+			MODE_FINE,
+			MODE_MAX,
+		};
+
+		struct HiZPushConstant {
+			uint32_t screen_size[2];
+			uint32_t mid_size[2];
+		};
+
+		LightGridBuildShaderRD shader;
+		RID shader_version;
+		RID shaders[MODE_MAX];
+		RID pipelines[MODE_MAX];
+		RID default_dummy_buffer;
+	} light_grid;
+
 public:
+	RID get_default_light_grid_buffer() const { return light_grid.default_dummy_buffer; }
+
 	ClusterBuilderSharedDataRD();
 	~ClusterBuilderSharedDataRD();
 };
@@ -227,6 +253,38 @@ private:
 	RID state_uniform;
 
 	RID debug_uniform_set;
+
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+	// Packed froxel light grid beside the legacy bitmask cluster buffers.
+	// GPU buffers are lazily allocated on first packed-grid bake so legacy scenes pay zero VRAM.
+	bool packed_grid_active = false;
+	bool packed_grid_built = false;
+	bool packed_grid_has_hiz = false;
+	bool packed_grid_cull_front = false;
+	Vector3i packed_grid_dims;
+	Vector3i packed_coarse_dims;
+	RendererRD::LightGrid::ZParams packed_z_params;
+	Projection packed_inv_projection;
+	LocalVector<RendererRD::LightGrid::PackedLightData> packed_lights_cpu;
+	uint32_t packed_omni_count = 0;
+	uint32_t packed_spot_count = 0;
+	uint32_t packed_area_count = 0;
+	uint32_t packed_light_capacity = 0;
+	uint32_t packed_coarse_stride = 0;
+	Size2i packed_allocated_screen_size;
+
+	RID packed_params_ubo;
+	RID packed_light_buffer;
+	RID packed_hiz_mid_buffer;
+	RID packed_tile_depth_buffer;
+	RID packed_coarse_counts_buffer;
+	RID packed_coarse_indices_buffer;
+	RID packed_cell_headers_buffer;
+	RID packed_index_buffer;
+	RID packed_stats_buffer;
+
+	void _clear_packed_grid();
+	void _ensure_packed_grid_buffers(uint32_t p_light_count);
 
 public:
 	void setup(Size2i p_screen_size, uint32_t p_max_elements, RID p_depth_buffer, RID p_depth_buffer_sampler, RID p_color_buffer);
@@ -422,6 +480,21 @@ public:
 
 	void bake_cluster();
 	void debug(ElementType p_element);
+
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+	void set_packed_grid_active(bool p_active);
+	bool is_packed_grid_requested() const { return packed_grid_active; }
+	bool is_packed_grid_active() const { return packed_grid_active && packed_grid_built; }
+	void add_packed_light(LightType p_type, uint32_t p_per_type_index, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, float p_barn_door_angle_deg, float p_barn_door_length, float p_intensity, bool p_megalights_handled = false);
+	void bake_packed_light_grid(RID p_depth_texture, RID p_depth_sampler, bool p_cull_front_of_min);
+
+	RID get_packed_cell_headers_buffer() const;
+	RID get_packed_index_buffer() const;
+	Vector3i get_packed_grid_dims() const { return packed_grid_dims; }
+	RendererRD::LightGrid::ZParams get_packed_z_params() const { return packed_z_params; }
+	uint32_t get_packed_grid_flags() const;
+	uint32_t get_packed_area_light_count() const { return packed_area_count; }
+	Dictionary run_packed_grid_check() const;
 
 	RID get_cluster_buffer() const;
 	uint32_t get_cluster_size() const;

@@ -1513,6 +1513,155 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #endif // LIGHT_CODE_USED
 }
 
+#ifdef FORWARD_CLUSTERED_LIGHT_GRID
+
+// GodotNext: light_grid (#139, plan §21.3 contract M2).
+// Packed per-cell light-grid lookup and forward shading loop for non-MegaLights lights.
+#define LIGHT_GRID_TILE_SHIFT 6u
+#define LIGHT_GRID_FLAG_ENABLED 1u
+#define LIGHT_GRID_FLAG_ORTHOGONAL 2u
+#define LIGHT_GRID_TYPE_OMNI 0u
+#define LIGHT_GRID_TYPE_SPOT 1u
+#define LIGHT_GRID_TYPE_AREA 2u
+#define LIGHT_GRID_ENTRY_INDEX_MASK 0xFFFFu
+#define LIGHT_GRID_ENTRY_TYPE_SHIFT 16u
+#define LIGHT_GRID_ENTRY_TYPE_MASK 3u
+#define LIGHT_GRID_ENTRY_FLAG_MEGALIGHTS (1u << 18u)
+
+bool light_grid_is_active() {
+	return (implementation_data.light_grid_dims.w & LIGHT_GRID_FLAG_ENABLED) != 0u;
+}
+
+uint light_grid_cell_index(uvec2 p_screen_pixel, float p_linear_depth) {
+	uvec2 tile = min(p_screen_pixel >> LIGHT_GRID_TILE_SHIFT, implementation_data.light_grid_dims.xy - uvec2(1u));
+	float depth = max(p_linear_depth, implementation_data.light_grid_z_params.x);
+	float z_f = ((implementation_data.light_grid_dims.w & LIGHT_GRID_FLAG_ORTHOGONAL) != 0u)
+			? (depth * implementation_data.light_grid_z_params.z + implementation_data.light_grid_z_params.w)
+			: (log(depth) * implementation_data.light_grid_z_params.z + implementation_data.light_grid_z_params.w);
+	uint tz = uint(clamp(floor(z_f), 0.0, float(implementation_data.light_grid_dims.z - 1u)));
+	return (tz * implementation_data.light_grid_dims.y + tile.y) * implementation_data.light_grid_dims.x + tile.x;
+}
+
+void light_grid_process_lights(uvec2 p_screen_pixel, uint p_layer_mask, uint p_instance_flags, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3 vertex_ddx, vec3 vertex_ddy, hvec3 f0, half roughness, half metallic, float taa_frame_count, hvec3 albedo, inout half alpha, vec2 screen_uv, hvec3 energy_compensation,
+#ifdef LIGHT_BACKLIGHT_USED
+		hvec3 backlight,
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+		hvec4 transmittance_color,
+		half transmittance_depth,
+		half transmittance_boost,
+#endif
+#ifdef LIGHT_RIM_USED
+		half rim, half rim_tint,
+#endif
+#ifdef LIGHT_CLEARCOAT_USED
+		half clearcoat, half clearcoat_roughness, hvec3 vertex_normal,
+#endif
+#ifdef LIGHT_ANISOTROPY_USED
+		hvec3 binormal, hvec3 tangent, half anisotropy,
+#endif
+		inout hvec3 diffuse_light, inout hvec3 specular_light) {
+	uint cell_idx = light_grid_cell_index(p_screen_pixel, -vertex.z);
+	uvec2 cell_header = packed_light_grid_headers.data[cell_idx];
+	uint offset = cell_header.x;
+	uint count = cell_header.y;
+	bool use_lightmap = bool(p_instance_flags & INSTANCE_FLAGS_USE_LIGHTMAP);
+
+	for (uint k = 0u; k < count; k++) {
+		uint entry = packed_light_grid_indices.data[offset + k];
+		if ((entry & LIGHT_GRID_ENTRY_FLAG_MEGALIGHTS) != 0u) {
+			continue; // Handled by MegaLights.
+		}
+		uint ltype = (entry >> LIGHT_GRID_ENTRY_TYPE_SHIFT) & LIGHT_GRID_ENTRY_TYPE_MASK;
+		uint light_index = entry & LIGHT_GRID_ENTRY_INDEX_MASK;
+
+		if (ltype == LIGHT_GRID_TYPE_OMNI) {
+			if (!bool(omni_lights.data[light_index].mask & p_layer_mask)) {
+				continue;
+			}
+			if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && use_lightmap) {
+				continue;
+			}
+			light_process_omni(light_index, vertex, eye_vec, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+#ifdef LIGHT_BACKLIGHT_USED
+					backlight,
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+					transmittance_color,
+					transmittance_depth,
+					transmittance_boost,
+#endif
+#ifdef LIGHT_RIM_USED
+					rim,
+					rim_tint,
+#endif
+#ifdef LIGHT_CLEARCOAT_USED
+					clearcoat, clearcoat_roughness, vertex_normal,
+#endif
+#ifdef LIGHT_ANISOTROPY_USED
+					binormal, tangent, anisotropy,
+#endif
+					diffuse_light, specular_light);
+		} else if (ltype == LIGHT_GRID_TYPE_SPOT) {
+			if (!bool(spot_lights.data[light_index].mask & p_layer_mask)) {
+				continue;
+			}
+			if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && use_lightmap) {
+				continue;
+			}
+			light_process_spot(light_index, vertex, eye_vec, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+#ifdef LIGHT_BACKLIGHT_USED
+					backlight,
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+					transmittance_color,
+					transmittance_depth,
+					transmittance_boost,
+#endif
+#ifdef LIGHT_RIM_USED
+					rim,
+					rim_tint,
+#endif
+#ifdef LIGHT_CLEARCOAT_USED
+					clearcoat, clearcoat_roughness, vertex_normal,
+#endif
+#ifdef LIGHT_ANISOTROPY_USED
+					binormal, tangent, anisotropy,
+#endif
+					diffuse_light, specular_light);
+		} else if (ltype == LIGHT_GRID_TYPE_AREA && sc_cluster_has_area_light()) {
+			if (!bool(area_lights.data[light_index].mask & p_layer_mask)) {
+				continue;
+			}
+			if (area_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && use_lightmap) {
+				continue;
+			}
+			light_process_area(light_index, vertex, eye_vec, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+#ifdef LIGHT_BACKLIGHT_USED
+					backlight,
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+					transmittance_color,
+					transmittance_depth,
+					transmittance_boost,
+#endif
+#ifdef LIGHT_RIM_USED
+					rim,
+					rim_tint,
+#endif
+#ifdef LIGHT_CLEARCOAT_USED
+					clearcoat, clearcoat_roughness, vertex_normal,
+#endif
+#ifdef LIGHT_ANISOTROPY_USED
+					binormal, tangent, anisotropy,
+#endif
+					diffuse_light, specular_light);
+		}
+	}
+}
+
+#endif // FORWARD_CLUSTERED_LIGHT_GRID
+
 void reflection_process(uint ref_index, vec3 vertex, hvec3 ref_vec, hvec3 normal, half roughness, hvec3 ambient_light,
 #ifdef LIGHT_CLEARCOAT_USED
 		hvec3 cc_ref_vec, half cc_roughness, inout hvec4 cc_reflection_accum,

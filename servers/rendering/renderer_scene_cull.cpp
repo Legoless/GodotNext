@@ -39,6 +39,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
+// GodotNext: light_grid (#139).
+#include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
@@ -217,6 +219,35 @@ void RendererSceneCull::occluder_set_mesh(RID p_occluder, const PackedVector3Arr
 
 /* SCENARIO API */
 
+// GodotNext: light_grid (#139, plan §21.3 contract M2).
+bool RendererSceneCull::light_should_skip_geometry_pairing(bool p_mobile_light_pairing, bool p_casts_shadow, RSE::LightShadowMethod p_shadow_method, bool p_megalights_active, bool p_uses_projector, bool p_uses_softshadow) {
+	// Mobile and Compatibility renderers rely on per-geometry paired light lists for shading.
+	if (p_mobile_light_pairing) {
+		return false;
+	}
+	// Ray-traced shadows need no shadow map.
+	if (p_shadow_method == RSE::LIGHT_SHADOW_METHOD_RAY_TRACED) {
+		return true;
+	}
+	// Under MegaLights, positional lights following the project default need no shadow map.
+	if (p_megalights_active && p_shadow_method == RSE::LIGHT_SHADOW_METHOD_PROJECT) {
+		return true;
+	}
+	// Unshadowed lights without projector or soft-shadow specialization flags need no geometry pairing on Forward+.
+	if (!p_casts_shadow && !p_uses_projector && !p_uses_softshadow) {
+		return true;
+	}
+	return false;
+}
+
+bool RendererSceneCull::_light_skips_geometry_pairing(const Instance *p_light_instance, const InstanceLightData *p_light) const {
+	const bool mobile_light_pairing = (geometry_instance_pair_mask & (1 << RSE::INSTANCE_LIGHT)) != 0;
+	const bool casts_shadow = RSG::light_storage->light_has_shadow(p_light_instance->base);
+	const RSE::LightShadowMethod shadow_method = RSG::light_storage->light_get_shadow_method(p_light_instance->base);
+	const bool megalights_active = RendererRD::MegaLightsInputs::is_requested();
+	return light_should_skip_geometry_pairing(mobile_light_pairing, casts_shadow, shadow_method, megalights_active, p_light->uses_projector, p_light->uses_softshadow);
+}
+
 void RendererSceneCull::_instance_pair(Instance *p_A, Instance *p_B) {
 	RendererSceneCull *self = (RendererSceneCull *)singleton;
 	Instance *A = p_A;
@@ -233,6 +264,12 @@ void RendererSceneCull::_instance_pair(Instance *p_A, Instance *p_B) {
 
 		if (!(light->cull_mask & A->layer_mask)) {
 			// Early return if the object's layer mask doesn't match the light's cull mask.
+			return;
+		}
+
+		// GodotNext: light_grid (#139, plan §21.3 contract M2). Skip CPU pairing and shadow dirtying
+		// when the light's resolved method needs no shadow map and is not used by the mobile renderer.
+		if (light->skips_geometry_pairing || self->_light_skips_geometry_pairing(B, light)) {
 			return;
 		}
 
@@ -358,6 +395,11 @@ void RendererSceneCull::_instance_unpair(Instance *p_A, Instance *p_B) {
 
 		if (!(light->cull_mask & A->layer_mask)) {
 			// Early return if the object's layer mask doesn't match the light's cull mask.
+			return;
+		}
+
+		// GodotNext: light_grid (#139). Symmetric guard when pairing was skipped or toggled dynamically.
+		if (!geom->lights.has(B)) {
 			return;
 		}
 
@@ -2518,8 +2560,14 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 
 		pair.bvh2 = &p_instance->scenario->indexers[Scenario::INDEXER_VOLUMES];
 	} else if (p_instance->base_type == RSE::INSTANCE_LIGHT) {
-		pair.pair_mask |= RSE::INSTANCE_GEOMETRY_MASK;
-		pair.bvh = &p_instance->scenario->indexers[Scenario::INDEXER_GEOMETRY];
+		// GodotNext: light_grid (#139, plan §21.3 contract M2). Skip BVH geometry pairing when
+		// the light needs no shadow map on Forward+.
+		InstanceLightData *light_data = static_cast<InstanceLightData *>(p_instance->base_data);
+		light_data->skips_geometry_pairing = _light_skips_geometry_pairing(p_instance, light_data);
+		if (!light_data->skips_geometry_pairing) {
+			pair.pair_mask |= RSE::INSTANCE_GEOMETRY_MASK;
+			pair.bvh = &p_instance->scenario->indexers[Scenario::INDEXER_GEOMETRY];
+		}
 
 		RSE::LightBakeMode bake_mode = RSG::light_storage->light_get_bake_mode(p_instance->base);
 		if (bake_mode == RSE::LIGHT_BAKE_STATIC || bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {

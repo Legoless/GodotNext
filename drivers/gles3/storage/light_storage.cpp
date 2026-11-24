@@ -95,6 +95,9 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	// GodotNext: df_shadows (#214).
 	light.param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START] = 0.0;
 	light.param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE] = 0.0;
+	// GodotNext: light_grid (#139).
+	light.param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE] = 90.0;
+	light.param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH] = 0.2;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -159,6 +162,8 @@ void LightStorage::light_set_param(RID p_light, RSE::LightParam p_param, float p
 	switch (p_param) {
 		case RSE::LIGHT_PARAM_RANGE:
 		case RSE::LIGHT_PARAM_SPOT_ANGLE:
+		case RSE::LIGHT_PARAM_BARN_DOOR_ANGLE:
+		case RSE::LIGHT_PARAM_BARN_DOOR_LENGTH:
 		case RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE:
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET:
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_2_OFFSET:
@@ -435,9 +440,25 @@ AABB LightStorage::light_get_aabb(RID p_light) const {
 		};
 		case RSE::LIGHT_AREA: {
 			float len = light->param[RSE::LIGHT_PARAM_RANGE];
-
-			float width = light->area_size.x / 2.0 + len;
-			float height = light->area_size.y / 2.0 + len;
+			float hw = light->area_size.x * 0.5f;
+			float hh = light->area_size.y * 0.5f;
+			float width = hw + len;
+			float height = hh + len;
+			// GodotNext: light_grid (#139). Tighten area light AABB to the barn-door frustum when active.
+			float bd_angle = light->param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE];
+			float bd_len = light->param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH];
+			if (bd_angle < 89.99f && bd_len > 1e-4f) {
+				float angle_rad = Math::deg_to_rad(CLAMP(bd_angle, 0.0f, 89.99f));
+				float sin_a = Math::sin(angle_rad);
+				float cos_a = Math::cos(angle_rad);
+				float z_d = bd_len * cos_a;
+				if (z_d > 1e-6f) {
+					float ext_x = (len <= z_d) ? (hw + len * (sin_a / cos_a)) : (-hw + len * ((2.0f * hw + bd_len * sin_a) / z_d));
+					float ext_y = (len <= z_d) ? (hh + len * (sin_a / cos_a)) : (-hh + len * ((2.0f * hh + bd_len * sin_a) / z_d));
+					width = MIN(width, ext_x);
+					height = MIN(height, ext_y);
+				}
+			}
 
 			return AABB(-Vector3(width, height, 0), Vector3(width * 2, height * 2, -len));
 		};

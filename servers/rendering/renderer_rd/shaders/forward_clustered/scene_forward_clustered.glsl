@@ -634,6 +634,50 @@ void vertex_shader(vec3 vertex_input,
 	uint cluster_offset = (implementation_data.cluster_width * cluster_pos.y + cluster_pos.x) * (implementation_data.max_cluster_element_count_div_32 + 32);
 	uint cluster_z = uint(clamp((-vertex_interp.z / scene_data.z_far) * 32.0, 0.0, 31.0));
 
+#ifdef FORWARD_CLUSTERED_LIGHT_GRID
+	if ((implementation_data.light_grid_dims.w & 1u) != 0u) {
+		// GodotNext: light_grid (#139). Vertex lighting iteration over packed per-cell list.
+		uvec2 lg_tile = min(screen_pixel >> 6u, implementation_data.light_grid_dims.xy - uvec2(1u));
+		float lg_depth = max(-vertex_interp.z, implementation_data.light_grid_z_params.x);
+		float lg_z_f = ((implementation_data.light_grid_dims.w & 2u) != 0u)
+				? (lg_depth * implementation_data.light_grid_z_params.z + implementation_data.light_grid_z_params.w)
+				: (log(lg_depth) * implementation_data.light_grid_z_params.z + implementation_data.light_grid_z_params.w);
+		uint lg_tz = uint(clamp(floor(lg_z_f), 0.0, float(implementation_data.light_grid_dims.z - 1u)));
+		uint lg_cell = (lg_tz * implementation_data.light_grid_dims.y + lg_tile.y) * implementation_data.light_grid_dims.x + lg_tile.x;
+		uvec2 lg_hdr = packed_light_grid_headers.data[lg_cell];
+		bool lg_use_lightmap = bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP);
+		uint lg_layer_mask = instances.data[instance_index].layer_mask;
+
+		for (uint k = 0u; k < lg_hdr.y; k++) {
+			uint entry = packed_light_grid_indices.data[lg_hdr.x + k];
+			if ((entry & (1u << 18u)) != 0u) {
+				continue;
+			}
+			uint ltype = (entry >> 16u) & 3u;
+			uint light_index = entry & 0xFFFFu;
+			if (ltype == 0u) {
+				if (!bool(omni_lights.data[light_index].mask & lg_layer_mask)) {
+					continue;
+				}
+				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && lg_use_lightmap) {
+					continue;
+				}
+				light_process_omni_vertex(light_index, vertex, view, normal, roughness,
+						diffuse_light_interp.rgb, specular_light_interp.rgb);
+			} else if (ltype == 1u) {
+				if (!bool(spot_lights.data[light_index].mask & lg_layer_mask)) {
+					continue;
+				}
+				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && lg_use_lightmap) {
+					continue;
+				}
+				light_process_spot_vertex(light_index, vertex, view, normal, roughness,
+						diffuse_light_interp.rgb, specular_light_interp.rgb);
+			}
+		}
+	} else
+#endif // FORWARD_CLUSTERED_LIGHT_GRID
+	{
 	{ //omni lights
 
 		uint cluster_omni_offset = cluster_offset;
@@ -702,6 +746,7 @@ void vertex_shader(vec3 vertex_input,
 						diffuse_light_interp.rgb, specular_light_interp.rgb);
 			}
 		}
+	}
 	}
 
 	{ // Directional light.
@@ -3510,6 +3555,38 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifndef USE_VERTEX_LIGHTING
+#ifdef FORWARD_CLUSTERED_LIGHT_GRID
+	if (light_grid_is_active()) {
+		// GodotNext: light_grid (#139, plan §21.3 contract M2).
+		// Iterate packed per-cell light list for non-MegaLights lights when grid mode is active.
+#ifdef USE_MULTIVIEW
+		uvec2 lg_screen_pixel = uvec2(combined_uv.xy / scene_data.screen_pixel_size);
+#else
+		uvec2 lg_screen_pixel = uvec2(NEXTGEO_FRAG_COORD.xy);
+#endif
+		light_grid_process_lights(lg_screen_pixel, instances.data[instance_index].layer_mask, instances.data[instance_index].flags, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+#ifdef LIGHT_BACKLIGHT_USED
+				backlight,
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+				transmittance_color,
+				transmittance_depth,
+				transmittance_boost,
+#endif
+#ifdef LIGHT_RIM_USED
+				rim,
+				rim_tint,
+#endif
+#ifdef LIGHT_CLEARCOAT_USED
+				clearcoat, clearcoat_roughness, geo_normal,
+#endif // LIGHT_CLEARCOAT_USED
+#ifdef LIGHT_ANISOTROPY_USED
+				binormal, tangent, anisotropy,
+#endif
+				diffuse_light, direct_specular_light);
+	} else
+#endif // FORWARD_CLUSTERED_LIGHT_GRID
+	{
 	{ //omni lights
 
 		uint cluster_omni_offset = cluster_offset;
@@ -3691,6 +3768,7 @@ void fragment_shader(in SceneData scene_data) {
 						diffuse_light, direct_specular_light);
 			}
 		}
+	}
 	}
 #endif // !USE_VERTEX_LIGHTING
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)

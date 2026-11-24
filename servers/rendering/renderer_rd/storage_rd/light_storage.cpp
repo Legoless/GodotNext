@@ -171,6 +171,9 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	// GodotNext: df_shadows (#214).
 	light.param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START] = 0.0;
 	light.param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE] = 0.0;
+	// GodotNext: light_grid (#139). Default open (90 deg) preserves legacy AABB and culling.
+	light.param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE] = RendererRD::LightGrid::DEFAULT_BARN_DOOR_ANGLE_DEG;
+	light.param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH] = RendererRD::LightGrid::DEFAULT_BARN_DOOR_LENGTH;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -236,6 +239,8 @@ void LightStorage::light_set_param(RID p_light, RSE::LightParam p_param, float p
 	switch (p_param) {
 		case RSE::LIGHT_PARAM_RANGE:
 		case RSE::LIGHT_PARAM_SPOT_ANGLE:
+		case RSE::LIGHT_PARAM_BARN_DOOR_ANGLE:
+		case RSE::LIGHT_PARAM_BARN_DOOR_LENGTH:
 		case RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE:
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_1_OFFSET:
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_2_OFFSET:
@@ -576,9 +581,13 @@ AABB LightStorage::light_get_aabb(RID p_light) const {
 		};
 		case RSE::LIGHT_AREA: {
 			float len = light->param[RSE::LIGHT_PARAM_RANGE];
-			float width = light->area_size.x / 2.0 + len;
-			float height = light->area_size.y / 2.0 + len;
-			return AABB(-Vector3(width, height, 0), Vector3(width * 2, height * 2, -len));
+			// GodotNext: light_grid (#139). Tighten area light AABB to barn-door frustum when active.
+			const Vector2 extents = RendererRD::LightGrid::area_light_barn_door_aabb_extents(
+					light->area_size,
+					len,
+					light->param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE],
+					light->param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH]);
+			return AABB(-Vector3(extents.x, extents.y, 0), Vector3(extents.x * 2, extents.y * 2, -len));
 		};
 		case RSE::LIGHT_DIRECTIONAL: {
 			return AABB();
@@ -764,6 +773,63 @@ void LightStorage::set_max_lights(const uint32_t p_max_lights) {
 	directional_light_buffer = RD::get_singleton()->uniform_buffer_create(directional_light_buffer_size);
 }
 
+// GodotNext: light_grid (#139, plan §21.3 contract M2).
+// Dynamically grow positional light SSBOs up to LightGrid::MAX_LIGHTS (65,536) when a scene exceeds
+// the legacy bitmask cap, without touching directional lights or legacy <=512 scenes.
+void LightStorage::ensure_light_capacity(const uint32_t p_required_per_type) {
+	const uint32_t clamped_req = MIN(p_required_per_type, RendererRD::LightGrid::MAX_LIGHTS);
+	if (clamped_req <= max_lights) {
+		return;
+	}
+
+	const uint32_t new_max = MIN(RendererRD::LightGrid::MAX_LIGHTS, MAX(max_lights * 2u, Math::next_power_of_2(clamped_req)));
+	RenderingDevice *rd = RD::get_singleton();
+
+	if (omni_light_buffer.is_valid()) {
+		rd->free_rid(omni_light_buffer);
+	}
+	if (spot_light_buffer.is_valid()) {
+		rd->free_rid(spot_light_buffer);
+	}
+	if (area_light_buffer.is_valid()) {
+		rd->free_rid(area_light_buffer);
+	}
+	if (omni_lights != nullptr) {
+		memdelete_arr(omni_lights);
+	}
+	if (spot_lights != nullptr) {
+		memdelete_arr(spot_lights);
+	}
+	if (area_lights != nullptr) {
+		memdelete_arr(area_lights);
+	}
+	if (omni_light_sort != nullptr) {
+		memdelete_arr(omni_light_sort);
+	}
+	if (spot_light_sort != nullptr) {
+		memdelete_arr(spot_light_sort);
+	}
+	if (area_light_sort != nullptr) {
+		memdelete_arr(area_light_sort);
+	}
+
+	max_lights = new_max;
+	const uint32_t light_buffer_size = max_lights * sizeof(LightData);
+	omni_lights = memnew_arr(LightData, max_lights);
+	omni_light_buffer = rd->storage_buffer_create(light_buffer_size);
+	omni_light_sort = memnew_arr(LightInstanceDepthSort, max_lights);
+	spot_lights = memnew_arr(LightData, max_lights);
+	spot_light_buffer = rd->storage_buffer_create(light_buffer_size);
+	spot_light_sort = memnew_arr(LightInstanceDepthSort, max_lights);
+	area_lights = memnew_arr(LightData, max_lights);
+	area_light_buffer = rd->storage_buffer_create(light_buffer_size);
+	area_light_sort = memnew_arr(LightInstanceDepthSort, max_lights);
+
+	if (RendererSceneRenderRD::get_singleton() != nullptr) {
+		RendererSceneRenderRD::get_singleton()->base_uniforms_changed();
+	}
+}
+
 void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const PagedArray<RID> &p_lights, const Transform3D &p_camera_transform, RID p_shadow_atlas, bool p_using_shadows, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count, bool &r_directional_light_soft_shadows) {
 	ForwardIDStorage *forward_id_storage = ForwardIDStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
@@ -793,6 +859,34 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 	uint32_t directional_contact_shadows_count = 0;
 
 	r_directional_light_soft_shadows = false;
+
+	// GodotNext: light_grid (#139). Grow positional light storage on demand when scene lights exceed max_lights.
+	if (p_lights.size() > max_lights) {
+		uint32_t req_omni = 0;
+		uint32_t req_spot = 0;
+		uint32_t req_area = 0;
+		for (int i = 0; i < (int)p_lights.size(); i++) {
+			LightInstance *li = light_instance_owner.get_or_null(p_lights[i]);
+			if (!li) {
+				continue;
+			}
+			Light *l = light_owner.get_or_null(li->light);
+			if (!l) {
+				continue;
+			}
+			if (l->type == RSE::LIGHT_OMNI) {
+				req_omni++;
+			} else if (l->type == RSE::LIGHT_SPOT) {
+				req_spot++;
+			} else if (l->type == RSE::LIGHT_AREA) {
+				req_area++;
+			}
+		}
+		const uint32_t max_req = MAX(req_omni, MAX(req_spot, req_area));
+		if (max_req > max_lights) {
+			ensure_light_capacity(max_req);
+		}
+	}
 
 	for (int i = 0; i < (int)p_lights.size(); i++) {
 		LightInstance *light_instance = light_instance_owner.get_or_null(p_lights[i]);
@@ -1482,7 +1576,17 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_instance->cull_mask = light->cull_mask;
 
 		// hook for subclass to do further processing.
-		RendererSceneRenderRD::get_singleton()->setup_added_light(type, light_transform, radius, spot_angle, area_size);
+		const float intensity_proxy = RendererRD::LightGrid::compute_light_intensity_proxy(light_data.color[0], light_data.color[1], light_data.color[2]);
+		RendererSceneRenderRD::get_singleton()->setup_added_light(
+				type,
+				light_transform,
+				radius,
+				spot_angle,
+				area_size,
+				index,
+				light->param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE],
+				light->param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH],
+				intensity_proxy);
 
 		r_positional_light_count++;
 	}

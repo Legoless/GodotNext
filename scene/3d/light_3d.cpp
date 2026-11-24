@@ -527,6 +527,9 @@ void Light3D::_bind_methods() {
 	// GodotNext: df_shadows (#214).
 	BIND_ENUM_CONSTANT(PARAM_DISTANCE_FIELD_SHADOW_START);
 	BIND_ENUM_CONSTANT(PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
+	// GodotNext: light_grid (#139).
+	BIND_ENUM_CONSTANT(PARAM_BARN_DOOR_ANGLE);
+	BIND_ENUM_CONSTANT(PARAM_BARN_DOOR_LENGTH);
 	BIND_ENUM_CONSTANT(PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(BAKE_DISABLED);
@@ -592,6 +595,9 @@ Light3D::Light3D(RSE::LightType p_type) {
 	// GodotNext: df_shadows (#214).
 	set_param(PARAM_DISTANCE_FIELD_SHADOW_START, 0.0);
 	set_param(PARAM_DISTANCE_FIELD_SHADOW_DISTANCE, 0.0);
+	// GodotNext: light_grid (#139). Default open (90 deg) preserves legacy AABB and culling.
+	set_param(PARAM_BARN_DOOR_ANGLE, 90.0);
+	set_param(PARAM_BARN_DOOR_LENGTH, 0.2);
 	// For OmniLight3D and SpotLight3D, specified in Lumens.
 	set_param(PARAM_INTENSITY, 1000.0);
 	set_temperature(6500.0); // Nearly white.
@@ -851,6 +857,11 @@ void AreaLight3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "area_normalize_energy"), "set_area_normalize_energy", "is_area_normalizing_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "area_size", PROPERTY_HINT_LINK, "suffix:m"), "set_area_size", "get_area_size");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "area_texture", PROPERTY_HINT_RESOURCE_TYPE, "Texture2D,-AnimatedTexture,-AtlasTexture,-CameraTexture,-CanvasTexture,-MeshTexture,-Texture2DRD,-ViewportTexture"), "set_area_texture", "get_area_texture");
+
+	// GodotNext: light_grid (#139, plan §21.3 contract M2). Barn doors narrow area light culling (shading in #140).
+	ADD_GROUP("Barn Door", "barn_door_");
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "barn_door_angle", PROPERTY_HINT_RANGE, "0,90,0.01,degrees"), "set_param", "get_param", PARAM_BARN_DOOR_ANGLE);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "barn_door_length", PROPERTY_HINT_RANGE, "0,100,0.001,or_greater,suffix:m"), "set_param", "get_param", PARAM_BARN_DOOR_LENGTH);
 }
 
 PackedStringArray AreaLight3D::get_configuration_warnings() const {

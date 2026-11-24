@@ -1125,6 +1125,16 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		scene_state.ubo.cluster_width = cluster_screen_width;
 	}
 
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+	scene_state.ubo.light_grid_dims[0] = uint32_t(MAX(p_render_data->packed_light_grid_dims.x, 1));
+	scene_state.ubo.light_grid_dims[1] = uint32_t(MAX(p_render_data->packed_light_grid_dims.y, 1));
+	scene_state.ubo.light_grid_dims[2] = uint32_t(MAX(p_render_data->packed_light_grid_dims.z, 1));
+	scene_state.ubo.light_grid_dims[3] = p_render_data->packed_light_grid_flags;
+	scene_state.ubo.light_grid_z_params[0] = p_render_data->packed_light_grid_z_near;
+	scene_state.ubo.light_grid_z_params[1] = p_render_data->packed_light_grid_z_far;
+	scene_state.ubo.light_grid_z_params[2] = p_render_data->packed_light_grid_z_scale;
+	scene_state.ubo.light_grid_z_params[3] = p_render_data->packed_light_grid_z_bias;
+
 	scene_state.ubo.gi_upscale_for_msaa = false;
 	scene_state.ubo.volumetric_fog_enabled = false;
 
@@ -2042,7 +2052,7 @@ void RenderForwardClustered::setup_added_reflection_probe(const Transform3D &p_t
 	}
 }
 
-void RenderForwardClustered::setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size) {
+void RenderForwardClustered::setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index, float p_barn_door_angle_deg, float p_barn_door_length, float p_intensity) {
 	if (current_cluster_builder != nullptr) {
 		ClusterBuilderRD::LightType type;
 		if (p_type == RSE::LIGHT_SPOT) {
@@ -2053,7 +2063,12 @@ void RenderForwardClustered::setup_added_light(const RSE::LightType p_type, cons
 			type = ClusterBuilderRD::LIGHT_TYPE_AREA;
 		}
 
-		current_cluster_builder->add_light(type, p_transform, p_radius, p_spot_aperture, p_area_size);
+		// GodotNext: light_grid (#139). Route lights into the packed grid when active; legacy bitmask stays untouched otherwise.
+		if (current_cluster_builder->is_packed_grid_requested()) {
+			current_cluster_builder->add_packed_light(type, p_per_type_index, p_transform, p_radius, p_spot_aperture, p_area_size, p_barn_door_angle_deg, p_barn_door_length, p_intensity, false);
+		} else {
+			current_cluster_builder->add_light(type, p_transform, p_radius, p_spot_aperture, p_area_size);
+		}
 	}
 }
 
@@ -2615,6 +2630,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		// If we ever make this optimization we should make it optional and only use it in mono.
 		// What we win by filtering out a few lights, we loose by having to do the work double for stereo.
 		current_cluster_builder->begin(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, !p_render_data->reflection_probe.is_valid());
+		// GodotNext: light_grid (#139). Enable packed light grid collection only when active for this view.
+		current_cluster_builder->set_packed_grid_active(packed_light_grid_active);
 	}
 
 	bool using_shadows = true;
@@ -2650,7 +2667,36 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	p_render_data->directional_light_count = directional_light_count;
 
 	if (current_cluster_builder) {
+		// GodotNext: light_grid (#139, plan §21.3 contract M2).
+		if (packed_light_grid_active) {
+			RID hiz_depth_tex;
+			if (packed_light_grid_has_depth_prepass && rb_data.is_valid() && !p_render_data->reflection_probe.is_valid() && rb->get_view_count() == 1) {
+				hiz_depth_tex = rb->get_depth_texture(0);
+			}
+			RID hiz_sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			const bool cull_front_of_min = render_list[RENDER_LIST_ALPHA].elements.is_empty();
+			current_cluster_builder->bake_packed_light_grid(hiz_depth_tex, hiz_sampler, cull_front_of_min);
+
+			const RendererRD::LightGrid::ZParams zp = current_cluster_builder->get_packed_z_params();
+			p_render_data->packed_light_grid_headers_buffer = current_cluster_builder->get_packed_cell_headers_buffer();
+			p_render_data->packed_light_grid_index_buffer = current_cluster_builder->get_packed_index_buffer();
+			p_render_data->packed_light_grid_dims = current_cluster_builder->get_packed_grid_dims();
+			p_render_data->packed_light_grid_flags = current_cluster_builder->get_packed_grid_flags();
+			p_render_data->packed_light_grid_z_near = zp.z_near;
+			p_render_data->packed_light_grid_z_far = zp.z_far;
+			p_render_data->packed_light_grid_z_scale = zp.z_scale;
+			p_render_data->packed_light_grid_z_bias = zp.z_bias;
+		} else {
+			p_render_data->packed_light_grid_headers_buffer = cluster_builder_shared.get_default_light_grid_buffer();
+			p_render_data->packed_light_grid_index_buffer = cluster_builder_shared.get_default_light_grid_buffer();
+			p_render_data->packed_light_grid_flags = 0u;
+		}
+
 		current_cluster_builder->bake_cluster();
+
+		if (!p_render_data->reflection_probe.is_valid() && RendererRD::LightGrid::consume_check_request()) {
+			RendererRD::LightGrid::store_check_result(current_cluster_builder->run_packed_grid_check());
+		}
 	}
 
 	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218) / vsm_nanite (#217). After the light buffers (vsm_map_base) and the cluster.
@@ -6618,7 +6664,27 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: vsm_page_marking (#219) / df_shadows (#214). Page marking and DF shadow mask read prepass depth.
 	const bool using_vsm = _vsm_marks_view(p_render_data);
 	force_depth_pre_pass = force_depth_pre_pass || using_vsm || using_df_shadows;
+	// GodotNext: light_grid (#139, plan §21.3 contract M2). Activate packed light grid only when
+	// MegaLights is enabled for this view or positional light count exceeds the legacy bitmask cap.
+	uint32_t packed_positional_light_hint = 0u;
+	if (!megalights_inputs_active && current_cluster_builder != nullptr && p_render_data->lights != nullptr && p_render_data->lights->size() > current_cluster_builder->get_max_cluster_elements()) {
+		for (uint32_t i = 0; i < (uint32_t)p_render_data->lights->size(); i++) {
+			RID li = (*p_render_data->lights)[i];
+			if (!light_storage->owns_light_instance(li)) {
+				continue;
+			}
+			RID base_light = light_storage->light_instance_get_base_light(li);
+			if (light_storage->light_get_type(base_light) != RSE::LIGHT_DIRECTIONAL) {
+				packed_positional_light_hint++;
+			}
+		}
+	}
+	const bool using_packed_light_grid = current_cluster_builder != nullptr &&
+			RendererRD::LightGrid::should_use_packed_grid(megalights_inputs_active, packed_positional_light_hint, current_cluster_builder->get_max_cluster_elements());
+	force_depth_pre_pass = force_depth_pre_pass || using_packed_light_grid;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
+	packed_light_grid_active = using_packed_light_grid;
+	packed_light_grid_has_depth_prepass = depth_pre_pass;
 	vsm_mark_view = using_vsm && depth_pre_pass;
 	df_shadows_view = using_df_shadows && depth_pre_pass;
 	df_bind_mask = RID();
@@ -6674,8 +6740,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
 		finish_depth = finish_depth || using_nextgi || using_nextgeo;
-		// GodotNext: vsm_page_marking (#219) / df_shadows (#214). With MSAA, marking and DF mask read resolved depth.
-		finish_depth = finish_depth || using_vsm || using_df_shadows;
+		// GodotNext: vsm_page_marking (#219) / df_shadows (#214) / light_grid (#139). With MSAA, marking, DF mask,
+		// and packed light-grid Hi-Z cell culling read the resolved prepass depth.
+		finish_depth = finish_depth || using_vsm || using_df_shadows || using_packed_light_grid;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		render_list_params.use_nextgeo_proxy = is_reflection_probe;
 		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
@@ -6899,7 +6966,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	if (current_cluster_builder) {
-		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
+		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0 ||
+				current_cluster_builder->get_packed_area_light_count() != 0;
 	}
 
 	RENDER_TIMESTAMP("Render Opaque Pass");
@@ -9335,6 +9403,15 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		_ensure_df_default_textures();
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 58, df_bind_mask.is_valid() ? df_bind_mask : df_default_mask));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 59, df_bind_guide.is_valid() ? df_bind_guide : df_default_guide));
+	}
+	{
+		// GodotNext: light_grid (#139, plan §21.3 contract M2). Packed per-cell light list buffers
+		// (default dummy buffer when the packed light grid is inactive).
+		const RID default_lg = cluster_builder_shared.get_default_light_grid_buffer();
+		const RID lg_headers = (p_render_data && p_render_data->packed_light_grid_headers_buffer.is_valid()) ? p_render_data->packed_light_grid_headers_buffer : default_lg;
+		const RID lg_indices = (p_render_data && p_render_data->packed_light_grid_index_buffer.is_valid()) ? p_render_data->packed_light_grid_index_buffer : default_lg;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 60, lg_headers));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 61, lg_indices));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)

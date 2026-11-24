@@ -70,6 +70,16 @@ public:
 	uint32_t cluster_size = 0;
 	uint32_t cluster_max_elements = 0;
 
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+	RID packed_light_grid_headers_buffer;
+	RID packed_light_grid_index_buffer;
+	Vector3i packed_light_grid_dims;
+	uint32_t packed_light_grid_flags = 0;
+	float packed_light_grid_z_near = 0.05f;
+	float packed_light_grid_z_far = 100.0f;
+	float packed_light_grid_z_scale = 1.0f;
+	float packed_light_grid_z_bias = 0.0f;
+
 	uint32_t directional_light_count = 0;
 	bool directional_light_soft_shadows = false;
 

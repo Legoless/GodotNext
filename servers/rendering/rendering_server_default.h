@@ -134,6 +134,13 @@ class RenderingServerDefault : public RenderingServer {
 	Dictionary _virtual_shadow_maps_get_raster_check_result() {
 		return RenderingServer::virtual_shadow_maps_get_raster_check_result();
 	}
+	// GodotNext: light_grid (#139).
+	void _light_grid_request_check() {
+		RenderingServer::light_grid_request_check();
+	}
+	Dictionary _light_grid_get_check_result() {
+		return RenderingServer::light_grid_get_check_result();
+	}
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -1442,6 +1449,27 @@ public:
 		} else {
 			Dictionary ret;
 			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_shadow_maps_get_raster_check_result, &ret);
+			return ret;
+		}
+	}
+
+	// GodotNext: light_grid (#139).
+	virtual void light_grid_request_check() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			_light_grid_request_check();
+		} else {
+			command_queue.push(this, &RenderingServerDefault::_light_grid_request_check);
+		}
+	}
+
+	virtual Dictionary light_grid_get_check_result() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _light_grid_get_check_result();
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_light_grid_get_check_result, &ret);
 			return ret;
 		}
 	}

@@ -607,6 +607,9 @@ public:
 	virtual Dictionary virtual_shadow_maps_get_raster_check_result();
 	// GodotNext: vsm_settings_debug (#221). The tier rule's result and the project's shadow method.
 	virtual Dictionary virtual_shadow_maps_get_tier_info();
+	// GodotNext: light_grid (#139, plan §21.3 contract M2). GPU check for the packed froxel light grid.
+	virtual void light_grid_request_check();
+	virtual Dictionary light_grid_get_check_result();
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;

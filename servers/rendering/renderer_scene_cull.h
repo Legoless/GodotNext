@@ -421,6 +421,11 @@ public:
 	static void _instance_pair(Instance *p_A, Instance *p_B);
 	static void _instance_unpair(Instance *p_A, Instance *p_B);
 
+	// GodotNext: light_grid (#139, plan §21.3 contract M2). CPU light-geometry pairing skip.
+	struct InstanceLightData;
+	bool _light_skips_geometry_pairing(const Instance *p_light_instance, const InstanceLightData *p_light) const;
+	static bool light_should_skip_geometry_pairing(bool p_mobile_light_pairing, bool p_casts_shadow, RSE::LightShadowMethod p_shadow_method, bool p_megalights_active, bool p_uses_projector, bool p_uses_softshadow);
+
 	void _instance_update_mesh_instance(Instance *p_instance) const;
 	// GodotNext: nextgeo_instance_records (#75).
 	void _instance_record_attach(Instance *p_instance) const;
@@ -788,6 +793,8 @@ public:
 
 		bool uses_projector = false;
 		bool uses_softshadow = false;
+		// GodotNext: light_grid (#139, plan §21.3 contract M2). True when the light skips CPU geometry pairing.
+		bool skips_geometry_pairing = false;
 
 		HashSet<Instance *> geometries;
 
@@ -928,6 +935,13 @@ public:
 			Instance *p_instance = (Instance *)p_data;
 
 			if (instance != p_instance && instance->transformed_aabb.intersects(p_instance->transformed_aabb) && (pair_mask & (1 << p_instance->base_type))) {
+				// GodotNext: light_grid (#139). Avoid allocating InstancePair links between geometries and
+				// lights whose resolved shadow method needs no shadow map and is not used by mobile.
+				if (p_instance->base_type == RSE::INSTANCE_LIGHT && ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK)) {
+					if (static_cast<InstanceLightData *>(p_instance->base_data)->skips_geometry_pairing) {
+						return false;
+					}
+				}
 				//test is more coarse in indexer
 				p_instance->pair_check = pair_pass;
 				InstancePair *pair = pair_allocator->alloc();

@@ -47,6 +47,8 @@
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
+// GodotNext: light_grid (#139).
+#include "servers/rendering/renderer_rd/light_grid_math.h"
 // GodotNext: vsm_page_pool (#220).
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #endif
@@ -2404,6 +2406,22 @@ Dictionary RenderingServer::virtual_shadow_maps_get_raster_check_result() {
 	return Dictionary();
 }
 
+void RenderingServer::light_grid_request_check() {
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	RendererRD::LightGrid::request_check();
+#endif
+}
+
+Dictionary RenderingServer::light_grid_get_check_result() {
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	return RendererRD::LightGrid::get_check_result();
+#else
+	return Dictionary();
+#endif
+}
+
 Dictionary RenderingServer::virtual_shadow_maps_get_tier_info() {
 	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). Valid on every renderer: without the Forward+
 	// storage the reason is UNSUPPORTED_RENDERER.
@@ -2837,6 +2855,9 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: df_shadows (#214).
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
+	// GodotNext: light_grid (#139).
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_BARN_DOOR_ANGLE);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_BARN_DOOR_LENGTH);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DISABLED);
@@ -3154,6 +3175,9 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: vsm_settings_debug (#221).
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_tier_info"), &RenderingServer::virtual_shadow_maps_get_tier_info);
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_raster_check_result"), &RenderingServer::virtual_shadow_maps_get_raster_check_result);
+	// GodotNext: light_grid (#139, plan §21.3 contract M2).
+	ClassDB::bind_method(D_METHOD("light_grid_request_check"), &RenderingServer::light_grid_request_check);
+	ClassDB::bind_method(D_METHOD("light_grid_get_check_result"), &RenderingServer::light_grid_get_check_result);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);

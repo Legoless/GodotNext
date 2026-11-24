@@ -2242,6 +2242,18 @@
 				If [code]true[/code], this light will not be used for anything except sky shaders. Use this for lights that impact your sky shader that you may want to hide from affecting the rest of the scene. For example, you may want to enable this when the sun in your sky shader falls below the horizon.
 			</description>
 		</method>
+		<method name="light_grid_get_check_result">
+			<return type="Dictionary" />
+			<description>
+				Returns the most recent GPU-versus-CPU reference verification result recorded after calling [method light_grid_request_check]. Returns an empty [Dictionary] if no check has completed yet.
+			</description>
+		</method>
+		<method name="light_grid_request_check">
+			<return type="void" />
+			<description>
+				Arms a one-shot verification readback on the next rendered Forward+ main view, comparing the GPU packed light grid against the CPU brute-force reference. Retrieve the result with [method light_grid_get_check_result].
+			</description>
+		</method>
 		<method name="light_omni_set_shadow_mode">
 			<return type="void" />
 			<param index="0" name="light" type="RID" />
@@ -5514,7 +5526,13 @@
 		<constant name="LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE" value="23" enum="LightParam">
 			Maximum distance from the camera (in 3D units) covered by distance-field far shadows on a [DirectionalLight3D]. Equivalent to [member Light3D.distance_field_shadow_distance].
 		</constant>
-		<constant name="LIGHT_PARAM_MAX" value="24" enum="LightParam">
+		<constant name="LIGHT_PARAM_BARN_DOOR_ANGLE" value="24" enum="LightParam">
+			The opening angle of an area light's barn doors in degrees (see [member AreaLight3D.barn_door_angle]).
+		</constant>
+		<constant name="LIGHT_PARAM_BARN_DOOR_LENGTH" value="25" enum="LightParam">
+			The length of an area light's barn doors in meters (see [member AreaLight3D.barn_door_length]).
+		</constant>
+		<constant name="LIGHT_PARAM_MAX" value="26" enum="LightParam">
 			Represents the size of the [enum LightParam] enum.
 		</constant>
 		<constant name="LIGHT_BAKE_DISABLED" value="0" enum="LightBakeMode">

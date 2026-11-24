@@ -224,7 +224,13 @@
 		<constant name="PARAM_DISTANCE_FIELD_SHADOW_DISTANCE" value="23" enum="Param">
 			Constant for accessing [member distance_field_shadow_distance].
 		</constant>
-		<constant name="PARAM_MAX" value="24" enum="Param">
+		<constant name="PARAM_BARN_DOOR_ANGLE" value="24" enum="Param">
+			Constant for accessing [member AreaLight3D.barn_door_angle].
+		</constant>
+		<constant name="PARAM_BARN_DOOR_LENGTH" value="25" enum="Param">
+			Constant for accessing [member AreaLight3D.barn_door_length].
+		</constant>
+		<constant name="PARAM_MAX" value="26" enum="Param">
 			Represents the size of the [enum Param] enum.
 		</constant>
 		<constant name="BAKE_DISABLED" value="0" enum="BakeMode">

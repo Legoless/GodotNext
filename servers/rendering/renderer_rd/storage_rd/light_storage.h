@@ -859,6 +859,8 @@ public:
 
 	void free_light_data();
 	void set_max_lights(const uint32_t p_max_lights);
+	// GodotNext: light_grid (#139). Grow positional light SSBOs dynamically up to LightGrid::MAX_LIGHTS (65,536).
+	void ensure_light_capacity(const uint32_t p_required_per_type);
 	// GodotNext: vsm_page_marking (#219). The lights update_light_buffers() wrote last.
 	uint32_t get_omni_light_count() const { return omni_light_count; }
 	uint32_t get_spot_light_count() const { return spot_light_count; }
