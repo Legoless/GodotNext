@@ -361,7 +361,7 @@ String find_loaded_module_by_basename(const String &p_basename) {
 	DWORD needed = 0;
 	HANDLE proc = GetCurrentProcess();
 	if (EnumProcessModules(proc, modules, sizeof(modules), &needed)) {
-		const DWORD count = MIN<DWORD>(needed / sizeof(HMODULE), 1024);
+		const DWORD count = MIN<DWORD>(needed / DWORD(sizeof(HMODULE)), DWORD(1024));
 		wchar_t path_buf[MAX_PATH * 4];
 		for (DWORD i = 0; i < count; i++) {
 			const DWORD len = GetModuleFileNameW(modules[i], path_buf, uint32_t(sizeof(path_buf) / sizeof(path_buf[0])));
