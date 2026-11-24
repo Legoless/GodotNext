@@ -109,6 +109,14 @@ jobs:
             bin: ./bin/godot.linuxbsd.editor.x86_64
             free-space: true
 
+          - name: Editor w/ DLSS mock backend (target=editor, module_dlss_enabled=yes, dlss_backend=mock)
+            cache-name: linux-editor-dlss-mock
+            target: editor
+            scons-flags: module_dlss_enabled=yes dlss_backend=mock debug_symbols=no
+            bin: ./bin/godot.linuxbsd.editor.x86_64.dlss
+            dlss-mock-byte-check: true
+            free-space: true
+
           - name: Minimal template (target=template_release, everything disabled)
             cache-name: linux-template-minimal
             target: template_release
@@ -243,6 +251,15 @@ jobs:
         if: matrix.artifact
         with:
           name: ${{ matrix.cache-name }}
+
+      - name: Verify DLSS mock binary contains no NGX symbols
+        if: matrix.dlss-mock-byte-check
+        run: |
+          hits=$(grep -a -c -e NVSDK_NGX -e nvngx_dlss "${{ matrix.bin }}" || true)
+          if [ "$hits" -ne 0 ]; then
+            echo "Unexpected NGX symbol/string hits ($hits) in mock binary ${{ matrix.bin }}" >&2
+            exit 1
+          fi
 
       - name: Unit tests
         run: |

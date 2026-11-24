@@ -13,18 +13,61 @@ DLSS-free. Do not add NVIDIA files to the repository: the CI guard
 
 ## Building with DLSS (developers only)
 
-`modules/dlss` is disabled by default. Developers who accept NVIDIA's terms
-compile it against their own SDK checkout:
+`modules/dlss` is disabled by default (`is_enabled() == False`). Developers who
+accept NVIDIA's RTX SDKs License directly can fetch the pinned SDK outside any
+git work tree using the helper script:
+
+```
+python3 misc/scripts/install_dlss_sdk.py --accept-nvidia-license
+```
+
+`install_dlss_sdk.py` clones `NVIDIA/DLSS` at the pinned tag (`v310.9.16`) into
+`~/.godotnext/dlss-sdk/v310.9.16` (outside any git repository) and verifies the
+pinned `lib/*/rel/` SHA-256 digests.
+
+### Windows (MSVC or clang-cl, release CRT only)
 
 ```
 scons platform=windows target=editor dev_mode=yes d3d12=yes \
   module_dlss_enabled=yes dlss_backend=ngx dlss_sdk_path=<their SDK>
 ```
 
-`dlss_backend=mock` compiles and tests without any SDK; CI builds and tests
-only the mock backend. DLSS-enabled builds are allowed only on the owned RTX
-4080 SUPER and RTX 5090 machines. Never on the Linux VM or a rented/cloud GPU
-(Supplement §3; the five questions in `dlss-license.md`).
+- `use_mingw=yes` and `debug_crt=yes` (`/MDd`) are rejected at configure time
+  because the NVIDIA DLSS SDK ships MSVC release-CRT static libraries
+  (`nvsdk_ngx_s.lib` for `/MT` when `use_static_cpp=yes`, otherwise
+  `nvsdk_ngx_d.lib` for `/MD`).
+- Build outputs get the `.dlss` module suffix (e.g.
+  `godot.windows.editor.x86_64.dlss.exe`), the unmodified `rel/` runtime DLL is
+  copied into `bin/`, and `bin/dlss_runtime.json` records `{sdk_tag, variant, sha256, files}`.
+- Pass `dlss_dev_runtime=yes` only for local debugging (copies `dev/` runtimes
+  and emits a startup warning; never distribute or export `dev/` runtimes).
+
+### Linux (native x86_64 Vulkan)
+
+```
+scons platform=linuxbsd target=editor dev_mode=yes \
+  module_dlss_enabled=yes dlss_backend=ngx dlss_sdk_path=<their SDK>
+```
+
+- Links against `<sdk>/lib/Linux_x86_64/libnvsdk_ngx.a` (or `libsdk_nvngx.a`)
+  and copies `libnvidia-ngx-dlss.so.<ver>` alongside `bin/dlss_runtime.json`.
+- Native Linux x86_64 builds are validated directly on the RTX 5090 Linux
+  workstation (WSL2 on the Windows RTX 4080 SUPER machine is not required once
+  native Linux NVIDIA hardware is available).
+
+### Mock backend (CI and local tests without the SDK)
+
+```
+scons platform=linuxbsd target=editor dev_mode=yes \
+  module_dlss_enabled=yes dlss_backend=mock
+./bin/godot.linuxbsd.editor.x86_64.dlss --headless --test --tc="*[DLSS]*"
+```
+
+`dlss_backend=mock` compiles and tests without any SDK and contains zero
+`NVSDK_NGX` or `nvngx_dlss` symbols/strings. CI builds and tests only the
+default and mock backends. DLSS-enabled `ngx` builds are allowed only on owned
+NVIDIA RTX machines, never on rented/cloud GPUs (Supplement §3; the five
+questions in `dlss-license.md`).
 
 ## Distributor duties (§19(f))
 

@@ -41,6 +41,16 @@ jobs:
             bin: ./bin/godot.windows.editor.x86_64.llvm.exe
             compiler: clang
 
+          - name: Editor w/ DLSS mock backend (target=editor, module_dlss_enabled=yes, dlss_backend=mock)
+            cache-name: windows-editor-dlss-mock
+            target: editor
+            scons-flags: >-
+              windows_subsystem=console
+              module_dlss_enabled=yes
+              dlss_backend=mock
+            bin: ./bin/godot.windows.editor.x86_64.dlss.exe
+            compiler: msvc
+
           - name: Template (target=template_release)
             cache-name: windows-template
             target: template_release

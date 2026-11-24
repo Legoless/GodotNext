@@ -1,0 +1,129 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import hashlib
+import json
+import os
+import subprocess
+
+from methods import print_warning
+
+Import("env")
+Import("env_modules")
+
+env_dlss = env_modules.Clone()
+
+module_obj = []
+
+env_dlss.add_source_files(module_obj, "register_types.cpp")
+env_dlss.add_source_files(module_obj, "dlss_backend_mock.cpp")
+
+if env["tests"]:
+    env_dlss.Append(CPPDEFINES=["TESTS_ENABLED"])
+    env_dlss.add_source_files(module_obj, "./tests/*.cpp")
+
+if env["dlss_backend"] == "ngx":
+    env_dlss.Append(CPPDEFINES=["DLSS_BACKEND_NGX"])
+    env_dlss.Prepend(CPPPATH=[env["dlss_resolved_include"]])
+
+    if env["dlss_dev_runtime"]:
+        env_dlss.Append(CPPDEFINES=["DLSS_DEV_RUNTIME"])
+
+    if env["vulkan"]:
+        env_dlss.add_source_files(module_obj, "dlss_ngx_vk.cpp")
+
+    lib_path = env["dlss_resolved_lib"]
+    if env["platform"] == "windows":
+        env.Append(LIBS=[env.File(lib_path)])
+    else:
+        env.Append(LIBS=[env.File(lib_path)])
+
+    # Copy runtime libraries unmodified into #bin/ and write bin/dlss_runtime.json.
+    sdk_root = env["dlss_resolved_sdk"]
+    runtime_files = env.get("dlss_resolved_runtime_files", [])
+    copied_targets = []
+    for src_path, _variant in runtime_files:
+        basename = os.path.basename(src_path)
+        copied_targets.append(
+            env.CommandNoCache(
+                "#bin/" + basename,
+                env.File(src_path),
+                Copy("$TARGET", "$SOURCE"),
+            )
+        )
+
+    def _describe_sdk_tag(path):
+        try:
+            res = subprocess.run(
+                ["git", "-C", path, "describe", "--tags", "--exact-match"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+            res = subprocess.run(
+                ["git", "-C", path, "describe", "--tags"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except OSError:
+            pass
+        return "unknown"
+
+    def _sha256_file(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _write_dlss_manifest(target, source, env):
+        from modules.dlss.config import DLSS_SDK_TAG
+
+        detected_tag = _describe_sdk_tag(sdk_root)
+        if detected_tag != DLSS_SDK_TAG:
+            print_warning(
+                f"modules/dlss: SDK tag at '{sdk_root}' is '{detected_tag}', expected pinned tag '{DLSS_SDK_TAG}'."
+            )
+        variant = "dev" if env["dlss_dev_runtime"] else "rel"
+        sha_map = {}
+        files_list = []
+        for src_path, file_variant in runtime_files:
+            basename = os.path.basename(src_path)
+            digest = _sha256_file(src_path)
+            sha_map[basename] = digest
+            files_list.append(
+                {
+                    "name": basename,
+                    "sha256": digest,
+                    "variant": file_variant,
+                }
+            )
+        manifest = {
+            "sdk_tag": detected_tag,
+            "pinned_tag": DLSS_SDK_TAG,
+            "variant": variant,
+            "sha256": sha_map,
+            "files": files_list,
+        }
+        out_path = str(target[0])
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+            f.write("\n")
+
+    manifest_cmd = env.CommandNoCache(
+        "#bin/dlss_runtime.json",
+        copied_targets,
+        env.Action(_write_dlss_manifest, "Generating DLSS runtime manifest $TARGET"),
+    )
+    env.AlwaysBuild(manifest_cmd)
+    env.Default(copied_targets, manifest_cmd)
+else:
+    env_dlss.Append(CPPDEFINES=["DLSS_BACKEND_MOCK"])
+
+env.modules_sources += module_obj

@@ -184,6 +184,11 @@
 /modules/dds/**/*.py                          @godotengine/asset-pipeline @godotengine/buildsystem
 /modules/dds/**/SCsub                         @godotengine/asset-pipeline @godotengine/buildsystem
 /modules/dds/tests/                           @godotengine/asset-pipeline @godotengine/tests
+/modules/dlss/                                @godotengine/rendering
+/modules/dlss/**/*.py                         @godotengine/rendering @godotengine/buildsystem
+/modules/dlss/**/SCsub                        @godotengine/rendering @godotengine/buildsystem
+/modules/dlss/editor/                         @godotengine/rendering @godotengine/editor
+/modules/dlss/tests/                          @godotengine/rendering @godotengine/tests
 /modules/etcpak/                              @godotengine/asset-pipeline
 /modules/etcpak/**/*.py                       @godotengine/asset-pipeline @godotengine/buildsystem
 /modules/etcpak/**/SCsub                      @godotengine/asset-pipeline @godotengine/buildsystem
