@@ -1208,6 +1208,11 @@ uint instance_index_interp = 0u;
 
 int _ng_vertex_id = 0;
 int _ng_instance_id = 0;
+uint _ng_record_index = 0u;
+vec4 _ng_instance_color = vec4(1.0);
+vec4 _ng_instance_custom = vec4(0.0);
+mat3x4 _ng_model_xform = mat3x4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0));
+bool _ng_non_uniform_scale = false;
 vec4 color_attrib = vec4(1.0);
 vec2 uv_attrib = vec2(0.0);
 vec2 uv2_attrib = vec2(0.0);
@@ -1625,9 +1630,9 @@ void _ng_resolve_vertex_corner(
 		in vec3 model_precision,
 #endif
 		out vec4 r_clip_pos) {
-	vec4 instance_custom = vec4(0.0);
+	vec4 instance_custom = _ng_instance_custom;
 #if defined(COLOR_USED)
-	color_interp = color_attrib;
+	color_interp = color_attrib * _ng_instance_color;
 #endif
 
 	mat4 inv_view_matrix = transpose(mat4(scene_data.inv_view_matrix[0],
@@ -1645,7 +1650,7 @@ void _ng_resolve_vertex_corner(
 #endif
 
 	mat3 model_normal_matrix;
-	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
+	if (_ng_non_uniform_scale || bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
 		model_normal_matrix = transpose(inverse(mat3(model_matrix)));
 	} else {
 		model_normal_matrix = mat3(model_matrix);
@@ -1936,17 +1941,28 @@ void fragment_shader(in SceneData scene_data) {
 			scene_data.inv_view_matrix[1],
 			scene_data.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#ifdef MODE_VISIBILITY_RESOLVE
+	mat4 read_model_matrix = transpose(mat4(_ng_model_xform[0],
+			_ng_model_xform[1],
+			_ng_model_xform[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+#else
 	mat4 read_model_matrix = transpose(mat4(instances.data[instance_index].transform[0],
 			instances.data[instance_index].transform[1],
 			instances.data[instance_index].transform[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#endif
 
 #ifdef LIGHT_VERTEX_USED
 	vec3 light_vertex = vertex;
 #endif //LIGHT_VERTEX_USED
 
 	mat3 model_normal_matrix;
+#ifdef MODE_VISIBILITY_RESOLVE
+	if (_ng_non_uniform_scale || bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
+#else
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
+#endif
 		model_normal_matrix = transpose(inverse(mat3(read_model_matrix)));
 	} else {
 		model_normal_matrix = mat3(read_model_matrix);
@@ -4185,7 +4201,7 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #ifdef MODE_VISIBILITY_RESOLVE
-	nextgeo_instance_id = instance_index;
+	nextgeo_instance_id = _ng_record_index;
 #endif
 
 #endif //MODE_RENDER_NORMAL_ROUGHNESS
@@ -4431,8 +4447,13 @@ void main() {
 		}
 	}
 
-	instance_index_interp = _ng_entry.x;
-	_ng_instance_id = int(_ng_entry.x);
+	_ng_record_index = _ng_entry.x;
+	NextGeoInstanceAttributes _ng_attr = nextgeo_instance_attrs.data[_ng_entry.x];
+	instance_index_interp = _ng_record.bucket_base >> 5u;
+	_ng_instance_id = int(_ng_attr.meta.y);
+	_ng_instance_color = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_COLOR) != 0u) ? _ng_attr.color : vec4(1.0);
+	_ng_instance_custom = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM) != 0u) ? _ng_attr.custom_data : vec4(0.0);
+	_ng_non_uniform_scale = (_ng_record.flags & NEXTGEO_RECORD_NON_UNIFORM_SCALE) != 0u;
 	// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Past
 	// programmable_raster_distance or vertex_offset_disable_distance, clusters were demoted to FIXED;
 	// skip masked discards or WPO in resolve so distant surfaces stay consistent with raster.
@@ -4454,6 +4475,7 @@ void main() {
 		}
 	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+	_ng_model_xform = _ng_cur_xform;
 #ifdef MOTION_VECTORS
 	mat3x4 _ng_prev_xform = mat3x4(_ng_record.prev_transform[0], _ng_record.prev_transform[1], _ng_record.prev_transform[2]);
 	vec4 _ng_prev_clip_c[3];
@@ -4642,7 +4664,7 @@ void main() {
 					_ng_p_nrm,
 					_ng_p_tan,
 					_ng_p_bin,
-					_ng_entry.x,
+					instance_index_interp,
 					scene_data_block.prev_data,
 					_ng_prev_xform,
 #ifdef USE_DOUBLE_PRECISION
@@ -4668,7 +4690,7 @@ void main() {
 				_ng_c_nrm,
 				_ng_c_tan,
 				_ng_c_bin,
-				_ng_entry.x,
+				instance_index_interp,
 				scene_data_block.data,
 				_ng_cur_xform,
 #ifdef USE_DOUBLE_PRECISION

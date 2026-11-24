@@ -292,6 +292,7 @@
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/3d/sky_material.h"
 // GodotNext: vgd_register
+#include "scene/resources/3d/virtual_geometry_assembly.h"
 #include "scene/resources/3d/virtual_geometry_data.h"
 // GodotNext: mesh_sdf_register
 #include "scene/resources/3d/mesh_distance_field.h"
@@ -913,6 +914,7 @@ void register_scene_types() {
 
 #ifndef _3D_DISABLED
 	// GodotNext: vgd_register
+	GDREGISTER_CLASS(VirtualGeometryAssembly);
 	GDREGISTER_CLASS(VirtualGeometryData);
 	// GodotNext: mesh_sdf_register
 	GDREGISTER_CLASS(MeshDistanceField);

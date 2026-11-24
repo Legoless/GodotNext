@@ -1465,12 +1465,12 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		if (!p_append) {
 			if (!nextgeo_visibility_only_active || nextgeo_programmable_view_active) {
 				nextgeo_resolve.begin_frame();
-				const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
-				nextgeo_bucket_table.resize(MAX(record_count * 32u, 1u));
+				const uint32_t bucket_count = RSG::virtual_mesh_storage->get_bucket_record_count();
+				nextgeo_bucket_table.resize(MAX(bucket_count * 32u, 1u));
 				for (uint32_t k = 0; k < nextgeo_bucket_table.size(); k++) {
 					nextgeo_bucket_table[k] = NextGeoResolve::BUCKET_INVALID;
 				}
-				nextgeo_instance_data.resize(MAX(record_count, 1u));
+				nextgeo_instance_data.resize(MAX(bucket_count, 1u));
 				memset(nextgeo_instance_data.ptr(), 0, nextgeo_instance_data.size() * sizeof(SceneState::InstanceData));
 			} else {
 				nextgeo_bucket_table.clear();
@@ -1485,8 +1485,8 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				nextgeo_raster_bin_owners[bin] = {};
 			}
 			if (nextgeo_programmable_view_active) {
-				const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
-				nextgeo_raster_bin_table.resize(MAX(record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
+				const uint32_t bucket_count = RSG::virtual_mesh_storage->get_bucket_record_count();
+				nextgeo_raster_bin_table.resize(MAX(bucket_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
 				memset(nextgeo_raster_bin_table.ptr(), 0, nextgeo_raster_bin_table.size() * sizeof(uint32_t));
 			} else {
 				nextgeo_raster_bin_table.clear();
@@ -1695,16 +1695,17 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			}
 #endif
 			if (skip_virtual) {
+				const uint32_t bslot = (inst->nextgeo_bucket_slot != UINT32_MAX) ? (inst->nextgeo_bucket_slot + surf->nextgeo_bucket_offset) : UINT32_MAX;
 				// GodotNext: nextgeo_raster_bins (#155). The surface's programmable bin, and the material it binds.
 				if (surf->nextgeo_raster_bin != 0u && nextgeo_virtual_view && p_render_list == RENDER_LIST_OPAQUE && surf->surface_index < 32 && surf->nextgeo_raster_bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT &&
-						inst->nextgeo_record_index != UINT32_MAX && RendererRD::nextgeo_raster_bin_table_word(inst->nextgeo_record_index, surf->surface_index) < nextgeo_raster_bin_table.size()) {
-					RendererRD::nextgeo_raster_bin_table_set(nextgeo_raster_bin_table.ptr(), inst->nextgeo_record_index, surf->surface_index, surf->nextgeo_raster_bin);
+						bslot != UINT32_MAX && RendererRD::nextgeo_raster_bin_table_word(bslot, surf->surface_index) < nextgeo_raster_bin_table.size()) {
+					RendererRD::nextgeo_raster_bin_table_set(nextgeo_raster_bin_table.ptr(), bslot, surf->surface_index, surf->nextgeo_raster_bin);
 					nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].shader = surf->shader;
 					nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].material = surf->material;
 					nextgeo_raster_bins_used |= uint64_t(1) << (surf->nextgeo_raster_bin - 1u);
 				}
-				if ((!nextgeo_visibility_only_active || nextgeo_programmable_view_active) && p_render_list == RENDER_LIST_OPAQUE && inst->nextgeo_record_index < nextgeo_instance_data.size() && surf->surface_index < 32) {
-					const uint32_t rec = inst->nextgeo_record_index;
+				if ((!nextgeo_visibility_only_active || nextgeo_programmable_view_active) && p_render_list == RENDER_LIST_OPAQUE && bslot < nextgeo_instance_data.size() && surf->surface_index < 32) {
+					const uint32_t rec = bslot;
 					SceneState::InstanceData &idata = nextgeo_instance_data[rec];
 					if (inst->store_transform_cache) {
 						RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->transform, idata.transform);
@@ -1779,6 +1780,12 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 						scene_state.used_depth_texture = true;
 					}
 				}
+				surf = surf->next;
+				continue;
+			}
+			// GodotNext: nextgeo_foliage_instancing (#151). Assembly part surfaces carry part-local meshes
+			// only for NextGeo bucket/bin registration and must not draw stacked at the container origin.
+			if (surf->nextgeo_assembly_part) {
 				surf = surf->next;
 				continue;
 			}
@@ -2593,6 +2600,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 			if (!shadow_views.is_empty()) {
 				RSG::virtual_mesh_storage->flush();
+				nextgeo_cut.prepare_gpu_records(RSG::virtual_mesh_storage);
 				if (!nextgeo_cut.dispatch_shadows(RSG::virtual_mesh_storage, shadow_views.ptr(), shadow_views.size(), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")))) {
 					for (uint32_t i = 0; i < render_shadow_to_view.size(); i++) {
 						render_shadow_to_view[i] = -1;
@@ -5296,15 +5304,15 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 	// Step 7: Share #155's programmable raster bins and material raster targets (group 2 depth-only).
 	if (nextgeo_programmable_view_active && p_render_data->render_buffers.is_valid()) {
 		Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
-		const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
-		if (nextgeo_raster_bin_table.size() < record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD) {
+		const uint32_t bucket_count = RSG::virtual_mesh_storage->get_bucket_record_count();
+		if (nextgeo_raster_bin_table.size() < bucket_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD) {
 			const uint32_t old_words = nextgeo_raster_bin_table.size();
-			nextgeo_raster_bin_table.resize(MAX(record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
+			nextgeo_raster_bin_table.resize(MAX(bucket_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
 			memset(nextgeo_raster_bin_table.ptr() + old_words, 0, (nextgeo_raster_bin_table.size() - old_words) * sizeof(uint32_t));
 		}
-		if (nextgeo_instance_data.size() < record_count) {
+		if (nextgeo_instance_data.size() < bucket_count) {
 			const uint32_t old_size = nextgeo_instance_data.size();
-			nextgeo_instance_data.resize(record_count);
+			nextgeo_instance_data.resize(bucket_count);
 			memset(nextgeo_instance_data.ptr() + old_size, 0, (nextgeo_instance_data.size() - old_size) * sizeof(SceneState::InstanceData));
 		}
 		bool extra_instance_uploaded = false;
@@ -5313,7 +5321,7 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 		for (uint32_t s = 0; s < vsm_shadow_count && vsm_shadows != nullptr; s++) {
 			for (uint32_t i = 0; i < vsm_shadows[s].casters.size(); i++) {
 				GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(vsm_shadows[s].casters[i].geometry_instance);
-				if (inst == nullptr || inst->nextgeo_record_index >= record_count) {
+				if (inst == nullptr || inst->nextgeo_record_index == UINT32_MAX || inst->nextgeo_bucket_slot == UINT32_MAX) {
 					continue;
 				}
 				for (GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf != nullptr; surf = surf->next) {
@@ -5323,16 +5331,20 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 					if (surf->nextgeo_raster_bin == 0u || surf->nextgeo_raster_bin >= RendererVirtualMeshStorage::RASTER_BIN_LIMIT || surf->surface_index >= 32u || surf->shader == nullptr || surf->material == nullptr) {
 						continue;
 					}
-					const uint32_t existing_bin = RendererRD::nextgeo_raster_bin_table_get(nextgeo_raster_bin_table.ptr(), inst->nextgeo_record_index, surf->surface_index);
+					const uint32_t bslot = inst->nextgeo_bucket_slot + surf->nextgeo_bucket_offset;
+					if (bslot >= bucket_count) {
+						continue;
+					}
+					const uint32_t existing_bin = RendererRD::nextgeo_raster_bin_table_get(nextgeo_raster_bin_table.ptr(), bslot, surf->surface_index);
 					if (existing_bin != surf->nextgeo_raster_bin) {
-						RendererRD::nextgeo_raster_bin_table_set(nextgeo_raster_bin_table.ptr(), inst->nextgeo_record_index, surf->surface_index, surf->nextgeo_raster_bin);
+						RendererRD::nextgeo_raster_bin_table_set(nextgeo_raster_bin_table.ptr(), bslot, surf->surface_index, surf->nextgeo_raster_bin);
 						nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].shader = surf->shader;
 						nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].material = surf->material;
 						nextgeo_raster_bins_used |= uint64_t(1) << (surf->nextgeo_raster_bin - 1u);
 						// Off-camera and SHADOWS_ONLY instances were not visited in RENDER_LIST_OPAQUE;
 						// populate their SceneState::InstanceData with the exact transposed 3x4 layout
 						// expected by raster_material_inc.glsl.
-						SceneState::InstanceData &idata = nextgeo_instance_data[inst->nextgeo_record_index];
+						SceneState::InstanceData &idata = nextgeo_instance_data[bslot];
 						if (idata.material_feedback_index == 0u) {
 							if (inst->store_transform_cache) {
 								RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->transform, idata.transform);
@@ -5446,6 +5458,8 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 			}
 		}
 	}
+
+	nextgeo_cut.prepare_gpu_records(RSG::virtual_mesh_storage);
 
 	Dictionary nanite_stats;
 	if (nextgeo_cut.dispatch_vsm(RSG::virtual_mesh_storage, inputs, &nanite_stats)) {
@@ -6414,6 +6428,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// before this frame's views inspect record buffers; idempotent after
 		// the first view.
 		RSG::virtual_mesh_storage->flush();
+		nextgeo_cut.prepare_gpu_records(RSG::virtual_mesh_storage);
 	}
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -10624,7 +10639,7 @@ void RenderForwardClustered::_update_global_pipeline_data_requirements_from_ligh
 	global_pipeline_data_required.use_shadow_dual_paraboloid = light_storage->get_shadow_dual_paraboloid_used();
 }
 
-void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh, bool p_chain_blocked) {
+void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh, bool p_chain_blocked, uint32_t p_bucket_offset, bool p_assembly_part) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	uint32_t flags = 0;
 
@@ -10701,11 +10716,12 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		material_shadow = p_material;
 	}
 
-	// GodotNext: nextgeo_exclusive_dispatch (#79) / nextgeo_resolve (#80).
+	// GodotNext: nextgeo_exclusive_dispatch (#79) / nextgeo_resolve (#80) / nextgeo_foliage_instancing (#151).
 	// Mark the surface as a virtual-geometry candidate here; the view-level
 	// gates (MSAA, multiview, debug draw, draw_ready) are applied per view.
 	RendererRD::NextGeoSurfaceFacts route_facts;
-	route_facts.instance_mesh = ginstance->data->base_type == RSE::INSTANCE_MESH;
+	route_facts.instance_mesh = ginstance->data->base_type == RSE::INSTANCE_MESH ||
+			(ginstance->data->base_type == RSE::INSTANCE_MULTIMESH && ginstance->nextgeo_record_index != UINT32_MAX);
 	if (route_facts.instance_mesh && RSG::virtual_mesh_storage != nullptr) {
 		route_facts.mesh_has_virtual_geometry = RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 		route_facts.surface_in_mask = route_facts.mesh_has_virtual_geometry && RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, p_surface);
@@ -10808,6 +10824,8 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	sdcache->surface_rt_proxy = nullptr;
 	sdcache->primitive = mesh_storage->mesh_surface_get_primitive(sdcache->surface);
 	sdcache->surface_index = p_surface;
+	sdcache->nextgeo_bucket_offset = p_bucket_offset;
+	sdcache->nextgeo_assembly_part = p_assembly_part;
 
 	if (ginstance->data->dirty_dependencies) {
 		RSG::utilities->base_update_dependency(p_mesh, &ginstance->data->dependency_tracker);
@@ -10857,7 +10875,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 #endif
 }
 
-void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, RID p_mat_src, RID p_mesh, bool p_overlay) {
+void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, RID p_mat_src, RID p_mesh, bool p_overlay, uint32_t p_bucket_offset, bool p_assembly_part) {
 	SceneShaderForwardClustered::MaterialData *material = p_material;
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
@@ -10879,7 +10897,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(
 		walk = next;
 	}
 
-	_geometry_instance_add_surface_with_material(ginstance, p_surface, material, p_mat_src.get_local_index(), material_storage->material_get_shader_id(p_mat_src), p_mesh, chain_blocked);
+	_geometry_instance_add_surface_with_material(ginstance, p_surface, material, p_mat_src.get_local_index(), material_storage->material_get_shader_id(p_mat_src), p_mesh, chain_blocked, p_bucket_offset, p_assembly_part);
 
 	while (material->next_pass.is_valid()) {
 		RID next_pass = material->next_pass;
@@ -10890,11 +10908,11 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(
 		if (ginstance->data->dirty_dependencies) {
 			material_storage->material_update_dependency(next_pass, &ginstance->data->dependency_tracker);
 		}
-		_geometry_instance_add_surface_with_material(ginstance, p_surface, material, next_pass.get_local_index(), material_storage->material_get_shader_id(next_pass), p_mesh, chain_blocked);
+		_geometry_instance_add_surface_with_material(ginstance, p_surface, material, next_pass.get_local_index(), material_storage->material_get_shader_id(next_pass), p_mesh, chain_blocked, p_bucket_offset, p_assembly_part);
 	}
 }
 
-void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, RID p_material, RID p_mesh) {
+void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, RID p_material, RID p_mesh, uint32_t p_bucket_offset, bool p_assembly_part) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RID m_src;
 
@@ -10928,7 +10946,7 @@ void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForw
 		overlay_valid = overlay != nullptr && overlay->shader_data->is_valid();
 	}
 
-	_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh, overlay_valid);
+	_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh, overlay_valid, p_bucket_offset, p_assembly_part);
 
 	if (ginstance->data->material_overlay.is_valid()) {
 		m_src = ginstance->data->material_overlay;
@@ -10939,7 +10957,7 @@ void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForw
 				material_storage->material_update_dependency(m_src, &ginstance->data->dependency_tracker);
 			}
 
-			_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh, overlay_valid);
+			_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh, overlay_valid, p_bucket_offset, p_assembly_part);
 		}
 	}
 }
@@ -10953,25 +10971,41 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 		ginstance->data->dependency_tracker.update_begin();
 	}
 
+	auto add_mesh_or_assembly = [&](RID p_mesh, const RID *p_inst_materials, uint32_t p_inst_mat_count) {
+		// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 GN-7). When experimental assemblies are
+		// active, register each unique part mesh's surfaces under its contiguous bucket slot offset.
+		if (RSG::virtual_mesh_storage != nullptr && ginstance->nextgeo_record_index != UINT32_MAX &&
+				RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(p_mesh)) {
+			const LocalVector<RID> *unique_parts = RSG::virtual_mesh_storage->mesh_get_assembly_unique_part_meshes(p_mesh);
+			if (unique_parts != nullptr && !unique_parts->is_empty()) {
+				for (uint32_t u = 0; u < unique_parts->size(); u++) {
+					const RID part_mesh = (*unique_parts)[u];
+					uint32_t part_surface_count = 0;
+					const RID *part_materials = mesh_storage->mesh_get_surface_count_and_materials(part_mesh, part_surface_count);
+					if (part_materials) {
+						for (uint32_t j = 0; j < part_surface_count; j++) {
+							_geometry_instance_add_surface(ginstance, j, part_materials[j], part_mesh, u, true);
+						}
+					}
+				}
+				return;
+			}
+		}
+		uint32_t surface_count = 0;
+		const RID *materials = mesh_storage->mesh_get_surface_count_and_materials(p_mesh, surface_count);
+		if (materials) {
+			for (uint32_t j = 0; j < surface_count; j++) {
+				RID material = (p_inst_materials != nullptr && j < p_inst_mat_count && p_inst_materials[j].is_valid()) ? p_inst_materials[j] : materials[j];
+				_geometry_instance_add_surface(ginstance, j, material, p_mesh);
+			}
+		}
+	};
+
 	//add geometry for drawing
 	switch (ginstance->data->base_type) {
 		case RSE::INSTANCE_MESH: {
-			const RID *materials = nullptr;
-			uint32_t surface_count;
 			RID mesh = ginstance->data->base;
-
-			materials = mesh_storage->mesh_get_surface_count_and_materials(mesh, surface_count);
-			if (materials) {
-				//if no materials, no surfaces.
-				const RID *inst_materials = ginstance->data->surface_materials.ptr();
-				uint32_t surf_mat_count = ginstance->data->surface_materials.size();
-
-				for (uint32_t j = 0; j < surface_count; j++) {
-					RID material = (j < surf_mat_count && inst_materials[j].is_valid()) ? inst_materials[j] : materials[j];
-					_geometry_instance_add_surface(ginstance, j, material, mesh);
-				}
-			}
-
+			add_mesh_or_assembly(mesh, ginstance->data->surface_materials.ptr(), ginstance->data->surface_materials.size());
 			ginstance->instance_count = 1;
 
 		} break;
@@ -10979,7 +11013,10 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 		case RSE::INSTANCE_MULTIMESH: {
 			RID mesh = mesh_storage->multimesh_get_mesh(ginstance->data->base);
 			if (mesh.is_valid()) {
-				if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(mesh)) {
+				// GodotNext: nextgeo_foliage_instancing (#151). Eligible 3D non-indirect MultiMeshInstance3D
+				// routes through NextGeo; only ineligible MultiMeshes (e.g. GridMap octants, 2D, indirect)
+				// emit the VGD_IGNORED warning.
+				if (ginstance->nextgeo_record_index == UINT32_MAX && RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(mesh)) {
 					if (ginstance->warned_vgd_mesh != mesh) {
 						ginstance->warned_vgd_mesh = mesh;
 						RSG::virtual_mesh_storage->nextgeo_count_vgd_ignored_warning();
@@ -10988,15 +11025,7 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 				} else {
 					ginstance->warned_vgd_mesh = RID();
 				}
-				const RID *materials = nullptr;
-				uint32_t surface_count;
-
-				materials = mesh_storage->mesh_get_surface_count_and_materials(mesh, surface_count);
-				if (materials) {
-					for (uint32_t j = 0; j < surface_count; j++) {
-						_geometry_instance_add_surface(ginstance, j, materials[j], mesh);
-					}
-				}
+				add_mesh_or_assembly(mesh, nullptr, 0);
 
 				ginstance->instance_count = mesh_storage->multimesh_get_instances_to_draw(ginstance->data->base);
 			} else {
@@ -11131,6 +11160,16 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 	}
 
 	if (RSG::virtual_mesh_storage != nullptr && ginstance->nextgeo_record_index != UINT32_MAX) {
+		const uint32_t bslot_base = ginstance->nextgeo_bucket_slot;
+		const uint32_t bslot_count = MAX(RSG::virtual_mesh_storage->instance_record_get_bucket_slot_count(ginstance->nextgeo_record_index), 1u);
+		LocalVector<uint32_t> part_vmask;
+		LocalVector<uint32_t> part_smask;
+		LocalVector<uint32_t> part_cdmask;
+		LocalVector<uint32_t> part_cfmask;
+		part_vmask.resize_initialized(bslot_count);
+		part_smask.resize_initialized(bslot_count);
+		part_cdmask.resize_initialized(bslot_count);
+		part_cfmask.resize_initialized(bslot_count);
 		uint32_t virtual_surface_mask = 0u;
 		uint32_t shadow_surface_mask = 0u;
 		uint32_t cull_disabled_mask = 0u;
@@ -11138,16 +11177,34 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 		for (GeometryInstanceSurfaceDataCache *s = ginstance->surface_caches; s != nullptr; s = s->next) {
 			if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) && s->surface_index < 32) {
 				const uint32_t bit = 1u << s->surface_index;
+				const uint32_t off = s->nextgeo_bucket_offset;
 				virtual_surface_mask |= bit;
+				if (off < bslot_count) {
+					part_vmask[off] |= bit;
+				}
 				if (s->nextgeo_raster_bin == 0u) {
 					shadow_surface_mask |= bit;
+					if (off < bslot_count) {
+						part_smask[off] |= bit;
+					}
 				}
 				if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) ||
 						(s->shader != nullptr && s->shader->cull_mode == RSE::CULL_MODE_DISABLED)) {
 					cull_disabled_mask |= bit;
+					if (off < bslot_count) {
+						part_cdmask[off] |= bit;
+					}
 				} else if (s->shader != nullptr && s->shader->cull_mode == RSE::CULL_MODE_FRONT) {
 					cull_front_mask |= bit;
+					if (off < bslot_count) {
+						part_cfmask[off] |= bit;
+					}
 				}
+			}
+		}
+		if (bslot_base != UINT32_MAX) {
+			for (uint32_t u = 0; u < bslot_count; u++) {
+				RSG::virtual_mesh_storage->bucket_slot_set_surface_masks(bslot_base + u, part_vmask[u], part_smask[u], part_cdmask[u], part_cfmask[u]);
 			}
 		}
 		RSG::virtual_mesh_storage->instance_record_set_surface_mask(ginstance->nextgeo_record_index, virtual_surface_mask, shadow_surface_mask);
@@ -11664,7 +11721,8 @@ Dictionary RenderForwardClustered::geometry_instance_get_nextgeo_debug_stats(Ren
 	const_cast<RenderForwardClustered *>(this)->_update_dirty_geometry_instances();
 	const GeometryInstanceForwardClustered *ginstance = static_cast<const GeometryInstanceForwardClustered *>(p_geometry_instance);
 	const bool draw_ready = RSG::virtual_mesh_storage == nullptr || RSG::virtual_mesh_storage->is_nextgeo_draw_ready() || bool(GLOBAL_GET("rendering/nextgeo/visibility_only"));
-	const bool is_multimesh_or_particles = ginstance->data->base_type == RSE::INSTANCE_MULTIMESH || ginstance->data->base_type == RSE::INSTANCE_PARTICLES;
+	const bool is_multimesh_or_particles = ginstance->data->base_type == RSE::INSTANCE_PARTICLES ||
+			(ginstance->data->base_type == RSE::INSTANCE_MULTIMESH && ginstance->nextgeo_record_index == UINT32_MAX);
 
 	struct SurfaceEntry {
 		uint32_t index = 0;

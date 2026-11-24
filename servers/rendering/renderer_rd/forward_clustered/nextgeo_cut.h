@@ -52,6 +52,8 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/cluster_cull.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/hiz_pyramid.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/instance_cull.glsl.gen.h"
+// GodotNext: nextgeo_foliage_instancing (#151).
+#include "servers/rendering/renderer_rd/shaders/nextgeo/multimesh_expand.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_bin_compact.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/sw_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_export.glsl.gen.h"
@@ -233,6 +235,9 @@ public:
 	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9, GN-10). Selects mesh-shader vs VS HW path.
 	RendererRD::NextGeoHWRasterSelection select_hw_raster_path(RendererRD::NextGeoHWRasterPath p_setting, bool p_multiview = false) const;
 
+	// GodotNext: nextgeo_foliage_instancing (#151). Expands dirty MultiMeshes and active 2-level Assemblies on GPU.
+	void prepare_gpu_records(RendererVirtualMeshStorage *p_storage);
+
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
 	bool dispatch_shadows(RendererVirtualMeshStorage *p_storage, const NextGeoShadowViewDesc *p_views, uint32_t p_view_count, bool p_debug_stats);
 	bool draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, const Rect2i &p_rect, bool p_dual_paraboloid);
@@ -322,6 +327,14 @@ private:
 	RID instance_pipeline;
 	RID instance_phase2;
 	RID instance_shadow_pipeline;
+	// GodotNext: nextgeo_foliage_instancing (#151). GPU MultiMesh expansion and 2-level Assembly expansion.
+	RID instance_assembly_expand_pipeline;
+	MultimeshExpandShaderRD multimesh_expand_shader;
+	RID multimesh_expand_version;
+	RID multimesh_expand_pipeline;
+	RID multimesh_expand_params;
+	RID assembly_counter_buf;
+	uint64_t last_assembly_expand_frame = UINT64_MAX;
 	ClusterCullShaderRD cluster_shader;
 	RID cluster_version;
 	RID cluster_bvh;

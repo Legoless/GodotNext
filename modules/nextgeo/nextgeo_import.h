@@ -45,4 +45,4 @@ class VirtualGeometryData;
 // AABB and the surface count cover every source surface, so an ineligible
 // surface gets a [0, 0] range in every part. Stage-2 SRC card descriptors and
 // per-triangle group IDs are populated from the proxy cut's cluster groups (#77).
-Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);

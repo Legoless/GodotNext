@@ -51,12 +51,17 @@ void VirtualMeshStorage::free_resources() {
 		rd->free_rid(record_buffer);
 		record_buffer = RID();
 	}
+	if (instance_attributes_buffer.is_valid()) {
+		rd->free_rid(instance_attributes_buffer);
+		instance_attributes_buffer = RID();
+	}
 	if (mesh_record_buffer.is_valid()) {
 		rd->free_rid(mesh_record_buffer);
 		mesh_record_buffer = RID();
 	}
 	buffer_capacity = 0;
 	mesh_buffer_capacity = 0;
+	_reset_auxiliary_buffers();
 	_reset_dag();
 	_reset_pages();
 	_reset_clusters();
@@ -341,24 +346,123 @@ void VirtualMeshStorage::_reset_cluster_skin() {
 	cluster_skin_bytes = 0;
 }
 
+bool VirtualMeshStorage::_ensure_record_gpu_capacity(uint32_t p_capacity) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_capacity == 0) {
+		return false;
+	}
+	if (record_buffer.is_valid() && instance_attributes_buffer.is_valid() && buffer_capacity >= p_capacity) {
+		return false;
+	}
+	if (record_buffer.is_valid()) {
+		rd->free_rid(record_buffer);
+		record_buffer = RID();
+	}
+	if (instance_attributes_buffer.is_valid()) {
+		rd->free_rid(instance_attributes_buffer);
+		instance_attributes_buffer = RID();
+	}
+	buffer_capacity = MAX(p_capacity, record_capacity);
+	record_buffer = rd->storage_buffer_create(buffer_capacity * sizeof(Record));
+	instance_attributes_buffer = rd->storage_buffer_create(buffer_capacity * sizeof(InstanceAttributes));
+	ERR_FAIL_COND_V(record_buffer.is_null() || instance_attributes_buffer.is_null(), false);
+	if (!records.is_empty()) {
+		rd->buffer_update(record_buffer, 0, records.size() * sizeof(Record), records.ptr());
+	}
+	if (!instance_attributes.is_empty()) {
+		rd->buffer_update(instance_attributes_buffer, 0, instance_attributes.size() * sizeof(InstanceAttributes), instance_attributes.ptr());
+	}
+	return true;
+}
+
+void VirtualMeshStorage::_clear_record_range(uint32_t p_first, uint32_t p_count) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_count == 0 || record_buffer.is_null() || p_first + p_count > buffer_capacity) {
+		return;
+	}
+	rd->buffer_clear(record_buffer, p_first * sizeof(Record), p_count * sizeof(Record));
+}
+
+void VirtualMeshStorage::_upload_bucket_surface_masks(const BucketSurfaceMaskGPU *p_data, uint32_t p_count) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_data == nullptr || p_count == 0) {
+		return;
+	}
+	if (bucket_surface_masks_buffer.is_null() || bucket_surface_masks_capacity < p_count) {
+		if (bucket_surface_masks_buffer.is_valid()) {
+			rd->free_rid(bucket_surface_masks_buffer);
+		}
+		bucket_surface_masks_capacity = MAX(Math::next_power_of_2(p_count), 256u);
+		bucket_surface_masks_buffer = rd->storage_buffer_create(bucket_surface_masks_capacity * sizeof(BucketSurfaceMaskGPU));
+		ERR_FAIL_COND(bucket_surface_masks_buffer.is_null());
+	}
+	rd->buffer_update(bucket_surface_masks_buffer, 0, p_count * sizeof(BucketSurfaceMaskGPU), p_data);
+}
+
+void VirtualMeshStorage::_upload_assembly_buffers(const AssemblyHeaderGPU *p_headers, uint32_t p_header_count, const AssemblyChildGPU *p_children, uint32_t p_child_count, const AssemblyPartGPU *p_parts, uint32_t p_part_count) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	auto ensure_upload = [&](RID &r_buf, uint32_t &r_cap, const void *p_src, uint32_t p_count, uint32_t p_stride) {
+		const uint32_t needed = MAX(p_count, 1u);
+		if (r_buf.is_null() || r_cap < needed) {
+			if (r_buf.is_valid()) {
+				rd->free_rid(r_buf);
+			}
+			r_cap = MAX(Math::next_power_of_2(needed), 16u);
+			Vector<uint8_t> zeros;
+			zeros.resize_initialized(r_cap * p_stride);
+			r_buf = rd->storage_buffer_create(r_cap * p_stride, zeros);
+			ERR_FAIL_COND(r_buf.is_null());
+		}
+		if (p_src != nullptr && p_count > 0) {
+			rd->buffer_update(r_buf, 0, p_count * p_stride, p_src);
+		}
+	};
+	ensure_upload(assembly_headers_buffer, assembly_headers_capacity, p_headers, p_header_count, sizeof(AssemblyHeaderGPU));
+	ensure_upload(assembly_children_buffer, assembly_children_capacity, p_children, p_child_count, sizeof(AssemblyChildGPU));
+	ensure_upload(assembly_parts_buffer, assembly_parts_capacity, p_parts, p_part_count, sizeof(AssemblyPartGPU));
+}
+
+void VirtualMeshStorage::_reset_auxiliary_buffers() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		if (bucket_surface_masks_buffer.is_valid()) {
+			rd->free_rid(bucket_surface_masks_buffer);
+		}
+		if (assembly_headers_buffer.is_valid()) {
+			rd->free_rid(assembly_headers_buffer);
+		}
+		if (assembly_children_buffer.is_valid()) {
+			rd->free_rid(assembly_children_buffer);
+		}
+		if (assembly_parts_buffer.is_valid()) {
+			rd->free_rid(assembly_parts_buffer);
+		}
+	}
+	bucket_surface_masks_buffer = RID();
+	bucket_surface_masks_capacity = 0;
+	assembly_headers_buffer = RID();
+	assembly_headers_capacity = 0;
+	assembly_children_buffer = RID();
+	assembly_children_capacity = 0;
+	assembly_parts_buffer = RID();
+	assembly_parts_capacity = 0;
+}
+
 void VirtualMeshStorage::_upload_records(uint32_t p_first, uint32_t p_count) {
 	RenderingDevice *rd = RD::get_singleton();
 	if (rd == nullptr || p_count == 0) {
 		return;
 	}
-	if (record_buffer.is_null() || buffer_capacity < record_capacity) {
-		if (record_buffer.is_valid()) {
-			rd->free_rid(record_buffer);
-		}
-		buffer_capacity = record_capacity;
-		record_buffer = rd->storage_buffer_create(buffer_capacity * sizeof(Record));
-		ERR_FAIL_COND(record_buffer.is_null());
-		rd->buffer_update(record_buffer, 0, record_capacity * sizeof(Record), records.ptr());
+	if (_ensure_record_gpu_capacity(record_capacity)) {
 		return;
 	}
-	ERR_FAIL_COND(record_buffer.is_null());
+	ERR_FAIL_COND(record_buffer.is_null() || instance_attributes_buffer.is_null());
 	ERR_FAIL_COND(p_first + p_count > record_capacity);
 	rd->buffer_update(record_buffer, p_first * sizeof(Record), p_count * sizeof(Record), records.ptr() + p_first);
+	rd->buffer_update(instance_attributes_buffer, p_first * sizeof(InstanceAttributes), p_count * sizeof(InstanceAttributes), instance_attributes.ptr() + p_first);
 }
 
 void VirtualMeshStorage::_upload_mesh_records(uint32_t p_first, uint32_t p_count) {

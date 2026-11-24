@@ -47,6 +47,11 @@ static_assert(sizeof(RendererVirtualMeshStorage::Record) == 224, "NextGeo instan
 static_assert(sizeof(RendererVirtualMeshStorage::MeshRecord) == 32, "NextGeo mesh record must stay 32 bytes (plan §6.3).");
 static_assert(sizeof(RendererVirtualMeshStorage::ClusterGPUDesc) == 16, "NextGeo cluster GPU descriptor must stay 16 bytes.");
 static_assert(sizeof(RendererVirtualMeshStorage::SkinInstanceInfo) == 16, "NextGeo skin instance side table entry must stay 16 bytes.");
+static_assert(sizeof(RendererVirtualMeshStorage::InstanceAttributes) == 48, "NextGeo InstanceAttributes must stay 48 bytes.");
+static_assert(sizeof(RendererVirtualMeshStorage::BucketSurfaceMaskGPU) == 16, "NextGeo BucketSurfaceMaskGPU must stay 16 bytes.");
+static_assert(sizeof(RendererVirtualMeshStorage::AssemblyHeaderGPU) == 32, "NextGeo AssemblyHeaderGPU must stay 32 bytes.");
+static_assert(sizeof(RendererVirtualMeshStorage::AssemblyChildGPU) == 64, "NextGeo AssemblyChildGPU must stay 64 bytes.");
+static_assert(sizeof(RendererVirtualMeshStorage::AssemblyPartGPU) == 96, "NextGeo AssemblyPartGPU must stay 96 bytes.");
 
 namespace {
 
@@ -173,6 +178,7 @@ RendererVirtualMeshStorage::RendererVirtualMeshStorage() {
 
 RendererVirtualMeshStorage::~RendererVirtualMeshStorage() {
 	wait_for_streaming_tasks(true);
+	_reset_auxiliary_buffers();
 	_reset_dag();
 	_reset_pages();
 	_reset_clusters();
@@ -193,6 +199,7 @@ void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
 	}
 	records.resize(capacity);
 	skin_instances.resize(capacity);
+	instance_attributes.resize(capacity);
 	slot_states.resize(capacity);
 	record_capacity = capacity;
 }
@@ -537,6 +544,9 @@ uint32_t RendererVirtualMeshStorage::get_max_bvh_levels() const {
 void RendererVirtualMeshStorage::_mark_dirty(uint32_t p_record) {
 	if (p_record < slot_states.size()) {
 		slot_states[p_record].dirty = true;
+		if ((records[p_record].flags & RECORD_MULTIMESH_PARENT) != 0u) {
+			multimesh_mark_parent_dirty(p_record);
+		}
 	}
 }
 
@@ -595,6 +605,7 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	if (old_info != nullptr) {
 		info.generation = old_info->generation + 1;
 		info.live_instances = old_info->live_instances;
+		_release_assembly_part_refs(*old_info);
 		_free_mesh_page_slots(*old_info);
 		if (old_info->dag_size != 0) {
 			_free_dag(old_info->dag_offset, old_info->dag_size);
@@ -603,6 +614,27 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 			_free_clusters(old_info->cluster_table_offset, old_info->cluster_table_size);
 		}
 	}
+
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 GN-7). Extract deduplicated assembly part meshes.
+	auto collect_assembly_part_mesh = [&](RID p_part_mesh) {
+		if (p_part_mesh.is_null() || p_part_mesh == p_mesh) {
+			return;
+		}
+		if (!info.assembly_unique_part_meshes.has(p_part_mesh)) {
+			info.assembly_unique_part_meshes.push_back(p_part_mesh);
+		}
+		info.assembly_leaf_count++;
+	};
+	for (int i = 0; i < p_desc.assembly_parts.size(); i++) {
+		collect_assembly_part_mesh(p_desc.assembly_parts[i].mesh);
+	}
+	for (int c = 0; c < p_desc.assembly_children.size(); c++) {
+		const RenderingServerTypes::VirtualGeometryDesc::AssemblyChildDesc &child = p_desc.assembly_children[c];
+		for (int i = 0; i < child.parts.size(); i++) {
+			collect_assembly_part_mesh(child.parts[i].mesh);
+		}
+	}
+	info.has_assembly = info.assembly_leaf_count > 0 && !info.assembly_unique_part_meshes.is_empty();
 
 	if (!p_desc.dag_header.is_empty()) {
 		const uint32_t dag_offset = _alloc_dag(uint32_t(p_desc.dag_header.size()));
@@ -864,13 +896,17 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	residency_layout_dirty = true;
 
 	meshes[p_mesh] = info;
+	if (info.live_instances > 0 && info.has_assembly) {
+		_acquire_assembly_part_refs(meshes[p_mesh]);
+	}
+	assemblies_gpu_dirty = true;
 	mesh_records[index] = info.record;
 	mesh_record_dirty[index] = 1;
 	mesh_records_dirty = true;
 
 	// Live records of this mesh pick up the new mask and virtual-mesh index.
 	for (uint32_t slot = 0; slot < used_slots; slot++) {
-		if (!slot_states[slot].allocated || records[slot].virtual_mesh != index) {
+		if (!slot_states[slot].allocated || slot_states[slot].gpu_managed || records[slot].virtual_mesh != index) {
 			continue;
 		}
 		records[slot].surface_mask = p_desc.eligible_surface_mask;
@@ -899,11 +935,13 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	mesh_records_dirty = true;
 	MeshInfo *info = meshes.getptr(p_mesh);
 	if (info != nullptr) {
+		_release_assembly_part_refs(*info);
 		_free_mesh_page_slots(*info);
 		_free_dag(info->dag_offset, info->dag_size);
 		_free_clusters(info->cluster_table_offset, info->cluster_table_size);
 	}
 	meshes.erase(p_mesh);
+	assemblies_gpu_dirty = true;
 
 	// Purge pending / staged requests for the cleared mesh.
 	LocalVector<QueuedPageKey> dead_keys;
@@ -934,7 +972,7 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	residency_layout_dirty = true;
 
 	for (uint32_t slot = 0; slot < used_slots; slot++) {
-		if (!slot_states[slot].allocated || records[slot].virtual_mesh != *index) {
+		if (!slot_states[slot].allocated || slot_states[slot].gpu_managed || records[slot].virtual_mesh != *index) {
 			continue;
 		}
 		records[slot].virtual_mesh = UINT32_MAX;
@@ -1008,16 +1046,23 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 	}
 	ERR_FAIL_UNSIGNED_INDEX_V(slot, record_capacity, UINT32_MAX);
 
+	const uint32_t bslot = _bucket_slot_allocate(1u);
+
 	Record &record = records[slot];
 	record = Record();
-	record.bucket_base = slot * 32u;
+	record.bucket_base = bslot * 32u;
+	instance_attributes[slot] = InstanceAttributes();
+	instance_attributes[slot].meta[1] = slot;
 	SlotState &state = slot_states[slot];
 	state.instance = p_instance;
 	state.allocated = true;
 	state.dirty = true;
 	state.dirty_last = false;
 	state.initialized = false;
+	state.gpu_managed = false;
 	state.free_frame = UINT32_MAX;
+	state.bucket_slot = bslot;
+	state.bucket_slot_count = 1u;
 	live_records++;
 	_record_reused(slot);
 
@@ -1030,7 +1075,11 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 		record.pad0 = info->desc.eligible_surface_mask;
 		info->live_instances++;
 		notify_first_instance = info->live_instances == 1u;
+		if (notify_first_instance && info->has_assembly) {
+			_acquire_assembly_part_refs(*info);
+		}
 	}
+	bucket_slot_set_surface_masks(bslot, record.surface_mask, record.pad0, 0u, 0u);
 	record.flags = RECORD_VALID | RECORD_VISIBLE;
 	if (notify_first_instance && RSG::mesh_storage != nullptr) {
 		RSG::mesh_storage->mesh_on_virtual_geometry_changed(p_mesh);
@@ -1044,11 +1093,18 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 	}
 	// GodotNext: nextgeo_skinned_runtime (#160). Release skeleton ref and recycle palette bones before freeing slot.
 	instance_record_set_skeleton(p_record, RID());
+	multimesh_range_detach(p_record);
 	SlotState &state = slot_states[p_record];
+	if (state.bucket_slot != UINT32_MAX && state.bucket_slot_count > 0u) {
+		_bucket_slot_free(state.bucket_slot, state.bucket_slot_count);
+		state.bucket_slot = UINT32_MAX;
+		state.bucket_slot_count = 0u;
+	}
 	state.instance = RID();
 	state.allocated = false;
 	state.dirty = true;
 	state.dirty_last = false;
+	state.gpu_managed = false;
 	state.free_frame = frame + 1;
 	// GodotNext: spline_meshes (#161). Release any spline slot owned by the freed record.
 	if ((records[p_record].flags & RECORD_HAS_SPLINE) != 0u) {
@@ -1067,6 +1123,7 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 		}
 	}
 	records[p_record].flags = 0;
+	instance_attributes[p_record] = InstanceAttributes();
 	live_records--;
 	const uint32_t index = records[p_record].virtual_mesh;
 	RID notify_last_mesh;
@@ -1076,6 +1133,9 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 		if (info != nullptr && info->live_instances > 0) {
 			info->live_instances--;
 			if (info->live_instances == 0u) {
+				if (info->assembly_part_refs_held) {
+					_release_assembly_part_refs(*info);
+				}
 				notify_last_mesh = mesh_rid;
 			}
 		}
@@ -1143,6 +1203,11 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 		record.flags |= RECORD_MOVED;
 		record.flags &= ~RECORD_TELEPORTED;
 	}
+	if (basis_has_non_uniform_scale(p_transform.basis)) {
+		record.flags |= RECORD_NON_UNIFORM_SCALE;
+	} else {
+		record.flags &= ~RECORD_NON_UNIFORM_SCALE;
+	}
 	record.flags |= RECORD_VALID | RECORD_VISIBLE;
 	_mark_dirty(p_record);
 }
@@ -1152,7 +1217,7 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET | RECORD_SKINNED_PALETTE | RECORD_HAS_SPLINE | RECORD_SPLINE_INDEX_MASK;
+	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET | RECORD_SKINNED_PALETTE | RECORD_HAS_SPLINE | RECORD_SPLINE_INDEX_MASK | RECORD_MULTIMESH_ELEMENT | RECORD_NON_UNIFORM_SCALE | RECORD_HAS_INSTANCE_COLOR | RECORD_HAS_INSTANCE_CUSTOM | RECORD_ASSEMBLY_PART;
 	uint32_t keep = record.flags & preserved_mask;
 	if ((p_flags & RECORD_VISIBLE) == 0u) {
 		keep &= ~RECORD_VISIBLE;
@@ -1255,6 +1320,12 @@ void RendererVirtualMeshStorage::instance_record_set_surface_mask(uint32_t p_rec
 		return;
 	}
 	const uint32_t shadow_mask = p_shadow_surface_mask == UINT32_MAX ? p_surface_mask : p_shadow_surface_mask;
+	if (slot_states[p_record].bucket_slot != UINT32_MAX && slot_states[p_record].bucket_slot_count == 1u) {
+		const uint32_t bslot = slot_states[p_record].bucket_slot;
+		if (bslot < bucket_surface_masks.size()) {
+			bucket_slot_set_surface_masks(bslot, p_surface_mask, shadow_mask, bucket_surface_masks[bslot].cull_disabled_mask, bucket_surface_masks[bslot].cull_front_mask);
+		}
+	}
 	if (records[p_record].surface_mask == p_surface_mask && records[p_record].pad0 == shadow_mask) {
 		return;
 	}
@@ -1266,6 +1337,12 @@ void RendererVirtualMeshStorage::instance_record_set_surface_mask(uint32_t p_rec
 void RendererVirtualMeshStorage::instance_record_set_surface_cull_masks(uint32_t p_record, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask) {
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
+	}
+	if (slot_states[p_record].bucket_slot != UINT32_MAX && slot_states[p_record].bucket_slot_count == 1u) {
+		const uint32_t bslot = slot_states[p_record].bucket_slot;
+		if (bslot < bucket_surface_masks.size()) {
+			bucket_slot_set_surface_masks(bslot, bucket_surface_masks[bslot].surface_mask, bucket_surface_masks[bslot].shadow_surface_mask, p_cull_disabled_mask, p_cull_front_mask);
+		}
 	}
 	Record &record = records[p_record];
 	if (record.pad1[0] == p_cull_disabled_mask && record.pad1[1] == p_cull_front_mask) {
@@ -1375,7 +1452,7 @@ void RendererVirtualMeshStorage::instance_record_set_spline_deform(uint32_t p_re
 			slot = spline_free_now[spline_free_now.size() - 1];
 			spline_free_now.remove_at(spline_free_now.size() - 1);
 		} else {
-			ERR_FAIL_COND_MSG(spline_entries.size() >= 0x3FFFu, "NextGeo: spline deformation slot limit (16383) reached.");
+			ERR_FAIL_COND_MSG(spline_entries.size() >= 0x7Fu, "NextGeo: spline deformation slot limit (127) reached.");
 			slot = spline_entries.size();
 			spline_entries.push_back(SplineDeformEntry());
 			spline_allocated.push_back(0);
@@ -1648,6 +1725,29 @@ void RendererVirtualMeshStorage::begin_frame() {
 			entry.value.dirty_this_frame = false;
 		}
 	}
+
+	for (const UploadRun &r : range_free_next) {
+		range_free_now.push_back(r);
+	}
+	range_free_next.clear();
+	if (range_free_now.size() > 1u) {
+		for (uint32_t i = 0; i < range_free_now.size(); i++) {
+			for (uint32_t j = i + 1; j < range_free_now.size(); j++) {
+				if (range_free_now[j].first < range_free_now[i].first) {
+					SWAP(range_free_now[i], range_free_now[j]);
+				}
+			}
+		}
+		uint32_t write_idx = 0u;
+		for (uint32_t i = 0; i < range_free_now.size(); i++) {
+			if (write_idx > 0u && range_free_now[write_idx - 1u].first + range_free_now[write_idx - 1u].count == range_free_now[i].first) {
+				range_free_now[write_idx - 1u].count += range_free_now[i].count;
+			} else {
+				range_free_now[write_idx++] = range_free_now[i];
+			}
+		}
+		range_free_now.resize(write_idx);
+	}
 }
 
 void RendererVirtualMeshStorage::process_streaming() {
@@ -1672,7 +1772,7 @@ void RendererVirtualMeshStorage::process_streaming() {
 	if (!residency_changed_meshes.is_empty()) {
 		bool added = false;
 		for (uint32_t slot = 0; slot < used_slots; slot++) {
-			if (slot_states[slot].allocated && residency_changed_meshes.has(records[slot].virtual_mesh)) {
+			if (slot_states[slot].allocated && !slot_states[slot].gpu_managed && residency_changed_meshes.has(records[slot].virtual_mesh)) {
 				if (!residency_changed_records.has(slot)) {
 					residency_changed_records.push_back(slot);
 					added = true;
@@ -1689,10 +1789,44 @@ void RendererVirtualMeshStorage::process_streaming() {
 void RendererVirtualMeshStorage::flush() {
 	process_streaming();
 
+	// GodotNext: nextgeo_foliage_instancing (#151). Compute required GPU tail capacity for active Nanite Assemblies.
+	uint32_t wanted_assembly_leaves = 0u;
+	if (are_assemblies_enabled()) {
+		for (uint32_t slot = 0; slot < used_slots; slot++) {
+			const SlotState &state = slot_states[slot];
+			if (!state.allocated || state.gpu_managed) {
+				continue;
+			}
+			const Record &rec = records[slot];
+			if ((rec.flags & (RECORD_VALID | RECORD_VISIBLE | RECORD_HAS_ASSEMBLY)) != (RECORD_VALID | RECORD_VISIBLE | RECORD_HAS_ASSEMBLY)) {
+				continue;
+			}
+			const MeshInfo *info = get_mesh_info(rec.virtual_mesh);
+			if (info == nullptr || !info->has_assembly || info->assembly_leaf_count == 0u) {
+				continue;
+			}
+			if ((rec.flags & RECORD_MULTIMESH_PARENT) != 0u) {
+				const uint32_t *idx_ptr = multimesh_parent_to_expand.getptr(slot);
+				if (idx_ptr != nullptr && *idx_ptr < multimesh_expands.size() && multimesh_expands[*idx_ptr].active) {
+					wanted_assembly_leaves += multimesh_expands[*idx_ptr].range_count * info->assembly_leaf_count;
+				}
+			} else {
+				wanted_assembly_leaves += info->assembly_leaf_count;
+			}
+		}
+	}
+	active_assembly_leaf_capacity = wanted_assembly_leaves;
+	if (used_slots + active_assembly_leaf_capacity > record_capacity) {
+		_ensure_capacity(used_slots + active_assembly_leaf_capacity);
+	}
+
 	// A record that changed last frame and not this one needs one rewrite so
 	// prev holds last frame's cur, not the frame before the last change.
 	for (uint32_t slot = 0; slot < used_slots; slot++) {
 		SlotState &state = slot_states[slot];
+		if (state.gpu_managed) {
+			continue;
+		}
 		if (state.dirty_last && !state.dirty && state.allocated) {
 			Record &record = records[slot];
 			for (int row = 0; row < 3; row++) {
@@ -1710,32 +1844,66 @@ void RendererVirtualMeshStorage::flush() {
 			}
 			state.dirty = true;
 			state.rewritten = true;
+			if ((record.flags & RECORD_MULTIMESH_PARENT) != 0u) {
+				multimesh_mark_parent_dirty(slot);
+			}
 		}
 	}
 
-	uint32_t run_first = UINT32_MAX;
-	uint32_t run_count = 0;
-	for (uint32_t slot = 0; slot < used_slots; slot++) {
-		SlotState &state = slot_states[slot];
-		if (state.dirty) {
-			if (run_first == UINT32_MAX) {
-				run_first = slot;
+	const bool gpu_reallocated = _ensure_record_gpu_capacity(record_capacity);
+	if (gpu_reallocated) {
+		pending_zero_ranges.clear();
+		for (uint32_t i = 0; i < multimesh_expands.size(); i++) {
+			if (multimesh_expands[i].active) {
+				multimesh_expands[i].dirty = true;
 			}
-			run_count++;
-		} else if (run_first != UINT32_MAX) {
+		}
+	} else {
+		for (const UploadRun &r : pending_zero_ranges) {
+			_clear_record_range(r.first, r.count);
+		}
+		pending_zero_ranges.clear();
+
+		uint32_t run_first = UINT32_MAX;
+		uint32_t run_count = 0;
+		for (uint32_t slot = 0; slot < used_slots; slot++) {
+			SlotState &state = slot_states[slot];
+			if (state.dirty && !state.gpu_managed) {
+				if (run_first == UINT32_MAX) {
+					run_first = slot;
+				}
+				run_count++;
+			} else if (run_first != UINT32_MAX) {
+				_upload_records(run_first, run_count);
+				run_first = UINT32_MAX;
+				run_count = 0;
+			}
+		}
+		if (run_first != UINT32_MAX) {
 			_upload_records(run_first, run_count);
-			run_first = UINT32_MAX;
-			run_count = 0;
 		}
 	}
-	if (run_first != UINT32_MAX) {
-		_upload_records(run_first, run_count);
-	}
 	for (uint32_t slot = 0; slot < used_slots; slot++) {
 		SlotState &state = slot_states[slot];
+		if (state.gpu_managed) {
+			state.dirty = false;
+			state.dirty_last = false;
+			state.rewritten = false;
+			continue;
+		}
 		state.dirty_last = state.dirty && !state.rewritten;
 		state.dirty = false;
 		state.rewritten = false;
+	}
+
+	if (bucket_surface_masks_dirty && !bucket_surface_masks.is_empty()) {
+		_upload_bucket_surface_masks(bucket_surface_masks.ptr(), bucket_surface_masks.size());
+		bucket_surface_masks_dirty = false;
+	}
+
+	if (assemblies_gpu_dirty) {
+		_rebuild_assemblies_gpu();
+		assemblies_gpu_dirty = false;
 	}
 
 	if (mesh_records_dirty) {
@@ -3389,13 +3557,789 @@ void RendererVirtualMeshStorage::_process_streaming_frame() {
 	// Publish instance record slots whose virtual mesh changed its resident page set (#78 step 7, #82).
 	if (!residency_changed_meshes.is_empty()) {
 		for (uint32_t slot = 0; slot < used_slots; slot++) {
-			if (slot_states[slot].allocated && residency_changed_meshes.has(records[slot].virtual_mesh)) {
+			if (slot_states[slot].allocated && !slot_states[slot].gpu_managed && residency_changed_meshes.has(records[slot].virtual_mesh)) {
 				residency_changed_records.push_back(slot);
 			}
 		}
 		residency_changed_meshes.clear();
 		if (!residency_changed_records.is_empty()) {
 			residency_event_epoch++;
+		}
+	}
+}
+
+// ============================================================================
+// Foliage Instancing, MultiMesh Ranges & Nanite Assemblies (#151)
+// ============================================================================
+
+bool RendererVirtualMeshStorage::are_assemblies_enabled() {
+	if (ProjectSettings::get_singleton() == nullptr) {
+		return false;
+	}
+	return bool(ProjectSettings::get_singleton()->get_setting("rendering/nextgeo/experimental/assemblies", false));
+}
+
+bool RendererVirtualMeshStorage::mesh_has_assembly(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return info != nullptr && info->has_assembly;
+}
+
+uint32_t RendererVirtualMeshStorage::mesh_get_assembly_leaf_count(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return info != nullptr && info->has_assembly ? info->assembly_leaf_count : 0u;
+}
+
+const LocalVector<RID> *RendererVirtualMeshStorage::mesh_get_assembly_unique_part_meshes(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return (info != nullptr && info->has_assembly) ? &info->assembly_unique_part_meshes : nullptr;
+}
+
+void RendererVirtualMeshStorage::mesh_get_assembly_expanded_parts_cpu(RID p_mesh, const Transform3D &p_root_transform, LocalVector<AssemblyLeafCPU> &r_out) const {
+	r_out.clear();
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	if (info == nullptr || !info->has_assembly) {
+		return;
+	}
+	auto append_part = [&](const RenderingServerTypes::VirtualGeometryDesc::AssemblyPartDesc &p_part, const Transform3D &p_parent_world) {
+		if (p_part.mesh.is_null() || p_part.mesh == p_mesh) {
+			return;
+		}
+		int64_t unique_idx = info->assembly_unique_part_meshes.find(p_part.mesh);
+		if (unique_idx < 0) {
+			return;
+		}
+		AssemblyLeafCPU leaf;
+		leaf.mesh = p_part.mesh;
+		const uint32_t *m_idx = mesh_indices.getptr(p_part.mesh);
+		leaf.part_mesh_index = (m_idx != nullptr && meshes.has(p_part.mesh)) ? *m_idx : UINT32_MAX;
+		leaf.unique_part_index = uint32_t(unique_idx);
+		leaf.world_transform = p_parent_world * p_part.local_transform;
+		if (p_part.local_aabb.has_surface()) {
+			leaf.local_aabb = p_part.local_aabb;
+		} else if (RSG::mesh_storage != nullptr && p_part.mesh.is_valid()) {
+			leaf.local_aabb = RSG::mesh_storage->mesh_get_aabb(p_part.mesh);
+		}
+		r_out.push_back(leaf);
+	};
+	for (int i = 0; i < info->desc.assembly_parts.size(); i++) {
+		append_part(info->desc.assembly_parts[i], p_root_transform);
+	}
+	for (int c = 0; c < info->desc.assembly_children.size(); c++) {
+		const RenderingServerTypes::VirtualGeometryDesc::AssemblyChildDesc &child = info->desc.assembly_children[c];
+		const Transform3D child_world = p_root_transform * child.local_transform;
+		for (int i = 0; i < child.parts.size(); i++) {
+			append_part(child.parts[i], child_world);
+		}
+	}
+}
+
+AABB RendererVirtualMeshStorage::mesh_get_assembly_local_aabb(RID p_mesh) const {
+	LocalVector<AssemblyLeafCPU> leaves;
+	mesh_get_assembly_expanded_parts_cpu(p_mesh, Transform3D(), leaves);
+	AABB out;
+	bool has = false;
+	for (uint32_t i = 0; i < leaves.size(); i++) {
+		if (!leaves[i].local_aabb.has_surface()) {
+			continue;
+		}
+		const AABB part_aabb = leaves[i].world_transform.xform(leaves[i].local_aabb);
+		out = has ? out.merge(part_aabb) : part_aabb;
+		has = true;
+	}
+	return out;
+}
+
+uint32_t RendererVirtualMeshStorage::_bucket_slot_allocate(uint32_t p_count) {
+	const uint32_t count = MAX(p_count, 1u);
+	for (uint32_t i = 0; i < bucket_free.size(); i++) {
+		if (bucket_free[i].count < count) {
+			continue;
+		}
+		const uint32_t base = bucket_free[i].first;
+		bucket_free[i].first += count;
+		bucket_free[i].count -= count;
+		if (bucket_free[i].count == 0u) {
+			bucket_free.remove_at(i);
+		}
+		return base;
+	}
+	const uint32_t base = bucket_slots_used;
+	bucket_slots_used += count;
+	if (bucket_surface_masks.size() < bucket_slots_used) {
+		const uint32_t old_size = bucket_surface_masks.size();
+		bucket_surface_masks.resize(bucket_slots_used);
+		for (uint32_t i = old_size; i < bucket_slots_used; i++) {
+			bucket_surface_masks[i] = BucketSurfaceMaskGPU();
+		}
+		bucket_surface_masks_dirty = true;
+	}
+	return base;
+}
+
+void RendererVirtualMeshStorage::_bucket_slot_free(uint32_t p_base, uint32_t p_count) {
+	if (p_base == UINT32_MAX || p_count == 0u) {
+		return;
+	}
+	for (uint32_t i = 0; i < p_count && p_base + i < bucket_surface_masks.size(); i++) {
+		bucket_surface_masks[p_base + i] = BucketSurfaceMaskGPU();
+	}
+	bucket_surface_masks_dirty = true;
+	UploadRun run;
+	run.first = p_base;
+	run.count = p_count;
+	bucket_free.push_back(run);
+	if (bucket_free.size() > 1u) {
+		for (uint32_t i = 0; i < bucket_free.size(); i++) {
+			for (uint32_t j = i + 1; j < bucket_free.size(); j++) {
+				if (bucket_free[j].first < bucket_free[i].first) {
+					SWAP(bucket_free[i], bucket_free[j]);
+				}
+			}
+		}
+		uint32_t write_idx = 0u;
+		for (uint32_t i = 0; i < bucket_free.size(); i++) {
+			if (write_idx > 0u && bucket_free[write_idx - 1u].first + bucket_free[write_idx - 1u].count == bucket_free[i].first) {
+				bucket_free[write_idx - 1u].count += bucket_free[i].count;
+			} else {
+				bucket_free[write_idx++] = bucket_free[i];
+			}
+		}
+		bucket_free.resize(write_idx);
+	}
+}
+
+uint32_t RendererVirtualMeshStorage::instance_record_get_bucket_slot(uint32_t p_record) const {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return UINT32_MAX;
+	}
+	return slot_states[p_record].bucket_slot;
+}
+
+uint32_t RendererVirtualMeshStorage::instance_record_get_bucket_slot_count(uint32_t p_record) const {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return 0u;
+	}
+	return slot_states[p_record].bucket_slot_count;
+}
+
+void RendererVirtualMeshStorage::instance_record_resize_bucket_slots(uint32_t p_record, uint32_t p_count) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const uint32_t count = MAX(p_count, 1u);
+	SlotState &state = slot_states[p_record];
+	if (state.bucket_slot_count == count && state.bucket_slot != UINT32_MAX) {
+		return;
+	}
+	if (state.bucket_slot != UINT32_MAX && state.bucket_slot_count > 0u) {
+		_bucket_slot_free(state.bucket_slot, state.bucket_slot_count);
+	}
+	state.bucket_slot = _bucket_slot_allocate(count);
+	state.bucket_slot_count = count;
+	records[p_record].bucket_base = state.bucket_slot * 32u;
+	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::bucket_slot_set_surface_masks(uint32_t p_bucket_slot, uint32_t p_surface_mask, uint32_t p_shadow_surface_mask, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask) {
+	if (p_bucket_slot == UINT32_MAX) {
+		return;
+	}
+	if (p_bucket_slot >= bucket_surface_masks.size()) {
+		const uint32_t old_size = bucket_surface_masks.size();
+		bucket_surface_masks.resize(p_bucket_slot + 1u);
+		for (uint32_t i = old_size; i < bucket_surface_masks.size(); i++) {
+			bucket_surface_masks[i] = BucketSurfaceMaskGPU();
+		}
+	}
+	BucketSurfaceMaskGPU &entry = bucket_surface_masks[p_bucket_slot];
+	if (entry.surface_mask == p_surface_mask && entry.shadow_surface_mask == p_shadow_surface_mask && entry.cull_disabled_mask == p_cull_disabled_mask && entry.cull_front_mask == p_cull_front_mask) {
+		return;
+	}
+	entry.surface_mask = p_surface_mask;
+	entry.shadow_surface_mask = p_shadow_surface_mask;
+	entry.cull_disabled_mask = p_cull_disabled_mask;
+	entry.cull_front_mask = p_cull_front_mask;
+	bucket_surface_masks_dirty = true;
+}
+
+void RendererVirtualMeshStorage::instance_record_set_visibility_range(uint32_t p_record, float p_begin, float p_end) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const float begin = (!Math::is_finite(p_begin) || p_begin < 0.0f) ? 0.0f : p_begin;
+	const float end = (!Math::is_finite(p_end) || p_end < 0.0f) ? 0.0f : p_end;
+	uint32_t begin_bits = 0u;
+	uint32_t end_bits = 0u;
+	memcpy(&begin_bits, &begin, sizeof(uint32_t));
+	memcpy(&end_bits, &end, sizeof(uint32_t));
+	InstanceAttributes &attr = instance_attributes[p_record];
+	if (attr.meta[2] == begin_bits && attr.meta[3] == end_bits) {
+		return;
+	}
+	attr.meta[2] = begin_bits;
+	attr.meta[3] = end_bits;
+	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::instance_record_set_attributes(uint32_t p_record, const Color &p_color, const Color &p_custom_data, uint32_t p_parent_record, uint32_t p_element_index, bool p_has_color, bool p_has_custom) {
+	if (p_record >= used_slots) {
+		return;
+	}
+	InstanceAttributes &attr = instance_attributes[p_record];
+	attr.color[0] = p_color.r;
+	attr.color[1] = p_color.g;
+	attr.color[2] = p_color.b;
+	attr.color[3] = p_color.a;
+	attr.custom_data[0] = p_custom_data.r;
+	attr.custom_data[1] = p_custom_data.g;
+	attr.custom_data[2] = p_custom_data.b;
+	attr.custom_data[3] = p_custom_data.a;
+	attr.meta[0] = p_parent_record;
+	attr.meta[1] = p_element_index;
+	if (p_has_color) {
+		records[p_record].flags |= RECORD_HAS_INSTANCE_COLOR;
+	} else {
+		records[p_record].flags &= ~RECORD_HAS_INSTANCE_COLOR;
+	}
+	if (p_has_custom) {
+		records[p_record].flags |= RECORD_HAS_INSTANCE_CUSTOM;
+	} else {
+		records[p_record].flags &= ~RECORD_HAS_INSTANCE_CUSTOM;
+	}
+	_mark_dirty(p_record);
+}
+
+const RendererVirtualMeshStorage::InstanceAttributes &RendererVirtualMeshStorage::get_instance_attributes(uint32_t p_record) const {
+	static const InstanceAttributes fallback;
+	if (p_record >= instance_attributes.size()) {
+		return fallback;
+	}
+	return instance_attributes[p_record];
+}
+
+uint32_t RendererVirtualMeshStorage::multimesh_range_attach(uint32_t p_parent_record, RID p_multimesh, RID p_mesh, uint32_t p_count) {
+	if (p_parent_record >= used_slots || !slot_states[p_parent_record].allocated) {
+		return UINT32_MAX;
+	}
+	if (p_count == 0u || p_multimesh.is_null()) {
+		multimesh_range_detach(p_parent_record);
+		return UINT32_MAX;
+	}
+	const uint32_t *existing_idx = multimesh_parent_to_expand.getptr(p_parent_record);
+	if (existing_idx != nullptr && *existing_idx < multimesh_expands.size()) {
+		MultiMeshExpandEntry &entry = multimesh_expands[*existing_idx];
+		if (entry.active && entry.range_count == p_count && entry.multimesh == p_multimesh && entry.mesh == p_mesh) {
+			entry.dirty = true;
+			return entry.range_base;
+		}
+		multimesh_range_detach(p_parent_record);
+	}
+
+	uint32_t range_base = UINT32_MAX;
+	for (uint32_t i = 0; i < range_free_now.size(); i++) {
+		if (range_free_now[i].count < p_count) {
+			continue;
+		}
+		range_base = range_free_now[i].first;
+		range_free_now[i].first += p_count;
+		range_free_now[i].count -= p_count;
+		if (range_free_now[i].count == 0u) {
+			range_free_now.remove_at(i);
+		}
+		break;
+	}
+	if (range_base == UINT32_MAX) {
+		range_base = used_slots;
+		used_slots += p_count;
+		_ensure_capacity(used_slots);
+	}
+	ERR_FAIL_COND_V(range_base + p_count > record_capacity, UINT32_MAX);
+
+	for (uint32_t i = 0; i < p_count; i++) {
+		const uint32_t slot = range_base + i;
+		records[slot] = Record();
+		instance_attributes[slot] = InstanceAttributes();
+		SlotState &st = slot_states[slot];
+		st.instance = RID();
+		st.allocated = true;
+		st.dirty = false;
+		st.dirty_last = false;
+		st.initialized = false;
+		st.gpu_managed = true;
+		st.free_frame = UINT32_MAX;
+		st.bucket_slot = UINT32_MAX;
+		st.bucket_slot_count = 0u;
+	}
+
+	uint32_t expand_idx = UINT32_MAX;
+	for (uint32_t i = 0; i < multimesh_expands.size(); i++) {
+		if (!multimesh_expands[i].active) {
+			expand_idx = i;
+			break;
+		}
+	}
+	if (expand_idx == UINT32_MAX) {
+		expand_idx = multimesh_expands.size();
+		multimesh_expands.push_back(MultiMeshExpandEntry());
+	}
+	MultiMeshExpandEntry &entry = multimesh_expands[expand_idx];
+	entry.parent_record = p_parent_record;
+	entry.range_base = range_base;
+	entry.range_count = p_count;
+	entry.multimesh = p_multimesh;
+	entry.mesh = p_mesh;
+	entry.last_serial = 0u;
+	entry.active = true;
+	entry.dirty = true;
+	entry.dirty_last = false;
+	multimesh_parent_to_expand[p_parent_record] = expand_idx;
+
+	records[p_parent_record].flags |= RECORD_MULTIMESH_PARENT;
+	_mark_dirty(p_parent_record);
+	return range_base;
+}
+
+void RendererVirtualMeshStorage::multimesh_range_detach(uint32_t p_parent_record) {
+	const uint32_t *existing_idx = multimesh_parent_to_expand.getptr(p_parent_record);
+	if (existing_idx == nullptr) {
+		return;
+	}
+	const uint32_t idx = *existing_idx;
+	multimesh_parent_to_expand.erase(p_parent_record);
+	if (idx >= multimesh_expands.size()) {
+		return;
+	}
+	MultiMeshExpandEntry &entry = multimesh_expands[idx];
+	if (entry.active && entry.range_count > 0u) {
+		const uint32_t end = MIN(entry.range_base + entry.range_count, used_slots);
+		for (uint32_t slot = entry.range_base; slot < end; slot++) {
+			records[slot].flags = 0u;
+			instance_attributes[slot] = InstanceAttributes();
+			SlotState &st = slot_states[slot];
+			st.allocated = false;
+			st.dirty = false;
+			st.dirty_last = false;
+			st.gpu_managed = false;
+			st.free_frame = frame + 1u;
+		}
+		UploadRun run;
+		run.first = entry.range_base;
+		run.count = entry.range_count;
+		range_free_next.push_back(run);
+		pending_zero_ranges.push_back(run);
+	}
+	entry = MultiMeshExpandEntry();
+	if (p_parent_record < used_slots && slot_states[p_parent_record].allocated) {
+		records[p_parent_record].flags &= ~RECORD_MULTIMESH_PARENT;
+		_mark_dirty(p_parent_record);
+	}
+}
+
+void RendererVirtualMeshStorage::multimesh_mark_parent_dirty(uint32_t p_parent_record) {
+	const uint32_t *idx_ptr = multimesh_parent_to_expand.getptr(p_parent_record);
+	if (idx_ptr != nullptr && *idx_ptr < multimesh_expands.size() && multimesh_expands[*idx_ptr].active) {
+		multimesh_expands[*idx_ptr].dirty = true;
+	}
+}
+
+void RendererVirtualMeshStorage::_acquire_assembly_part_refs(MeshInfo &r_info) {
+	if (r_info.assembly_part_refs_held || !r_info.has_assembly) {
+		return;
+	}
+	r_info.assembly_part_refs_held = true;
+	for (uint32_t i = 0; i < r_info.assembly_unique_part_meshes.size(); i++) {
+		const RID part_rid = r_info.assembly_unique_part_meshes[i];
+		MeshInfo *part_info = meshes.getptr(part_rid);
+		if (part_info != nullptr) {
+			part_info->live_instances++;
+			if (part_info->live_instances == 1u && RSG::mesh_storage != nullptr) {
+				RSG::mesh_storage->mesh_on_virtual_geometry_changed(part_rid);
+			}
+		}
+	}
+}
+
+void RendererVirtualMeshStorage::_release_assembly_part_refs(MeshInfo &r_info) {
+	if (!r_info.assembly_part_refs_held) {
+		return;
+	}
+	r_info.assembly_part_refs_held = false;
+	for (uint32_t i = 0; i < r_info.assembly_unique_part_meshes.size(); i++) {
+		const RID part_rid = r_info.assembly_unique_part_meshes[i];
+		MeshInfo *part_info = meshes.getptr(part_rid);
+		if (part_info != nullptr && part_info->live_instances > 0u) {
+			part_info->live_instances--;
+			if (part_info->live_instances == 0u && RSG::mesh_storage != nullptr) {
+				RSG::mesh_storage->mesh_on_virtual_geometry_changed(part_rid);
+			}
+		}
+	}
+}
+
+void RendererVirtualMeshStorage::_rebuild_assemblies_gpu() {
+	const uint32_t mesh_count = mesh_records.size();
+	assembly_headers_gpu.resize(mesh_count);
+	for (uint32_t i = 0; i < mesh_count; i++) {
+		assembly_headers_gpu[i] = AssemblyHeaderGPU();
+	}
+	assembly_children_gpu.clear();
+	assembly_parts_gpu.clear();
+
+	auto store_xform = [](const Transform3D &p_t, float r_out[3][4]) {
+		for (int row = 0; row < 3; row++) {
+			r_out[row][0] = p_t.basis.rows[row][0];
+			r_out[row][1] = p_t.basis.rows[row][1];
+			r_out[row][2] = p_t.basis.rows[row][2];
+			r_out[row][3] = p_t.origin[row];
+		}
+	};
+
+	for (const KeyValue<RID, MeshInfo> &E : meshes) {
+		const MeshInfo &info = E.value;
+		if (!info.has_assembly || info.mesh_index >= mesh_count) {
+			continue;
+		}
+		AssemblyHeaderGPU hdr;
+		hdr.direct_part_offset = assembly_parts_gpu.size();
+
+		auto push_part = [&](const RenderingServerTypes::VirtualGeometryDesc::AssemblyPartDesc &p_part) -> bool {
+			if (p_part.mesh.is_null() || p_part.mesh == info.mesh) {
+				return false;
+			}
+			const uint32_t *part_m_idx = mesh_indices.getptr(p_part.mesh);
+			const MeshInfo *part_info = meshes.getptr(p_part.mesh);
+			const int64_t unique_idx = info.assembly_unique_part_meshes.find(p_part.mesh);
+			if (part_m_idx == nullptr || part_info == nullptr || unique_idx < 0) {
+				return false;
+			}
+			AssemblyPartGPU gp;
+			store_xform(p_part.local_transform, gp.transform);
+			AABB local_aabb = p_part.local_aabb;
+			if (!local_aabb.has_surface() && RSG::mesh_storage != nullptr) {
+				local_aabb = RSG::mesh_storage->mesh_get_aabb(p_part.mesh);
+			}
+			gp.local_aabb_min[0] = local_aabb.position.x;
+			gp.local_aabb_min[1] = local_aabb.position.y;
+			gp.local_aabb_min[2] = local_aabb.position.z;
+			gp.local_aabb_min[3] = 0.0f;
+			gp.local_aabb_max[0] = local_aabb.position.x + local_aabb.size.x;
+			gp.local_aabb_max[1] = local_aabb.position.y + local_aabb.size.y;
+			gp.local_aabb_max[2] = local_aabb.position.z + local_aabb.size.z;
+			gp.local_aabb_max[3] = 0.0f;
+			gp.part_virtual_mesh = *part_m_idx;
+			gp.unique_part_index = uint32_t(unique_idx);
+			gp.surface_mask = part_info->desc.eligible_surface_mask;
+			assembly_parts_gpu.push_back(gp);
+			return true;
+		};
+
+		for (int i = 0; i < info.desc.assembly_parts.size(); i++) {
+			if (push_part(info.desc.assembly_parts[i])) {
+				hdr.direct_part_count++;
+			}
+		}
+
+		hdr.child_offset = assembly_children_gpu.size();
+		for (int c = 0; c < info.desc.assembly_children.size(); c++) {
+			const RenderingServerTypes::VirtualGeometryDesc::AssemblyChildDesc &child = info.desc.assembly_children[c];
+			AssemblyChildGPU gc;
+			store_xform(child.local_transform, gc.transform);
+			gc.part_offset = assembly_parts_gpu.size();
+			for (int i = 0; i < child.parts.size(); i++) {
+				if (push_part(child.parts[i])) {
+					gc.part_count++;
+				}
+			}
+			if (gc.part_count > 0u) {
+				assembly_children_gpu.push_back(gc);
+				hdr.child_count++;
+				hdr.leaf_count += gc.part_count;
+			}
+		}
+		hdr.leaf_count += hdr.direct_part_count;
+		assembly_headers_gpu[info.mesh_index] = hdr;
+	}
+
+	_upload_assembly_buffers(
+			assembly_headers_gpu.ptr(), assembly_headers_gpu.size(),
+			assembly_children_gpu.ptr(), assembly_children_gpu.size(),
+			assembly_parts_gpu.ptr(), assembly_parts_gpu.size());
+}
+
+void RendererVirtualMeshStorage::build_multimesh_element_record_cpu(const Record &p_parent, const InstanceAttributes &p_parent_attr, uint32_t p_parent_record_idx, uint32_t p_element_idx, const float *p_elem_cur, const float *p_elem_prev, uint32_t p_color_offset, uint32_t p_custom_offset, bool p_has_color, bool p_has_custom, bool p_visible, const AABB &p_mesh_local_aabb, Record &r_out_record, InstanceAttributes &r_out_attr) {
+	r_out_record = p_parent;
+	r_out_record.flags &= ~RECORD_MULTIMESH_PARENT;
+	r_out_record.flags |= RECORD_MULTIMESH_ELEMENT;
+	if (!p_visible || p_elem_cur == nullptr) {
+		r_out_record.flags &= ~RECORD_VISIBLE;
+	}
+	if (p_has_color) {
+		r_out_record.flags |= RECORD_HAS_INSTANCE_COLOR;
+	} else {
+		r_out_record.flags &= ~RECORD_HAS_INSTANCE_COLOR;
+	}
+	if (p_has_custom) {
+		r_out_record.flags |= RECORD_HAS_INSTANCE_CUSTOM;
+	} else {
+		r_out_record.flags &= ~RECORD_HAS_INSTANCE_CUSTOM;
+	}
+
+	auto read_xform = [](const float p_rows[3][4]) -> Transform3D {
+		Transform3D t;
+		for (int r = 0; r < 3; r++) {
+			t.basis.rows[r][0] = p_rows[r][0];
+			t.basis.rows[r][1] = p_rows[r][1];
+			t.basis.rows[r][2] = p_rows[r][2];
+			t.origin[r] = p_rows[r][3];
+		}
+		return t;
+	};
+	auto read_mm_xform = [](const float *p_f) -> Transform3D {
+		Transform3D t;
+		for (int r = 0; r < 3; r++) {
+			t.basis.rows[r][0] = p_f[r * 4 + 0];
+			t.basis.rows[r][1] = p_f[r * 4 + 1];
+			t.basis.rows[r][2] = p_f[r * 4 + 2];
+			t.origin[r] = p_f[r * 4 + 3];
+		}
+		return t;
+	};
+	auto write_xform = [](const Transform3D &p_t, float r_rows[3][4]) {
+		for (int r = 0; r < 3; r++) {
+			r_rows[r][0] = p_t.basis.rows[r][0];
+			r_rows[r][1] = p_t.basis.rows[r][1];
+			r_rows[r][2] = p_t.basis.rows[r][2];
+			r_rows[r][3] = p_t.origin[r];
+		}
+	};
+
+	const Transform3D parent_cur = read_xform(p_parent.transform);
+	const Transform3D parent_prev = read_xform(p_parent.prev_transform);
+	const Transform3D elem_cur = p_elem_cur != nullptr ? read_mm_xform(p_elem_cur) : Transform3D();
+	const Transform3D elem_prev = p_elem_prev != nullptr ? read_mm_xform(p_elem_prev) : elem_cur;
+	const Transform3D world_cur = parent_cur * elem_cur;
+	const Transform3D world_prev = parent_prev * elem_prev;
+
+	write_xform(world_cur, r_out_record.transform);
+	write_xform(world_prev, r_out_record.prev_transform);
+
+	const Vector3 scale = world_cur.basis.get_scale();
+	const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
+	if (max_scale <= 1e-12f) {
+		r_out_record.flags &= ~RECORD_VISIBLE;
+	}
+	if (basis_has_non_uniform_scale(world_cur.basis)) {
+		r_out_record.flags |= RECORD_NON_UNIFORM_SCALE;
+	} else {
+		r_out_record.flags &= ~RECORD_NON_UNIFORM_SCALE;
+	}
+
+	const AABB world_aabb = world_cur.xform(p_mesh_local_aabb);
+	const AABB prev_world_aabb = world_prev.xform(p_mesh_local_aabb);
+	r_out_record.world_aabb_min[0] = world_aabb.position.x;
+	r_out_record.world_aabb_min[1] = world_aabb.position.y;
+	r_out_record.world_aabb_min[2] = world_aabb.position.z;
+	r_out_record.world_aabb_min[3] = max_scale;
+	r_out_record.world_aabb_max[0] = world_aabb.position.x + world_aabb.size.x;
+	r_out_record.world_aabb_max[1] = world_aabb.position.y + world_aabb.size.y;
+	r_out_record.world_aabb_max[2] = world_aabb.position.z + world_aabb.size.z;
+	r_out_record.prev_world_aabb_min[0] = prev_world_aabb.position.x;
+	r_out_record.prev_world_aabb_min[1] = prev_world_aabb.position.y;
+	r_out_record.prev_world_aabb_min[2] = prev_world_aabb.position.z;
+	r_out_record.prev_world_aabb_max[0] = prev_world_aabb.position.x + prev_world_aabb.size.x;
+	r_out_record.prev_world_aabb_max[1] = prev_world_aabb.position.y + prev_world_aabb.size.y;
+	r_out_record.prev_world_aabb_max[2] = prev_world_aabb.position.z + prev_world_aabb.size.z;
+
+	r_out_attr = InstanceAttributes();
+	if (p_has_color && p_elem_cur != nullptr) {
+		for (int k = 0; k < 4; k++) {
+			r_out_attr.color[k] = p_elem_cur[p_color_offset + k];
+		}
+	}
+	if (p_has_custom && p_elem_cur != nullptr) {
+		for (int k = 0; k < 4; k++) {
+			r_out_attr.custom_data[k] = p_elem_cur[p_custom_offset + k];
+		}
+	}
+	r_out_attr.meta[0] = p_parent_record_idx;
+	r_out_attr.meta[1] = p_element_idx;
+	r_out_attr.meta[2] = p_parent_attr.meta[2];
+	r_out_attr.meta[3] = p_parent_attr.meta[3];
+}
+
+bool RendererVirtualMeshStorage::cull_instance_cpu(const Record &p_record, const InstanceAttributes &p_attr, const Record *p_parent_or_null, const float p_frustum[6][4], const Vector3 &p_camera_pos, uint32_t p_cull_mask, bool p_is_shadow_view) {
+	const bool cast_ok = p_is_shadow_view
+			? ((p_record.flags & RECORD_CAST_SHADOW_MASK) != RECORD_CAST_SHADOW_OFF)
+			: ((p_record.flags & RECORD_CAST_SHADOW_MASK) != RECORD_CAST_SHADOW_SHADOWS_ONLY);
+	if ((p_record.flags & (RECORD_VALID | RECORD_VISIBLE)) != (RECORD_VALID | RECORD_VISIBLE) ||
+			!cast_ok ||
+			(p_record.flags & (RECORD_HAS_INSTANCE_UNIFORMS | RECORD_MULTIMESH_PARENT | RECORD_HAS_ASSEMBLY)) != 0u ||
+			(p_record.flags & (RECORD_HAS_SKELETON | RECORD_SKINNED_PALETTE)) == RECORD_HAS_SKELETON ||
+			(p_record.gi_flags & GI_LIGHTMAPPED) != 0u ||
+			p_record.virtual_mesh == UINT32_MAX ||
+			(p_is_shadow_view ? p_record.pad0 : p_record.surface_mask) == 0u ||
+			(p_record.layer_mask & p_cull_mask) == 0u) {
+		return false;
+	}
+	auto aabb_visible = [&](const Vector3 &p_lo, const Vector3 &p_hi) -> bool {
+		for (int plane = 0; plane < 6; plane++) {
+			const float nx = p_frustum[plane][0];
+			const float ny = p_frustum[plane][1];
+			const float nz = p_frustum[plane][2];
+			const float fx = nx >= 0.0f ? p_hi.x : p_lo.x;
+			const float fy = ny >= 0.0f ? p_hi.y : p_lo.y;
+			const float fz = nz >= 0.0f ? p_hi.z : p_lo.z;
+			if (nx * fx + ny * fy + nz * fz + p_frustum[plane][3] < 0.0f) {
+				return false;
+			}
+		}
+		return true;
+	};
+	// Coarse MultiMesh parent AABB pre-test.
+	if ((p_record.flags & RECORD_MULTIMESH_ELEMENT) != 0u && p_parent_or_null != nullptr) {
+		if ((p_parent_or_null->flags & (RECORD_VALID | RECORD_VISIBLE)) != (RECORD_VALID | RECORD_VISIBLE)) {
+			return false;
+		}
+		const float parent_wpo = get_record_vertex_offset_bound(*p_parent_or_null) * Math::abs(p_parent_or_null->world_aabb_min[3]);
+		const Vector3 plo(p_parent_or_null->world_aabb_min[0] - parent_wpo, p_parent_or_null->world_aabb_min[1] - parent_wpo, p_parent_or_null->world_aabb_min[2] - parent_wpo);
+		const Vector3 phi(p_parent_or_null->world_aabb_max[0] + parent_wpo, p_parent_or_null->world_aabb_max[1] + parent_wpo, p_parent_or_null->world_aabb_max[2] + parent_wpo);
+		if (!aabb_visible(plo, phi)) {
+			return false;
+		}
+	}
+	// Per-instance distance culling (main view).
+	if (!p_is_shadow_view) {
+		float vis_begin = 0.0f;
+		float vis_end = 0.0f;
+		memcpy(&vis_begin, &p_attr.meta[2], sizeof(float));
+		memcpy(&vis_end, &p_attr.meta[3], sizeof(float));
+		if (vis_begin > 0.0f || vis_end > 0.0f) {
+			const Vector3 center(
+					0.5f * (p_record.world_aabb_min[0] + p_record.world_aabb_max[0]),
+					0.5f * (p_record.world_aabb_min[1] + p_record.world_aabb_max[1]),
+					0.5f * (p_record.world_aabb_min[2] + p_record.world_aabb_max[2]));
+			const float dist = center.distance_to(p_camera_pos);
+			if ((vis_end > 0.0f && dist > vis_end) || (vis_begin > 0.0f && dist < vis_begin)) {
+				return false;
+			}
+		}
+	}
+	// Per-instance frustum test with WPO AABB inflation.
+	const float wpo_margin = get_record_vertex_offset_bound(p_record) * Math::abs(p_record.world_aabb_min[3]);
+	const Vector3 lo(p_record.world_aabb_min[0] - wpo_margin, p_record.world_aabb_min[1] - wpo_margin, p_record.world_aabb_min[2] - wpo_margin);
+	const Vector3 hi(p_record.world_aabb_max[0] + wpo_margin, p_record.world_aabb_max[1] + wpo_margin, p_record.world_aabb_max[2] + wpo_margin);
+	return aabb_visible(lo, hi);
+}
+
+void RendererVirtualMeshStorage::get_effective_records_cpu(LocalVector<Record> &r_records, LocalVector<InstanceAttributes> &r_attrs) const {
+	r_records.resize(used_slots);
+	r_attrs.resize(used_slots);
+	for (uint32_t i = 0; i < used_slots; i++) {
+		r_records[i] = records[i];
+		r_attrs[i] = i < instance_attributes.size() ? instance_attributes[i] : InstanceAttributes();
+	}
+
+	// Expand MultiMesh element records on CPU matching multimesh_expand.glsl.
+	if (RSG::mesh_storage != nullptr) {
+		for (uint32_t i = 0; i < multimesh_expands.size(); i++) {
+			const MultiMeshExpandEntry &entry = multimesh_expands[i];
+			if (!entry.active || entry.parent_record >= used_slots || entry.range_base + entry.range_count > used_slots) {
+				continue;
+			}
+			RendererMeshStorage::MultiMeshNextGeoInfo info;
+			if (!RSG::mesh_storage->multimesh_get_nextgeo_info(entry.multimesh, info) || !info.eligible) {
+				continue;
+			}
+			const Vector<float> buf = RSG::mesh_storage->multimesh_get_buffer(entry.multimesh);
+			const Record &parent = r_records[entry.parent_record];
+			const InstanceAttributes &parent_attr = r_attrs[entry.parent_record];
+			for (uint32_t e = 0; e < entry.range_count; e++) {
+				const uint32_t slot = entry.range_base + e;
+				const float *elem_ptr = (uint64_t(e + 1) * uint64_t(info.stride) <= uint64_t(buf.size())) ? (buf.ptr() + e * info.stride) : nullptr;
+				build_multimesh_element_record_cpu(
+						parent, parent_attr, entry.parent_record, e,
+						elem_ptr, elem_ptr,
+						info.color_offset, info.custom_offset,
+						info.uses_colors, info.uses_custom_data,
+						e < info.visible_count, info.mesh_local_aabb,
+						r_records[slot], r_attrs[slot]);
+			}
+		}
+	}
+
+	// Expand 2-level Nanite Assemblies matching instance_cull.glsl ASSEMBLY_EXPAND.
+	if (are_assemblies_enabled() && active_assembly_leaf_capacity > 0u) {
+		const uint32_t source_count = used_slots;
+		for (uint32_t idx = 0; idx < source_count; idx++) {
+			const Record &src = r_records[idx];
+			if ((src.flags & (RECORD_VALID | RECORD_VISIBLE | RECORD_HAS_ASSEMBLY)) != (RECORD_VALID | RECORD_VISIBLE | RECORD_HAS_ASSEMBLY) ||
+					(src.flags & RECORD_MULTIMESH_PARENT) != 0u) {
+				continue;
+			}
+			const MeshInfo *info = get_mesh_info(src.virtual_mesh);
+			if (info == nullptr || !info->has_assembly) {
+				continue;
+			}
+			Transform3D src_xform;
+			for (int r = 0; r < 3; r++) {
+				src_xform.basis.rows[r][0] = src.transform[r][0];
+				src_xform.basis.rows[r][1] = src.transform[r][1];
+				src_xform.basis.rows[r][2] = src.transform[r][2];
+				src_xform.origin[r] = src.transform[r][3];
+			}
+			LocalVector<AssemblyLeafCPU> leaves;
+			mesh_get_assembly_expanded_parts_cpu(info->mesh, src_xform, leaves);
+			const InstanceAttributes src_attr = r_attrs[idx];
+			const uint32_t base_bucket_slot = src.bucket_base >> 5u;
+			for (uint32_t l = 0; l < leaves.size(); l++) {
+				const AssemblyLeafCPU &leaf = leaves[l];
+				if (leaf.part_mesh_index == UINT32_MAX) {
+					continue;
+				}
+				Record out_rec = src;
+				out_rec.flags &= ~RECORD_HAS_ASSEMBLY;
+				out_rec.flags |= RECORD_ASSEMBLY_PART;
+				out_rec.virtual_mesh = leaf.part_mesh_index;
+				const uint32_t bslot = base_bucket_slot + leaf.unique_part_index;
+				out_rec.bucket_base = bslot * 32u;
+				if (bslot < bucket_surface_masks.size()) {
+					out_rec.surface_mask = bucket_surface_masks[bslot].surface_mask;
+					out_rec.pad0 = bucket_surface_masks[bslot].shadow_surface_mask;
+					out_rec.pad1[0] = bucket_surface_masks[bslot].cull_disabled_mask;
+					out_rec.pad1[1] = bucket_surface_masks[bslot].cull_front_mask;
+				}
+				for (int r = 0; r < 3; r++) {
+					out_rec.transform[r][0] = leaf.world_transform.basis.rows[r][0];
+					out_rec.transform[r][1] = leaf.world_transform.basis.rows[r][1];
+					out_rec.transform[r][2] = leaf.world_transform.basis.rows[r][2];
+					out_rec.transform[r][3] = leaf.world_transform.origin[r];
+					out_rec.prev_transform[r][0] = out_rec.transform[r][0];
+					out_rec.prev_transform[r][1] = out_rec.transform[r][1];
+					out_rec.prev_transform[r][2] = out_rec.transform[r][2];
+					out_rec.prev_transform[r][3] = out_rec.transform[r][3];
+				}
+				const Vector3 scale = leaf.world_transform.basis.get_scale();
+				const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
+				if (basis_has_non_uniform_scale(leaf.world_transform.basis)) {
+					out_rec.flags |= RECORD_NON_UNIFORM_SCALE;
+				} else {
+					out_rec.flags &= ~RECORD_NON_UNIFORM_SCALE;
+				}
+				const AABB world_aabb = leaf.world_transform.xform(leaf.local_aabb);
+				out_rec.world_aabb_min[0] = world_aabb.position.x;
+				out_rec.world_aabb_min[1] = world_aabb.position.y;
+				out_rec.world_aabb_min[2] = world_aabb.position.z;
+				out_rec.world_aabb_min[3] = max_scale;
+				out_rec.world_aabb_max[0] = world_aabb.position.x + world_aabb.size.x;
+				out_rec.world_aabb_max[1] = world_aabb.position.y + world_aabb.size.y;
+				out_rec.world_aabb_max[2] = world_aabb.position.z + world_aabb.size.z;
+				for (int k = 0; k < 3; k++) {
+					out_rec.prev_world_aabb_min[k] = out_rec.world_aabb_min[k];
+					out_rec.prev_world_aabb_max[k] = out_rec.world_aabb_max[k];
+				}
+				r_records.push_back(out_rec);
+				r_attrs.push_back(src_attr);
+			}
 		}
 	}
 }

@@ -3648,6 +3648,9 @@
 		<member name="rendering/nextgeo/debug_vis64_buffer" type="bool" setter="" getter="" default="false">
 			Use the storage-buffer form of the hybrid raster's 64-bit visibility buffer even where 64-bit image atomics are available. The buffer form is the one devices without 64-bit image atomics use; this setting exercises it on other devices for testing.
 		</member>
+		<member name="rendering/nextgeo/experimental/assemblies" type="bool" setter="" getter="" default="false" experimental="Nanite Assemblies are experimental and off by default.">
+			Enable GPU expansion of [VirtualGeometryAssembly] payloads attached to [member VirtualGeometryData.assembly] (up to two levels of instanced virtualized parts and child assemblies) in NextGeo visibility, VSM, and ray-tracing passes. Off by default.
+		</member>
 		<member name="rendering/nextgeo/experimental/tessellation" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite runtime displacement tessellation">
 			Enable experimental runtime displacement tessellation for NextGeo virtual geometry. Displaced materials (spatial shaders with a [code]displacement()[/code] function or [BaseMaterial3D] with [constant BaseMaterial3D.HEIGHTMAP_MODE_DISPLACEMENT] and positive [member Material.displacement_magnitude]) are diced at [member rendering/nextgeo/tessellation/dicing_rate] pixels per edge with crack-free canonical edge factors, rasterized into the 64-bit visibility buffer via software rasterization and a bounded hardware stream, and resolved deterministically during shading. When disabled, zero dicing buffers are allocated and zero dicing passes run.
 		</member>

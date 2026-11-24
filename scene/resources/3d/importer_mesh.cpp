@@ -1684,7 +1684,7 @@ Ref<VirtualGeometryData> ImporterMesh::get_virtual_geometry() const {
 	return virtual_geometry;
 }
 
-Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path, bool p_skinned) {
+Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path, bool p_skinned, bool p_preserve_area) {
 	mesh.unref();
 	virtual_geometry.unref();
 
@@ -1710,7 +1710,7 @@ Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path, bool p_skin
 
 	Ref<VirtualGeometryData> built;
 	Vector<Vector<uint8_t>> pages;
-	const Error err = build_virtual_geometry_func(this, eligible, built, pages);
+	const Error err = build_virtual_geometry_func(this, eligible, p_preserve_area, built, pages);
 	if (err != OK) {
 		return err;
 	}
@@ -1833,7 +1833,8 @@ void ImporterMesh::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("generate_lods", "normal_merge_angle", "normal_split_angle", "bone_transform_array"), &ImporterMesh::_generate_lods_bind);
 	// GodotNext: nextgeo_import
 	// GodotNext: nextgeo_skinned
-	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path", "skinned"), &ImporterMesh::build_virtual_geometry, DEFVAL(false));
+	// GodotNext: nextgeo_foliage_instancing (#151)
+	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path", "skinned", "preserve_area"), &ImporterMesh::build_virtual_geometry, DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_mesh", "base_mesh"), &ImporterMesh::get_mesh, DEFVAL(Ref<ArrayMesh>()));
 	ClassDB::bind_static_method("ImporterMesh", D_METHOD("from_mesh", "mesh"), &ImporterMesh::from_mesh);
 	ClassDB::bind_method(D_METHOD("clear"), &ImporterMesh::clear);

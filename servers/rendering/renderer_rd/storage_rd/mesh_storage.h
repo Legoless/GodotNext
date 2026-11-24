@@ -418,6 +418,8 @@ private:
 		// GodotNext: nextgi_rt_multimesh. Changed on each of the last 8 frames means the MultiMesh is dynamic.
 		uint64_t rt_last_change_frame = 0;
 		uint8_t rt_change_streak = 0;
+		// GodotNext: nextgeo_foliage_instancing (#151). Monotonic serial bumped when GPU buffer or visibility changes.
+		uint64_t nextgeo_dirty_serial = 1;
 		uint32_t stride_cache = 0;
 		uint32_t color_offset_cache = 0;
 		uint32_t custom_data_offset_cache = 0;
@@ -989,6 +991,8 @@ public:
 
 	void _update_dirty_multimeshes();
 	void _multimesh_get_motion_vectors_offsets(RID p_multimesh, uint32_t &r_current_offset, uint32_t &r_prev_offset);
+	virtual bool multimesh_get_nextgeo_info(RID p_multimesh, MultiMeshNextGeoInfo &r_info) const override;
+	virtual uint64_t multimesh_get_nextgeo_dirty_serial(RID p_multimesh) const override;
 	bool _multimesh_uses_motion_vectors_offsets(RID p_multimesh);
 	bool _multimesh_uses_motion_vectors(RID p_multimesh);
 

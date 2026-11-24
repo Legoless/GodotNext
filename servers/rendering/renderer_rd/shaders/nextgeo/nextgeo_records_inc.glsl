@@ -69,9 +69,62 @@ const uint NEXTGEO_RECORD_VSM_DYNAMIC = 1u << 14;
 const uint NEXTGEO_RECORD_RT_EVALUATE_VERTEX_OFFSET = 1u << 15;
 // GodotNext: nextgeo_skinned_runtime (#160). Instance has a valid #159 skinned virtual mesh + 3D skeleton palette entry.
 const uint NEXTGEO_RECORD_SKINNED_PALETTE = 1u << 16;
-// GodotNext: spline_meshes (#161). Bit 17 marks an active spline record; bits 18..31 hold the 14-bit spline slot index.
-const uint NEXTGEO_RECORD_HAS_SPLINE = 1u << 17;
-const uint NEXTGEO_RECORD_SPLINE_INDEX_SHIFT = 18u;
+// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10, GN-7, GN-12).
+const uint NEXTGEO_RECORD_MULTIMESH_PARENT = 1u << 17;
+const uint NEXTGEO_RECORD_MULTIMESH_ELEMENT = 1u << 18;
+const uint NEXTGEO_RECORD_NON_UNIFORM_SCALE = 1u << 19;
+const uint NEXTGEO_RECORD_HAS_INSTANCE_COLOR = 1u << 20;
+const uint NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM = 1u << 21;
+const uint NEXTGEO_RECORD_HAS_ASSEMBLY = 1u << 22;
+const uint NEXTGEO_RECORD_ASSEMBLY_PART = 1u << 23;
+// GodotNext: spline_meshes (#161). Bit 24 marks an active spline record; bits 25..31 hold the 7-bit spline slot index.
+const uint NEXTGEO_RECORD_HAS_SPLINE = 1u << 24;
+const uint NEXTGEO_RECORD_SPLINE_INDEX_SHIFT = 25u;
+
+// GodotNext: nextgeo_foliage_instancing (#151). Per-record sideband attributes (48 B std430), parallel to NextGeoInstanceRecord.
+struct NextGeoInstanceAttributes {
+	vec4 color; // 0
+	vec4 custom_data; // 16
+	uvec4 meta; // 32: x = parent_record_idx (0xFFFFFFFF if none), y = element_index (INSTANCE_ID), z = visibility_range_begin bits, w = visibility_range_end bits
+};
+
+// Per-bucket-slot surface and cull masks (16 B std430), indexed by (bucket_base >> 5).
+struct NextGeoBucketSurfaceMask {
+	uint surface_mask;
+	uint shadow_surface_mask;
+	uint cull_disabled_mask;
+	uint cull_front_mask;
+};
+
+// GPU Nanite Assembly descriptors (std430, <= 2 levels: instance -> part -> sub-part).
+struct NextGeoAssemblyHeader {
+	uint direct_part_offset;
+	uint direct_part_count;
+	uint child_offset;
+	uint child_count;
+	uint leaf_count;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+}; // 32 B
+
+struct NextGeoAssemblyChild {
+	vec4 transform[3];
+	uint part_offset;
+	uint part_count;
+	uint pad0;
+	uint pad1;
+}; // 64 B
+
+struct NextGeoAssemblyPart {
+	vec4 transform[3];
+	vec4 local_aabb_min;
+	vec4 local_aabb_max;
+	uint part_virtual_mesh;
+	uint unique_part_index;
+	uint surface_mask;
+	uint pad0;
+}; // 96 B
 
 // NextGeoInstanceRecord::gi_flags.
 const uint NEXTGEO_GI_MODE_MASK = 3u << 0;

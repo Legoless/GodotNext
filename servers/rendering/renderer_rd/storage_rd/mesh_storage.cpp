@@ -3371,6 +3371,7 @@ void MeshStorage::_multimesh_allocate_data(RID p_multimesh, int p_instances, RSE
 		multimesh->buffer = RD::get_singleton()->storage_buffer_create(buffer_size, zeros.span());
 	}
 
+	multimesh->nextgeo_dirty_serial++;
 	multimesh->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MULTIMESH);
 	_multimesh_note_rt_change(multimesh);
 }
@@ -3410,6 +3411,7 @@ void MeshStorage::_multimesh_enable_motion_vectors(MultiMesh *multimesh) {
 
 	multimesh->buffer = new_buffer;
 	multimesh->uniform_set_3d = RID(); // Cleared by dependency.
+	multimesh->nextgeo_dirty_serial++;
 
 	// Invalidate any references to the buffer that was released and the uniform set that was pointing to it.
 	multimesh->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MULTIMESH);
@@ -3444,6 +3446,7 @@ void MeshStorage::_multimesh_set_mesh(RID p_multimesh, RID p_mesh) {
 		return;
 	}
 	multimesh->mesh = p_mesh;
+	multimesh->nextgeo_dirty_serial++;
 
 	if (multimesh->indirect) {
 		ERR_FAIL_COND(p_mesh.is_null());
@@ -3976,6 +3979,7 @@ void MeshStorage::_multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_
 			RD::get_singleton()->buffer_update(multimesh->buffer, multimesh->motion_vectors_previous_offset * multimesh->stride_cache * sizeof(float), p_buffer.size() * sizeof(float), r);
 		}
 		multimesh->buffer_set = true;
+		multimesh->nextgeo_dirty_serial++;
 	}
 	_multimesh_note_rt_change(multimesh);
 
@@ -4046,6 +4050,7 @@ void MeshStorage::_multimesh_set_visible_instances(RID p_multimesh, int p_visibl
 	}
 
 	multimesh->visible_instances = p_visible;
+	multimesh->nextgeo_dirty_serial++;
 	_multimesh_note_rt_change(multimesh);
 
 	if (multimesh->indirect) { //we have to update the command buffer for the instance counts, in each stride this will be the second integer.
@@ -4135,6 +4140,7 @@ void MeshStorage::_update_dirty_multimeshes() {
 
 				multimesh->previous_data_cache_dirty_region_count = multimesh->data_cache_dirty_region_count;
 				multimesh->data_cache_dirty_region_count = 0;
+				multimesh->nextgeo_dirty_serial++;
 			}
 
 			if (multimesh->aabb_dirty) {
@@ -4154,6 +4160,42 @@ void MeshStorage::_update_dirty_multimeshes() {
 	}
 
 	multimesh_dirty_list = nullptr;
+}
+
+bool MeshStorage::multimesh_get_nextgeo_info(RID p_multimesh, MultiMeshNextGeoInfo &r_info) const {
+	r_info = MultiMeshNextGeoInfo();
+	const MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+	if (multimesh == nullptr) {
+		return false;
+	}
+	r_info.buffer = multimesh->buffer;
+	r_info.mesh = multimesh->mesh;
+	r_info.instance_count = uint32_t(MAX(multimesh->instances, 0));
+	r_info.visible_count = multimesh->visible_instances >= 0 ? uint32_t(MIN(multimesh->visible_instances, multimesh->instances)) : r_info.instance_count;
+	r_info.stride = multimesh->stride_cache;
+	r_info.color_offset = multimesh->color_offset_cache;
+	r_info.custom_offset = multimesh->custom_data_offset_cache;
+	r_info.uses_colors = multimesh->uses_colors;
+	r_info.uses_custom_data = multimesh->uses_custom_data;
+	r_info.dirty_serial = multimesh->nextgeo_dirty_serial;
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	const bool active_mv = multimesh->motion_vectors_enabled && multimesh->motion_vectors_last_change == frame;
+	r_info.motion_vectors = active_mv;
+	r_info.current_offset = multimesh->motion_vectors_current_offset;
+	r_info.prev_offset = active_mv ? multimesh->motion_vectors_previous_offset : multimesh->motion_vectors_current_offset;
+	if (multimesh->mesh.is_valid()) {
+		const Mesh *mesh = mesh_owner.get_or_null(multimesh->mesh);
+		if (mesh != nullptr) {
+			r_info.mesh_local_aabb = mesh->custom_aabb != AABB() ? mesh->custom_aabb : mesh->aabb;
+		}
+	}
+	r_info.eligible = multimesh->xform_format == RSE::MULTIMESH_TRANSFORM_3D && !multimesh->indirect && multimesh->instances > 0 && multimesh->mesh.is_valid() && multimesh->buffer.is_valid();
+	return true;
+}
+
+uint64_t MeshStorage::multimesh_get_nextgeo_dirty_serial(RID p_multimesh) const {
+	const MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+	return multimesh != nullptr ? multimesh->nextgeo_dirty_serial : 0;
 }
 
 /* SKELETON API */

@@ -613,7 +613,10 @@ func _verify_p3_matrix(p_post_mutate: bool) -> void:
 						exp_route = ExclusionRules.ROUTE_LEGACY
 						exp_reason = ExclusionRules.REASON_MUTATED
 					_assert_instance_surface(cand as VisualInstance3D, s_idx, exp_route, exp_reason, "p3_%s/%s" % [label, cid])
-			"multimesh", "particles":
+			"multimesh":
+				# GodotNext: nextgeo_foliage_instancing (#151). Eligible 3D MultiMeshInstance3D routes virtual.
+				_assert_instance_surface(cand as VisualInstance3D, 0, "virtual", "NONE", "p3_%s/%s" % [label, cid])
+			"particles":
 				_assert_instance_surface(cand as VisualInstance3D, 0, "legacy", "MULTIMESH_OR_PARTICLES", "p3_%s/%s" % [label, cid])
 			"baked_gridmap":
 				var bgm := cand as GridMap

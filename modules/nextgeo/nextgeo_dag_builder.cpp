@@ -100,6 +100,8 @@ struct BuildCluster {
 	uint32_t vertex_count = 0;
 	LocalVector<uint16_t> bones; // Sorted global bones touched with weight > 0 (skinned builds).
 	uint16_t surface_id = 0;
+	// GodotNext: nextgeo_foliage_instancing (#151). Centroid linear scale applied on emission (> 1.0 when preserve_area is active).
+	float area_scale = 1.0f;
 	float bounds[4] = {};
 	int8_t cone_axis[3] = {};
 	int8_t cone_cutoff = 0;
@@ -198,21 +200,70 @@ bool _bone_in(const LocalVector<uint16_t> &p_bones, uint16_t p_bone) {
 	return false;
 }
 
+double _triangles_area(const MergedMesh &p_mesh, const LocalVector<uint32_t> &p_indices) {
+	double total = 0.0;
+	for (uint32_t t = 0; t + 2 < p_indices.size(); t += 3) {
+		const float *p0 = &p_mesh.positions[p_indices[t + 0] * 3];
+		const float *p1 = &p_mesh.positions[p_indices[t + 1] * 3];
+		const float *p2 = &p_mesh.positions[p_indices[t + 2] * 3];
+		const double ex1 = double(p1[0]) - double(p0[0]);
+		const double ey1 = double(p1[1]) - double(p0[1]);
+		const double ez1 = double(p1[2]) - double(p0[2]);
+		const double ex2 = double(p2[0]) - double(p0[0]);
+		const double ey2 = double(p2[1]) - double(p0[1]);
+		const double ez2 = double(p2[2]) - double(p0[2]);
+		const double cx = ey1 * ez2 - ez1 * ey2;
+		const double cy = ez1 * ex2 - ex1 * ez2;
+		const double cz = ex1 * ey2 - ey1 * ex2;
+		total += 0.5 * std::sqrt(cx * cx + cy * cy + cz * cz);
+	}
+	return total;
+}
+
 // One build cluster over a merged-index triangle list: bounds, cone and bone list.
-void _make_cluster(const MergedMesh &p_mesh, LocalVector<uint32_t> &&p_indices, uint16_t p_surface_id, LocalVector<BuildCluster> &r_clusters) {
+void _make_cluster(const MergedMesh &p_mesh, LocalVector<uint32_t> &&p_indices, uint16_t p_surface_id, LocalVector<BuildCluster> &r_clusters, float p_area_scale = 1.0f) {
 	if (p_indices.is_empty()) {
 		return;
 	}
 	BuildCluster cluster;
 	cluster.surface_id = p_surface_id;
+	cluster.area_scale = p_area_scale;
 	cluster.indices = std::move(p_indices);
 
-	LocalVector<uint32_t> unique(cluster.indices);
-	_sort_unique(unique);
-	cluster.vertex_count = unique.size();
 	_collect_bones(p_mesh, cluster.indices, cluster.bones);
 
-	const meshopt_Bounds bounds = meshopt_computeClusterBounds(cluster.indices.ptr(), cluster.indices.size(), p_mesh.positions.ptr(), p_mesh.vertex_count, sizeof(float) * 3);
+	meshopt_Bounds bounds;
+	if (p_area_scale > 1.0f) {
+		// Unshared vertices per triangle scaled about each triangle's centroid.
+		const uint32_t corner_count = cluster.indices.size();
+		cluster.vertex_count = corner_count;
+		LocalVector<float> scaled_positions;
+		scaled_positions.resize(corner_count * 3);
+		LocalVector<uint32_t> seq_indices;
+		seq_indices.resize(corner_count);
+		for (uint32_t t = 0; t + 2 < corner_count; t += 3) {
+			const float *p0 = &p_mesh.positions[cluster.indices[t + 0] * 3];
+			const float *p1 = &p_mesh.positions[cluster.indices[t + 1] * 3];
+			const float *p2 = &p_mesh.positions[cluster.indices[t + 2] * 3];
+			const float cx = (p0[0] + p1[0] + p2[0]) / 3.0f;
+			const float cy = (p0[1] + p1[1] + p2[1]) / 3.0f;
+			const float cz = (p0[2] + p1[2] + p2[2]) / 3.0f;
+			const float *pts[3] = { p0, p1, p2 };
+			for (uint32_t c = 0; c < 3; c++) {
+				const uint32_t idx = t + c;
+				scaled_positions[idx * 3 + 0] = cx + (pts[c][0] - cx) * p_area_scale;
+				scaled_positions[idx * 3 + 1] = cy + (pts[c][1] - cy) * p_area_scale;
+				scaled_positions[idx * 3 + 2] = cz + (pts[c][2] - cz) * p_area_scale;
+				seq_indices[idx] = idx;
+			}
+		}
+		bounds = meshopt_computeClusterBounds(seq_indices.ptr(), corner_count, scaled_positions.ptr(), corner_count, sizeof(float) * 3);
+	} else {
+		LocalVector<uint32_t> unique(cluster.indices);
+		_sort_unique(unique);
+		cluster.vertex_count = unique.size();
+		bounds = meshopt_computeClusterBounds(cluster.indices.ptr(), cluster.indices.size(), p_mesh.positions.ptr(), p_mesh.vertex_count, sizeof(float) * 3);
+	}
 	_write_sphere(bounds, cluster.bounds);
 	for (uint32_t k = 0; k < 3; k++) {
 		cluster.cone_axis[k] = bounds.cone_axis_s8[k];
@@ -224,7 +275,7 @@ void _make_cluster(const MergedMesh &p_mesh, LocalVector<uint32_t> &&p_indices, 
 // Splits a single-surface triangle list into clusters of at most 128 vertices and 128
 // triangles (plan §7.1, step 4.2). Vertices are compacted first so that the meshlet
 // builder's cost does not scale with the size of the whole merged stream.
-void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p_index_count, uint16_t p_surface_id, LocalVector<BuildCluster> &r_clusters) {
+void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p_index_count, uint16_t p_surface_id, LocalVector<BuildCluster> &r_clusters, float p_area_scale = 1.0f) {
 	if (p_index_count == 0) {
 		return;
 	}
@@ -251,7 +302,8 @@ void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p
 		}
 	}
 
-	const size_t max_meshlets = meshopt_buildMeshletsBound(p_index_count, NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES);
+	const uint32_t max_triangles = p_area_scale > 1.0f ? (NEXTGEO_MAX_CLUSTER_VERTICES / 3u) : NEXTGEO_MAX_CLUSTER_TRIANGLES;
+	const size_t max_meshlets = meshopt_buildMeshletsBound(p_index_count, NEXTGEO_MAX_CLUSTER_VERTICES, max_triangles);
 	LocalVector<meshopt_Meshlet> meshlets;
 	meshlets.resize(uint32_t(max_meshlets));
 	LocalVector<uint32_t> meshlet_vertices;
@@ -261,7 +313,7 @@ void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p
 
 	const size_t meshlet_count = meshopt_buildMeshlets(meshlets.ptr(), meshlet_vertices.ptr(), meshlet_triangles.ptr(),
 			local_indices.ptr(), p_index_count, local_positions.ptr(), unique.size(), sizeof(float) * 3,
-			NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, CLUSTER_CONE_WEIGHT);
+			NEXTGEO_MAX_CLUSTER_VERTICES, max_triangles, CLUSTER_CONE_WEIGHT);
 
 	for (size_t m = 0; m < meshlet_count; m++) {
 		const meshopt_Meshlet &meshlet = meshlets[uint32_t(m)];
@@ -274,7 +326,7 @@ void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p
 		}
 
 		if (p_mesh.skin_influences == 0) {
-			_make_cluster(p_mesh, std::move(indices), p_surface_id, r_clusters);
+			_make_cluster(p_mesh, std::move(indices), p_surface_id, r_clusters, p_area_scale);
 			continue;
 		}
 
@@ -304,7 +356,7 @@ void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p
 				}
 			}
 			if (!current.is_empty() && current_bones.size() + extra > NEXTGEO_MAX_CLUSTER_BONES) {
-				_make_cluster(p_mesh, std::move(current), p_surface_id, r_clusters);
+				_make_cluster(p_mesh, std::move(current), p_surface_id, r_clusters, p_area_scale);
 				current = LocalVector<uint32_t>();
 				current_bones.clear();
 			}
@@ -317,7 +369,7 @@ void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p
 			current.push_back(indices[t + 1]);
 			current.push_back(indices[t + 2]);
 		}
-		_make_cluster(p_mesh, std::move(current), p_surface_id, r_clusters);
+		_make_cluster(p_mesh, std::move(current), p_surface_id, r_clusters, p_area_scale);
 	}
 }
 
@@ -702,16 +754,22 @@ void _merge_member_bounds(const LocalVector<BuildCluster> &p_clusters, const Loc
 
 // Simplifies one group and re-clusterizes the result per surface (plan §7.1, steps 4.3
 // and 4.4). Reads shared state only and writes only `r_result`.
-void _simplify_group(const MergedMesh &p_mesh, const LocalVector<BuildCluster> &p_clusters, const LocalVector<uint32_t> &p_members, const LocalVector<uint8_t> &p_locks, GroupResult &r_result) {
+void _simplify_group(const MergedMesh &p_mesh, const LocalVector<BuildCluster> &p_clusters, const LocalVector<uint32_t> &p_members, const LocalVector<uint8_t> &p_locks, bool p_preserve_area, GroupResult &r_result) {
 	float members_error = 0.0f;
 	_merge_member_bounds(p_clusters, p_members, r_result.lod, members_error);
 	r_result.terminal = true;
 	r_result.error = FLT_MAX;
 
 	LocalVector<uint32_t> merged;
+	double source_area = 0.0;
 	for (uint32_t member : p_members) {
-		for (uint32_t index : p_clusters[member].indices) {
+		const BuildCluster &mc = p_clusters[member];
+		for (uint32_t index : mc.indices) {
 			merged.push_back(index);
+		}
+		if (p_preserve_area) {
+			const double s = double(mc.area_scale);
+			source_area += _triangles_area(p_mesh, mc.indices) * s * s;
 		}
 	}
 
@@ -732,6 +790,14 @@ void _simplify_group(const MergedMesh &p_mesh, const LocalVector<BuildCluster> &
 	// Error stays monotonic: never below the members' own errors.
 	r_result.error = MAX(simplify_error, members_error);
 	r_result.terminal = false;
+
+	// GodotNext: nextgeo_foliage_instancing (#151). Preserve Area scales each simplified
+	// triangle about its centroid so the group's surface area matches the source group, clamped at 1.5x.
+	float area_scale = 1.0f;
+	if (p_preserve_area) {
+		const double simplified_area = _triangles_area(p_mesh, simplified);
+		area_scale = nextgeo_preserve_area_scale(source_area, simplified_area);
+	}
 
 	// Re-clusterize per surface so every cluster stays single-material.
 	LocalVector<uint32_t> surfaces;
@@ -755,7 +821,7 @@ void _simplify_group(const MergedMesh &p_mesh, const LocalVector<BuildCluster> &
 				surface_indices.push_back(simplified[t + 2]);
 			}
 		}
-		_clusterize(p_mesh, surface_indices.ptr(), surface_indices.size(), uint16_t(surface), r_result.clusters);
+		_clusterize(p_mesh, surface_indices.ptr(), surface_indices.size(), uint16_t(surface), r_result.clusters, area_scale);
 	}
 }
 
@@ -779,6 +845,14 @@ struct GroupOrderCompare {
 };
 
 } // namespace
+
+float nextgeo_preserve_area_scale(double p_source_area, double p_simplified_area) {
+	if (!Math::is_finite(p_source_area) || !Math::is_finite(p_simplified_area) || !(p_simplified_area > 0.0) || !(p_source_area > p_simplified_area)) {
+		return 1.0f;
+	}
+	const double linear_scale = std::sqrt(p_source_area / p_simplified_area);
+	return float(CLAMP(linear_scale, 1.0, double(NEXTGEO_PRESERVE_AREA_MAX_SCALE)));
+}
 
 uint32_t nextgeo_cluster_payload_bytes(uint32_t p_vertex_count, uint32_t p_triangle_count, uint32_t p_vertex_stride) {
 	return uint32_t(sizeof(NextGeoCluster)) + p_vertex_count * p_vertex_stride * uint32_t(sizeof(float)) + p_triangle_count * 3;
@@ -890,7 +964,7 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		} else {
 			_lock_borders(mesh, clusters, parts, frozen, owner, shared, locks);
 			auto task = [&](uint32_t p_index) {
-				_simplify_group(mesh, clusters, parts[p_index], locks, results[p_index]);
+				_simplify_group(mesh, clusters, parts[p_index], locks, p_input.preserve_area, results[p_index]);
 			};
 			_run_tasks(parts.size(), p_input.use_threads, task, "NextGeo DAG level");
 		}
@@ -1023,8 +1097,34 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		for (uint32_t member : group.members) {
 			const BuildCluster &cluster = clusters[member];
 			const uint32_t index_count = cluster.indices.size();
-			const size_t vertex_count = meshopt_extractMeshletIndices(local_vertices, local_triangles, cluster.indices.ptr(), index_count);
-			ERR_FAIL_COND_V(vertex_count != cluster.vertex_count, ERR_BUG);
+			const bool apply_area_scale = cluster.area_scale > 1.0f;
+			size_t vertex_count = 0;
+			float scaled_pos_scratch[NEXTGEO_MAX_CLUSTER_VERTICES * 3];
+			if (apply_area_scale) {
+				ERR_FAIL_COND_V(index_count > NEXTGEO_MAX_CLUSTER_VERTICES, ERR_BUG);
+				vertex_count = index_count;
+				ERR_FAIL_COND_V(vertex_count != cluster.vertex_count, ERR_BUG);
+				for (uint32_t t = 0; t + 2 < index_count; t += 3) {
+					const float *p0 = &mesh.positions[cluster.indices[t + 0] * 3];
+					const float *p1 = &mesh.positions[cluster.indices[t + 1] * 3];
+					const float *p2 = &mesh.positions[cluster.indices[t + 2] * 3];
+					const float cx = (p0[0] + p1[0] + p2[0]) / 3.0f;
+					const float cy = (p0[1] + p1[1] + p2[1]) / 3.0f;
+					const float cz = (p0[2] + p1[2] + p2[2]) / 3.0f;
+					const float *pts[3] = { p0, p1, p2 };
+					for (uint32_t c = 0; c < 3; c++) {
+						const uint32_t idx = t + c;
+						local_vertices[idx] = cluster.indices[idx];
+						local_triangles[idx] = uint8_t(idx);
+						scaled_pos_scratch[idx * 3 + 0] = cx + (pts[c][0] - cx) * cluster.area_scale;
+						scaled_pos_scratch[idx * 3 + 1] = cy + (pts[c][1] - cy) * cluster.area_scale;
+						scaled_pos_scratch[idx * 3 + 2] = cz + (pts[c][2] - cz) * cluster.area_scale;
+					}
+				}
+			} else {
+				vertex_count = meshopt_extractMeshletIndices(local_vertices, local_triangles, cluster.indices.ptr(), index_count);
+				ERR_FAIL_COND_V(vertex_count != cluster.vertex_count, ERR_BUG);
+			}
 
 			const uint32_t out_index = cluster_cursor;
 			NextGeoCluster &out = r_output.clusters[cluster_cursor++];
@@ -1050,13 +1150,18 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 			for (uint32_t v = 0; v < vertex_count; v++) {
 				const uint32_t source = local_vertices[v];
 				const float *vertex = &mesh.vertex_data[source * mesh.stride];
+				const float *pos_ptr = apply_area_scale ? &scaled_pos_scratch[v * 3] : &vertex[NEXTGEO_VERTEX_OFFSET_POSITION];
 				for (uint32_t k = 0; k < mesh.stride; k++) {
-					r_output.vertices.push_back(vertex[k]);
+					if (apply_area_scale && k >= NEXTGEO_VERTEX_OFFSET_POSITION && k < NEXTGEO_VERTEX_OFFSET_POSITION + 3) {
+						r_output.vertices.push_back(pos_ptr[k - NEXTGEO_VERTEX_OFFSET_POSITION]);
+					} else {
+						r_output.vertices.push_back(vertex[k]);
+					}
 				}
 				r_output.vertex_sources.push_back(mesh.vertex_source[source]);
 				for (uint32_t k = 0; k < 3; k++) {
-					out_group.aabb_min[k] = MIN(out_group.aabb_min[k], vertex[NEXTGEO_VERTEX_OFFSET_POSITION + k]);
-					out_group.aabb_max[k] = MAX(out_group.aabb_max[k], vertex[NEXTGEO_VERTEX_OFFSET_POSITION + k]);
+					out_group.aabb_min[k] = MIN(out_group.aabb_min[k], pos_ptr[k]);
+					out_group.aabb_max[k] = MAX(out_group.aabb_max[k], pos_ptr[k]);
 				}
 			}
 			for (uint32_t j = 0; j < index_count; j++) {
@@ -1083,7 +1188,7 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 				}
 				for (uint32_t v = 0; v < vertex_count; v++) {
 					const uint32_t source = local_vertices[v];
-					const float *position = &mesh.positions[source * 3];
+					const float *position = apply_area_scale ? &scaled_pos_scratch[v * 3] : &mesh.positions[source * 3];
 					const uint32_t base = source * mesh.skin_influences;
 					for (uint32_t k = 0; k < mesh.skin_influences; k++) {
 						const float weight = mesh.skin_weights[base + k];

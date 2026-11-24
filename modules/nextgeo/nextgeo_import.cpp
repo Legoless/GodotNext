@@ -155,7 +155,7 @@ static void _copy_triangle_surface(const Array &p_arrays, uint64_t p_flags, Next
 	}
 }
 
-Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages) {
+Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages) {
 	r_vgd.unref();
 	r_pages.clear();
 	ERR_FAIL_NULL_V(p_mesh, ERR_INVALID_PARAMETER);
@@ -163,6 +163,7 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 	NextGeoBuildInput input;
 	input.page_size = NGM_PROVISIONAL_PAGE_SIZE;
 	input.use_threads = true;
+	input.preserve_area = p_preserve_area;
 
 	bool any_eligible = false;
 	for (int i = 0; i < p_mesh->surfaces.size(); i++) {

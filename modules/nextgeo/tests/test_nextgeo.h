@@ -297,8 +297,13 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 			const Vector3 position = surface.positions[source];
 			const Vector2 uv = surface.uv0.is_empty() ? Vector2() : surface.uv0[source];
 			const float tangent_w = surface.tangents.is_empty() ? 1.0f : surface.tangents[source * 4 + 3];
-			if (vertex[NEXTGEO_VERTEX_OFFSET_POSITION + 0] != float(position.x) || vertex[NEXTGEO_VERTEX_OFFSET_POSITION + 1] != float(position.y) ||
-					vertex[NEXTGEO_VERTEX_OFFSET_POSITION + 2] != float(position.z) || vertex[NEXTGEO_VERTEX_OFFSET_UV0 + 0] != float(uv.x) ||
+			// GodotNext: nextgeo_foliage_instancing (#151). When preserve_area is enabled, simplified
+			// cluster vertices intentionally scale about triangle centroids; attributes stay unchanged.
+			const bool pos_mismatch = (!p_input.preserve_area || cluster.refined_group < 0) &&
+					(vertex[NEXTGEO_VERTEX_OFFSET_POSITION + 0] != float(position.x) ||
+							vertex[NEXTGEO_VERTEX_OFFSET_POSITION + 1] != float(position.y) ||
+							vertex[NEXTGEO_VERTEX_OFFSET_POSITION + 2] != float(position.z));
+			if (pos_mismatch || vertex[NEXTGEO_VERTEX_OFFSET_UV0 + 0] != float(uv.x) ||
 					vertex[NEXTGEO_VERTEX_OFFSET_UV0 + 1] != float(uv.y) || vertex[NEXTGEO_VERTEX_OFFSET_TANGENT + 3] != tangent_w) {
 				bad_vertices++;
 			}
@@ -1246,6 +1251,125 @@ TEST_CASE("[NextGeo] Invalid skinning input is rejected") {
 		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
 	}
 	ERR_PRINT_ON;
+}
+
+TEST_CASE("[NextGeo] Preserve Area restores coarse foliage area and clamps at 1.5x (#151)") {
+	// Direct scale-factor formula check: sqrt(source / simplified), clamped to [1.0, 1.5].
+	CHECK(nextgeo_preserve_area_scale(10.0, 10.0) == doctest::Approx(1.0f));
+	CHECK(nextgeo_preserve_area_scale(10.0, 12.0) == doctest::Approx(1.0f));
+	CHECK(nextgeo_preserve_area_scale(14.4, 10.0) == doctest::Approx(1.2f));
+	CHECK(nextgeo_preserve_area_scale(22.5, 10.0) == doctest::Approx(1.5f));
+	CHECK(nextgeo_preserve_area_scale(100.0, 10.0) == doctest::Approx(NEXTGEO_PRESERVE_AREA_MAX_SCALE));
+	CHECK(nextgeo_preserve_area_scale(10.0, 0.0) == doctest::Approx(1.0f));
+
+	// Build a multi-leaf foliage canopy of disconnected thin quads/cards (each shrinks sharply under
+	// simplification, losing surface area unless preserve_area is enabled).
+	NextGeoSurfaceInput foliage;
+	const uint32_t leaf_count = 320;
+	RandomPCG rng(TEST_SEED + 151);
+	for (uint32_t l = 0; l < leaf_count; l++) {
+		const float cx = float(rng.randd() * 4.0 - 2.0);
+		const float cy = float(rng.randd() * 4.0 - 2.0);
+		const float cz = float(rng.randd() * 4.0 - 2.0);
+		const float half = 0.08f;
+		// 3x3 subdivided card (18 triangles per leaf, 5760 triangles total).
+		const uint32_t base_v = foliage.positions.size();
+		for (int iy = 0; iy <= 3; iy++) {
+			for (int ix = 0; ix <= 3; ix++) {
+				const float u = float(ix) / 3.0f;
+				const float v = float(iy) / 3.0f;
+				// Tapered diamond leaf shape so simplification drops perimeter area.
+				const float taper = 1.0f - 0.35f * Math::abs(u - 0.5f) * 2.0f - 0.35f * Math::abs(v - 0.5f) * 2.0f;
+				const float x = cx + (u - 0.5f) * 2.0f * half * (0.5f + taper);
+				const float y = cy + (v - 0.5f) * 2.0f * half * (0.5f + taper);
+				const float z = cz + 0.02f * Math::sin(u * 3.14159f) * Math::sin(v * 3.14159f);
+				foliage.positions.push_back(Vector3(x, y, z));
+				foliage.normals.push_back(Vector3(0.0f, 0.0f, 1.0f));
+				foliage.tangents.push_back(1.0f);
+				foliage.tangents.push_back(0.0f);
+				foliage.tangents.push_back(0.0f);
+				foliage.tangents.push_back(1.0f);
+				foliage.uv0.push_back(Vector2(u, v));
+			}
+		}
+		for (int iy = 0; iy < 3; iy++) {
+			for (int ix = 0; ix < 3; ix++) {
+				const uint32_t v00 = base_v + iy * 4 + ix;
+				const uint32_t v10 = v00 + 1;
+				const uint32_t v01 = v00 + 4;
+				const uint32_t v11 = v01 + 1;
+				foliage.indices.push_back(v00);
+				foliage.indices.push_back(v10);
+				foliage.indices.push_back(v11);
+				foliage.indices.push_back(v00);
+				foliage.indices.push_back(v11);
+				foliage.indices.push_back(v01);
+			}
+		}
+	}
+
+	auto compute_cut_area = [](const NextGeoBuildOutput &p_dag, const LocalVector<uint32_t> &p_cut) -> double {
+		double total = 0.0;
+		for (uint32_t ci : p_cut) {
+			const NextGeoCluster &c = p_dag.clusters[ci];
+			for (uint32_t t = 0; t < c.triangle_count; t++) {
+				const uint32_t i0 = c.vertex_offset + p_dag.triangles[(c.triangle_offset + t) * 3 + 0];
+				const uint32_t i1 = c.vertex_offset + p_dag.triangles[(c.triangle_offset + t) * 3 + 1];
+				const uint32_t i2 = c.vertex_offset + p_dag.triangles[(c.triangle_offset + t) * 3 + 2];
+				const float *p0 = &p_dag.vertices[i0 * p_dag.vertex_stride];
+				const float *p1 = &p_dag.vertices[i1 * p_dag.vertex_stride];
+				const float *p2 = &p_dag.vertices[i2 * p_dag.vertex_stride];
+				const Vector3 v0(p0[0], p0[1], p0[2]);
+				const Vector3 v1(p1[0], p1[1], p1[2]);
+				const Vector3 v2(p2[0], p2[1], p2[2]);
+				total += 0.5 * double((v1 - v0).cross(v2 - v0).length());
+			}
+		}
+		return total;
+	};
+
+	NextGeoBuildInput input_off;
+	input_off.surfaces.push_back(foliage);
+	input_off.page_size = TEST_PAGE_SIZE;
+	input_off.preserve_area = false;
+	NextGeoBuildOutput dag_off_a;
+	NextGeoBuildOutput dag_off_b;
+	REQUIRE(nextgeo_build_dag(input_off, dag_off_a) == OK);
+	REQUIRE(nextgeo_build_dag(input_off, dag_off_b) == OK);
+	CHECK(same_output(dag_off_a, dag_off_b));
+	check_dag_invariants(input_off, dag_off_a);
+
+	NextGeoBuildInput input_on = input_off;
+	input_on.preserve_area = true;
+	NextGeoBuildOutput dag_on_a;
+	NextGeoBuildOutput dag_on_b;
+	REQUIRE(nextgeo_build_dag(input_on, dag_on_a) == OK);
+	REQUIRE(nextgeo_build_dag(input_on, dag_on_b) == OK);
+	CHECK_MESSAGE(same_output(dag_on_a, dag_on_b), "Preserve Area DAG build is deterministic.");
+	check_dag_invariants(input_on, dag_on_a);
+
+	// Verify coarse cut area with preserve_area is strictly larger than without preserve_area
+	// and never exceeds (1.5^2 = 2.25x) the unscaled coarse cut area (clamp check).
+	LocalVector<uint32_t> root_off;
+	LocalVector<uint32_t> root_on;
+	nextgeo_select_cut(dag_off_a, far_view(dag_off_a), nullptr, root_off);
+	nextgeo_select_cut(dag_on_a, far_view(dag_on_a), nullptr, root_on);
+	CHECK(nextgeo_check_cut(dag_on_a, root_on).is_valid_partition());
+	const double area_off = compute_cut_area(dag_off_a, root_off);
+	const double area_on = compute_cut_area(dag_on_a, root_on);
+	CHECK(area_off > 0.0);
+	CHECK_MESSAGE(area_on > area_off * 1.02, "Preserve Area visibly restores surface area on coarse foliage LODs.");
+
+	// Verify every simplified group's scaled area is bounded by the 1.5x linear (2.25x area) cap
+	// relative to the source cluster area (and at most source area + small epsilon when unclamped).
+	double source_area = 0.0;
+	for (uint32_t i = 0; i < foliage.indices.size(); i += 3) {
+		const Vector3 v0 = foliage.positions[foliage.indices[i]];
+		const Vector3 v1 = foliage.positions[foliage.indices[i + 1]];
+		const Vector3 v2 = foliage.positions[foliage.indices[i + 2]];
+		source_area += 0.5 * double((v1 - v0).cross(v2 - v0).length());
+	}
+	CHECK(area_on <= source_area * 1.05);
 }
 
 } // namespace TestNextGeo

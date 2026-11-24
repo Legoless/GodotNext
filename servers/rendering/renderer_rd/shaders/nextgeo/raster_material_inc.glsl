@@ -134,6 +134,12 @@ nextgeo_cluster_skin;
 #include "skinning_inc.glsl"
 // clang-format on
 
+// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10). Per-record INSTANCE_COLOR, INSTANCE_CUSTOM, and INSTANCE_ID.
+layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoInstanceAttrs {
+	NextGeoInstanceAttributes data[];
+}
+nextgeo_instance_attrs;
+
 /* Set 1: the scene environment the material code reads, as scene_forward_clustered_inc.glsl names it. */
 
 layout(set = 1, binding = 0, std140) uniform SceneDataBlock {
@@ -342,6 +348,10 @@ uint instance_index_interp = 0u;
 
 int _ng_vertex_id = 0;
 int _ng_instance_id = 0;
+vec4 _ng_instance_color = vec4(1.0);
+vec4 _ng_instance_custom = vec4(0.0);
+mat3x4 _ng_model_xform = mat3x4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0));
+bool _ng_non_uniform_scale = false;
 vec4 color_attrib = vec4(1.0);
 vec2 uv_attrib = vec2(0.0);
 vec2 uv2_attrib = vec2(0.0);
@@ -465,9 +475,9 @@ void _ng_resolve_vertex_corner(
 		in vec3 model_precision,
 #endif
 		out vec4 r_clip_pos) {
-	vec4 instance_custom = vec4(0.0);
+	vec4 instance_custom = _ng_instance_custom;
 #if defined(COLOR_USED)
-	color_interp = color_attrib;
+	color_interp = color_attrib * _ng_instance_color;
 #endif
 
 	mat4 inv_view_matrix = transpose(mat4(scene_data.inv_view_matrix[0],
@@ -493,7 +503,7 @@ void _ng_resolve_vertex_corner(
 #endif
 
 	mat3 model_normal_matrix;
-	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
+	if (_ng_non_uniform_scale || bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
 		model_normal_matrix = transpose(inverse(mat3(model_matrix)));
 	} else {
 		model_normal_matrix = mat3(model_matrix);
@@ -793,8 +803,12 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 	}
 
 	NextGeoInstanceRecord _ng_record = nextgeo_records.data[p_entry.x];
-	instance_index_interp = p_entry.x;
-	_ng_instance_id = int(p_entry.x);
+	NextGeoInstanceAttributes _ng_attr = nextgeo_instance_attrs.data[p_entry.x];
+	instance_index_interp = _ng_record.bucket_base >> 5u;
+	_ng_instance_id = int(_ng_attr.meta.y);
+	_ng_instance_color = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_COLOR) != 0u) ? _ng_attr.color : vec4(1.0);
+	_ng_instance_custom = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM) != 0u) ? _ng_attr.custom_data : vec4(0.0);
+	_ng_non_uniform_scale = (_ng_record.flags & NEXTGEO_RECORD_NON_UNIFORM_SCALE) != 0u;
 	_ng_skip_masked_discard = false;
 	_ng_skip_vertex_offset = false;
 	{
@@ -820,6 +834,7 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 		}
 	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+	_ng_model_xform = _ng_cur_xform;
 
 	uint _ng_w = p_desc.x + p_v_idx * _ng_stride;
 	vec3 _ng_c_pos = vec3(
@@ -902,7 +917,7 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 			_ng_c_nrm,
 			_ng_c_tan,
 			_ng_c_bin,
-			p_entry.x,
+			instance_index_interp,
 			scene_data_block.data,
 			_ng_cur_xform,
 #ifdef USE_DOUBLE_PRECISION
@@ -947,8 +962,12 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 	}
 
 	NextGeoInstanceRecord _ng_record = nextgeo_records.data[p_entry.x];
-	instance_index_interp = p_entry.x;
-	_ng_instance_id = int(p_entry.x);
+	NextGeoInstanceAttributes _ng_attr = nextgeo_instance_attrs.data[p_entry.x];
+	instance_index_interp = _ng_record.bucket_base >> 5u;
+	_ng_instance_id = int(_ng_attr.meta.y);
+	_ng_instance_color = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_COLOR) != 0u) ? _ng_attr.color : vec4(1.0);
+	_ng_instance_custom = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM) != 0u) ? _ng_attr.custom_data : vec4(0.0);
+	_ng_non_uniform_scale = (_ng_record.flags & NEXTGEO_RECORD_NON_UNIFORM_SCALE) != 0u;
 	_ng_skip_masked_discard = false;
 	_ng_skip_vertex_offset = false;
 	{
@@ -974,6 +993,7 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 		}
 	}
 	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+	_ng_model_xform = _ng_cur_xform;
 
 	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
 		uint _ng_idx_byte = p_desc.y + p_tri * 3u + _ng_corner;
@@ -1063,7 +1083,7 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 				_ng_c_nrm,
 				_ng_c_tan,
 				_ng_c_bin,
-				p_entry.x,
+				instance_index_interp,
 				scene_data_block.data,
 				_ng_cur_xform,
 #ifdef USE_DOUBLE_PRECISION
@@ -1490,9 +1510,9 @@ void _ng_raster_fragment(in SceneData scene_data) {
 			scene_data.inv_view_matrix[1],
 			scene_data.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
-	mat4 read_model_matrix = transpose(mat4(instances.data[instance_index].transform[0],
-			instances.data[instance_index].transform[1],
-			instances.data[instance_index].transform[2],
+	mat4 read_model_matrix = transpose(mat4(_ng_model_xform[0],
+			_ng_model_xform[1],
+			_ng_model_xform[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
 #ifdef LIGHT_VERTEX_USED
@@ -1500,7 +1520,7 @@ void _ng_raster_fragment(in SceneData scene_data) {
 #endif
 
 	mat3 model_normal_matrix;
-	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
+	if (_ng_non_uniform_scale || bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
 		model_normal_matrix = transpose(inverse(mat3(read_model_matrix)));
 	} else {
 		model_normal_matrix = mat3(read_model_matrix);

@@ -201,6 +201,23 @@ bins, #59 skinned RT actors, and #217/#212 VSM pipeline. Copied files: none.
 
 No outside input beyond the public graphics API specifications already logged above (Vulkan `VUID-RuntimeSpirv-NonWritable-06341`, Vulkan/D3D12 rasterization rules, and Metal/D3D12/Vulkan atomic rules). The experimental runtime displacement tessellation pipeline (#163, plan §21.4 contract N11, GN-6, GN-12, N5) — the shared 25-bit visibility cluster ID partition reserving `[0x01800000, 0x01BFFFFF]` for diced sub-patches and `[0x01C00000, 0x01FFFFFF]` for Nanite voxels (#165), canonical endpoint-sorted crack-free edge factors and edge-only attribute interpolation, inner-grid plus three outer monotone zipper-strip zero-degenerate triangulation with O(1) closed-form micro-triangle indexing, `<= 128` micro-triangle sub-patch splitting into `NextGeoDicedPatchRecord`, overflow coarsening with the `dicing_overflow` stat counter, workgroup-cooperative SW dicing and rasterization (`tessellation_dice.glsl`) paired with a bounded HW patch stream (`tessellation_hw.glsl`), deterministic patch reconstruction in visibility resolve (`scene_forward_clustered.glsl`), export/classify/bin/debug passes, and per-chain VSM tessellation toggles (`tessellation_directional` / `tessellation_local`) — is an original clean-room implementation built directly on GodotNext's #150 displacement compiler hook, #155 programmable raster bins, #162 hybrid visibility raster, and #217 VSM x Nanite pass. Copied files: none.
 
+## Foliage instancing, MultiMesh GPU records, Nanite Assemblies, and Preserve Area (#151)
+
+No outside input. Nanite foliage instancing (#151, plan §21.4 contract N10, GN-7, GN-12, N6) —
+contiguous persistent per-element GPU record ranges in `VirtualMeshStorage` expanded via compute
+(`multimesh_expand.glsl`) on MultiMesh buffer/state dirty updates while keeping non-virtualized
+MultiMeshes untouched, O(scene nodes) `bucket_slot` decoupling for resolve and raster-bin tables,
+per-instance frustum/Hi-Z/distance culling with coarse MultiMesh AABB pre-test in
+`instance_cull.glsl`, `INSTANCE_CUSTOM` and `COLOR` delivery via `NextGeoInstanceAttributes`
+across programmable raster bins (HW VS, SW, HW mesh, VSM) and visibility resolve (Tile Quads and
+Compute Bins), experimental 2-level `VirtualGeometryAssembly` payloads behind
+`rendering/nextgeo/experimental/assemblies` (default `false`) expanded on GPU (`ASSEMBLY_EXPAND`),
+the `meshes/virtual_geometry_assembly` repeated-node glTF/scene importer builder, the
+`virtual_geometry/preserve_area` DAG simplifier centroid triangle scaling clamped at `1.5x`,
+per-part RT TLAS expansion, and VSM `ASSEMBLY` / `VSM_ASSEMBLY` table parity — is an original
+implementation built directly on GodotNext's #75, #76, #80, #154, #155, #158, #162, #164, #217,
+and #43/#52 infrastructure. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

@@ -48,6 +48,7 @@
 #include "servers/rendering/rendering_server_globals.h"
 // GodotNext: spline_meshes (#161).
 #include "servers/rendering/storage/spline_deform.h"
+#include "servers/rendering/storage/mesh_storage.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
@@ -227,44 +228,22 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 	auto plane_distance = [&](const float p_plane[4], const Vector3 &p_point) {
 		return p_plane[0] * p_point.x + p_plane[1] * p_point.y + p_plane[2] * p_point.z + p_plane[3];
 	};
-	for (uint32_t record_index = 0; record_index < p_record_count; record_index++) {
-		const RendererVirtualMeshStorage::Record &record = p_storage->get_record(record_index);
-		const bool cast_ok = is_shadow_view
-				? ((record.flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK) != RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF)
-				: ((record.flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK) != RendererVirtualMeshStorage::RECORD_CAST_SHADOW_SHADOWS_ONLY);
-		const bool skeleton_rejected = (record.flags & (RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE)) == RendererVirtualMeshStorage::RECORD_HAS_SKELETON;
-		if ((record.flags & (RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE)) != (RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE) ||
-				!cast_ok ||
-				skeleton_rejected ||
-				(record.flags & RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS) != 0 ||
-				(record.gi_flags & RendererVirtualMeshStorage::GI_LIGHTMAPPED) != 0 ||
-				(is_shadow_view ? record.pad0 : record.surface_mask) == 0 ||
-				(record.layer_mask & cull_mask) == 0) {
+	// GodotNext: nextgeo_foliage_instancing (#151). Expand MultiMeshes and 2-level Assemblies on CPU to match GPU cut.
+	LocalVector<RendererVirtualMeshStorage::Record> eff_records;
+	LocalVector<RendererVirtualMeshStorage::InstanceAttributes> eff_attrs;
+	p_storage->get_effective_records_cpu(eff_records, eff_attrs);
+	const uint32_t eff_count = MIN(uint32_t(eff_records.size()), p_record_count);
+	for (uint32_t record_index = 0; record_index < eff_count; record_index++) {
+		const RendererVirtualMeshStorage::Record &record = eff_records[record_index];
+		const RendererVirtualMeshStorage::InstanceAttributes &attr = eff_attrs[record_index];
+		const RendererVirtualMeshStorage::Record *parent_ptr = (attr.meta[0] < eff_records.size()) ? &eff_records[attr.meta[0]] : nullptr;
+		if (!RendererVirtualMeshStorage::cull_instance_cpu(record, attr, parent_ptr, p_cut.frustum, eye, cull_mask, is_shadow_view)) {
 			continue;
 		}
-		// GodotNext: nextgeo_vertex_offset (#164). Mirror instance_cull.glsl AABB inflation.
 		const float wpo_bound = RendererVirtualMeshStorage::get_record_vertex_offset_bound(record);
 		const float wpo_margin = wpo_bound * Math::abs(record.world_aabb_min[3]);
 		const Vector3 lo(record.world_aabb_min[0] - wpo_margin, record.world_aabb_min[1] - wpo_margin, record.world_aabb_min[2] - wpo_margin);
 		const Vector3 hi(record.world_aabb_max[0] + wpo_margin, record.world_aabb_max[1] + wpo_margin, record.world_aabb_max[2] + wpo_margin);
-		bool visible = true;
-		for (int plane = 0; plane < 6 && visible; plane++) {
-			const Vector3 &n = *reinterpret_cast<const Vector3 *>(p_cut.frustum[plane]);
-			Vector3 farthest = lo;
-			if (n.x >= 0.0f) {
-				farthest.x = hi.x;
-			}
-			if (n.y >= 0.0f) {
-				farthest.y = hi.y;
-			}
-			if (n.z >= 0.0f) {
-				farthest.z = hi.z;
-			}
-			visible = plane_distance(p_cut.frustum[plane], farthest) >= 0.0f;
-		}
-		if (!visible) {
-			continue;
-		}
 		const uint32_t mesh_index = record.virtual_mesh;
 		const RendererVirtualMeshStorage::MeshInfo *mesh = p_storage->get_mesh_info(mesh_index);
 		if (mesh == nullptr || mesh->dag_size < 8) {
@@ -482,8 +461,11 @@ bool NextGeoCut::_ensure() {
 			base_defines,
 			base_defines + "\n#define PHASE2\n",
 			base_defines + "\n#define SHADOW_VIEW\n",
+			base_defines + "\n#define ASSEMBLY_EXPAND\n",
 	}));
 	instance_version = instance_shader.version_create();
+	multimesh_expand_shader.initialize(Vector<String>({ base_defines }));
+	multimesh_expand_version = multimesh_expand_shader.version_create();
 	cluster_shader.initialize(Vector<String>({
 			base_defines,
 			base_defines + "\n#define CLUSTER_CULL\n",
@@ -504,13 +486,15 @@ bool NextGeoCut::_ensure() {
 			base_defines + "\n#define MODE_SHADOW\n#define MODE_DUAL_PARABOLOID\n",
 	}));
 	raster_version = raster_shader.version_create();
-	if (!instance_version.is_valid() || !cluster_version.is_valid() || !hiz_version.is_valid() || !raster_version.is_valid()) {
+	if (!instance_version.is_valid() || !multimesh_expand_version.is_valid() || !cluster_version.is_valid() || !hiz_version.is_valid() || !raster_version.is_valid()) {
 		failed = true;
 		return false;
 	}
 	instance_pipeline = rd->compute_pipeline_create(instance_shader.version_get_shader(instance_version, 0));
 	instance_phase2 = rd->compute_pipeline_create(instance_shader.version_get_shader(instance_version, 1));
 	instance_shadow_pipeline = rd->compute_pipeline_create(instance_shader.version_get_shader(instance_version, 2));
+	instance_assembly_expand_pipeline = rd->compute_pipeline_create(instance_shader.version_get_shader(instance_version, 3));
+	multimesh_expand_pipeline = rd->compute_pipeline_create(multimesh_expand_shader.version_get_shader(multimesh_expand_version, 0));
 	cluster_bvh = rd->compute_pipeline_create(cluster_shader.version_get_shader(cluster_version, 0));
 	cluster_leaf = rd->compute_pipeline_create(cluster_shader.version_get_shader(cluster_version, 1));
 	cluster_hash = rd->compute_pipeline_create(cluster_shader.version_get_shader(cluster_version, 2));
@@ -519,7 +503,7 @@ bool NextGeoCut::_ensure() {
 	cluster_shadow_hash = rd->compute_pipeline_create(cluster_shader.version_get_shader(cluster_version, 5));
 	hiz_pipeline = rd->compute_pipeline_create(hiz_shader.version_get_shader(hiz_version, 0));
 	clear_vis_pipeline = rd->compute_pipeline_create(hiz_shader.version_get_shader(hiz_version, 1));
-	if (!instance_pipeline.is_valid() || !instance_phase2.is_valid() || !instance_shadow_pipeline.is_valid() || !cluster_bvh.is_valid() || !cluster_leaf.is_valid() || !cluster_hash.is_valid() || !cluster_shadow_bvh.is_valid() || !cluster_shadow_leaf.is_valid() || !cluster_shadow_hash.is_valid() || !hiz_pipeline.is_valid() || !clear_vis_pipeline.is_valid()) {
+	if (!instance_pipeline.is_valid() || !instance_phase2.is_valid() || !instance_shadow_pipeline.is_valid() || !instance_assembly_expand_pipeline.is_valid() || !multimesh_expand_pipeline.is_valid() || !cluster_bvh.is_valid() || !cluster_leaf.is_valid() || !cluster_hash.is_valid() || !cluster_shadow_bvh.is_valid() || !cluster_shadow_leaf.is_valid() || !cluster_shadow_hash.is_valid() || !hiz_pipeline.is_valid() || !clear_vis_pipeline.is_valid()) {
 		failed = true;
 		return false;
 	}
@@ -582,9 +566,11 @@ bool NextGeoCut::_ensure() {
 	shadow_bvh_args[1] = rd->storage_buffer_create(MAX_SHADOW_VIEWS * 9 * 4 * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 	shadow_draw_args = rd->storage_buffer_create(MAX_SHADOW_VIEWS * sizeof(RendererRD::NextGeoDrawIndirectCommand), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 	Vector<uint8_t> dummy_zero;
-	dummy_zero.resize(16);
+	dummy_zero.resize(256);
 	dummy_zero.fill(0);
-	dummy_page_buf = rd->storage_buffer_create(16, dummy_zero);
+	dummy_page_buf = rd->storage_buffer_create(256, dummy_zero);
+	multimesh_expand_params = _storage(80);
+	assembly_counter_buf = rd->storage_buffer_create(16, dummy_zero.slice(0, 16));
 
 	RD::TextureFormat format;
 	format.format = RD::DATA_FORMAT_R32_SFLOAT;
@@ -605,7 +591,7 @@ bool NextGeoCut::_ensure() {
 	sampler_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	sampler_state.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	dummy_sampler = rd->sampler_create(sampler_state);
-	initialized = params.is_valid() && raster_params.is_valid() && counters.is_valid() && aux_counters.is_valid() && shadow_params.is_valid() && shadow_raster_params.is_valid() && shadow_counters.is_valid() && counters_ring[0].is_valid() && counters_ring[1].is_valid() && counters_ring[2].is_valid() && shadow_counters_ring[0].is_valid() && shadow_counters_ring[1].is_valid() && shadow_counters_ring[2].is_valid() && request_ring[0].is_valid() && request_ring[1].is_valid() && request_ring[2].is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && shadow_nodes.is_valid() && shadow_level_a.is_valid() && shadow_level_b.is_valid() && shadow_groups.is_valid() && shadow_clusters.is_valid() && bvh_args[0].is_valid() && bvh_args[1].is_valid() && draw_args.is_valid() && shadow_bvh_args[0].is_valid() && shadow_bvh_args[1].is_valid() && shadow_draw_args.is_valid() && dummy_page_buf.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
+	initialized = params.is_valid() && raster_params.is_valid() && counters.is_valid() && aux_counters.is_valid() && shadow_params.is_valid() && shadow_raster_params.is_valid() && shadow_counters.is_valid() && counters_ring[0].is_valid() && counters_ring[1].is_valid() && counters_ring[2].is_valid() && shadow_counters_ring[0].is_valid() && shadow_counters_ring[1].is_valid() && shadow_counters_ring[2].is_valid() && request_ring[0].is_valid() && request_ring[1].is_valid() && request_ring[2].is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && shadow_nodes.is_valid() && shadow_level_a.is_valid() && shadow_level_b.is_valid() && shadow_groups.is_valid() && shadow_clusters.is_valid() && bvh_args[0].is_valid() && bvh_args[1].is_valid() && draw_args.is_valid() && shadow_bvh_args[0].is_valid() && shadow_bvh_args[1].is_valid() && shadow_draw_args.is_valid() && dummy_page_buf.is_valid() && multimesh_expand_params.is_valid() && assembly_counter_buf.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
 	if (!initialized) {
 		failed = true;
 		return false;
@@ -1189,6 +1175,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
+	const RID attr_buf = RSG::virtual_mesh_storage->get_instance_attributes_buffer().is_valid() ? RSG::virtual_mesh_storage->get_instance_attributes_buffer() : dummy_page_buf;
 	const RID counters_buf = p_counters.is_valid() ? p_counters : counters;
 	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
 	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
@@ -1205,6 +1192,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_palette_buf));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, skin_inst_buf));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, cluster_skin_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, attr_buf));
 	LocalVector<RD::Uniform> bin_uniforms;
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, raster_bin_lists));
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, raster_bin_state));
@@ -2175,6 +2163,150 @@ void NextGeoCut::_publish_shadow_stats(const PackedByteArray &p_data, uint32_t p
 	meta.view_count = 0;
 }
 
+void NextGeoCut::prepare_gpu_records(RendererVirtualMeshStorage *p_storage) {
+	if (p_storage == nullptr || !_ensure()) {
+		return;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || uniform_set_cache == nullptr) {
+		return;
+	}
+	const RID rec_buf = p_storage->get_record_buffer();
+	const RID attr_buf = p_storage->get_instance_attributes_buffer();
+	if (rec_buf.is_null() || attr_buf.is_null()) {
+		return;
+	}
+
+	const uint64_t cur_frame = p_storage->get_frame();
+	bool any_multimesh_expanded = false;
+
+	if (multimesh_expand_pipeline.is_valid() && multimesh_expand_params.is_valid() && RSG::mesh_storage != nullptr) {
+		struct MultiMeshExpandParamsGPU {
+			uint32_t range_base;
+			uint32_t range_count;
+			uint32_t visible_count;
+			uint32_t parent_record;
+			uint32_t stride;
+			uint32_t color_offset;
+			uint32_t custom_offset;
+			uint32_t cur_offset;
+			uint32_t prev_offset;
+			uint32_t flags;
+			uint32_t pad0;
+			uint32_t pad1;
+			float local_aabb_min[4];
+			float local_aabb_max[4];
+		};
+		static_assert(sizeof(MultiMeshExpandParamsGPU) == 80, "MultiMeshExpandParamsGPU must match multimesh_expand.glsl ExpandParams (80 bytes).");
+
+		const RID expand_sh = multimesh_expand_shader.version_get_shader(multimesh_expand_version, 0);
+		LocalVector<RendererVirtualMeshStorage::MultiMeshExpandEntry> &entries = p_storage->get_multimesh_expand_entries();
+		for (uint32_t i = 0; i < entries.size(); i++) {
+			RendererVirtualMeshStorage::MultiMeshExpandEntry &entry = entries[i];
+			if (!entry.active || entry.range_count == 0u || entry.multimesh.is_null()) {
+				continue;
+			}
+			RendererMeshStorage::MultiMeshNextGeoInfo info;
+			if (!RSG::mesh_storage->multimesh_get_nextgeo_info(entry.multimesh, info) || !info.eligible || info.buffer.is_null() || info.stride < 12u || info.instance_count == 0u) {
+				continue;
+			}
+			const bool need_cur = entry.dirty || info.dirty_serial != entry.last_serial;
+			const bool need_settle = !need_cur && entry.dirty_last && entry.last_expand_frame != cur_frame;
+			if (!need_cur && !need_settle) {
+				continue;
+			}
+			AABB local_aabb = info.mesh_local_aabb.has_surface() ? info.mesh_local_aabb : RSG::mesh_storage->mesh_get_aabb(entry.mesh, RID());
+			if (p_storage->are_assemblies_enabled() && p_storage->mesh_has_assembly(entry.mesh)) {
+				const AABB asm_aabb = p_storage->mesh_get_assembly_local_aabb(entry.mesh);
+				if (asm_aabb.has_surface()) {
+					local_aabb = local_aabb.has_surface() ? local_aabb.merge(asm_aabb) : asm_aabb;
+				}
+			}
+			MultiMeshExpandParamsGPU ep = {};
+			ep.range_base = entry.range_base;
+			ep.range_count = MIN(entry.range_count, info.instance_count);
+			ep.visible_count = MIN(info.visible_count, ep.range_count);
+			ep.parent_record = entry.parent_record;
+			ep.stride = info.stride;
+			ep.color_offset = info.color_offset;
+			ep.custom_offset = info.custom_offset;
+			ep.cur_offset = info.current_offset;
+			ep.prev_offset = info.prev_offset;
+			ep.flags = (info.uses_colors ? 1u : 0u) | (info.uses_custom_data ? 2u : 0u) | (need_settle ? 4u : 0u);
+			ep.local_aabb_min[0] = float(local_aabb.position.x);
+			ep.local_aabb_min[1] = float(local_aabb.position.y);
+			ep.local_aabb_min[2] = float(local_aabb.position.z);
+			ep.local_aabb_min[3] = 0.0f;
+			ep.local_aabb_max[0] = float(local_aabb.position.x + local_aabb.size.x);
+			ep.local_aabb_max[1] = float(local_aabb.position.y + local_aabb.size.y);
+			ep.local_aabb_max[2] = float(local_aabb.position.z + local_aabb.size.z);
+			ep.local_aabb_max[3] = 0.0f;
+			rd->buffer_update(multimesh_expand_params, 0, sizeof(ep), &ep);
+
+			LocalVector<RD::Uniform> uniforms;
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, rec_buf));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, attr_buf));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, info.buffer));
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, multimesh_expand_params));
+			const RID set = uniform_set_cache->get_cache_vec(expand_sh, 0, uniforms);
+			if (set.is_valid()) {
+				RD::ComputeListID list = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(list, multimesh_expand_pipeline);
+				rd->compute_list_bind_uniform_set(list, set, 0);
+				rd->compute_list_dispatch(list, (ep.range_count + 63u) / 64u, 1u, 1u);
+				rd->compute_list_end();
+				if (need_cur) {
+					entry.dirty = false;
+					entry.dirty_last = true;
+					entry.last_serial = info.dirty_serial;
+				} else {
+					entry.dirty_last = false;
+				}
+				entry.last_expand_frame = cur_frame;
+				any_multimesh_expanded = true;
+			}
+		}
+	}
+
+	if (p_storage->has_active_assemblies() && instance_assembly_expand_pipeline.is_valid() && assembly_counter_buf.is_valid()) {
+		if (any_multimesh_expanded || last_assembly_expand_frame != cur_frame) {
+			const uint32_t source_count = p_storage->get_record_count();
+			const uint32_t expanded_base = p_storage->get_assembly_expanded_base();
+			const uint32_t max_leaves = p_storage->get_assembly_expanded_capacity();
+			const RID hdr_buf = p_storage->get_assembly_headers_buffer();
+			if (source_count > 0u && max_leaves > 0u && hdr_buf.is_valid()) {
+				const RID child_buf = p_storage->get_assembly_children_buffer().is_valid() ? p_storage->get_assembly_children_buffer() : dummy_page_buf;
+				const RID part_buf = p_storage->get_assembly_parts_buffer().is_valid() ? p_storage->get_assembly_parts_buffer() : dummy_page_buf;
+				const RID bmask_buf = p_storage->get_bucket_surface_masks_buffer().is_valid() ? p_storage->get_bucket_surface_masks_buffer() : dummy_page_buf;
+
+				rd->buffer_clear(rec_buf, uint32_t(expanded_base * sizeof(RendererVirtualMeshStorage::Record)), uint32_t(max_leaves * sizeof(RendererVirtualMeshStorage::Record)));
+				rd->buffer_clear(assembly_counter_buf, 0, 16u);
+
+				LocalVector<RD::Uniform> uniforms;
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, rec_buf));
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, attr_buf));
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, hdr_buf));
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, child_buf));
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, part_buf));
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, bmask_buf));
+				uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, assembly_counter_buf));
+				const RID set = uniform_set_cache->get_cache_vec(instance_shader.version_get_shader(instance_version, 3), 0, uniforms);
+				if (set.is_valid()) {
+					const uint32_t push[4] = { source_count, expanded_base, max_leaves, p_storage->get_bucket_record_count() };
+					RD::ComputeListID list = rd->compute_list_begin();
+					rd->compute_list_bind_compute_pipeline(list, instance_assembly_expand_pipeline);
+					rd->compute_list_bind_uniform_set(list, set, 0);
+					rd->compute_list_set_push_constant(list, push, sizeof(push));
+					rd->compute_list_dispatch(list, (source_count + 63u) / 64u, 1u, 1u);
+					rd->compute_list_end();
+					last_assembly_expand_frame = cur_frame;
+				}
+			}
+		}
+	}
+}
+
 bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster, bool p_is_main_view) {
 	(void)p_storage;
 	if (!_ensure()) {
@@ -2185,7 +2317,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	}
 	RenderingDevice *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
-	const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
+	const uint32_t record_count = RSG::virtual_mesh_storage->get_active_record_count();
 	if (record_count == 0 || !RSG::virtual_mesh_storage->get_record_buffer().is_valid() || !RSG::virtual_mesh_storage->get_mesh_record_buffer().is_valid() || !RSG::virtual_mesh_storage->get_dag_buffer().is_valid()) {
 		return false;
 	}
@@ -2435,6 +2567,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	const bool have_prev = p_is_main_view && hiz_texture[0].is_valid() && hiz_primed;
 	const RID prev_hiz_tex = have_prev ? hiz_texture[0] : dummy_hiz;
 	const RID residency_buf = RSG::virtual_mesh_storage->get_residency_buffer().is_valid() ? RSG::virtual_mesh_storage->get_residency_buffer() : dummy_page_buf;
+	const RID attrs_buf = RSG::virtual_mesh_storage->get_instance_attributes_buffer().is_valid() ? RSG::virtual_mesh_storage->get_instance_attributes_buffer() : dummy_page_buf;
 
 	// Phase 1 instance cull against previous frame's Hi-Z: level 0 seed.
 	RENDER_TIMESTAMP("NextGeo Instance Cull");
@@ -2452,6 +2585,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, prev_hiz_tex })));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args[0]));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, attrs_buf));
 		RID set = uniform_set_cache->get_cache_vec(instance_shader.version_get_shader(instance_version, 0), 0, uniforms);
 		if (!set.is_valid()) {
 			rd->compute_list_end();
@@ -2538,6 +2672,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, hiz_texture[1] })));
 		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes));
 		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args[0]));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, attrs_buf));
 		RID inst_set = uniform_set_cache->get_cache_vec(instance_shader.version_get_shader(instance_version, 1), 0, inst_uniforms);
 		if (inst_set.is_valid()) {
 			list = rd->compute_list_begin();
@@ -2715,7 +2850,7 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 
 	RenderingDevice *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
-	const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
+	const uint32_t record_count = RSG::virtual_mesh_storage->get_active_record_count();
 	if (record_count == 0 || !RSG::virtual_mesh_storage->get_record_buffer().is_valid() || !RSG::virtual_mesh_storage->get_mesh_record_buffer().is_valid() || !RSG::virtual_mesh_storage->get_dag_buffer().is_valid()) {
 		return false;
 	}
@@ -2817,6 +2952,7 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 	}
 
 	const RID residency_buf = RSG::virtual_mesh_storage->get_residency_buffer().is_valid() ? RSG::virtual_mesh_storage->get_residency_buffer() : dummy_page_buf;
+	const RID attrs_buf = RSG::virtual_mesh_storage->get_instance_attributes_buffer().is_valid() ? RSG::virtual_mesh_storage->get_instance_attributes_buffer() : dummy_page_buf;
 	{
 		LocalVector<RD::Uniform> uniforms;
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
@@ -2829,6 +2965,7 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, dummy_hiz })));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, dummy_page_buf));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, shadow_bvh_args[0]));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, attrs_buf));
 		RID set = uniform_set_cache->get_cache_vec(instance_shader.version_get_shader(instance_version, 2), 0, uniforms);
 		if (!set.is_valid()) {
 			if (shadow_capture_timestamps) {
@@ -3463,6 +3600,7 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
 	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
 	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
+	const RID attr_buf = RSG::virtual_mesh_storage->get_instance_attributes_buffer().is_valid() ? RSG::virtual_mesh_storage->get_instance_attributes_buffer() : dummy_page_buf;
 	LocalVector<RD::Uniform> geometry_uniforms;
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
@@ -3475,6 +3613,7 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_palette_buf));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, skin_inst_buf));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, cluster_skin_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, attr_buf));
 
 	LocalVector<RD::Uniform> bin_uniforms;
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, vsm_bin_lists));
@@ -3817,7 +3956,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 	if (!_ensure_vsm() || !_ensure_vsm_hiz(p_inputs.pool_pages, p_inputs.grid_width, p_inputs.pool_reallocations)) {
 		return false;
 	}
-	const uint32_t record_count = p_storage->get_record_count();
+	const uint32_t record_count = p_storage->get_active_record_count();
 	const uint32_t max_levels = MIN(p_storage->get_max_bvh_levels(), 8u);
 	if (record_count == 0u || max_levels == 0u || p_storage->get_record_buffer().is_null() || p_storage->get_mesh_record_buffer().is_null() || p_storage->get_dag_buffer().is_null()) {
 		return false;
@@ -4437,6 +4576,10 @@ void NextGeoCut::free_resources() {
 		instance_shader.version_free(instance_version);
 		instance_version = RID();
 	}
+	if (multimesh_expand_version.is_valid()) {
+		multimesh_expand_shader.version_free(multimesh_expand_version);
+		multimesh_expand_version = RID();
+	}
 	if (cluster_version.is_valid()) {
 		cluster_shader.version_free(cluster_version);
 		cluster_version = RID();
@@ -4448,6 +4591,9 @@ void NextGeoCut::free_resources() {
 	instance_pipeline = RID();
 	instance_phase2 = RID();
 	instance_shadow_pipeline = RID();
+	instance_assembly_expand_pipeline = RID();
+	multimesh_expand_pipeline = RID();
+	last_assembly_expand_frame = UINT64_MAX;
 	cluster_bvh = RID();
 	cluster_leaf = RID();
 	cluster_hash = RID();
@@ -4456,7 +4602,7 @@ void NextGeoCut::free_resources() {
 	cluster_shadow_hash = RID();
 	hiz_pipeline = RID();
 	clear_vis_pipeline = RID();
-	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &raster_args, &raster_counts, &raster_lists, &raster_bin_state, &raster_bin_args, &raster_bin_hw_counts, &raster_bin_append, &raster_bin_lists, &raster_bin_table_buffer }) {
+	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &multimesh_expand_params, &assembly_counter_buf, &raster_args, &raster_counts, &raster_lists, &raster_bin_state, &raster_bin_args, &raster_bin_hw_counts, &raster_bin_append, &raster_bin_lists, &raster_bin_table_buffer }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();

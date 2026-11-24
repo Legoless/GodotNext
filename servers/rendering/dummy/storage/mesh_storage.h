@@ -52,6 +52,13 @@ private:
 	struct DummyMultiMesh {
 		RID mesh;
 		PackedFloat32Array buffer;
+		int instances = 0;
+		int visible_instances = -1;
+		RSE::MultimeshTransformFormat transform_format = RSE::MULTIMESH_TRANSFORM_2D;
+		bool use_colors = false;
+		bool use_custom_data = false;
+		bool use_indirect = false;
+		uint64_t nextgeo_dirty_serial = 1;
 	};
 
 	mutable RID_Owner<DummyMultiMesh, true> multimesh_owner;
@@ -190,13 +197,26 @@ public:
 	virtual void _multimesh_initialize(RID p_rid) override;
 	virtual void _multimesh_free(RID p_rid) override;
 
-	virtual void _multimesh_allocate_data(RID p_multimesh, int p_instances, RSE::MultimeshTransformFormat p_transform_format, bool p_use_colors = false, bool p_use_custom_data = false, bool p_use_indirect = false) override {}
-	virtual int _multimesh_get_instance_count(RID p_multimesh) const override { return 0; }
+	virtual void _multimesh_allocate_data(RID p_multimesh, int p_instances, RSE::MultimeshTransformFormat p_transform_format, bool p_use_colors = false, bool p_use_custom_data = false, bool p_use_indirect = false) override {
+		DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		ERR_FAIL_NULL(mm);
+		mm->instances = p_instances;
+		mm->transform_format = p_transform_format;
+		mm->use_colors = p_use_colors;
+		mm->use_custom_data = p_use_custom_data;
+		mm->use_indirect = p_use_indirect;
+		mm->nextgeo_dirty_serial++;
+	}
+	virtual int _multimesh_get_instance_count(RID p_multimesh) const override {
+		const DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		return mm != nullptr ? mm->instances : 0;
+	}
 
 	virtual void _multimesh_set_mesh(RID p_multimesh, RID p_mesh) override {
 		DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
 		ERR_FAIL_NULL(mm);
 		mm->mesh = p_mesh;
+		mm->nextgeo_dirty_serial++;
 	}
 	virtual void _multimesh_instance_set_transform(RID p_multimesh, int p_index, const Transform3D &p_transform) override {}
 	virtual void _multimesh_instance_set_transform_2d(RID p_multimesh, int p_index, const Transform2D &p_transform) override {}
@@ -221,8 +241,36 @@ public:
 	virtual RID _multimesh_get_buffer_rd_rid(RID p_multimesh) const override { return RID(); }
 	virtual Vector<float> _multimesh_get_buffer(RID p_multimesh) const override;
 
-	virtual void _multimesh_set_visible_instances(RID p_multimesh, int p_visible) override {}
-	virtual int _multimesh_get_visible_instances(RID p_multimesh) const override { return 0; }
+	virtual void _multimesh_set_visible_instances(RID p_multimesh, int p_visible) override {
+		DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		if (mm != nullptr) {
+			mm->visible_instances = p_visible;
+			mm->nextgeo_dirty_serial++;
+		}
+	}
+	virtual int _multimesh_get_visible_instances(RID p_multimesh) const override {
+		const DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		return mm != nullptr ? mm->visible_instances : 0;
+	}
+	virtual bool multimesh_get_nextgeo_info(RID p_multimesh, MultiMeshNextGeoInfo &r_info) const override {
+		r_info = MultiMeshNextGeoInfo();
+		const DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		if (mm == nullptr) {
+			return false;
+		}
+		r_info.mesh = mm->mesh;
+		r_info.instance_count = uint32_t(MAX(mm->instances, 0));
+		r_info.visible_count = mm->visible_instances < 0 ? r_info.instance_count : uint32_t(MIN(mm->visible_instances, MAX(mm->instances, 0)));
+		r_info.uses_colors = mm->use_colors;
+		r_info.uses_custom_data = mm->use_custom_data;
+		r_info.dirty_serial = mm->nextgeo_dirty_serial;
+		r_info.eligible = mm->transform_format == RSE::MULTIMESH_TRANSFORM_3D && !mm->use_indirect && mm->instances > 0 && mm->mesh.is_valid();
+		return r_info.eligible;
+	}
+	virtual uint64_t multimesh_get_nextgeo_dirty_serial(RID p_multimesh) const override {
+		const DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		return mm != nullptr ? mm->nextgeo_dirty_serial : 0;
+	}
 
 	MultiMeshInterpolator *_multimesh_get_interpolator(RID p_multimesh) const override { return nullptr; }
 

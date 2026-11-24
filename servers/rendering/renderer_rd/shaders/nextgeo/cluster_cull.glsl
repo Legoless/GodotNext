@@ -650,7 +650,7 @@ void main() {
 	uint req_flags = NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE;
 	if ((record.flags & req_flags) != req_flags ||
 			(record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_OFF ||
-			(record.flags & NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS) != 0u ||
+			(record.flags & (NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS | NEXTGEO_RECORD_MULTIMESH_PARENT | NEXTGEO_RECORD_HAS_ASSEMBLY)) != 0u ||
 			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) == NEXTGEO_RECORD_HAS_SKELETON ||
 			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
 			(record.layer_mask & meta.x) == 0u ||

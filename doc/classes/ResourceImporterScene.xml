@@ -86,6 +86,9 @@
 			Controls the size of each texel on the baked lightmap. A smaller value results in more precise lightmaps, at the cost of larger lightmap sizes and longer bake times.
 			[b]Note:[/b] Only effective if [member meshes/light_baking] is set to [b]Static Lightmaps[/b].
 		</member>
+		<member name="meshes/virtual_geometry_assembly" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], repeated virtualized mesh nodes in the imported scene are grouped into a [VirtualGeometryAssembly] payload (up to two hierarchy levels deep) on a container [ArrayMesh]. GPU expansion is enabled when [member ProjectSettings.rendering/nextgeo/experimental/assemblies] is [code]true[/code].
+		</member>
 		<member name="meshes/virtual_geometry_skinned" type="bool" setter="" getter="" default="false">
 			[b]Experimental:[/b] If [code]true[/code], surfaces with bone weights are eligible for virtual geometry and store skinning data in the [code].ngm[/code] page file. Can be overridden per mesh. Surfaces with blend shapes are never eligible.
 		</member>
@@ -119,6 +122,9 @@
 			- The mesh is all of the raw vertex data needed to display a mesh. In terms of the mesh, it knows how vertices are weight-painted and uses some internal numbering often imported from 3D modeling software.
 			- The skin contains the information necessary to bind this mesh onto this Skeleton3D. For each of the internal bone IDs chosen by the 3D modeling software, it contains two things. Firstly, a matrix known as the Bind Pose Matrix, Inverse Bind Matrix, or IBM for short. Secondly, the [Skin] contains each bone's name (if [member skins/use_named_skins] is [code]true[/code]), or the bone's index within the [Skeleton3D] list (if [member skins/use_named_skins] is [code]false[/code]).
 			Together, this information is enough to tell Godot how to use the bone poses in the [Skeleton3D] node to render the mesh from each [MeshInstance3D]. Note that each [MeshInstance3D] may share binds, as is common in models exported from Blender, or each [MeshInstance3D] may use a separate [Skin] object, as is common in models exported from other tools such as Maya.
+		</member>
+		<member name="virtual_geometry/preserve_area" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], triangles of each simplified virtual-geometry cluster group are scaled about their centroids (clamped to [code]1.5[/code]x) so the simplified group preserves the source group's surface area across coarse LODs. Useful for thin foliage cards and leaves.
 		</member>
 	</members>
 </class>

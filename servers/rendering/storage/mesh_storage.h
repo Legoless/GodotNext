@@ -180,6 +180,30 @@ public:
 	// GodotNext: vsm_caching (#212). True when the MultiMesh is indirect or updated recently.
 	virtual bool multimesh_is_vsm_dynamic(RID p_multimesh) const { return false; }
 
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10). GPU expansion metadata for eligible 3D non-indirect MultiMeshes.
+	struct MultiMeshNextGeoInfo {
+		RID buffer;
+		RID mesh;
+		uint32_t instance_count = 0;
+		uint32_t visible_count = 0;
+		uint32_t stride = 0;
+		uint32_t color_offset = 0;
+		uint32_t custom_offset = 0;
+		uint32_t current_offset = 0;
+		uint32_t prev_offset = 0;
+		uint64_t dirty_serial = 0;
+		AABB mesh_local_aabb;
+		bool uses_colors = false;
+		bool uses_custom_data = false;
+		bool motion_vectors = false;
+		bool eligible = false;
+	};
+	virtual bool multimesh_get_nextgeo_info(RID p_multimesh, MultiMeshNextGeoInfo &r_info) const {
+		r_info = MultiMeshNextGeoInfo();
+		return false;
+	}
+	virtual uint64_t multimesh_get_nextgeo_dirty_serial(RID p_multimesh) const { return 0; }
+
 	virtual RID _multimesh_allocate() = 0;
 	virtual void _multimesh_initialize(RID p_rid) = 0;
 	virtual void _multimesh_free(RID p_rid) = 0;

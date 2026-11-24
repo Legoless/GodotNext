@@ -41,6 +41,9 @@
 
 #include <cstdint>
 
+// Maximum linear triangle scale applied by Preserve Area (#151, plan §21.4 contract N10).
+static constexpr float NEXTGEO_PRESERVE_AREA_MAX_SCALE = 1.5f;
+
 // Cluster limits (plan §6.3): the visibility ID keeps 7 bits for the triangle.
 static constexpr uint32_t NEXTGEO_MAX_CLUSTER_TRIANGLES = 128;
 static constexpr uint32_t NEXTGEO_MAX_CLUSTER_VERTICES = 128;
@@ -147,6 +150,10 @@ struct NextGeoBuildInput {
 	uint32_t page_size = 0;
 	// Run each DAG level on the WorkerThreadPool. The output is identical either way.
 	bool use_threads = true;
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10).
+	// After simplifying a cluster group, scale its triangles about their centroids so the
+	// group's surface area matches the source group's area, clamped at 1.5x.
+	bool preserve_area = false;
 };
 
 struct NextGeoBuildOutput {
@@ -196,6 +203,10 @@ uint32_t nextgeo_cluster_skin_bytes(uint32_t p_bone_count, uint32_t p_vertex_cou
 // 16-byte page header, those records and their vertices and triangles, then padding to 16
 // bytes. A build keeps this at most NextGeoBuildInput::page_size, so raw_size fits too.
 uint32_t nextgeo_page_bytes(uint32_t p_cluster_payload_sum);
+
+// Linear triangle scale factor that restores `p_source_area` from `p_simplified_area`
+// when scaling each triangle about its centroid, clamped to [1.0, NEXTGEO_PRESERVE_AREA_MAX_SCALE].
+float nextgeo_preserve_area_scale(double p_source_area, double p_simplified_area);
 
 // Builds one cluster DAG over the eligible surfaces of a mesh (plan §7.1). The output is
 // deterministic: two builds of the same input are byte-identical, threaded or not.

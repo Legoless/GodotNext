@@ -651,7 +651,7 @@ Dictionary RendererSceneCull::instance_get_virtual_geometry_debug_stats(RID p_in
 		if (geom->geometry_instance != nullptr) {
 			Dictionary d = scene_render->geometry_instance_get_nextgeo_debug_stats(geom->geometry_instance);
 			if (d.is_empty()) {
-				d["record_index"] = -1;
+				d["record_index"] = instance->virtual_record == UINT32_MAX ? int64_t(-1) : int64_t(instance->virtual_record);
 				d["route"] = "legacy";
 				d["reason"] = "NONE";
 				d["surfaces"] = Array();
@@ -749,6 +749,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				_vsm_sync_instance(instance, scenario, true);
 				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
 				scene_render->geometry_instance_free(geom->geometry_instance);
+				geom->geometry_instance = nullptr;
 			} break;
 			case RSE::INSTANCE_LIGHT: {
 				InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
@@ -1180,6 +1181,11 @@ void RendererSceneCull::instance_attach_object_instance_id(RID p_instance, Objec
 	ERR_FAIL_NULL(instance);
 
 	instance->object_id = p_id;
+	// GodotNext: nextgeo_foliage_instancing (#151). Re-evaluate MultiMesh NextGeo eligibility when object_id is attached after base.
+	if (instance->base_type == RSE::INSTANCE_MULTIMESH) {
+		_instance_record_attach(instance);
+		_instance_queue_update(instance, false, true);
+	}
 }
 
 void RendererSceneCull::instance_set_blend_shape_weight(RID p_instance, int p_shape, float p_weight) {
@@ -1611,6 +1617,8 @@ void RendererSceneCull::instance_geometry_set_visibility_range(RID p_instance, f
 		vd.range_end_margin = instance->visibility_range_end_margin;
 		vd.fade_mode = p_fade_mode;
 	}
+	// GodotNext: nextgeo_foliage_instancing (#151). Sync visibility range into GPU instance attributes for per-element distance culling.
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_geometry_set_far_field(RID p_instance, RSE::FarFieldMode p_mode) {
@@ -1991,23 +1999,75 @@ void RendererSceneCull::_nextgi_sync_positional_light(Scenario *p_scenario, RID 
 	}
 }
 
-// GodotNext: nextgeo_instance_records (#75)
+// GodotNext: nextgeo_foliage_instancing (#151). Eligible 3D non-indirect MultiMeshInstance3D referencing a virtualized mesh.
+// Unattached MultiMeshes (object_id.is_null(), e.g. GridMap octants) keep legacy VGD_IGNORED routing.
+bool RendererSceneCull::_instance_is_nextgeo_multimesh(const Instance *p_instance, RID *r_mesh, RendererMeshStorage::MultiMeshNextGeoInfo *r_info) const {
+	if (p_instance == nullptr || p_instance->base_type != RSE::INSTANCE_MULTIMESH || p_instance->base.is_null() || p_instance->object_id.is_null()) {
+		return false;
+	}
+	if (RSG::mesh_storage == nullptr || RSG::virtual_mesh_storage == nullptr) {
+		return false;
+	}
+	RendererMeshStorage::MultiMeshNextGeoInfo info;
+	if (!RSG::mesh_storage->multimesh_get_nextgeo_info(p_instance->base, info) || !info.eligible || info.mesh.is_null() || info.instance_count == 0u) {
+		return false;
+	}
+	if (!RSG::virtual_mesh_storage->mesh_has_virtual_geometry(info.mesh)) {
+		return false;
+	}
+	if (r_mesh != nullptr) {
+		*r_mesh = info.mesh;
+	}
+	if (r_info != nullptr) {
+		*r_info = info;
+	}
+	return true;
+}
+
+// GodotNext: nextgeo_instance_records (#75) & nextgeo_foliage_instancing (#151).
 void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 	if (RSG::virtual_mesh_storage == nullptr) {
 		return;
 	}
-	const bool wants = p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid() && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_instance->base);
-	if (!wants) {
+	RID vgd_mesh;
+	bool is_multimesh = false;
+	RendererMeshStorage::MultiMeshNextGeoInfo mm_info;
+	if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid() && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_instance->base)) {
+		vgd_mesh = p_instance->base;
+	} else if (_instance_is_nextgeo_multimesh(p_instance, &vgd_mesh, &mm_info)) {
+		is_multimesh = true;
+	}
+	if (vgd_mesh.is_null()) {
 		_instance_record_release(p_instance);
 		return;
 	}
-	if (p_instance->virtual_record == UINT32_MAX) {
-		p_instance->virtual_record = RSG::virtual_mesh_storage->instance_record_allocate(p_instance->self, p_instance->base);
+	if (p_instance->virtual_record != UINT32_MAX && p_instance->virtual_record_mesh != vgd_mesh) {
+		_instance_record_release(p_instance);
 	}
+	if (p_instance->virtual_record == UINT32_MAX) {
+		p_instance->virtual_record = RSG::virtual_mesh_storage->instance_record_allocate(p_instance->self, vgd_mesh);
+		p_instance->virtual_record_mesh = vgd_mesh;
+	}
+	if (p_instance->virtual_record == UINT32_MAX) {
+		return;
+	}
+	const bool has_assembly = RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(vgd_mesh);
+	const LocalVector<RID> *unique_parts = has_assembly ? RSG::virtual_mesh_storage->mesh_get_assembly_unique_part_meshes(vgd_mesh) : nullptr;
+	const uint32_t needed_buckets = (unique_parts != nullptr && !unique_parts->is_empty()) ? uint32_t(unique_parts->size()) : 1u;
+	RSG::virtual_mesh_storage->instance_record_resize_bucket_slots(p_instance->virtual_record, needed_buckets);
+	const uint32_t bucket_slot = RSG::virtual_mesh_storage->instance_record_get_bucket_slot(p_instance->virtual_record);
+
+	if (is_multimesh) {
+		RSG::virtual_mesh_storage->multimesh_range_attach(p_instance->virtual_record, p_instance->base, vgd_mesh, mm_info.instance_count);
+	} else {
+		RSG::virtual_mesh_storage->multimesh_range_detach(p_instance->virtual_record);
+	}
+
 	if (((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && p_instance->base_data != nullptr) {
 		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
 		if (geom->geometry_instance != nullptr) {
 			geom->geometry_instance->set_nextgeo_record_index(p_instance->virtual_record);
+			geom->geometry_instance->set_nextgeo_bucket_slot(bucket_slot);
 		}
 	}
 	RSG::virtual_mesh_storage->instance_record_set_skeleton(p_instance->virtual_record, p_instance->skeleton);
@@ -2034,27 +2094,40 @@ float RendererSceneCull::_instance_displacement_bound(const Instance *p_instance
 		return 0.0f;
 	}
 	float max_disp = 0.0f;
-	if (p_instance->material_override.is_valid()) {
-		max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(p_instance->material_override));
-	} else if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid()) {
-		const int surface_count = RSG::mesh_storage->mesh_get_surface_count(p_instance->base);
+	auto scan_mesh_materials = [&](RID p_mesh, bool p_allow_overrides) {
+		if (p_mesh.is_null()) {
+			return;
+		}
+		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(p_mesh)) {
+			const LocalVector<RID> *parts = RSG::virtual_mesh_storage->mesh_get_assembly_unique_part_meshes(p_mesh);
+			if (parts != nullptr) {
+				for (uint32_t u = 0; u < parts->size(); u++) {
+					const RID part_mesh = (*parts)[u];
+					const int sc = RSG::mesh_storage->mesh_get_surface_count(part_mesh);
+					for (int i = 0; i < sc; i++) {
+						RID mat = RSG::mesh_storage->mesh_surface_get_material(part_mesh, i);
+						if (mat.is_valid()) {
+							max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(mat));
+						}
+					}
+				}
+				return;
+			}
+		}
+		const int surface_count = RSG::mesh_storage->mesh_get_surface_count(p_mesh);
 		for (int i = 0; i < surface_count; i++) {
-			RID mat = (i < p_instance->materials.size() && p_instance->materials[i].is_valid()) ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(p_instance->base, i);
+			RID mat = (p_allow_overrides && i < p_instance->materials.size() && p_instance->materials[i].is_valid()) ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(p_mesh, i);
 			if (mat.is_valid()) {
 				max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(mat));
 			}
 		}
+	};
+	if (p_instance->material_override.is_valid()) {
+		max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(p_instance->material_override));
+	} else if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid()) {
+		scan_mesh_materials(p_instance->base, true);
 	} else if (p_instance->base_type == RSE::INSTANCE_MULTIMESH && p_instance->base.is_valid()) {
-		RID mesh = RSG::mesh_storage->multimesh_get_mesh(p_instance->base);
-		if (mesh.is_valid()) {
-			const int surface_count = RSG::mesh_storage->mesh_get_surface_count(mesh);
-			for (int i = 0; i < surface_count; i++) {
-				RID mat = RSG::mesh_storage->mesh_surface_get_material(mesh, i);
-				if (mat.is_valid()) {
-					max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(mat));
-				}
-			}
-		}
+		scan_mesh_materials(RSG::mesh_storage->multimesh_get_mesh(p_instance->base), false);
 	}
 	if (p_instance->material_overlay.is_valid()) {
 		max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(p_instance->material_overlay));
@@ -2069,27 +2142,40 @@ float RendererSceneCull::_instance_vertex_offset_bound(const Instance *p_instanc
 	}
 	const float default_max = ProjectSettings::get_singleton() != nullptr ? MAX(0.0f, float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default"))) : 0.5f;
 	float max_wpo = 0.0f;
-	if (p_instance->material_override.is_valid()) {
-		max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(p_instance->material_override, default_max));
-	} else if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid()) {
-		const int surface_count = RSG::mesh_storage->mesh_get_surface_count(p_instance->base);
+	auto scan_mesh_materials = [&](RID p_mesh, bool p_allow_overrides) {
+		if (p_mesh.is_null()) {
+			return;
+		}
+		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(p_mesh)) {
+			const LocalVector<RID> *parts = RSG::virtual_mesh_storage->mesh_get_assembly_unique_part_meshes(p_mesh);
+			if (parts != nullptr) {
+				for (uint32_t u = 0; u < parts->size(); u++) {
+					const RID part_mesh = (*parts)[u];
+					const int sc = RSG::mesh_storage->mesh_get_surface_count(part_mesh);
+					for (int i = 0; i < sc; i++) {
+						RID mat = RSG::mesh_storage->mesh_surface_get_material(part_mesh, i);
+						if (mat.is_valid()) {
+							max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(mat, default_max));
+						}
+					}
+				}
+				return;
+			}
+		}
+		const int surface_count = RSG::mesh_storage->mesh_get_surface_count(p_mesh);
 		for (int i = 0; i < surface_count; i++) {
-			RID mat = (i < p_instance->materials.size() && p_instance->materials[i].is_valid()) ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(p_instance->base, i);
+			RID mat = (p_allow_overrides && i < p_instance->materials.size() && p_instance->materials[i].is_valid()) ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(p_mesh, i);
 			if (mat.is_valid()) {
 				max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(mat, default_max));
 			}
 		}
+	};
+	if (p_instance->material_override.is_valid()) {
+		max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(p_instance->material_override, default_max));
+	} else if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid()) {
+		scan_mesh_materials(p_instance->base, true);
 	} else if (p_instance->base_type == RSE::INSTANCE_MULTIMESH && p_instance->base.is_valid()) {
-		RID mesh = RSG::mesh_storage->multimesh_get_mesh(p_instance->base);
-		if (mesh.is_valid()) {
-			const int surface_count = RSG::mesh_storage->mesh_get_surface_count(mesh);
-			for (int i = 0; i < surface_count; i++) {
-				RID mat = RSG::mesh_storage->mesh_surface_get_material(mesh, i);
-				if (mat.is_valid()) {
-					max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(mat, default_max));
-				}
-			}
-		}
+		scan_mesh_materials(RSG::mesh_storage->multimesh_get_mesh(p_instance->base), false);
 	}
 	if (p_instance->material_overlay.is_valid()) {
 		max_wpo = MAX(max_wpo, RSG::material_storage->material_get_effective_vertex_offset_max(p_instance->material_overlay, default_max));
@@ -2102,8 +2188,10 @@ void RendererSceneCull::_instance_record_release(Instance *p_instance) const {
 		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
 		if (geom->geometry_instance != nullptr) {
 			geom->geometry_instance->set_nextgeo_record_index(UINT32_MAX);
+			geom->geometry_instance->set_nextgeo_bucket_slot(UINT32_MAX);
 		}
 	}
+	p_instance->virtual_record_mesh = RID();
 	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
 		return;
 	}
@@ -2139,11 +2227,19 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 	if (p_instance->instance_uniforms.location() >= 0 || p_instance->material_overlay.is_valid()) {
 		flags |= RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS;
 	}
+	// GodotNext: nextgeo_foliage_instancing (#151). Tag MultiMesh parent and active Assembly containers.
+	if (p_instance->base_type == RSE::INSTANCE_MULTIMESH) {
+		flags |= RendererVirtualMeshStorage::RECORD_MULTIMESH_PARENT;
+	}
+	if (RSG::virtual_mesh_storage->are_assemblies_enabled() && p_instance->virtual_record_mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_assembly(p_instance->virtual_record_mesh)) {
+		flags |= RendererVirtualMeshStorage::RECORD_HAS_ASSEMBLY;
+	}
 	// GodotNext: vsm_caching (#212). Encode per-instance cache invalidation mode in GPU record bits 12-13.
 	static_assert(uint32_t(RSE::SHADOW_CACHE_INVALIDATION_AUTO) == 0u && uint32_t(RSE::SHADOW_CACHE_INVALIDATION_ALWAYS) == 1u && uint32_t(RSE::SHADOW_CACHE_INVALIDATION_RIGID) == 2u && uint32_t(RSE::SHADOW_CACHE_INVALIDATION_STATIC) == 3u, "ShadowCacheInvalidation enum values must match RECORD_VSM_CACHE_* bits.");
 	flags |= (uint32_t(p_instance->shadow_cache_invalidation) << RendererVirtualMeshStorage::RECORD_VSM_CACHE_MODE_SHIFT) & RendererVirtualMeshStorage::RECORD_VSM_CACHE_MODE_MASK;
 	RSG::virtual_mesh_storage->instance_record_set_state(p_instance->virtual_record, flags);
 	RSG::virtual_mesh_storage->instance_record_set_layer_mask(p_instance->virtual_record, p_instance->layer_mask);
+	RSG::virtual_mesh_storage->instance_record_set_visibility_range(p_instance->virtual_record, p_instance->visibility_range_begin, p_instance->visibility_range_end);
 
 	uint32_t gi_flags = RendererVirtualMeshStorage::GI_MODE_NONE;
 	if (p_instance->dynamic_gi) {
@@ -2869,6 +2965,13 @@ void RendererSceneCull::_update_instance_aabb(Instance *p_instance) const {
 				new_aabb = spline_deform_compute_swept_aabb(p_instance->spline_deform, mesh_aabb);
 			} else {
 				new_aabb = mesh_aabb;
+				// GodotNext: nextgeo_foliage_instancing (#151). Merge assembly leaf AABBs when enabled.
+				if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(p_instance->base)) {
+					const AABB asm_aabb = RSG::virtual_mesh_storage->mesh_get_assembly_local_aabb(p_instance->base);
+					if (asm_aabb.has_surface()) {
+						new_aabb = new_aabb.has_surface() ? new_aabb.merge(asm_aabb) : asm_aabb;
+					}
+				}
 			}
 
 		} break;
@@ -2878,6 +2981,26 @@ void RendererSceneCull::_update_instance_aabb(Instance *p_instance) const {
 				new_aabb = *p_instance->custom_aabb;
 			} else {
 				new_aabb = RSG::mesh_storage->multimesh_get_aabb(p_instance->base);
+				if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->are_assemblies_enabled()) {
+					const RID mm_mesh = RSG::mesh_storage->multimesh_get_mesh(p_instance->base);
+					if (mm_mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_assembly(mm_mesh)) {
+						const AABB asm_aabb = RSG::virtual_mesh_storage->mesh_get_assembly_local_aabb(mm_mesh);
+						if (asm_aabb.has_surface()) {
+							const int elem_count = RSG::mesh_storage->multimesh_get_instance_count(p_instance->base);
+							if (elem_count > 0) {
+								for (int e = 0; e < elem_count; e++) {
+									const Transform3D et = RSG::mesh_storage->multimesh_instance_get_transform(p_instance->base, e);
+									const AABB ea = et.xform(asm_aabb);
+									new_aabb = new_aabb.has_surface() ? new_aabb.merge(ea) : ea;
+								}
+							} else if (new_aabb.has_surface()) {
+								new_aabb = new_aabb.merge(asm_aabb);
+							} else {
+								new_aabb = asm_aabb;
+							}
+						}
+					}
+				}
 			}
 
 		} break;
@@ -3711,6 +3834,25 @@ void RendererSceneCull::_visibility_cull(const VisibilityCullData &cull_data, ui
 template <bool p_fade_check>
 int RendererSceneCull::_visibility_range_check(InstanceVisibilityData &r_vis_data, const Vector3 &p_camera_pos, uint64_t p_viewport_mask) {
 	float dist = p_camera_pos.distance_to(r_vis_data.position);
+	float dist_min = dist;
+	float dist_max = dist;
+	// GodotNext: nextgeo_foliage_instancing (#151). Virtualized MultiMesh uses coarse AABB min/max
+	// distance pre-test on CPU so per-element GPU distance culling in instance_cull.glsl is exact.
+	if (r_vis_data.instance != nullptr && r_vis_data.instance->base_type == RSE::INSTANCE_MULTIMESH && r_vis_data.instance->virtual_record != UINT32_MAX && r_vis_data.instance->transformed_aabb.has_surface()) {
+		const AABB &aabb = r_vis_data.instance->transformed_aabb;
+		const Vector3 bmin = aabb.position;
+		const Vector3 bmax = aabb.position + aabb.size;
+		const Vector3 closest(
+				CLAMP(p_camera_pos.x, bmin.x, bmax.x),
+				CLAMP(p_camera_pos.y, bmin.y, bmax.y),
+				CLAMP(p_camera_pos.z, bmin.z, bmax.z));
+		const Vector3 farthest(
+				Math::abs(p_camera_pos.x - bmin.x) > Math::abs(p_camera_pos.x - bmax.x) ? bmin.x : bmax.x,
+				Math::abs(p_camera_pos.y - bmin.y) > Math::abs(p_camera_pos.y - bmax.y) ? bmin.y : bmax.y,
+				Math::abs(p_camera_pos.z - bmin.z) > Math::abs(p_camera_pos.z - bmax.z) ? bmin.z : bmax.z);
+		dist_min = p_camera_pos.distance_to(closest);
+		dist_max = p_camera_pos.distance_to(farthest);
+	}
 	const RSE::VisibilityRangeFadeMode &fade_mode = r_vis_data.fade_mode;
 
 	float begin_offset = -r_vis_data.range_begin_margin;
@@ -3721,10 +3863,10 @@ int RendererSceneCull::_visibility_range_check(InstanceVisibilityData &r_vis_dat
 		end_offset = -end_offset;
 	}
 
-	if (r_vis_data.range_end > 0.0f && dist > r_vis_data.range_end + end_offset) {
+	if (r_vis_data.range_end > 0.0f && dist_min > r_vis_data.range_end + end_offset) {
 		r_vis_data.viewport_state &= ~p_viewport_mask;
 		return -1;
-	} else if (r_vis_data.range_begin > 0.0f && dist < r_vis_data.range_begin + begin_offset) {
+	} else if (r_vis_data.range_begin > 0.0f && dist_max < r_vis_data.range_begin + begin_offset) {
 		r_vis_data.viewport_state &= ~p_viewport_mask;
 		return 1;
 	} else {
@@ -5016,6 +5158,46 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 						if (transforms == nullptr || stride < 12) {
 							continue;
 						}
+						// GodotNext: nextgeo_foliage_instancing (#151). Assemblies add one TLAS entry per leaf part.
+						const bool mm_has_assembly = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(mesh);
+						LocalVector<RendererVirtualMeshStorage::AssemblyLeafCPU> mm_asm_parts;
+						if (mm_has_assembly) {
+							RSG::virtual_mesh_storage->mesh_get_assembly_expanded_parts_cpu(mesh, Transform3D(), mm_asm_parts);
+						}
+						if (mm_has_assembly && !mm_asm_parts.is_empty()) {
+							const uint32_t part_stride = uint32_t(mm_asm_parts.size());
+							for (uint32_t element = 0; element < element_count; element++) {
+								const Transform3D elem_world = RendererRD::nextgi_rt_element_world(instance->transform, transforms + element * stride);
+								for (uint32_t p = 0; p < part_stride; p++) {
+									const RendererVirtualMeshStorage::AssemblyLeafCPU &leaf = mm_asm_parts[p];
+									if (!mesh_storage->owns_mesh(leaf.mesh)) {
+										continue;
+									}
+									const Transform3D world = elem_world * leaf.world_transform;
+									const AABB part_aabb = world.xform(leaf.local_aabb.has_surface() ? leaf.local_aabb : mesh_storage->mesh_get_aabb(leaf.mesh));
+									const float bound = part_aabb.size.length() * 0.5f;
+									const float distance = part_aabb.get_center().distance_to(anchor);
+									if (distance > scene_radius) {
+										continue;
+									}
+									if (RendererRD::nextgi_rt_cull_instance(distance, bound, scene_radius) != RendererRD::NEXTGI_RT_INCLUDED) {
+										not_in_scene++;
+										continue;
+									}
+									RTCandidate candidate;
+									candidate.instance = instance;
+									candidate.angular = RendererRD::nextgi_rt_angular_radius(distance, bound);
+									candidate.mesh_override = leaf.mesh;
+									candidate.world = world;
+									candidate.has_world = true;
+									candidate.element_index = element * part_stride + p;
+									picked.push_back(candidate);
+									angular.push_back(candidate.angular);
+									reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
+								}
+							}
+							continue;
+						}
 						const AABB mesh_aabb = mesh_storage->mesh_get_aabb(mesh);
 						for (uint32_t element = 0; element < element_count; element++) {
 							const Transform3D world = RendererRD::nextgi_rt_element_world(instance->transform, transforms + element * stride);
@@ -5045,6 +5227,40 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					const bool skinned = instance->mesh_instance.is_valid();
 					if (!RendererRD::nextgi_rt_instance_eligible(instance->base_type == RSE::INSTANCE_MESH, true, true, skinned)) {
 						continue;
+					}
+					// GodotNext: nextgeo_foliage_instancing (#151). Expand active Nanite Assemblies into one TLAS entry per part.
+					if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->are_assemblies_enabled() && RSG::virtual_mesh_storage->mesh_has_assembly(instance->base)) {
+						LocalVector<RendererVirtualMeshStorage::AssemblyLeafCPU> asm_parts;
+						RSG::virtual_mesh_storage->mesh_get_assembly_expanded_parts_cpu(instance->base, instance->transform, asm_parts);
+						if (!asm_parts.is_empty()) {
+							for (uint32_t p = 0; p < asm_parts.size(); p++) {
+								const RendererVirtualMeshStorage::AssemblyLeafCPU &leaf = asm_parts[p];
+								if (mesh_storage == nullptr || !mesh_storage->owns_mesh(leaf.mesh)) {
+									continue;
+								}
+								const AABB part_aabb = leaf.world_transform.xform(leaf.local_aabb.has_surface() ? leaf.local_aabb : mesh_storage->mesh_get_aabb(leaf.mesh));
+								const float bound = part_aabb.size.length() * 0.5f;
+								const float distance = part_aabb.get_center().distance_to(anchor);
+								if (distance > scene_radius) {
+									continue;
+								}
+								if (RendererRD::nextgi_rt_cull_instance(distance, bound, scene_radius) != RendererRD::NEXTGI_RT_INCLUDED) {
+									not_in_scene++;
+									continue;
+								}
+								RTCandidate candidate;
+								candidate.instance = instance;
+								candidate.angular = RendererRD::nextgi_rt_angular_radius(distance, bound);
+								candidate.mesh_override = leaf.mesh;
+								candidate.world = leaf.world_transform;
+								candidate.has_world = true;
+								candidate.element_index = p;
+								picked.push_back(candidate);
+								angular.push_back(candidate.angular);
+								reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
+							}
+							continue;
+						}
 					}
 					const float bound = parent_aabb.size.length() * 0.5f;
 					if (parent_distance > scene_radius) {
@@ -6005,6 +6221,8 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 			ERR_FAIL_NULL(geom->geometry_instance);
 			geom->geometry_instance->set_surface_materials(p_instance->materials);
 		}
+		// GodotNext: nextgeo_foliage_instancing (#151). Re-sync virtual record, MultiMesh GPU range, and Assembly bucket slots on dependency updates.
+		_instance_record_attach(p_instance);
 		_instance_record_update_state(p_instance);
 		// GodotNext: nextgeo_displacement (#150) & nextgeo_vertex_offset (#164). Re-inflate bounds if displacement or WPO max changed.
 		const float new_disp_bound = _instance_displacement_bound(p_instance);
@@ -6043,6 +6261,11 @@ void RendererSceneCull::update() {
 	const bool wpo_default_changed = last_vertex_offset_max_default >= 0.0f && current_wpo_default != last_vertex_offset_max_default;
 	last_vertex_offset_max_default = current_wpo_default;
 
+	// GodotNext: nextgeo_foliage_instancing (#151). Refresh assembly instances when experimental toggle flips.
+	const bool current_assemblies_enabled = RendererVirtualMeshStorage::are_assemblies_enabled();
+	const bool assemblies_changed = last_assemblies_enabled >= 0 && (current_assemblies_enabled != (last_assemblies_enabled != 0));
+	last_assemblies_enabled = current_assemblies_enabled ? 1 : 0;
+
 	uint32_t rid_count = scenario_owner.get_rid_count();
 	RID *rids = (RID *)alloca(sizeof(RID) * rid_count);
 	scenario_owner.fill_owned_buffer(rids);
@@ -6050,11 +6273,24 @@ void RendererSceneCull::update() {
 		Scenario *s = scenario_owner.get_or_null(rids[i]);
 		s->indexers[Scenario::INDEXER_GEOMETRY].optimize_incremental(indexer_update_iterations);
 		s->indexers[Scenario::INDEXER_VOLUMES].optimize_incremental(indexer_update_iterations);
-		if (wpo_default_changed) {
+		if (wpo_default_changed || assemblies_changed) {
 			for (SelfList<Instance> *E = s->instances.first(); E; E = E->next()) {
 				Instance *inst = E->self();
-				if (inst->base_type == RSE::INSTANCE_MESH && inst->virtual_record != UINT32_MAX) {
+				if (inst->virtual_record == UINT32_MAX) {
+					continue;
+				}
+				if (wpo_default_changed && (inst->base_type == RSE::INSTANCE_MESH || inst->base_type == RSE::INSTANCE_MULTIMESH)) {
 					_instance_queue_update(inst, true, true);
+				}
+				if (assemblies_changed && RSG::virtual_mesh_storage != nullptr && inst->virtual_record_mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_assembly(inst->virtual_record_mesh)) {
+					_instance_record_attach(inst);
+					_instance_queue_update(inst, true, true);
+					if (((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && inst->base_data != nullptr) {
+						InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(inst->base_data);
+						if (geom->geometry_instance != nullptr) {
+							geom->geometry_instance->_mark_dirty();
+						}
+					}
 				}
 			}
 		}

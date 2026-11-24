@@ -81,6 +81,8 @@ public:
 
 	// GodotNext: nextgeo_resolve (#80)
 	virtual void set_nextgeo_record_index(uint32_t p_index) {}
+	// GodotNext: nextgeo_foliage_instancing (#151). Base bucket slot in O(scene nodes) resolve/bin tables.
+	virtual void set_nextgeo_bucket_slot(uint32_t p_slot) {}
 	// GodotNext: vsm_caching (#212).
 	virtual void set_shadow_cache_invalidation(RSE::ShadowCacheInvalidation p_invalidation) {}
 	// GodotNext: light_source_parity (#140). Tracks whether the instance casts shadows for contact-shadow intensity split.
@@ -133,6 +135,8 @@ public:
 
 	// GodotNext: nextgeo_resolve (#80)
 	uint32_t nextgeo_record_index = UINT32_MAX;
+	// GodotNext: nextgeo_foliage_instancing (#151).
+	uint32_t nextgeo_bucket_slot = UINT32_MAX;
 
 	// GodotNext: spline_meshes (#161).
 	bool spline_deform_active = false;
@@ -202,6 +206,14 @@ public:
 		if (nextgeo_record_index != p_index) {
 			nextgeo_record_index = p_index;
 			if (p_index != UINT32_MAX) {
+				_mark_dirty();
+			}
+		}
+	}
+	virtual void set_nextgeo_bucket_slot(uint32_t p_slot) override {
+		if (nextgeo_bucket_slot != p_slot) {
+			nextgeo_bucket_slot = p_slot;
+			if (p_slot != UINT32_MAX) {
 				_mark_dirty();
 			}
 		}

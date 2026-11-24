@@ -238,6 +238,9 @@ class ResourceImporterScene : public ResourceImporter {
 	bool _ngm_generate = false;
 	// GodotNext: nextgeo_skinned
 	bool _ngm_skinned = false;
+	// GodotNext: nextgeo_foliage_instancing (#151)
+	bool _ngm_preserve_area = false;
+	bool _ngm_assembly = false;
 	bool _ngm_single_mesh = false;
 	Array _ngm_entries;
 	List<String> *_ngm_gen_files = nullptr;
@@ -305,6 +308,10 @@ public:
 
 	Error _save_scene_as_mesh_library(const String &p_source_file, const String &p_save_path, Node *p_godot_scene, const HashMap<StringName, Variant> &p_options, int p_flags);
 	Error _save_scene_as_single_mesh(const String &p_source_file, const String &p_save_path, Node *p_godot_scene, const HashMap<StringName, Variant> &p_options, int p_flags);
+
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10).
+	// Builds a VirtualGeometryAssembly (<= 2 levels) from repeated virtualized MeshInstance3D nodes in an imported scene.
+	static bool build_virtual_geometry_assembly_from_scene(Node *p_root);
 
 	Node *pre_import(const String &p_source_file, const HashMap<StringName, Variant> &p_options);
 	virtual Error import(ResourceUID::ID p_source_id, const String &p_source_file, const String &p_save_path, const HashMap<StringName, Variant> &p_options, List<String> *r_platform_variants, List<String> *r_gen_files = nullptr, Variant *r_metadata = nullptr) override;

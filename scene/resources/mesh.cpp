@@ -2387,11 +2387,21 @@ void ArrayMesh::_detach_virtual_geometry() {
 }
 
 void ArrayMesh::set_virtual_geometry(const Ref<VirtualGeometryData> &p_data) {
-	if (virtual_geometry == p_data) {
+	if (virtual_geometry == p_data && p_data.is_null()) {
 		return;
 	}
 	virtual_geometry = p_data;
 	emit_changed();
+	if (virtual_geometry.is_valid() && virtual_geometry->get_assembly().is_valid()) {
+		const AABB asm_aabb = virtual_geometry->get_assembly()->get_merged_aabb();
+		if (asm_aabb.has_surface() && surfaces.is_empty() && custom_aabb == AABB()) {
+			custom_aabb = asm_aabb;
+		}
+		_create_if_empty();
+		if (custom_aabb.has_surface()) {
+			RS::get_singleton()->mesh_set_custom_aabb(mesh, custom_aabb);
+		}
+	}
 	if (mesh.is_null()) {
 		// The RS mesh RID is created with the first surface; _create_if_empty()
 		// and mesh_create_from_surfaces() re-run the push, so a VGD set before
@@ -2427,6 +2437,57 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 		desc.rt_proxy_clusters = virtual_geometry->get_rt_proxy_clusters();
 		// GodotNext: nextgeo_skinned_runtime (#160)
 		desc.skin_influences = uint32_t(MAX(virtual_geometry->get_skin_influences(), 0));
+		// GodotNext: nextgeo_foliage_instancing (#151). Mirror Nanite Assembly hierarchy (<= 2 levels).
+		Ref<VirtualGeometryAssembly> asm_res = virtual_geometry->get_assembly();
+		if (asm_res.is_valid()) {
+			const TypedArray<Mesh> parts = asm_res->get_parts();
+			const TypedArray<Transform3D> part_xfs = asm_res->get_part_transforms();
+			for (int i = 0; i < parts.size(); i++) {
+				Ref<Mesh> part_mesh = parts[i];
+				if (part_mesh.is_null()) {
+					continue;
+				}
+				const RID part_rid = part_mesh->get_rid();
+				if (part_rid.is_null() || part_rid == mesh) {
+					continue;
+				}
+				RenderingServerTypes::VirtualGeometryDesc::AssemblyPartDesc pdesc;
+				pdesc.mesh = part_rid;
+				pdesc.local_transform = i < part_xfs.size() ? Transform3D(part_xfs[i]) : Transform3D();
+				pdesc.local_aabb = part_mesh->get_aabb();
+				desc.assembly_parts.push_back(pdesc);
+			}
+			const TypedArray<VirtualGeometryAssembly> children = asm_res->get_child_assemblies();
+			const TypedArray<Transform3D> child_xfs = asm_res->get_child_transforms();
+			for (int i = 0; i < children.size(); i++) {
+				Ref<VirtualGeometryAssembly> child = children[i];
+				if (child.is_null() || child == asm_res) {
+					continue;
+				}
+				RenderingServerTypes::VirtualGeometryDesc::AssemblyChildDesc cdesc;
+				cdesc.local_transform = i < child_xfs.size() ? Transform3D(child_xfs[i]) : Transform3D();
+				const TypedArray<Mesh> sub_parts = child->get_parts();
+				const TypedArray<Transform3D> sub_xfs = child->get_part_transforms();
+				for (int j = 0; j < sub_parts.size(); j++) {
+					Ref<Mesh> sub_mesh = sub_parts[j];
+					if (sub_mesh.is_null()) {
+						continue;
+					}
+					const RID sub_rid = sub_mesh->get_rid();
+					if (sub_rid.is_null() || sub_rid == mesh) {
+						continue;
+					}
+					RenderingServerTypes::VirtualGeometryDesc::AssemblyPartDesc pdesc;
+					pdesc.mesh = sub_rid;
+					pdesc.local_transform = j < sub_xfs.size() ? Transform3D(sub_xfs[j]) : Transform3D();
+					pdesc.local_aabb = sub_mesh->get_aabb();
+					cdesc.parts.push_back(pdesc);
+				}
+				if (!cdesc.parts.is_empty()) {
+					desc.assembly_children.push_back(cdesc);
+				}
+			}
+		}
 		const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
 		for (int index = 0; index < eligibility.size() && index < 32; index++) {
 			if (eligibility[index] == 1) {

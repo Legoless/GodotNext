@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="VirtualGeometryAssembly" inherits="Resource" api_type="core" experimental="Nanite Assemblies are experimental and off by default." xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Experimental hierarchical part assembly payload for [VirtualGeometryData].
+	</brief_description>
+	<description>
+		Holds a set of virtualized part [Mesh] resources with local [Transform3D] placements and optional child [VirtualGeometryAssembly] resources up to [constant MAX_DEPTH] (2) levels deep.
+		Attach a [VirtualGeometryAssembly] to [member VirtualGeometryData.assembly] to enable GPU-side assembly expansion in NextGeo visibility, VSM, and ray-tracing passes when [member ProjectSettings.rendering/nextgeo/experimental/assemblies] is enabled.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_child_assembly">
+			<return type="int" enum="Error" />
+			<param index="0" name="child" type="VirtualGeometryAssembly" />
+			<param index="1" name="transform" type="Transform3D" default="Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)" />
+			<description>
+				Appends a child [VirtualGeometryAssembly] with local [param transform]. Returns [constant ERR_INVALID_PARAMETER] if [param child] is null, cyclic, or would exceed [constant MAX_DEPTH] (2) levels.
+			</description>
+		</method>
+		<method name="add_part">
+			<return type="void" />
+			<param index="0" name="mesh" type="Mesh" />
+			<param index="1" name="transform" type="Transform3D" default="Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)" />
+			<description>
+				Appends a virtualized part [param mesh] placed at local [param transform].
+			</description>
+		</method>
+		<method name="clear">
+			<return type="void" />
+			<description>
+				Removes all parts and child assemblies.
+			</description>
+		</method>
+		<method name="get_child_assembly_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of direct child assemblies.
+			</description>
+		</method>
+		<method name="get_depth" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the hierarchy depth of this assembly ([code]0[/code] when empty, [code]1[/code] for direct parts only, [code]2[/code] when child assemblies with parts are present).
+			</description>
+		</method>
+		<method name="get_merged_aabb" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the local-space [AABB] enclosing all direct and child assembly parts.
+			</description>
+		</method>
+		<method name="get_part_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of direct parts.
+			</description>
+		</method>
+		<method name="get_total_leaf_part_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the total number of expanded leaf part instances across this assembly and all direct child assemblies.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="child_assemblies" type="VirtualGeometryAssembly[]" setter="set_child_assemblies" getter="get_child_assemblies" default="[]">
+			Direct child [VirtualGeometryAssembly] resources (at most two hierarchy levels total).
+		</member>
+		<member name="child_transforms" type="Transform3D[]" setter="set_child_transforms" getter="get_child_transforms" default="[]">
+			Local [Transform3D] placements parallel to [member child_assemblies].
+		</member>
+		<member name="part_transforms" type="Transform3D[]" setter="set_part_transforms" getter="get_part_transforms" default="[]">
+			Local [Transform3D] placements parallel to [member parts].
+		</member>
+		<member name="parts" type="Mesh[]" setter="set_parts" getter="get_parts" default="[]">
+			Direct virtualized part [Mesh] resources referenced by this assembly.
+		</member>
+	</members>
+	<constants>
+		<constant name="MAX_DEPTH" value="2">
+			Maximum supported assembly nesting depth (root assembly -&gt; child assembly -&gt; part mesh).
+		</constant>
+	</constants>
+</class>

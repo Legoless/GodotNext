@@ -4379,6 +4379,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/nextgeo/experimental/tessellation", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/tessellation/dicing_rate", PROPERTY_HINT_RANGE, "0.5,16.0,0.25,suffix:px"), 2.0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/tessellation/debug_max_patches", PROPERTY_HINT_RANGE, "0,4194304,1"), 0);
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10). EXPERIMENTAL Nanite Assemblies
+	// (GPU expansion of instance -> part -> sub-part, <= 2 levels). Off by default.
+	GLOBAL_DEF("rendering/nextgeo/experimental/assemblies", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

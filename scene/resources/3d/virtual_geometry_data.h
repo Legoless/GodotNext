@@ -32,6 +32,7 @@
 
 #include "core/io/resource.h"
 #include "core/variant/typed_array.h"
+#include "scene/resources/3d/virtual_geometry_assembly.h"
 
 // Sub-resource referenced by ArrayMesh (plan §7.2). It is not a Mesh subclass: the
 // authored ArrayMesh RID and its surfaces stay in place, and any surface mutation
@@ -72,6 +73,8 @@ private:
 	int64_t page_count = 0;
 	int64_t page_size = 0;
 	int skin_influences = 0; // 0 (unskinned), 4 or 8. The skinning data is in the `.ngm` pages.
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10). Optional Nanite Assembly payload.
+	Ref<VirtualGeometryAssembly> assembly;
 	// Not saved and not bound. The importer hook stashes what NGMWriter needs beyond the
 	// page payloads: vertex layout, and (first_group, group_count) pairs in page order.
 	uint32_t ngm_vertex_layout = 0;
@@ -172,6 +175,10 @@ public:
 
 	void set_skin_influences(int p_influences);
 	int get_skin_influences() const;
+
+	// GodotNext: nextgeo_foliage_instancing (#151). Optional Nanite Assembly (<= 2 levels).
+	void set_assembly(const Ref<VirtualGeometryAssembly> &p_assembly);
+	Ref<VirtualGeometryAssembly> get_assembly() const;
 
 	// Transient `.ngm` write table. Cleared by reset_state. Not a property.
 	void set_ngm_page_table(uint32_t p_vertex_layout, const PackedInt32Array &p_page_groups);

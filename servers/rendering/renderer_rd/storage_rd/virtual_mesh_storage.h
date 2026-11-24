@@ -38,6 +38,15 @@ namespace RendererRD {
 // The RenderingDevice-backed record store and fixed-slot page arena.
 class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	RID record_buffer;
+	RID instance_attributes_buffer;
+	RID bucket_surface_masks_buffer;
+	uint32_t bucket_surface_masks_capacity = 0;
+	RID assembly_headers_buffer;
+	uint32_t assembly_headers_capacity = 0;
+	RID assembly_children_buffer;
+	uint32_t assembly_children_capacity = 0;
+	RID assembly_parts_buffer;
+	uint32_t assembly_parts_capacity = 0;
 	RID mesh_record_buffer;
 	// GodotNext: nextgeo_gpu_cull (#76). Per-mesh DAG blobs (groups + BVH8).
 	RID dag_buffer;
@@ -65,6 +74,11 @@ class VirtualMeshStorage : public RendererVirtualMeshStorage {
 protected:
 	uint64_t _get_max_storage_buffer_range() const override;
 	void _upload_records(uint32_t p_first, uint32_t p_count) override;
+	bool _ensure_record_gpu_capacity(uint32_t p_capacity) override;
+	void _clear_record_range(uint32_t p_first, uint32_t p_count) override;
+	void _upload_bucket_surface_masks(const BucketSurfaceMaskGPU *p_data, uint32_t p_count) override;
+	void _upload_assembly_buffers(const AssemblyHeaderGPU *p_headers, uint32_t p_header_count, const AssemblyChildGPU *p_children, uint32_t p_child_count, const AssemblyPartGPU *p_parts, uint32_t p_part_count) override;
+	void _reset_auxiliary_buffers() override;
 	void _upload_mesh_records(uint32_t p_first, uint32_t p_count) override;
 	bool _resize_dag(uint32_t p_bytes) override;
 	void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
@@ -103,6 +117,11 @@ public:
 	RID get_skin_instance_buffer() const override { return skin_instance_buffer; }
 	RID get_cluster_skin_buffer() const override { return cluster_skin_buffer; }
 	RID get_record_buffer() const override { return record_buffer; }
+	RID get_instance_attributes_buffer() const override { return instance_attributes_buffer; }
+	RID get_bucket_surface_masks_buffer() const override { return bucket_surface_masks_buffer; }
+	RID get_assembly_headers_buffer() const override { return assembly_headers_buffer; }
+	RID get_assembly_children_buffer() const override { return assembly_children_buffer; }
+	RID get_assembly_parts_buffer() const override { return assembly_parts_buffer; }
 	RID get_mesh_record_buffer() const override { return mesh_record_buffer; }
 
 	void free_resources();

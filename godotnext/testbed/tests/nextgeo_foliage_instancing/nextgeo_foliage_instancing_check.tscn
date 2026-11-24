@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/nextgeo_foliage_instancing/nextgeo_foliage_instancing_check.gd" id="1"]
+
+[node name="NextGeoFoliageInstancingCheck" type="Node3D"]
+script = ExtResource("1")

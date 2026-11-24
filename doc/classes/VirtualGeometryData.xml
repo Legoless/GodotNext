@@ -10,6 +10,9 @@
 	<tutorials>
 	</tutorials>
 	<members>
+		<member name="assembly" type="VirtualGeometryAssembly" setter="set_assembly" getter="get_assembly">
+			Optional experimental Nanite assembly payload describing up to two levels of instanced virtualized part meshes and child assemblies. Expanded on the GPU when [member ProjectSettings.rendering/nextgeo/experimental/assemblies] is enabled.
+		</member>
 		<member name="card_descriptors" type="PackedByteArray" setter="set_card_descriptors" getter="get_card_descriptors" default="PackedByteArray()">
 			Packed 32-byte little-endian Stage-2 surface radiance cache card descriptors generated from the ray-tracing proxy cluster groups.
 		</member>

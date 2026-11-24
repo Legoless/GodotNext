@@ -1006,6 +1006,12 @@ layout(set = 2, binding = 20, std430) restrict readonly buffer NextGeoDicedPatch
 }
 nextgeo_diced_patches;
 
+// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10). Per-record INSTANCE_COLOR, INSTANCE_CUSTOM, and INSTANCE_ID.
+layout(set = 2, binding = 21, std430) restrict readonly buffer NextGeoInstanceAttrs {
+	NextGeoInstanceAttributes data[];
+}
+nextgeo_instance_attrs;
+
 #else
 
 layout(set = 2, binding = 0, std430) restrict readonly buffer Transforms {

@@ -436,6 +436,8 @@ public:
 	void _instance_record_release(Instance *p_instance) const;
 	void _instance_record_update_state(Instance *p_instance) const;
 	void _instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const;
+	// GodotNext: nextgeo_foliage_instancing (#151).
+	bool _instance_is_nextgeo_multimesh(const Instance *p_instance, RID *r_mesh = nullptr, RendererMeshStorage::MultiMeshNextGeoInfo *r_info = nullptr) const;
 	// GodotNext: vsm_caching (#212, plan §21.3 contract S5).
 	struct InstanceGeometryData;
 	mutable uint64_t vsm_invalidation_epoch_counter = 0;
@@ -452,6 +454,8 @@ public:
 	// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Max effective vertex_offset_max across an instance's active materials.
 	float _instance_vertex_offset_bound(const Instance *p_instance) const;
 	float last_vertex_offset_max_default = -1.0f;
+	// GodotNext: nextgeo_foliage_instancing (#151). Tracks rendering/nextgeo/experimental/assemblies transitions.
+	int8_t last_assemblies_enabled = -1;
 	void _process_nextgeo_residency_shadow_dirty();
 	uint64_t last_nextgeo_residency_epoch = 0;
 
@@ -496,6 +500,8 @@ public:
 		RID mesh_instance; //only used for meshes and when skeleton/blendshapes exist
 		// GodotNext: nextgeo_instance_records (#75). Persistent GPU record, UINT32_MAX = none.
 		uint32_t virtual_record = UINT32_MAX;
+		// GodotNext: nextgeo_foliage_instancing (#151). Mesh RID backing virtual_record (for MultiMesh mesh changes).
+		RID virtual_record_mesh;
 		// GodotNext: nextgeo_displacement (#150). Last applied max displacement magnitude (meters) for AABB and cluster cull bound inflation.
 		float displacement_bound = 0.0f;
 		// GodotNext: nextgeo_masked_two_sided (#153). Per-instance programmable raster cutoff distance (meters; 0 = always programmable).

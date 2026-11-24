@@ -80,11 +80,19 @@ public:
 		// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). Skinned VGD instance with a
 		// valid 3D skeleton palette in the skin palette arena.
 		RECORD_SKINNED_PALETTE = 1u << 16,
-		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Bit 17 marks an active spline record;
-		// bits 18..31 store the 14-bit index into the compact spline deformation SSBO (up to 16,383).
-		RECORD_HAS_SPLINE = 1u << 17,
-		RECORD_SPLINE_INDEX_SHIFT = 18u,
-		RECORD_SPLINE_INDEX_MASK = 0xFFFC0000u,
+		// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10, GN-7, GN-12).
+		RECORD_MULTIMESH_PARENT = 1u << 17,
+		RECORD_MULTIMESH_ELEMENT = 1u << 18,
+		RECORD_NON_UNIFORM_SCALE = 1u << 19,
+		RECORD_HAS_INSTANCE_COLOR = 1u << 20,
+		RECORD_HAS_INSTANCE_CUSTOM = 1u << 21,
+		RECORD_HAS_ASSEMBLY = 1u << 22,
+		RECORD_ASSEMBLY_PART = 1u << 23,
+		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Bit 24 marks an active spline record;
+		// bits 25..31 store the 7-bit index into the compact spline deformation SSBO (up to 127).
+		RECORD_HAS_SPLINE = 1u << 24,
+		RECORD_SPLINE_INDEX_SHIFT = 25u,
+		RECORD_SPLINE_INDEX_MASK = 0xFE000000u,
 	};
 
 	// gi_flags.
@@ -149,6 +157,75 @@ public:
 	static constexpr uint32_t VIS_PATCH_INDEX_MASK = 0x003FFFFFu;
 	static constexpr uint32_t VIS_VOXEL_BASE = 0x01C00000u;
 	static constexpr uint32_t VIS_VOXEL_MASK = 0x01C00000u;
+
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10, GN-7). Per-record sideband attributes (48 B std430),
+	// parallel to Record: INSTANCE_COLOR, INSTANCE_CUSTOM, parent record index, element INSTANCE_ID, and distance range.
+	struct InstanceAttributes {
+		float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float custom_data[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		// [0] = parent_record_idx (UINT32_MAX if none), [1] = element_index (INSTANCE_ID),
+		// [2] = floatBitsToUint(visibility_range_begin), [3] = floatBitsToUint(visibility_range_end).
+		uint32_t meta[4] = { UINT32_MAX, 0u, 0u, 0u };
+	};
+
+	// Per-bucket-slot surface and cull masks (16 B std430), indexed by (bucket_base >> 5) for GPU assembly expansion.
+	struct BucketSurfaceMaskGPU {
+		uint32_t surface_mask = 0u;
+		uint32_t shadow_surface_mask = 0u;
+		uint32_t cull_disabled_mask = 0u;
+		uint32_t cull_front_mask = 0u;
+	};
+
+	// GPU Nanite Assembly descriptors (std430, <= 2 levels: instance -> part -> sub-part).
+	struct AssemblyHeaderGPU {
+		uint32_t direct_part_offset = 0u;
+		uint32_t direct_part_count = 0u;
+		uint32_t child_offset = 0u;
+		uint32_t child_count = 0u;
+		uint32_t leaf_count = 0u;
+		uint32_t pad0 = 0u;
+		uint32_t pad1 = 0u;
+		uint32_t pad2 = 0u;
+	};
+
+	struct AssemblyChildGPU {
+		float transform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+		uint32_t part_offset = 0u;
+		uint32_t part_count = 0u;
+		uint32_t pad0 = 0u;
+		uint32_t pad1 = 0u;
+	};
+
+	struct AssemblyPartGPU {
+		float transform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+		float local_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float local_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		uint32_t part_virtual_mesh = UINT32_MAX;
+		uint32_t unique_part_index = 0u;
+		uint32_t surface_mask = 0u;
+		uint32_t pad0 = 0u;
+	};
+
+	struct AssemblyLeafCPU {
+		RID mesh;
+		uint32_t part_mesh_index = UINT32_MAX;
+		uint32_t unique_part_index = 0u;
+		Transform3D world_transform;
+		AABB local_aabb;
+	};
+
+	struct MultiMeshExpandEntry {
+		uint32_t parent_record = UINT32_MAX;
+		uint32_t range_base = 0u;
+		uint32_t range_count = 0u;
+		RID multimesh;
+		RID mesh;
+		uint64_t last_serial = 0u;
+		uint64_t last_expand_frame = UINT64_MAX;
+		bool active = false;
+		bool dirty = true;
+		bool dirty_last = false;
+	};
 
 	// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N3). The raster-feature table. A raster bin is keyed
 	// by (feature mask, material shader version); the fixed-function bin has no feature bit. Each entry
@@ -229,6 +306,10 @@ public:
 		// visibility and VSM passes.
 		{ RASTER_FEATURE_SKINNED, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "SKINNED" },
 		{ RASTER_FEATURE_SKINNED, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_SKINNED" },
+		// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 GN-7). Assembly parts expand to leaf records
+		// and rasterize through fixed or per-part programmable bins in both visibility and VSM passes.
+		{ RASTER_FEATURE_ASSEMBLY, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "ASSEMBLY" },
+		{ RASTER_FEATURE_ASSEMBLY, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_ASSEMBLY" },
 	};
 	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
 
@@ -430,6 +511,12 @@ public:
 		// GodotNext: nextgeo_rt_native (#156). Bumped whenever refine_ok is recomputed, that is on
 		// every residency change, so native RT buckets know when to take their cut again.
 		uint64_t residency_generation = 0;
+
+		// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 GN-7). Optional 2-level assembly metadata.
+		bool has_assembly = false;
+		bool assembly_part_refs_held = false;
+		uint32_t assembly_leaf_count = 0;
+		LocalVector<RID> assembly_unique_part_meshes;
 	};
 
 	RendererVirtualMeshStorage();
@@ -546,6 +633,52 @@ public:
 	uint32_t get_palette_arena_free_block_count() const { return palette_free.size(); }
 	bool has_active_skinned_instances() const { return skin_instances_active; }
 
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 N10, GN-7, GN-12).
+	// Bucket slots (O(scene nodes)), per-instance attributes, MultiMesh contiguous GPU ranges, and Assemblies.
+	static bool are_assemblies_enabled();
+	static _FORCE_INLINE_ bool basis_has_non_uniform_scale(const Basis &p_b) {
+		const float sx = p_b.get_column(0).length_squared();
+		const float sy = p_b.get_column(1).length_squared();
+		const float sz = p_b.get_column(2).length_squared();
+		const float max_s = MAX(sx, MAX(sy, sz));
+		if (max_s <= 1e-12f) {
+			return false;
+		}
+		const float eps = max_s * 1e-4f;
+		return Math::abs(sx - sy) > eps || Math::abs(sy - sz) > eps || Math::abs(sx - sz) > eps;
+	}
+	bool mesh_has_assembly(RID p_mesh) const;
+	uint32_t mesh_get_assembly_leaf_count(RID p_mesh) const;
+	const LocalVector<RID> *mesh_get_assembly_unique_part_meshes(RID p_mesh) const;
+	void mesh_get_assembly_expanded_parts_cpu(RID p_mesh, const Transform3D &p_root_transform, LocalVector<AssemblyLeafCPU> &r_out) const;
+	AABB mesh_get_assembly_local_aabb(RID p_mesh) const;
+
+	uint32_t instance_record_get_bucket_slot(uint32_t p_record) const;
+	uint32_t instance_record_get_bucket_slot_count(uint32_t p_record) const;
+	void instance_record_resize_bucket_slots(uint32_t p_record, uint32_t p_count);
+	void bucket_slot_set_surface_masks(uint32_t p_bucket_slot, uint32_t p_surface_mask, uint32_t p_shadow_surface_mask, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask);
+	uint32_t get_bucket_record_count() const { return bucket_slots_used; }
+
+	void instance_record_set_visibility_range(uint32_t p_record, float p_begin, float p_end);
+	void instance_record_set_attributes(uint32_t p_record, const Color &p_color, const Color &p_custom_data, uint32_t p_parent_record, uint32_t p_element_index, bool p_has_color = false, bool p_has_custom = false);
+	const InstanceAttributes &get_instance_attributes(uint32_t p_record) const;
+
+	uint32_t multimesh_range_attach(uint32_t p_parent_record, RID p_multimesh, RID p_mesh, uint32_t p_count);
+	void multimesh_range_detach(uint32_t p_parent_record);
+	void multimesh_mark_parent_dirty(uint32_t p_parent_record);
+	LocalVector<MultiMeshExpandEntry> &get_multimesh_expand_entries() { return multimesh_expands; }
+	const LocalVector<MultiMeshExpandEntry> &get_multimesh_expand_entries() const { return multimesh_expands; }
+
+	uint32_t get_assembly_expanded_base() const { return used_slots; }
+	uint32_t get_assembly_expanded_capacity() const { return active_assembly_leaf_capacity; }
+	uint32_t get_active_record_count() const { return used_slots + active_assembly_leaf_capacity; }
+	bool has_active_assemblies() const { return active_assembly_leaf_capacity > 0u; }
+
+	// CPU reference helpers for doctests and CPU_cut_hash parity (#151).
+	static void build_multimesh_element_record_cpu(const Record &p_parent, const InstanceAttributes &p_parent_attr, uint32_t p_parent_record_idx, uint32_t p_element_idx, const float *p_elem_cur, const float *p_elem_prev, uint32_t p_color_offset, uint32_t p_custom_offset, bool p_has_color, bool p_has_custom, bool p_visible, const AABB &p_mesh_local_aabb, Record &r_out_record, InstanceAttributes &r_out_attr);
+	static bool cull_instance_cpu(const Record &p_record, const InstanceAttributes &p_attr, const Record *p_parent_or_null, const float p_frustum[6][4], const Vector3 &p_camera_pos, uint32_t p_cull_mask, bool p_is_shadow_view);
+	void get_effective_records_cpu(LocalVector<Record> &r_records, LocalVector<InstanceAttributes> &r_attrs) const;
+
 	// Per frame: advance the free list and the temporal history, process page
 	// streaming uploads under the per-frame KiB cap, then upload dirty records.
 	void begin_frame();
@@ -627,6 +760,11 @@ public:
 	const HashMap<RID, MeshInfo> &get_meshes() const { return meshes; }
 	const MeshInfo *get_mesh_info(uint32_t p_mesh_index) const;
 	virtual RID get_record_buffer() const { return RID(); }
+	virtual RID get_instance_attributes_buffer() const { return RID(); }
+	virtual RID get_bucket_surface_masks_buffer() const { return RID(); }
+	virtual RID get_assembly_headers_buffer() const { return RID(); }
+	virtual RID get_assembly_children_buffer() const { return RID(); }
+	virtual RID get_assembly_parts_buffer() const { return RID(); }
 	virtual RID get_mesh_record_buffer() const { return RID(); }
 	virtual RID get_dag_buffer() const { return RID(); }
 	virtual RID get_page_buffer() const { return RID(); }
@@ -643,6 +781,11 @@ public:
 
 protected:
 	virtual void _upload_records(uint32_t p_first, uint32_t p_count) = 0;
+	virtual bool _ensure_record_gpu_capacity(uint32_t p_capacity) { return false; }
+	virtual void _clear_record_range(uint32_t p_first, uint32_t p_count) {}
+	virtual void _upload_bucket_surface_masks(const BucketSurfaceMaskGPU *p_data, uint32_t p_count) {}
+	virtual void _upload_assembly_buffers(const AssemblyHeaderGPU *p_headers, uint32_t p_header_count, const AssemblyChildGPU *p_children, uint32_t p_child_count, const AssemblyPartGPU *p_parts, uint32_t p_part_count) {}
+	virtual void _reset_auxiliary_buffers() {}
 	virtual void _upload_mesh_records(uint32_t p_first, uint32_t p_count) = 0;
 	// GodotNext: nextgeo_gpu_cull (#76). The DAG buffer lives in the renderer.
 	virtual uint64_t _get_max_storage_buffer_range() const { return 0; }
@@ -689,7 +832,10 @@ protected:
 		bool initialized = false;
 		bool rewritten = false;
 		bool skin_dirty = false;
+		bool gpu_managed = false;
 		uint32_t free_frame = UINT32_MAX;
+		uint32_t bucket_slot = UINT32_MAX;
+		uint32_t bucket_slot_count = 0u;
 	};
 
 	// GodotNext: nextgeo_skinned_runtime (#160). One active skeleton's current+previous bone palette
@@ -830,6 +976,7 @@ protected:
 
 	LocalVector<Record> records;
 	LocalVector<SkinInstanceInfo> skin_instances;
+	LocalVector<InstanceAttributes> instance_attributes;
 	LocalVector<MeshRecord> mesh_records;
 	LocalVector<SlotState> slot_states;
 	LocalVector<uint32_t> free_now;
@@ -844,6 +991,26 @@ protected:
 	LocalVector<uint32_t> spline_free_next;
 	uint32_t live_splines = 0;
 	HashMap<RID, SkeletonPaletteSlot> skeleton_palettes;
+	LocalVector<UploadRun> range_free_now;
+	LocalVector<UploadRun> range_free_next;
+	LocalVector<UploadRun> pending_zero_ranges;
+	LocalVector<UploadRun> bucket_free;
+	uint32_t bucket_slots_used = 0u;
+	LocalVector<BucketSurfaceMaskGPU> bucket_surface_masks;
+	bool bucket_surface_masks_dirty = false;
+	LocalVector<MultiMeshExpandEntry> multimesh_expands;
+	HashMap<uint32_t, uint32_t> multimesh_parent_to_expand;
+	LocalVector<AssemblyHeaderGPU> assembly_headers_gpu;
+	LocalVector<AssemblyChildGPU> assembly_children_gpu;
+	LocalVector<AssemblyPartGPU> assembly_parts_gpu;
+	bool assemblies_gpu_dirty = false;
+	uint32_t active_assembly_leaf_capacity = 0u;
+
+	uint32_t _bucket_slot_allocate(uint32_t p_count);
+	void _bucket_slot_free(uint32_t p_base, uint32_t p_count);
+	void _acquire_assembly_part_refs(MeshInfo &r_info);
+	void _release_assembly_part_refs(MeshInfo &r_info);
+	void _rebuild_assemblies_gpu();
 
 	HashMap<RID, MeshInfo> meshes;
 	HashMap<RID, uint32_t> mesh_indices;

@@ -319,7 +319,9 @@ func _tick_p1() -> void:
 	_assert_surface(_p1_valid_empty_ov.get_instance(), "virtual", "NONE", "p1/empty_shader_overlay")
 	_assert_surface(_p1_blocked_ov.get_instance(), "legacy", "NEXT_PASS_OR_OVERLAY", "p1/valid_overlay")
 	_assert_surface(_p1_stencil.get_instance(), "legacy", "NEXT_PASS_OR_OVERLAY", "p1/stencil")
-	_assert_surface(_p1_mmi.get_instance(), "legacy", "MULTIMESH_OR_PARTICLES", "p1/multimesh_instance")
+	# GodotNext: nextgeo_foliage_instancing (#151). Eligible 3D non-indirect MultiMeshInstance3D now routes virtual;
+	# internal unattached MultiMeshes (GridMap octant pattern) keep legacy/VGD_IGNORED.
+	_assert_surface(_p1_mmi.get_instance(), "virtual", "NONE", "p1/multimesh_instance")
 	_assert_surface(_p1_internal_mm_inst, "legacy", "VGD_IGNORED", "p1/internal_multimesh_vgd_ignored")
 
 	if _p1_baked_gm.get_bake_meshes().size() != 2:

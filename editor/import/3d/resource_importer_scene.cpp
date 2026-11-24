@@ -60,6 +60,8 @@
 #include "scene/resources/3d/mesh_library.h"
 #include "scene/resources/3d/separation_ray_shape_3d.h"
 #include "scene/resources/3d/sphere_shape_3d.h"
+#include "scene/resources/3d/virtual_geometry_assembly.h"
+#include "scene/resources/3d/virtual_geometry_data.h"
 #include "scene/resources/3d/world_boundary_shape_3d.h"
 #include "scene/resources/animation.h"
 #include "scene/resources/bone_map.h"
@@ -2351,8 +2353,8 @@ Error ResourceImporterScene::_save_virtual_geometry_single_mesh(const String &p_
 	}
 
 	const String key = _ngm_source_path + "::" + importer_mesh->get_name();
-	// GodotNext: nextgeo_skinned
-	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries, _ngm_skinned);
+	// GodotNext: nextgeo_skinned / nextgeo_foliage_instancing (#151)
+	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries, _ngm_skinned, _ngm_preserve_area);
 	Ref<ArrayMesh> mesh = importer_mesh->get_mesh();
 	ERR_FAIL_COND_V_MSG(mesh.is_null(), ERR_INVALID_DATA, "Cannot save single mesh from '" + p_source_file + "'.");
 	mesh->set_path(save_file_path, true);
@@ -2425,6 +2427,8 @@ void ResourceImporterScene::get_internal_import_options(InternalImportCategory p
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			// GodotNext: nextgeo_skinned (#159, #160, plan §21.4.1). Per-asset opt-in, marked Experimental.
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry_skinned", PROPERTY_HINT_ENUM, "Default,Enable (Experimental),Disable"), 0));
+			// GodotNext: nextgeo_foliage_instancing (#151)
+			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "virtual_geometry/preserve_area", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "lods/normal_merge_angle", PROPERTY_HINT_RANGE, "0,180,1,degrees"), 20.0f));
 			// GodotNext: mesh_sdf_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/distance_fields", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
@@ -2782,6 +2786,9 @@ void ResourceImporterScene::get_import_options(const String &p_path, List<Import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_virtual_geometry"), false));
 	// GodotNext: nextgeo_skinned
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/virtual_geometry_skinned"), false));
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10)
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/virtual_geometry_assembly"), false));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "virtual_geometry/preserve_area"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/create_shadow_meshes"), true));
 	// GodotNext: mesh_sdf_import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_distance_fields"), bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/generate"))));
@@ -2891,6 +2898,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 				bool generate_virtual_geometry = _ngm_generate && !_ngm_single_mesh;
 				// GodotNext: nextgeo_skinned
 				bool virtual_geometry_skinned = _ngm_skinned;
+				// GodotNext: nextgeo_foliage_instancing (#151)
+				bool virtual_geometry_preserve_area = _ngm_preserve_area;
 
 				String mesh_id = importer_mesh->get_meta("import_id", importer_mesh->get_name());
 
@@ -2971,6 +2980,15 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 							virtual_geometry_skinned = false;
 						}
 					}
+					// GodotNext: nextgeo_foliage_instancing (#151)
+					if (!_ngm_single_mesh && mesh_settings.has("virtual_geometry/preserve_area")) {
+						int preserve_override = mesh_settings["virtual_geometry/preserve_area"];
+						if (preserve_override == MESH_OVERRIDE_ENABLE) {
+							virtual_geometry_preserve_area = true;
+						} else if (preserve_override == MESH_OVERRIDE_DISABLE) {
+							virtual_geometry_preserve_area = false;
+						}
+					}
 
 					if (bool(mesh_settings.get("save_to_file/enabled", false))) {
 						save_to_file = mesh_settings.get("save_to_file/path", String());
@@ -3038,8 +3056,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 					} else {
 						ngm_path = ResourceUID::ensure_path(save_to_file) + ".ngm";
 					}
-					// GodotNext: nextgeo_skinned
-					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries, virtual_geometry_skinned);
+					// GodotNext: nextgeo_skinned / nextgeo_foliage_instancing (#151)
+					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries, virtual_geometry_skinned, virtual_geometry_preserve_area);
 				}
 
 				if (generate_lods) {
@@ -3447,6 +3465,140 @@ Error ResourceImporterScene::_check_resource_save_paths(ResourceUID::ID p_source
 	return OK;
 }
 
+// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10).
+// Detects repeated virtualized MeshInstance3D nodes (same ArrayMesh with VirtualGeometryData
+// referenced >= 2 times, without skinning or per-node surface overrides) and builds a <= 2-level
+// VirtualGeometryAssembly attached to a root assembly MeshInstance3D (with merged authored fallback
+// surfaces for when rendering/nextgeo/experimental/assemblies is off).
+bool ResourceImporterScene::build_virtual_geometry_assembly_from_scene(Node *p_root) {
+	if (p_root == nullptr) {
+		return false;
+	}
+	struct Candidate {
+		MeshInstance3D *node = nullptr;
+		Ref<ArrayMesh> mesh;
+		Node3D *group_node = nullptr; // Direct Node3D child of p_root if nested, else nullptr (level 1).
+		Transform3D local_to_group; // Relative to group_node (or p_root if group_node == nullptr).
+		Transform3D relative_to_root;
+	};
+
+	LocalVector<Candidate> candidates;
+	HashMap<const ArrayMesh *, uint32_t> mesh_counts;
+
+	auto collect = [&](auto &&self, Node *p_node, Node3D *p_top_group, const Transform3D &p_rel_root, const Transform3D &p_rel_group) -> void {
+		for (int i = 0; i < p_node->get_child_count(); i++) {
+			Node *child = p_node->get_child(i);
+			Node3D *child_3d = Object::cast_to<Node3D>(child);
+			const Transform3D next_rel_root = child_3d != nullptr ? (p_rel_root * child_3d->get_transform()) : p_rel_root;
+			Node3D *next_group = p_top_group;
+			Transform3D next_rel_group = child_3d != nullptr ? (p_rel_group * child_3d->get_transform()) : p_rel_group;
+
+			MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(child);
+			if (mi != nullptr) {
+				Ref<ArrayMesh> am = mi->get_mesh();
+				bool has_override = mi->get_material_override().is_valid() || mi->get_material_overlay().is_valid();
+				if (!has_override && am.is_valid()) {
+					for (int s = 0; s < mi->get_surface_override_material_count(); s++) {
+						if (mi->get_surface_override_material(s).is_valid()) {
+							has_override = true;
+							break;
+						}
+					}
+				}
+				if (am.is_valid() && am->get_virtual_geometry().is_valid() && mi->get_skin().is_null() && mi->get_skeleton_path().is_empty() && !has_override && mi->get_child_count() == 0) {
+					Candidate c;
+					c.node = mi;
+					c.mesh = am;
+					c.group_node = p_top_group;
+					c.local_to_group = p_top_group != nullptr ? next_rel_group : next_rel_root;
+					c.relative_to_root = next_rel_root;
+					candidates.push_back(c);
+					mesh_counts[am.ptr()] = mesh_counts.has(am.ptr()) ? (mesh_counts[am.ptr()] + 1u) : 1u;
+				}
+				continue;
+			}
+			// Only promote non-MeshInstance3D direct Node3D children of p_root as level-1 child assemblies.
+			if (p_node == p_root && child_3d != nullptr && p_top_group == nullptr) {
+				next_group = child_3d;
+				next_rel_group = Transform3D();
+			}
+			self(self, child, next_group, next_rel_root, next_rel_group);
+		}
+	};
+	collect(collect, p_root, nullptr, Transform3D(), Transform3D());
+
+	// Keep only candidates whose mesh is repeated at least twice in the scene.
+	LocalVector<Candidate> repeated;
+	for (const Candidate &c : candidates) {
+		if (mesh_counts.has(c.mesh.ptr()) && mesh_counts[c.mesh.ptr()] >= 2u) {
+			repeated.push_back(c);
+		}
+	}
+	if (repeated.is_empty()) {
+		return false;
+	}
+
+	Ref<VirtualGeometryAssembly> root_asm;
+	root_asm.instantiate();
+
+	HashMap<Node3D *, Ref<VirtualGeometryAssembly>> child_asms;
+	LocalVector<Node3D *> child_group_order;
+	TypedArray<ImporterMesh> fallback_meshes;
+	TypedArray<Transform3D> fallback_xforms;
+
+	for (const Candidate &c : repeated) {
+		if (c.group_node == nullptr) {
+			root_asm->add_part(c.mesh, c.relative_to_root);
+		} else {
+			if (!child_asms.has(c.group_node)) {
+				Ref<VirtualGeometryAssembly> sub;
+				sub.instantiate();
+				child_asms[c.group_node] = sub;
+				child_group_order.push_back(c.group_node);
+			}
+			child_asms[c.group_node]->add_part(c.mesh, c.local_to_group);
+		}
+		fallback_meshes.push_back(ImporterMesh::from_mesh(c.mesh));
+		fallback_xforms.push_back(c.relative_to_root);
+	}
+	for (Node3D *group_node : child_group_order) {
+		root_asm->add_child_assembly(child_asms[group_node], group_node->get_transform());
+	}
+
+	Ref<ImporterMesh> merged_fallback = ImporterMesh::merge_importer_meshes(fallback_meshes, fallback_xforms, true);
+	Ref<ArrayMesh> asm_mesh = merged_fallback.is_valid() ? merged_fallback->get_mesh() : Ref<ArrayMesh>();
+	if (asm_mesh.is_null()) {
+		asm_mesh.instantiate();
+	}
+	Ref<VirtualGeometryData> asm_vgd;
+	asm_vgd.instantiate();
+	asm_vgd->set_assembly(root_asm);
+	asm_mesh->set_virtual_geometry(asm_vgd);
+	asm_mesh->set_name(String(p_root->get_name()) + "_Assembly");
+
+	MeshInstance3D *asm_node = memnew(MeshInstance3D);
+	asm_node->set_name("VirtualGeometryAssembly");
+	asm_node->set_mesh(asm_mesh);
+	p_root->add_child(asm_node, true);
+	asm_node->set_owner(p_root);
+
+	for (const Candidate &c : repeated) {
+		Node *parent = c.node->get_parent();
+		if (parent != nullptr) {
+			parent->remove_child(c.node);
+		}
+		memdelete(c.node);
+	}
+	// Clean up now-empty intermediate group nodes that only held collapsed assembly parts.
+	for (Node3D *group_node : child_group_order) {
+		if (group_node->get_child_count() == 0 && group_node->get_parent() != nullptr) {
+			group_node->get_parent()->remove_child(group_node);
+			memdelete(group_node);
+		}
+	}
+	return true;
+}
+
 Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p_source_file, const String &p_save_path, const HashMap<StringName, Variant> &p_options, List<String> *r_platform_variants, List<String> *r_gen_files, Variant *r_metadata) {
 	const String &src_path = p_source_file;
 
@@ -3482,6 +3634,9 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	_ngm_generate = p_options.has("meshes/generate_virtual_geometry") && bool(p_options["meshes/generate_virtual_geometry"]);
 	// GodotNext: nextgeo_skinned
 	_ngm_skinned = p_options.has("meshes/virtual_geometry_skinned") && bool(p_options["meshes/virtual_geometry_skinned"]);
+	// GodotNext: nextgeo_foliage_instancing (#151)
+	_ngm_preserve_area = p_options.has("virtual_geometry/preserve_area") && bool(p_options["virtual_geometry/preserve_area"]);
+	_ngm_assembly = p_options.has("meshes/virtual_geometry_assembly") && bool(p_options["meshes/virtual_geometry_assembly"]);
 	_ngm_single_mesh = _ngm_generate && _scene_import_type == "ArrayMesh";
 	_ngm_gen_files = r_gen_files;
 
@@ -3642,6 +3797,13 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 
 	// GodotNext: mesh_sdf_import
 	scene = _generate_meshes(scene, mesh_data, gen_lods, create_shadow_meshes, generate_distance_fields, distance_field_resolution_scale, LightBakeMode(light_bake_mode), lightmap_texel_size, src_lightmap_cache, mesh_lightmap_caches);
+
+	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10).
+	// When meshes/virtual_geometry_assembly is enabled on a PackedScene import, build a
+	// VirtualGeometryAssembly (<= 2 levels) from repeated virtualized MeshInstance3D nodes.
+	if (_ngm_generate && _ngm_assembly && _scene_import_type == "PackedScene") {
+		build_virtual_geometry_assembly_from_scene(scene);
+	}
 
 	if (mesh_lightmap_caches.size()) {
 		Ref<FileAccess> f = FileAccess::open(p_source_file + ".unwrap_cache", FileAccess::WRITE);
