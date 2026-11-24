@@ -19,6 +19,6 @@ else:
     env_oidn.Prepend(CPPPATH=[env["oidn_resolved_include"]])
     env_oidn.add_source_files(module_obj, "oidn_denoiser_real.cpp")
     env.Append(LIBPATH=[env["oidn_resolved_libpath"]])
-    env.Append(LIBS=["OpenImageDenoise"])
+    env.Append(LIBS=["OpenImageDenoise.lib" if env.msvc else "OpenImageDenoise"])
 
 env.modules_sources += module_obj
