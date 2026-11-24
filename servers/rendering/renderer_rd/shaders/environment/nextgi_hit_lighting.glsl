@@ -244,7 +244,8 @@ void hl_trace_secondary(vec3 p_origin, vec3 p_dir, float p_tmax, uint p_cull_mas
 	traceRayEXT(hit_tlas, gl_RayFlagsOpaqueEXT, p_cull_mask, 0u, 1u, 0u, p_origin, 0.0, p_dir, p_tmax, 0);
 }
 
-// Shades a hit payload (direct lighting from 64^3 world light grid + up to 4 area shadows + SRC/WRC indirect + emission).
+// Shades a hit payload (direct lighting from 64^3 world light grid + up to p_max_shadowed_lights area
+// shadows + SRC/WRC indirect + emission). Shared by reflections (4 shadowed lights) and diffuse GI (1 shadowed light).
 vec3 hl_shade_surface(
 		vec3 p_hit_pos,
 		vec3 p_view_dir,
@@ -258,8 +259,11 @@ vec3 hl_shade_surface(
 		float p_hit_eps,
 		ivec2 p_pixel,
 		uint p_bounce,
-		bool p_add_specular_fallback) {
+		bool p_add_specular_fallback,
+		uint p_max_shadowed_lights,
+		bool p_diffuse_gi) {
 	vec3 direct = vec3(0.0);
+	float eval_roughness = p_diffuse_gi ? max(p_roughness, 0.25) : p_roughness;
 	uint cell = nextgi_light_grid_world_to_cell(p_hit_pos, hit_light_params.grid_min_inv_cell.xyz, hit_light_params.grid_min_inv_cell.w);
 	uint light_count_total = hit_light_params.counts0.y;
 	if (cell != 0xFFFFFFFFu && light_count_total > 0u) {
@@ -304,7 +308,7 @@ vec3 hl_shade_surface(
 
 			float vis = 1.0;
 			if ((light.shadow_flags.x & NEXTGI_HL_LIGHT_FLAG_SHADOW) != 0u) {
-				if (shadowed_used < NEXTGI_HL_MAX_SHADOWED_LIGHTS) {
+				if (shadowed_used < p_max_shadowed_lights) {
 					vec2 bn = hl_blue_noise(p_pixel, hit_light_params.counts0.w + shadowed_used * 17u + p_bounce * 53u);
 					vec3 shadow_dir;
 					float shadow_tmax;
@@ -317,7 +321,7 @@ vec3 hl_shade_surface(
 				}
 			}
 			if (vis > 0.0) {
-				vec3 brdf = nextgi_hl_eval_brdf(p_albedo, p_metallic, p_roughness, p_normal, p_view_dir, to_light);
+				vec3 brdf = nextgi_hl_eval_brdf(p_albedo, p_metallic, eval_roughness, p_normal, p_view_dir, to_light);
 				direct += brdf * (light.color_energy.rgb * light.color_energy.a * atten * n_dot_l * vis);
 			}
 		}
@@ -326,6 +330,12 @@ vec3 hl_shade_surface(
 			uint prev = atomicAdd(hit_light_counters.data.shadow_rays, traced_shadows);
 			if (prev == 0xFFFFFFFFu) {
 				hit_light_counters.data.sink = prev;
+			}
+			if (p_diffuse_gi) {
+				uint gi_sprev = atomicAdd(hit_light_counters.data.gi_shadow_rays, traced_shadows);
+				if (gi_sprev == 0xFFFFFFFFu) {
+					hit_light_counters.data.sink = gi_sprev;
+				}
 			}
 		}
 		if (unshadowed_extra > 0u) {
@@ -366,17 +376,30 @@ vec3 hl_shade_surface(
 }
 
 void main() {
+	bool is_gi_pass = (hit_params.flags & NEXTGI_HIT_PARAMS_GI_LIGHTING) != 0u;
+	uint active_total = min(hit_light_counters.data.marked_hits, hit_light_params.counts0.x);
+	uint refl_count = min(hit_light_counters.data.refl_sorted_hits, active_total);
+	uint gi_count = min(hit_light_counters.data.gi_sorted_hits, active_total - refl_count);
 	uint launch_idx = gl_LaunchIDEXT.x;
-	uint active_count = min(hit_light_counters.data.marked_hits, hit_light_params.counts0.x);
-	if (launch_idx >= active_count) {
-		return;
+	uint sort_idx;
+	if (is_gi_pass) {
+		if (launch_idx >= gi_count) {
+			return;
+		}
+		sort_idx = refl_count + launch_idx;
+	} else {
+		if (launch_idx >= refl_count) {
+			return;
+		}
+		sort_idx = launch_idx;
 	}
 
-	uint rec_idx = hit_light_sorted_indices.data[launch_idx];
+	uint rec_idx = hit_light_sorted_indices.data[sort_idx];
 	NextGIHitLightRecord rec = hit_light_records.data[rec_idx];
 
 	ivec2 pixel = ivec2(rec.id_pixel.w & 0xFFFFu, rec.id_pixel.w >> 16u);
-	if (pixel.x >= int(hit_light_params.counts1.x) || pixel.y >= int(hit_light_params.counts1.y)) {
+	ivec2 out_size = imageSize(hit_light_reflection_out);
+	if (pixel.x < 0 || pixel.y < 0 || pixel.x >= out_size.x || pixel.y >= out_size.y) {
 		return;
 	}
 
@@ -394,6 +417,62 @@ void main() {
 
 	float mark_eps = inst_idx < hit_params.record_count ? hit_records.data[inst_idx].origin_offset : 0.005;
 	float primary_tmax = mark_t + max(2.0 * mark_eps, 0.01);
+
+	// GodotNext: nextgi_hit_lighting_gi (#128). Diffuse GI hits share the raygen and world light grid
+	// with 1 shadowed light per hit, replacing SRC radiance in probe_image (bound at slot 52) before filtering.
+	if (is_gi_pass) {
+		hl_trace_primary(cur_origin, ray_dir, primary_tmax, NEXTGI_HL_MASK_GI, material_key, cone);
+		uint pflags = payload.shading.z >> 24u;
+		vec3 gi_radiance;
+		if ((pflags & NEXTGI_HIT_PAYLOAD_HIT) == 0u) {
+			gi_radiance = hl_miss_radiance(cur_origin + ray_dir * mark_t, ray_dir);
+		} else {
+			float hit_t = uintBitsToFloat(payload.hit.x);
+			uint hit_custom = payload.hit.w;
+			vec3 hit_pos = cur_origin + ray_dir * hit_t;
+			float hit_eps = hit_custom < hit_params.record_count ? hit_records.data[hit_custom].origin_offset : 0.005;
+
+			vec4 albedo_alpha = unpackUnorm4x8(payload.shading.x);
+			vec3 albedo = albedo_alpha.rgb;
+			vec3 normal = nextgi_hit_oct_decode(unpackSnorm2x16(payload.shading.y));
+			if (dot(normal, -ray_dir) < 0.0) {
+				normal = -normal;
+			}
+			float roughness = float(payload.shading.z & 0xFFu) / 255.0;
+			float metallic = float((payload.shading.z >> 8u) & 0xFFu) / 255.0;
+			float ao = float((payload.shading.z >> 16u) & 0xFFu) / 255.0;
+			vec3 emission = nextgi_hit_unpack_r11g11b10(payload.shading.w);
+
+			gi_radiance = hl_shade_surface(
+					hit_pos,
+					-ray_dir,
+					albedo,
+					normal,
+					roughness,
+					metallic,
+					ao,
+					emission,
+					hit_custom,
+					hit_eps,
+					pixel,
+					0u,
+					roughness < 0.25 && metallic > 0.5,
+					NEXTGI_HL_GI_MAX_SHADOWED_LIGHTS,
+					true);
+		}
+		if (any(isnan(gi_radiance)) || any(isinf(gi_radiance))) {
+			gi_radiance = vec3(0.0);
+		}
+		gi_radiance = max(gi_radiance, vec3(0.0));
+		// resume_dist carries probe_depth for diffuse GI records so probe_image.a is preserved without read-modify-write.
+		imageStore(hit_light_reflection_out, pixel, vec4(gi_radiance, resume_dist));
+		uint gi_prev = atomicAdd(hit_light_counters.data.gi_shaded_hits, 1u);
+		if (gi_prev == 0xFFFFFFFFu) {
+			hit_light_counters.data.sink = gi_prev;
+		}
+		return;
+	}
+
 	uint primary_mask = first_translucent ? (NEXTGI_HL_MASK_GI | NEXTGI_HL_MASK_TRANSLUCENT) : NEXTGI_HL_MASK_GI;
 
 	vec3 accum_radiance = vec3(0.0);
@@ -451,7 +530,7 @@ void main() {
 					(hit_records.data[hit_custom].rt_flags & NEXTGI_HL_RT_FLAG_TRANSLUCENT) != 0u;
 
 			if (hit_is_translucent && translucent_skips < NEXTGI_HL_MAX_TRANSLUCENT_SKIPS) {
-				vec3 layer_rad = hl_shade_surface(hit_pos, -ray_dir, albedo, normal, roughness, metallic, ao, emission, hit_custom, hit_eps, pixel, bounce, false);
+				vec3 layer_rad = hl_shade_surface(hit_pos, -ray_dir, albedo, normal, roughness, metallic, ao, emission, hit_custom, hit_eps, pixel, bounce, false, NEXTGI_HL_MAX_SHADOWED_LIGHTS, false);
 				accum_radiance += throughput * layer_rad * clamp(opacity, 0.0, 1.0);
 				throughput *= nextgi_hl_translucent_transmittance(albedo, opacity);
 				translucent_skips++;
@@ -489,7 +568,7 @@ void main() {
 			}
 
 			bool will_bounce = (bounce + 1u < max_bounces) && (roughness < NEXTGI_HL_MIRROR_ROUGHNESS);
-			vec3 surf_rad = hl_shade_surface(hit_pos, -ray_dir, albedo, normal, roughness, metallic, ao, emission, hit_custom, hit_eps, pixel, bounce, !will_bounce && roughness < 0.25);
+			vec3 surf_rad = hl_shade_surface(hit_pos, -ray_dir, albedo, normal, roughness, metallic, ao, emission, hit_custom, hit_eps, pixel, bounce, !will_bounce && roughness < 0.25, NEXTGI_HL_MAX_SHADOWED_LIGHTS, false);
 			accum_radiance += throughput * surf_rad;
 
 			if (will_bounce) {

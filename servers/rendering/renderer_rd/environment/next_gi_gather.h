@@ -35,9 +35,11 @@
 #include "core/math/projection.h"
 #include "core/math/vector2i.h"
 #include "core/string/ustring.h"
+#include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/effects/denoise.h"
+#include "servers/rendering/rendering_device.h"
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
@@ -144,6 +146,8 @@ class NextGIGather {
 	uint32_t rr_sampling_mode = 0;
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
+	RID gather_hl_uniform_set;
+	LocalVector<RenderingDevice::Uniform> last_gather_uniforms;
 	RID reflect_uniform_set;
 	RID reflect_far_uniform_set;
 	RID reflect_counter_buffer;

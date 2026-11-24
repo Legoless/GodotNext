@@ -47,8 +47,16 @@ const uint NEXTGI_LIGHT_GRID_CELL_CAP = 32u;
 const uint NEXTGI_LIGHT_GRID_CELL_WORDS = 17u;
 
 const uint NEXTGI_HL_MAX_SHADOWED_LIGHTS = 4u;
+const uint NEXTGI_HL_GI_MAX_SHADOWED_LIGHTS = 1u;
 const uint NEXTGI_HL_MAX_TRANSLUCENT_SKIPS = 2u;
 const float NEXTGI_HL_MIRROR_ROUGHNESS = 0.1;
+
+// Disjoint 16-bit material sort key ranges so a single 16-bit counting sort separates
+// reflection hits [0x0000..0x7FFF] from diffuse GI hits [0x8000..0xFFFF] (#128).
+const uint NEXTGI_HL_KEY_REFLECTION_BASE = 0x0000u;
+const uint NEXTGI_HL_KEY_REFLECTION_FALLBACK = 0x7FFFu;
+const uint NEXTGI_HL_KEY_GI_BASE = 0x8000u;
+const uint NEXTGI_HL_KEY_GI_FALLBACK = 0xFFFFu;
 
 // TLAS instance mask bits (next_gi_shadow_policy.h) and instance record rt_flags (next_gi_rt_scene.h).
 const uint NEXTGI_HL_MASK_GI = 0x80u;
@@ -59,6 +67,7 @@ const uint NEXTGI_HL_RT_FLAG_TRANSLUCENT = 1u << 5u;
 const uint NEXTGI_HL_RECORD_FLAG_FRONT_FACE = 1u << 24u;
 const uint NEXTGI_HL_RECORD_FLAG_TRANSLUCENT = 1u << 25u;
 const uint NEXTGI_HL_RECORD_FLAG_MIRROR = 1u << 26u;
+const uint NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI = 1u << 27u;
 
 // NextGIHitLightGPU.shadow_flags.x bits.
 const uint NEXTGI_HL_LIGHT_FLAG_SHADOW = 1u << 0u;
@@ -95,7 +104,7 @@ struct NextGIHitLightGPU {
 	uvec4 shadow_flags; // x = flags, y = #145 shadow light_mask_mode, z = caster_mask, w = pad
 };
 
-// GPU counters and #277-safe atomic sink (32 bytes, std430).
+// GPU counters and #277-safe atomic sink (64 bytes, std430).
 struct NextGIHitLightCounters {
 	uint marked_hits;
 	uint sorted_hits;
@@ -105,16 +114,33 @@ struct NextGIHitLightCounters {
 	uint translucent_skips;
 	uint light_grid_overflow;
 	uint sink;
+	uint refl_sorted_hits;
+	uint gi_marked_hits;
+	uint gi_sorted_hits;
+	uint gi_shaded_hits;
+	uint gi_shadow_rays;
+	uint pad0;
+	uint pad1;
+	uint pad2;
 };
 
-// 16-bit material sort key: high byte = shader slot (coherence across hit shaders),
-// low byte = material index (coherence across textures/parameters). Fallback uses 0xFFFF.
+// 16-bit material sort key partitioned into two disjoint ranges (#128):
+//   Reflections: [0x0000..0x7FFF] (7-bit shader slot + 8-bit material id, fallback 0x7FFF).
+//   Diffuse GI:  [0x8000..0xFFFF] (0x8000 | 7-bit shader slot + 8-bit material id, fallback 0xFFFF).
 uint nextgi_hit_light_material_key(uint p_shader_slot, uint p_material_id) {
 	if (p_material_id == 0xFFFFFFFFu || p_shader_slot == 0xFFFFFFFFu) {
-		return 0xFFFFu;
+		return NEXTGI_HL_KEY_REFLECTION_FALLBACK;
 	}
-	uint key = ((p_shader_slot & 0xFFu) << 8u) | (p_material_id & 0xFFu);
-	return key == 0xFFFFu ? 0xFFFEu : key;
+	uint key = ((p_shader_slot & 0x7Fu) << 8u) | (p_material_id & 0xFFu);
+	return key == NEXTGI_HL_KEY_REFLECTION_FALLBACK ? (NEXTGI_HL_KEY_REFLECTION_FALLBACK - 1u) : key;
+}
+
+uint nextgi_hit_light_gi_material_key(uint p_shader_slot, uint p_material_id) {
+	if (p_material_id == 0xFFFFFFFFu || p_shader_slot == 0xFFFFFFFFu) {
+		return NEXTGI_HL_KEY_GI_FALLBACK;
+	}
+	uint key = NEXTGI_HL_KEY_GI_BASE | ((p_shader_slot & 0x7Fu) << 8u) | (p_material_id & 0xFFu);
+	return key == NEXTGI_HL_KEY_GI_FALLBACK ? (NEXTGI_HL_KEY_GI_FALLBACK - 1u) : key;
 }
 
 uint nextgi_hl_record_material_key(NextGIHitLightRecord p_rec) {

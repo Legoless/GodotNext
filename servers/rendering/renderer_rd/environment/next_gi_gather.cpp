@@ -188,15 +188,15 @@ static uint64_t nextgi_gather_counter_next_token = 1;
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
-	RID pipelines[7];
+	RID pipelines[8];
 };
 
 // GodotNext: ps_swrt_trace (#186). Same variants and pipeline indices as the hardware gather;
-// the hit-radiance reference (4) and the far field (6) are hardware-only and stay disabled.
+// the hit-radiance reference (4), far field (6), and GI hit lighting (7) are hardware-only and stay disabled.
 struct NextGIGather::SWRTShaderState {
 	NextgiGatherSwrtShaderRD shader;
 	RID version;
-	RID pipelines[7];
+	RID pipelines[8];
 };
 
 static Vector<String> _nextgi_gather_variant_defines() {
@@ -208,6 +208,7 @@ static Vector<String> _nextgi_gather_variant_defines() {
 	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
 	defines.push_back("#define MODE_REFLECT\n");
 	defines.push_back("#define MODE_FAR_FIELD\n");
+	defines.push_back("#define MODE_HIT_LIGHTING_GI\n");
 	return defines;
 }
 
@@ -255,6 +256,9 @@ void NextGIGather::_free_uniform_set() {
 		if (rd->uniform_set_is_valid(uniform_set)) {
 			rd->free_rid(uniform_set);
 		}
+		if (rd->uniform_set_is_valid(gather_hl_uniform_set)) {
+			rd->free_rid(gather_hl_uniform_set);
+		}
 		if (rd->uniform_set_is_valid(reflect_uniform_set)) {
 			rd->free_rid(reflect_uniform_set);
 		}
@@ -268,6 +272,8 @@ void NextGIGather::_free_uniform_set() {
 	}
 	swrt_trace_set = RID();
 	uniform_set = RID();
+	gather_hl_uniform_set = RID();
+	last_gather_uniforms.clear();
 	reflect_uniform_set = RID();
 	reflect_far_uniform_set = RID();
 }
@@ -281,7 +287,7 @@ void NextGIGather::free_resources() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 7; i++) {
+			for (int i = 0; i < 8; i++) {
 				if (shader->pipelines[i].is_valid()) {
 					rd->free_rid(shader->pipelines[i]);
 				}
@@ -296,7 +302,7 @@ void NextGIGather::free_resources() {
 	// GodotNext: ps_swrt_trace (#186)
 	if (swrt_shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 7; i++) {
+			for (int i = 0; i < 8; i++) {
 				if (swrt_shader->pipelines[i].is_valid()) {
 					rd->free_rid(swrt_shader->pipelines[i]);
 				}
@@ -388,9 +394,14 @@ bool NextGIGather::_ensure_shader() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	for (int i = 0; i < 7; i++) {
+	for (int i = 0; i < 8; i++) {
 		shader->pipelines[i] = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, i));
 		if (!shader->pipelines[i].is_valid()) {
+			for (int j = 0; j < i; j++) {
+				if (shader->pipelines[j].is_valid()) {
+					rd->free_rid(shader->pipelines[j]);
+				}
+			}
 			shader->shader.version_free(shader->version);
 			memdelete(shader);
 			shader = nullptr;
@@ -416,7 +427,7 @@ bool NextGIGather::_ensure_swrt_shader() {
 		swrt_shader = nullptr;
 		ERR_FAIL_V_MSG(false, "The NextGI software gather shader failed to compile.");
 	}
-	for (int i = 0; i < 7; i++) {
+	for (int i = 0; i < 8; i++) {
 		if (!swrt_shader->shader.is_variant_enabled(i)) {
 			continue;
 		}
@@ -1057,6 +1068,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	}
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
 	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader_rid, 0);
+	// Snapshot base gather uniforms (bindings 0..38) for optional MODE_HIT_LIGHTING_GI binding (#128).
+	last_gather_uniforms.clear();
+	last_gather_uniforms.reserve(40);
+	for (uint32_t i = 0; i < 36; i++) {
+		last_gather_uniforms.push_back(uniforms[i]);
+	}
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
 	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), reflect_shader_rid, 0);
@@ -1187,10 +1204,111 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	rd->buffer_update(clamp_totals_buffer, 0, sizeof(clamp_zero), clamp_zero);
 	const uint32_t groups_x = MAX((nextgi_gather_probe_count_axis(last_screen_w) + 7u) / 8u, 1u);
 	const uint32_t groups_y = MAX((nextgi_gather_probe_count_axis(last_screen_h) + 7u) / 8u, 1u);
+
+	// GodotNext: nextgi_hit_lighting (#129, #128). Prepare hit-lighting execute params once when active on HWRT.
+	NextGI *hl_next_gi = NextGI::get_singleton();
+	const bool hl_refl_eligible = !bound_swrt && hl_next_gi != nullptr && p_render_data != nullptr && last_screen_w > 0 && last_screen_h > 0 &&
+			hl_next_gi->is_hit_lighting_active_for_view(p_render_data->environment);
+	const bool hl_gi_eligible = hl_refl_eligible && p_diffuse && !front_layer && !hit_radiance_reference &&
+			hl_next_gi->is_hit_lighting_gi_active_for_view(p_render_data->environment);
+
+	NextGIHitLighting::ExecuteParams ep;
+	if (hl_refl_eligible) {
+		ep.render_data = p_render_data;
+		ep.rt_scene = hl_next_gi->get_rt_scene();
+		ep.hit_materials = hl_next_gi->get_hit_materials();
+		ep.src = hl_next_gi->get_src();
+		ep.relight = NextGIRelight::get_singleton();
+		ep.wrc = hl_next_gi->get_wrc(p_render_data->render_buffers.ptr());
+		ep.depth = last_depth.is_valid() ? last_depth : dummy_color;
+		ep.normal_roughness = last_normal_roughness.is_valid() ? last_normal_roughness : dummy_color;
+		ep.hiz = last_hiz_texture.is_valid() ? last_hiz_texture : dummy_color;
+		ep.last_frame = last_frame_color_texture.is_valid() ? last_frame_color_texture : dummy_color;
+		ep.sky_tex = last_sky_texture.is_valid() ? last_sky_texture : dummy_color;
+		ep.blue_noise = blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color;
+		ep.sampler_linear = sampler;
+		ep.sampler_nearest = sampler_nearest;
+		ep.dummy_color = dummy_color;
+		ep.dummy_buffer = dummy_buffer;
+		ep.reflection_out = specular_raw;
+		ep.hit_distance_out = last_specular_hit;
+		ep.debug_out = specular_debug;
+		ep.reflect_counter_buffer = reflect_counter_buffer;
+		ep.screen_size = Size2i(int(last_screen_w), int(last_screen_h));
+		ep.trace_size = last_trace_size;
+		ep.inv_view_proj = last_inv_view_proj;
+		ep.view_proj = last_prev_view_proj;
+		ep.view_to_world = last_view_to_world;
+		ep.camera_pos = last_camera_pos;
+		ep.rt_radius = last_rt_radius;
+		ep.max_origin_offset = last_max_origin_offset;
+		ep.max_trace_roughness = last_max_trace_roughness;
+		ep.frame = frame;
+		ep.max_reflection_bounces = NextGI::read_max_reflection_bounces();
+		ep.hiz_max_mip = last_hiz_max_mip;
+		ep.reflect_enabled = last_reflect_enabled;
+		ep.reflect_debug = last_reflect_debug;
+		ep.blue_noise_mode = rr_sampling_mode == 0u;
+		ep.front_layer = front_layer;
+		ep.sky_enabled = last_sky_enabled;
+		ep.ambient_color = last_ambient_color;
+		ep.fog_enabled = last_fog_enabled;
+		ep.fog_depth_mode = last_fog_depth_mode;
+		ep.fog_density = last_fog_density;
+		ep.fog_height = last_fog_height;
+		ep.fog_height_density = last_fog_height_density;
+		ep.fog_depth_begin = last_fog_depth_begin;
+		ep.fog_depth_end = last_fog_depth_end;
+		ep.fog_depth_curve = last_fog_depth_curve;
+		ep.fog_light_color = last_fog_light_color;
+		ep.fog_light_energy = last_fog_light_energy;
+		ep.time = p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f;
+	}
+
+	bool ran_gi_hit_lighting = false;
+	NextGIHitLighting *hl = nullptr;
+	if (hl_gi_eligible) {
+		hl = hl_next_gi->ensure_hit_lighting();
+		const uint32_t gi_max_rays = probe_w * probe_h * ray_count;
+		if (hl != nullptr && hl->begin_combined(ep, gi_max_rays) && shader != nullptr && last_gather_uniforms.size() == 36) {
+			const uint32_t hit_mat_count = ep.hit_materials->get_material_count();
+			const uint32_t hit_max_rays = hl->get_combined_max_rays();
+			const uint32_t hit_rec_count = ep.hit_materials->get_record_count();
+			rd->buffer_update(params_buffer, offsetof(GatherParamsGPU, card_set_count), sizeof(uint32_t), &hit_mat_count);
+			rd->buffer_update(params_buffer, offsetof(GatherParamsGPU, card_count), sizeof(uint32_t), &hit_max_rays);
+			rd->buffer_update(params_buffer, offsetof(GatherParamsGPU, front_pad), sizeof(uint32_t), &hit_rec_count);
+
+			LocalVector<RD::Uniform> gi_hl_uniforms;
+			gi_hl_uniforms.reserve(40);
+			for (uint32_t i = 0; i < last_gather_uniforms.size(); i++) {
+				gi_hl_uniforms.push_back(last_gather_uniforms[i]);
+			}
+			const RID hit_surf_buf = ep.hit_materials->get_hit_surface_buffer().is_valid() ? ep.hit_materials->get_hit_surface_buffer() : dummy_buffer;
+			const RID hit_mat_buf = ep.hit_materials->get_material_table_buffer().is_valid() ? ep.hit_materials->get_material_table_buffer() : dummy_buffer;
+			gi_hl_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, hit_surf_buf));
+			gi_hl_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 41, hit_mat_buf));
+			gi_hl_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 42, hl->get_record_buffer()));
+			gi_hl_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, hl->get_counter_buffer()));
+			if (rd->uniform_set_is_valid(gather_hl_uniform_set)) {
+				rd->free_rid(gather_hl_uniform_set);
+			}
+			const RID gi_hl_shader_rid = shader->shader.version_get_shader(shader->version, 7);
+			gather_hl_uniform_set = rd->uniform_set_create(gi_hl_uniforms, gi_hl_shader_rid, 0);
+			if (gather_hl_uniform_set.is_valid()) {
+				ran_gi_hit_lighting = true;
+			}
+		}
+	}
+
 	if (p_diffuse) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, _pipeline(hit_radiance_reference ? 4 : 0));
-		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		if (ran_gi_hit_lighting) {
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(7));
+			rd->compute_list_bind_uniform_set(list, gather_hl_uniform_set, 0);
+		} else {
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(hit_radiance_reference ? 4 : 0));
+			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		}
 		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
@@ -1217,8 +1335,15 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		rd->compute_list_dispatch(list, half_x, half_y, 1);
 		rd->compute_list_end();
 	}
+	// GodotNext: nextgi_hit_lighting_gi (#128). When GI hit lighting is active, mark reflections into
+	// the same hit-record buffer, run the single 16-bit counting sort (disjoint key ranges), and shade
+	// diffuse GI hits back into probe_image BEFORE probe spatial/temporal filtering.
+	bool gi_hl_shaded = false;
+	if (ran_gi_hit_lighting && hl != nullptr) {
+		gi_hl_shaded = hl->mark_sort_and_shade_gi(ep, probe_image);
+	}
 	// GodotNext: nextgi_denoise
-	// Spatial denoise of the fresh probe texels, between the gather and the ambient integration.
+	// Spatial denoise of the fresh probe texels, between the gather (and GI hit lighting) and the ambient integration.
 	// The temporal pass replaces the gather's own history blend when it lands (#53 step 4).
 	if (p_diffuse) {
 		_denoise_probes();
@@ -1231,61 +1356,14 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	const uint32_t reflect_groups_x = nextgi_reflect_dispatch_groups(uint32_t(last_trace_size.width));
 	const uint32_t reflect_groups_y = nextgi_reflect_dispatch_groups(uint32_t(last_trace_size.height));
 	bool ran_hit_lighting = false;
-	NextGI *hl_next_gi = NextGI::get_singleton();
-	if (!bound_swrt && hl_next_gi != nullptr && p_render_data != nullptr && last_screen_w > 0 && last_screen_h > 0 &&
-			hl_next_gi->is_hit_lighting_active_for_view(p_render_data->environment)) {
-		NextGIHitLighting *hl = hl_next_gi->ensure_hit_lighting();
+	if (gi_hl_shaded && hl != nullptr) {
+		ran_hit_lighting = hl->shade_reflections_combined(ep);
+		if (ran_hit_lighting) {
+			hl_next_gi->note_reflection_dispatch();
+		}
+	} else if (hl_refl_eligible) {
+		hl = hl_next_gi->ensure_hit_lighting();
 		if (hl != nullptr) {
-			NextGIHitLighting::ExecuteParams ep;
-			ep.render_data = p_render_data;
-			ep.rt_scene = hl_next_gi->get_rt_scene();
-			ep.hit_materials = hl_next_gi->get_hit_materials();
-			ep.src = hl_next_gi->get_src();
-			ep.relight = NextGIRelight::get_singleton();
-			ep.wrc = hl_next_gi->get_wrc(p_render_data->render_buffers.ptr());
-			ep.depth = last_depth.is_valid() ? last_depth : dummy_color;
-			ep.normal_roughness = last_normal_roughness.is_valid() ? last_normal_roughness : dummy_color;
-			ep.hiz = last_hiz_texture.is_valid() ? last_hiz_texture : dummy_color;
-			ep.last_frame = last_frame_color_texture.is_valid() ? last_frame_color_texture : dummy_color;
-			ep.sky_tex = last_sky_texture.is_valid() ? last_sky_texture : dummy_color;
-			ep.blue_noise = blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color;
-			ep.sampler_linear = sampler;
-			ep.sampler_nearest = sampler_nearest;
-			ep.dummy_color = dummy_color;
-			ep.dummy_buffer = dummy_buffer;
-			ep.reflection_out = specular_raw;
-			ep.hit_distance_out = last_specular_hit;
-			ep.debug_out = specular_debug;
-			ep.reflect_counter_buffer = reflect_counter_buffer;
-			ep.screen_size = Size2i(int(last_screen_w), int(last_screen_h));
-			ep.trace_size = last_trace_size;
-			ep.inv_view_proj = last_inv_view_proj;
-			ep.view_proj = last_prev_view_proj;
-			ep.view_to_world = last_view_to_world;
-			ep.camera_pos = last_camera_pos;
-			ep.rt_radius = last_rt_radius;
-			ep.max_origin_offset = last_max_origin_offset;
-			ep.max_trace_roughness = last_max_trace_roughness;
-			ep.frame = frame;
-			ep.max_reflection_bounces = NextGI::read_max_reflection_bounces();
-			ep.hiz_max_mip = last_hiz_max_mip;
-			ep.reflect_enabled = last_reflect_enabled;
-			ep.reflect_debug = last_reflect_debug;
-			ep.blue_noise_mode = rr_sampling_mode == 0u;
-			ep.front_layer = front_layer;
-			ep.sky_enabled = last_sky_enabled;
-			ep.ambient_color = last_ambient_color;
-			ep.fog_enabled = last_fog_enabled;
-			ep.fog_depth_mode = last_fog_depth_mode;
-			ep.fog_density = last_fog_density;
-			ep.fog_height = last_fog_height;
-			ep.fog_height_density = last_fog_height_density;
-			ep.fog_depth_begin = last_fog_depth_begin;
-			ep.fog_depth_end = last_fog_depth_end;
-			ep.fog_depth_curve = last_fog_depth_curve;
-			ep.fog_light_color = last_fog_light_color;
-			ep.fog_light_energy = last_fog_light_energy;
-			ep.time = p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f;
 			ran_hit_lighting = hl->execute(ep);
 			if (ran_hit_lighting) {
 				hl_next_gi->note_reflection_dispatch();
@@ -1624,24 +1702,18 @@ Vector<String> NextGIGather::get_shader_variant_defines() {
 	return _nextgi_gather_variant_defines();
 }
 
-// GodotNext: nextgi_bake_swrt (#261). The software sibling has no hit-radiance reference (4) and
-// no far field (6), whose sources need ray query; the shader baker's instance uses this too.
+// GodotNext: nextgi_bake_swrt (#261). The software sibling has no hit-radiance reference (4),
+// no far field (6), and no GI hit lighting (7), whose sources need ray query; the shader baker's instance uses this too.
 void NextGIGather::initialize_swrt_shader(ShaderRD &r_shader) {
 	r_shader.initialize(_nextgi_gather_variant_defines());
 	r_shader.set_variant_enabled(4, false);
 	r_shader.set_variant_enabled(6, false);
+	r_shader.set_variant_enabled(7, false);
 }
 
 String NextGIGather::build_shader_source(int p_variant) {
 	NextgiGatherShaderRD shader;
-	Vector<String> defines;
-	defines.push_back("");
-	defines.push_back("#define MODE_INTEGRATE\n");
-	defines.push_back("#define MODE_SRC_FEEDBACK\n");
-	defines.push_back("#define MODE_COVERAGE\n");
-	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
-	defines.push_back("#define MODE_REFLECT\n");
-	shader.initialize(defines);
+	shader.initialize(_nextgi_gather_variant_defines());
 	const RID version = shader.version_create(false);
 	ERR_FAIL_COND_V(!version.is_valid(), String());
 	const Vector<String> sources = shader.version_build_variant_stage_sources(version, p_variant);

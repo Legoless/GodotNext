@@ -1,18 +1,21 @@
-# NextGI hit lighting for reflections source log
+# NextGI hit lighting source log
 
 The plan's clean-room protocol (§19) requires a source log per subsystem. This file records the outside
-inputs used for hit lighting for reflections (#129, plan §21.2 contract L7, GL-1 to GL-3): the Ray Lighting
-Mode project setting and per-`Environment` override, reflection hit marking, 16-bit material-key counting
-sort, the 64^3 world-space light grid, sorted-deferred re-trace into #130 material hit groups with optional
-Shader Execution Reordering (SER), inline ray-query area shadows via #145 `trace_shadow()`, multi-bounce
+inputs used for hit lighting for reflections (#129, plan §21.2 contract L7, GL-1 to GL-3) and hit lighting
+for GI (#128, plan §21.2 contract L7, GL-4): the Ray Lighting Mode project setting and per-`Environment`
+override, the advanced Epic-only `hit_lighting_gi` toggle, reflection and diffuse screen-probe hit marking,
+16-bit material-key counting sort with disjoint reflection (`[0x0000..0x7FFF]`) and diffuse GI
+(`[0x8000..0xFFFF]`) key ranges, the 64^3 world-space light grid, sorted-deferred re-trace into #130
+material hit groups with optional Shader Execution Reordering (SER), inline ray-query area shadows via
+#145 `trace_shadow()` (4 shadowed lights for reflections, 1 shadowed light for diffuse GI), multi-bounce
 mirror reflections, and translucent TLAS admission with tinted skipping.
 
 ## No Unreal Engine input
 
-The mark shader, 16-bit counting sort, 64^3 world light grid builder, raygen shader, BRDF shading,
-translucent TLAS mask bit reservation, and verification tests were written from the plan (§21.2 L7),
-issue #129, and public specifications/talks listed below. No Unreal Engine source, shader, plugin,
-NvRTX sample, or decompile was opened.
+The mark shader, screen-probe GI hit-marking variant, 16-bit counting sort, 64^3 world light grid builder,
+raygen shader, BRDF shading, translucent TLAS mask bit reservation, and verification tests were written
+from the plan (§21.2 L7), issues #129 and #128, and public specifications/talks listed below. No Unreal
+Engine source, shader, plugin, NvRTX sample, or decompile was opened.
 
 ## Sorted-deferred hit lighting architecture (public talk)
 
@@ -22,9 +25,9 @@ NvRTX sample, or decompile was opened.
 | Upstream | https://advances.realtimerendering.com/s2022/ |
 | Version | SIGGRAPH 2022 published course notes |
 | License | Public SIGGRAPH course slides; high-level algorithm concept only. Consulted, not copied |
-| Read on | 2026-11-24, for issue #129 (known published algorithm) |
-| Consulted by | The #129 implementer |
-| Used in | `servers/rendering/renderer_rd/environment/next_gi_hit_lighting.{h,cpp}`, `servers/rendering/renderer_rd/shaders/environment/nextgi_reflect.glsl`, `nextgi_hit_sort.glsl`, `nextgi_light_grid.glsl`, `nextgi_hit_lighting.glsl` |
+| Read on | 2026-11-24, for issues #129 and #128 (known published algorithm) |
+| Consulted by | The #129 and #128 implementers |
+| Used in | `servers/rendering/renderer_rd/environment/next_gi_hit_lighting.{h,cpp}`, `next_gi_gather.{h,cpp}`, `servers/rendering/renderer_rd/shaders/environment/nextgi_reflect.glsl`, `nextgi_gather.glsl`, `nextgi_gather_body_inc.glsl`, `nextgi_hit_sort.glsl`, `nextgi_light_grid.glsl`, `nextgi_hit_lighting.glsl` |
 | Copied files | None |
 
 ## GLSL Shader Execution Reordering extensions

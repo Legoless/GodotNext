@@ -437,6 +437,11 @@ void nextgi_gather_main() {
 #endif
 
 	vec3 raw_radiance[64];
+#ifdef MODE_HIT_LIGHTING_GI
+	float probe_depth = length(world - params.camera_pos.xyz);
+	uint hit_lit_lo = 0u;
+	uint hit_lit_hi = 0u;
+#endif
 	float angle = float(params.frame) * 2.3999632;
 	if (params.sampling_mode == 0u) {
 		angle = nextgi_blue_noise_sample(ivec2(gl_GlobalInvocationID.xy), params.frame).x * 6.2831853;
@@ -460,7 +465,12 @@ void nextgi_gather_main() {
 		float ray_confidence = 0.0;
 		atomicAdd(counters.rays, 1u);
 		float handoff = nextgi_wrc_handoff(origin);
+#ifdef MODE_HIT_LIGHTING_GI
+		float gi_hl_cutoff = handoff > 0.0 ? min(1.5 * handoff, params.rt_radius) : params.rt_radius;
+		float tmax = gi_hl_cutoff;
+#else
 		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
+#endif
 		vec3 screen_color;
 		vec3 march_end;
 		bool screen_hit = nextgi_screen_trace(origin, dir, tmax, screen_color, march_end);
@@ -482,7 +492,64 @@ void nextgi_gather_main() {
 #else
 		} else if (nextgi_trace(trace_origin, dir, trace_tmax, hit)) {
 #endif
+#ifdef MODE_HIT_LIGHTING_GI
+			// GodotNext: nextgi_hit_lighting_gi (#128). Hits before 1.5x WRC handoff write compact hit
+			// records into the shared hit-lighting buffer with keys in [0x8000..0xFFFF].
+			bool queued_hl = false;
+			if ((resume + hit.t) < gi_hl_cutoff) {
+				uint slot = atomicAdd(gi_hl_counters.data.marked_hits, 1u);
+				if (slot < params.hit_record_max_rays) {
+					uint material_key = NEXTGI_HL_KEY_GI_FALLBACK;
+					if (hit.custom_index < params.hit_record_count) {
+						NextGIInstanceRecord inst = records.data[hit.custom_index];
+						if (hit.geometry_index < inst.surface_count) {
+							uint surf_idx = inst.surface_base + hit.geometry_index;
+							NextGIHitSurfaceGI hs = gi_hit_surfaces.data[surf_idx];
+							if (hs.material_id < params.hit_material_count) {
+								NextGIHitMaterialGI hm = gi_hit_materials.data[hs.material_id];
+								material_key = nextgi_hit_light_gi_material_key(hm.shader_slot, hs.material_id);
+							}
+						}
+					}
+					ivec2 texel = ivec2(probe) * int(params.ray_stride) + ivec2(int(ix), int(iy));
+					uint flags = (hit.front_face ? NEXTGI_HL_RECORD_FLAG_FRONT_FACE : 0u) | NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI;
+					float cone_width = max(probe_depth * 16.0 / max(params.screen_jitter.y, 1.0), 0.01);
+					float cone_spread = 0.18;
+					NextGIHitLightRecord rec;
+					rec.origin_t = vec4(trace_origin, hit.t);
+					rec.id_pixel = uvec4(
+							(hit.custom_index & 0xFFFFFFu) | flags,
+							(hit.geometry_index & 0xFFFFu) | ((material_key & 0xFFFFu) << 16u),
+							hit.primitive,
+							(uint(texel.x) & 0xFFFFu) | ((uint(texel.y) & 0xFFFFu) << 16u));
+					rec.packed_geom = uvec4(
+							packHalf2x16(hit.bary),
+							packSnorm2x16(nextgi_hl_oct_encode(dir)),
+							packHalf2x16(vec2(cone_width, cone_spread)),
+							floatBitsToUint(probe_depth));
+					gi_hit_records_out.data[slot] = rec;
+					uint gi_prev = atomicAdd(gi_hl_counters.data.gi_marked_hits, 1u);
+					if (gi_prev == 0xFFFFFFFFu) {
+						gi_hl_counters.data.sink = gi_prev;
+					}
+					if (i < 32u) {
+						hit_lit_lo |= 1u << i;
+					} else {
+						hit_lit_hi |= 1u << (i - 32u);
+					}
+					radiance = vec3(0.0);
+					ray_confidence = 1.0;
+					queued_hl = true;
+				} else if (slot == 0xFFFFFFFFu) {
+					gi_hl_counters.data.sink = slot;
+				}
+			}
+			if (!queued_hl) {
+				radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
+			}
+#else
 			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
+#endif
 		} else {
 			radiance = nextgi_wrc_sample(trace_origin + dir * trace_tmax, dir);
 			if (!nextgi_wrc_hit_cache) {
@@ -505,6 +572,26 @@ void nextgi_gather_main() {
 	// this probe's 16 rays (emissive radiance included), then count the removed energy for Q16.
 	const vec3 luminance_weights = vec3(0.2126, 0.7152, 0.0722);
 	float lum_sum = 0.0;
+#ifdef MODE_HIT_LIGHTING_GI
+	uint non_hl_count = 0u;
+	for (uint i = 0u; i < params.ray_count; i++) {
+		bool is_hl = i < 32u ? ((hit_lit_lo & (1u << i)) != 0u) : ((hit_lit_hi & (1u << (i - 32u))) != 0u);
+		if (!is_hl) {
+			lum_sum += dot(raw_radiance[i], luminance_weights);
+			non_hl_count++;
+		}
+	}
+	const float mean_lum = non_hl_count > 0u ? (lum_sum / float(non_hl_count)) : 0.0;
+	float variance = 0.0;
+	for (uint i = 0u; i < params.ray_count; i++) {
+		bool is_hl = i < 32u ? ((hit_lit_lo & (1u << i)) != 0u) : ((hit_lit_hi & (1u << (i - 32u))) != 0u);
+		if (!is_hl) {
+			const float delta = dot(raw_radiance[i], luminance_weights) - mean_lum;
+			variance += delta * delta;
+		}
+	}
+	const float clamp_limit = non_hl_count > 0u ? (mean_lum + 3.0 * sqrt(variance / float(non_hl_count))) : 1e9;
+#else
 	for (uint i = 0u; i < params.ray_count; i++) {
 		lum_sum += dot(raw_radiance[i], luminance_weights);
 	}
@@ -515,10 +602,12 @@ void nextgi_gather_main() {
 		variance += delta * delta;
 	}
 	const float clamp_limit = mean_lum + 3.0 * sqrt(variance / float(params.ray_count));
+#endif
 	float removed = 0.0;
 	const uint texels = params.ray_stride * params.ray_stride;
 	for (uint t = 0u; t < texels; t++) {
-		vec3 radiance = raw_radiance[t % params.ray_count];
+		uint ray_idx = t % params.ray_count;
+		vec3 radiance = raw_radiance[ray_idx];
 		const float luminance = dot(radiance, luminance_weights);
 		if (luminance > clamp_limit && luminance > 0.0) {
 			radiance *= clamp_limit / luminance;

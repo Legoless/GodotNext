@@ -53,38 +53,59 @@ const uint SORT_BINS = 65536u;
 const uint SORT_BLOCK_SIZE = 256u;
 const uint SORT_BLOCKS = 256u;
 
+#if defined(MODE_HISTOGRAM) || defined(MODE_SCATTER)
 layout(set = 0, binding = 0, std430) restrict readonly buffer SortHitRecords {
 	NextGIHitLightRecord data[];
 }
 hit_records;
+#endif
 
+#if defined(MODE_CLEAR) || defined(MODE_HISTOGRAM) || defined(MODE_SCAN_LOCAL) || defined(MODE_SCAN_ADD) || defined(MODE_SCATTER)
 layout(set = 0, binding = 1, std430) restrict buffer SortHistogram {
 	uint data[];
 }
 histogram;
+#endif
 
+#if defined(MODE_SCAN_LOCAL) || defined(MODE_SCAN_BLOCKS)
 layout(set = 0, binding = 2, std430) restrict buffer SortBlockSums {
 	uint data[];
 }
 block_sums;
+#elif defined(MODE_SCAN_ADD)
+layout(set = 0, binding = 2, std430) restrict readonly buffer SortBlockSums {
+	uint data[];
+}
+block_sums;
+#endif
 
-layout(set = 0, binding = 3, std430) restrict buffer SortSortedIndices {
+#if defined(MODE_SCATTER)
+layout(set = 0, binding = 3, std430) restrict writeonly buffer SortSortedIndices {
 	uint data[];
 }
 sorted_indices;
+#endif
 
+#if defined(MODE_CLEAR) || defined(MODE_HISTOGRAM) || defined(MODE_SCAN_ADD) || defined(MODE_SCATTER)
 layout(set = 0, binding = 4, std430) restrict buffer SortCounters {
 	NextGIHitLightCounters data;
 }
 counters;
+#endif
 
-// Indirect commands: [0..2] = RT raygen indirect dispatch (active_count, 1, 1);
-//                    [4..6] = compute sort indirect dispatch ((active_count + 255) / 256, 1, 1).
-layout(set = 0, binding = 5, std430) restrict buffer SortIndirect {
+// Indirect commands: [0..3]  = Reflection RT raygen indirect dispatch (refl_count, 1, 1);
+//                    [4..7]  = Compute sort indirect dispatch ((active_count + 255) / 256, 1, 1);
+//                    [8..11] = Diffuse GI RT raygen indirect dispatch (gi_count, 1, 1) (#128).
+// Declared only in variants that write it so MODE_HISTOGRAM/MODE_SCATTER keep indirect_buffer
+// exclusively in RESOURCE_USAGE_INDIRECT_BUFFER_READ for proper RDG barriers.
+#if defined(MODE_CLEAR) || defined(MODE_SCAN_ADD)
+layout(set = 0, binding = 5, std430) restrict writeonly buffer SortIndirect {
 	uint data[];
 }
 indirect_cmds;
+#endif
 
+#if defined(MODE_CLEAR) || defined(MODE_HISTOGRAM) || defined(MODE_SCAN_ADD) || defined(MODE_SCATTER)
 layout(push_constant, std430) uniform SortPush {
 	uint max_rays;
 	uint pad0;
@@ -92,6 +113,7 @@ layout(push_constant, std430) uniform SortPush {
 	uint pad2;
 }
 sort_push;
+#endif
 
 #if defined(MODE_SCAN_LOCAL) || defined(MODE_SCAN_BLOCKS)
 shared uint s_scan[SORT_BLOCK_SIZE];
@@ -99,7 +121,9 @@ shared uint s_scan[SORT_BLOCK_SIZE];
 
 void main() {
 	uint gid = gl_GlobalInvocationID.x;
+#if defined(MODE_CLEAR) || defined(MODE_HISTOGRAM) || defined(MODE_SCAN_ADD) || defined(MODE_SCATTER)
 	uint active_count = min(counters.data.marked_hits, sort_push.max_rays);
+#endif
 
 #if defined(MODE_CLEAR)
 	if (gid < SORT_BINS) {
@@ -107,15 +131,21 @@ void main() {
 	}
 	if (gid == 0u) {
 		counters.data.sorted_hits = active_count;
-		indirect_cmds.data[0] = active_count;
-		indirect_cmds.data[1] = active_count > 0u ? 1u : 0u;
-		indirect_cmds.data[2] = active_count > 0u ? 1u : 0u;
+		counters.data.refl_sorted_hits = 0u;
+		counters.data.gi_sorted_hits = 0u;
+		indirect_cmds.data[0] = 0u;
+		indirect_cmds.data[1] = 0u;
+		indirect_cmds.data[2] = 0u;
 		indirect_cmds.data[3] = 0u;
 		uint groups = active_count > 0u ? (active_count + 255u) / 256u : 0u;
 		indirect_cmds.data[4] = groups;
 		indirect_cmds.data[5] = groups > 0u ? 1u : 0u;
 		indirect_cmds.data[6] = groups > 0u ? 1u : 0u;
 		indirect_cmds.data[7] = 0u;
+		indirect_cmds.data[8] = 0u;
+		indirect_cmds.data[9] = 0u;
+		indirect_cmds.data[10] = 0u;
+		indirect_cmds.data[11] = 0u;
 	}
 #elif defined(MODE_HISTOGRAM)
 	if (gid >= active_count) {
@@ -130,6 +160,7 @@ void main() {
 	uint lid = gl_LocalInvocationID.x;
 	uint val = gid < SORT_BINS ? histogram.data[gid] : 0u;
 	s_scan[lid] = val;
+	memoryBarrierShared();
 	barrier();
 
 	// Up-sweep (reduction).
@@ -138,12 +169,14 @@ void main() {
 		if (idx < SORT_BLOCK_SIZE) {
 			s_scan[idx] += s_scan[idx - stride];
 		}
+		memoryBarrierShared();
 		barrier();
 	}
 	if (lid == 0u) {
 		block_sums.data[gl_WorkGroupID.x] = s_scan[SORT_BLOCK_SIZE - 1u];
 		s_scan[SORT_BLOCK_SIZE - 1u] = 0u;
 	}
+	memoryBarrierShared();
 	barrier();
 
 	// Down-sweep (exclusive scan).
@@ -154,6 +187,7 @@ void main() {
 			s_scan[idx - stride] = s_scan[idx];
 			s_scan[idx] += t;
 		}
+		memoryBarrierShared();
 		barrier();
 	}
 	if (gid < SORT_BINS) {
@@ -162,6 +196,7 @@ void main() {
 #elif defined(MODE_SCAN_BLOCKS)
 	uint lid = gl_LocalInvocationID.x;
 	s_scan[lid] = lid < SORT_BLOCKS ? block_sums.data[lid] : 0u;
+	memoryBarrierShared();
 	barrier();
 
 	for (uint stride = 1u; stride < SORT_BLOCK_SIZE; stride <<= 1u) {
@@ -169,11 +204,13 @@ void main() {
 		if (idx < SORT_BLOCK_SIZE) {
 			s_scan[idx] += s_scan[idx - stride];
 		}
+		memoryBarrierShared();
 		barrier();
 	}
 	if (lid == 0u) {
 		s_scan[SORT_BLOCK_SIZE - 1u] = 0u;
 	}
+	memoryBarrierShared();
 	barrier();
 
 	for (uint stride = SORT_BLOCK_SIZE >> 1u; stride > 0u; stride >>= 1u) {
@@ -183,6 +220,7 @@ void main() {
 			s_scan[idx - stride] = s_scan[idx];
 			s_scan[idx] += t;
 		}
+		memoryBarrierShared();
 		barrier();
 	}
 	if (lid < SORT_BLOCKS) {
@@ -190,7 +228,24 @@ void main() {
 	}
 #elif defined(MODE_SCAN_ADD)
 	if (gid < SORT_BINS) {
-		histogram.data[gid] += block_sums.data[gl_WorkGroupID.x];
+		uint val = histogram.data[gid] + block_sums.data[gl_WorkGroupID.x];
+		histogram.data[gid] = val;
+		// Bin NEXTGI_HL_KEY_GI_BASE (0x8000) holds the exact exclusive prefix sum of all reflection keys
+		// [0x0000..0x7FFF], giving the split point between reflection hits and diffuse GI hits (#128).
+		if (gid == NEXTGI_HL_KEY_GI_BASE) {
+			uint refl_count = min(val, active_count);
+			uint gi_count = active_count - refl_count;
+			counters.data.refl_sorted_hits = refl_count;
+			counters.data.gi_sorted_hits = gi_count;
+			indirect_cmds.data[0] = refl_count;
+			indirect_cmds.data[1] = refl_count > 0u ? 1u : 0u;
+			indirect_cmds.data[2] = refl_count > 0u ? 1u : 0u;
+			indirect_cmds.data[3] = 0u;
+			indirect_cmds.data[8] = gi_count;
+			indirect_cmds.data[9] = gi_count > 0u ? 1u : 0u;
+			indirect_cmds.data[10] = gi_count > 0u ? 1u : 0u;
+			indirect_cmds.data[11] = 0u;
+		}
 	}
 #elif defined(MODE_SCATTER)
 	if (gid >= active_count) {

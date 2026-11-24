@@ -73,18 +73,26 @@ enum {
 	NEXTGI_LIGHT_GRID_CELL_CAP = 32,
 	NEXTGI_LIGHT_GRID_CELL_WORDS = 17, // 1 count + 16 words holding 32 uint16 light indices.
 	NEXTGI_HIT_LIGHT_MAX_SHADOWED_LIGHTS = 4,
+	NEXTGI_HIT_LIGHT_GI_MAX_SHADOWED_LIGHTS = 1,
 	NEXTGI_HIT_LIGHT_MAX_TRANSLUCENT_SKIPS = 2,
 	NEXTGI_HIT_LIGHT_MIN_BOUNCES = 1,
 	NEXTGI_HIT_LIGHT_MAX_BOUNCES = 4,
 	NEXTGI_HIT_LIGHT_SORT_BINS = 65536,
+	// Disjoint 16-bit material key ranges (#128): reflections [0x0000..0x7FFF], diffuse GI [0x8000..0xFFFF].
+	NEXTGI_HL_KEY_REFLECTION_BASE = 0x0000,
+	NEXTGI_HL_KEY_REFLECTION_FALLBACK = 0x7FFF,
+	NEXTGI_HL_KEY_GI_BASE = 0x8000,
+	NEXTGI_HL_KEY_GI_FALLBACK = 0xFFFF,
 };
 
 inline constexpr float NEXTGI_HIT_LIGHT_MIRROR_ROUGHNESS = 0.1f;
+inline constexpr float NEXTGI_HIT_LIGHT_GI_HANDOFF_SCALE = 1.5f;
 
 enum : uint32_t {
 	NEXTGI_HL_RECORD_FLAG_FRONT_FACE = 1u << 24,
 	NEXTGI_HL_RECORD_FLAG_TRANSLUCENT = 1u << 25,
 	NEXTGI_HL_RECORD_FLAG_MIRROR = 1u << 26,
+	NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI = 1u << 27,
 	NEXTGI_HL_LIGHT_FLAG_SHADOW = 1u << 0,
 	NEXTGI_HL_LIGHT_FLAG_STATIC = 1u << 1,
 	NEXTGI_HL_PARAM_FLAG_TRANSLUCENT = 1u << 0,
@@ -118,6 +126,27 @@ NextGIHitLightingVerdict nextgi_hit_lighting_evaluate(
 		NextGIHitMode p_hit_mode = NEXTGI_HIT_MODE_FULL,
 		bool p_raygen_ready = true);
 
+// GodotNext: nextgi_hit_lighting_gi (#128, plan §21.2 contract L7, gate GL-4).
+// Evaluates whether hit lighting for screen-probe diffuse GI can run.
+// Active ONLY when hit_lighting_gi is true, reflection hit lighting is active
+// (ray_lighting_mode == hit_lighting_reflections + HWRT + RT pipelines/libraries/bindless + Full + raygen),
+// AND resolved quality == EPIC.
+struct NextGIHitLightingGIVerdict {
+	bool requested = false;
+	bool active = false;
+	const char *reason = "OFF";
+};
+
+NextGIHitLightingGIVerdict nextgi_hit_lighting_gi_evaluate(
+		bool p_hit_lighting_gi_setting,
+		const NextGIHitLightingVerdict &p_reflection_verdict,
+		bool p_epic_quality);
+
+// Cutoff distance for diffuse GI hit lighting: 1.5x WRC handoff distance, clamped to rt_scene_radius.
+_FORCE_INLINE_ float nextgi_hit_light_gi_cutoff(float p_wrc_handoff_distance, float p_rt_radius) {
+	return p_wrc_handoff_distance > 0.0f ? MIN(NEXTGI_HIT_LIGHT_GI_HANDOFF_SCALE * p_wrc_handoff_distance, p_rt_radius) : p_rt_radius;
+}
+
 // std430 compact per-ray hit record (48 bytes, matches nextgi_hit_lighting_common_inc.glsl).
 struct NextGIHitLightRecord {
 	float origin[3] = {};
@@ -148,8 +177,14 @@ struct NextGIHitLightRecordUnpacked {
 	float resume_distance = 0.0f;
 };
 
-// 16-bit material sort key combining shader slot (high byte) and material ID (low byte).
+// 16-bit material sort keys partitioned into two disjoint ranges (#128):
+//   Reflections: [0x0000..0x7FFF] (7-bit shader slot + 8-bit material id, fallback 0x7FFF).
+//   Diffuse GI:  [0x8000..0xFFFF] (0x8000 | 7-bit shader slot + 8-bit material id, fallback 0xFFFF).
 uint16_t nextgi_hit_light_material_key(uint32_t p_shader_slot, uint32_t p_material_id);
+uint16_t nextgi_hit_light_gi_material_key(uint32_t p_shader_slot, uint32_t p_material_id);
+_FORCE_INLINE_ bool nextgi_hit_light_key_is_gi(uint16_t p_key) {
+	return p_key >= uint16_t(NEXTGI_HL_KEY_GI_BASE);
+}
 NextGIHitLightRecord nextgi_hit_light_pack_record(const NextGIHitLightRecordUnpacked &p_in);
 NextGIHitLightRecordUnpacked nextgi_hit_light_unpack_record(const NextGIHitLightRecord &p_rec);
 
@@ -166,7 +201,7 @@ struct NextGIHitLightGPU {
 };
 static_assert(sizeof(NextGIHitLightGPU) == 80, "NextGIHitLightGPU must be 80 bytes (nextgi_hit_lighting_common_inc.glsl).");
 
-// std430 GPU counters (32 bytes, matches nextgi_hit_lighting_common_inc.glsl).
+// std430 GPU counters (64 bytes, matches nextgi_hit_lighting_common_inc.glsl).
 struct NextGIHitLightCountersGPU {
 	uint32_t marked_hits = 0;
 	uint32_t sorted_hits = 0;
@@ -176,8 +211,16 @@ struct NextGIHitLightCountersGPU {
 	uint32_t translucent_skips = 0;
 	uint32_t light_grid_overflow = 0;
 	uint32_t sink = 0;
+	uint32_t refl_sorted_hits = 0;
+	uint32_t gi_marked_hits = 0;
+	uint32_t gi_sorted_hits = 0;
+	uint32_t gi_shaded_hits = 0;
+	uint32_t gi_shadow_rays = 0;
+	uint32_t pad0 = 0;
+	uint32_t pad1 = 0;
+	uint32_t pad2 = 0;
 };
-static_assert(sizeof(NextGIHitLightCountersGPU) == 32, "NextGIHitLightCountersGPU must be 32 bytes.");
+static_assert(sizeof(NextGIHitLightCountersGPU) == 64, "NextGIHitLightCountersGPU must be 64 bytes.");
 
 // Maps a world-space point into the 64^3 world light grid, or UINT32_MAX when outside.
 uint32_t nextgi_light_grid_world_to_cell(const Vector3 &p_world, const Vector3 &p_grid_min, float p_inv_cell_size);
@@ -251,8 +294,14 @@ public:
 
 	struct Counters {
 		uint64_t dispatches = 0;
+		uint64_t gi_dispatches = 0;
 		uint32_t last_marked_hits = 0;
 		uint32_t last_sorted_hits = 0;
+		uint32_t last_refl_sorted_hits = 0;
+		uint32_t last_gi_marked_hits = 0;
+		uint32_t last_gi_sorted_hits = 0;
+		uint32_t last_gi_shaded_hits = 0;
+		uint32_t last_gi_shadow_rays = 0;
 		uint32_t last_shadow_rays = 0;
 		uint32_t last_unshadowed_lights = 0;
 		uint32_t last_bounce_rays = 0;
@@ -283,6 +332,12 @@ private:
 	uint32_t light_capacity = 0;
 	bool indirect_rt_supported = false;
 
+	// State carried across begin_combined() -> mark_sort_and_shade_gi() -> shade_reflections_combined() (#128).
+	uint32_t combined_max_rays = 0;
+	uint32_t combined_gi_max_rays = 0;
+	uint32_t combined_reflect_max_rays = 0;
+	uint32_t combined_light_count = 0;
+
 	uint64_t counter_token = 0;
 	bool counters_pending = false;
 	Counters counters;
@@ -290,15 +345,29 @@ private:
 	bool _ensure_shaders();
 	bool _ensure_buffers(uint32_t p_max_rays, uint32_t p_light_count);
 	uint32_t _upload_lights(RenderDataRD *p_render_data, NextGIRTScene *p_rt_scene);
+	bool _dispatch_light_grid(const ExecuteParams &p_params, uint32_t p_light_count);
+	bool _dispatch_mark(const ExecuteParams &p_params, uint32_t p_max_rays);
+	bool _dispatch_sort(uint32_t p_max_rays);
+	void _upload_hl_params(const ExecuteParams &p_params, uint32_t p_max_rays, uint32_t p_light_count, uint32_t p_max_bounces);
+	bool _dispatch_raygen(const ExecuteParams &p_params, bool p_gi_pass, RID p_output_image, uint32_t p_max_rays, uint32_t p_indirect_offset);
 	void _request_counters();
 	static void _counters_received(const Vector<uint8_t> &p_data, uint64_t p_token);
 
 public:
 	bool execute(const ExecuteParams &p_params);
+	// GodotNext: nextgi_hit_lighting_gi (#128). Combined GI + reflections pipeline sharing the world
+	// light grid, hit record buffer, and 16-bit counting sort, while shading diffuse GI into probe_image
+	// BEFORE probe spatial/temporal filtering and reflections into specular_raw after.
+	bool begin_combined(const ExecuteParams &p_params, uint32_t p_gi_max_rays);
+	bool mark_sort_and_shade_gi(const ExecuteParams &p_params, RID p_probe_image);
+	bool shade_reflections_combined(const ExecuteParams &p_params);
+	RID get_record_buffer() const { return record_buffer; }
+	RID get_counter_buffer() const { return counter_buffer; }
+	uint32_t get_combined_max_rays() const { return combined_max_rays; }
 	void free_resources();
 
 	const Counters &get_counters() const { return counters; }
-	void fill_counters(Dictionary &r_counters) const;
+	void fill_counters(Dictionary &r_counters, bool p_gi_active = true) const;
 
 	NextGIHitLighting() = default;
 	~NextGIHitLighting();

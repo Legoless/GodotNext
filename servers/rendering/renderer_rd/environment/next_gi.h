@@ -64,9 +64,10 @@ struct NextGICardClusterResult;
 
 // GodotNext: nextgi_hit_groups (#130)
 class NextGIHitMaterials;
-// GodotNext: nextgi_hit_lighting (#129)
+// GodotNext: nextgi_hit_lighting (#129, #128)
 class NextGIHitLighting;
 struct NextGIHitLightingVerdict;
+struct NextGIHitLightingGIVerdict;
 
 // GodotNext: path_tracer (#167)
 class PathTracer;
@@ -435,6 +436,9 @@ private:
 	bool hit_lighting_translucent_active = false;
 	int hit_lighting_last_requested = 0;
 	int hit_lighting_last_effective = 0;
+	// GodotNext: nextgi_hit_lighting_gi (#128). Epic-only hit lighting for diffuse screen-probe GI.
+	bool hit_lighting_gi_last_active = false;
+	const char *hit_lighting_gi_last_reason = "OFF";
 	void _free_hit_lighting();
 	uint32_t rough_reflection_mip_count = 1;
 	void _gather(RenderDataRD *p_render_data);
@@ -753,11 +757,14 @@ public:
 	// (trace on frames where its has_current_records() is true); while it does not ask, what it would get.
 	int get_hit_availability_for(uint32_t p_consumer) const;
 	NextGIHitMaterials *get_hit_materials() const { return hit_materials; }
-	// GodotNext: nextgi_hit_lighting (#129). Ray Lighting Mode and hit lighting for reflections.
+	// GodotNext: nextgi_hit_lighting (#129, #128). Ray Lighting Mode and hit lighting for reflections / GI.
 	static int read_ray_lighting_mode();
 	static uint32_t read_max_reflection_bounces();
+	static bool read_hit_lighting_gi();
 	NextGIHitLightingVerdict evaluate_hit_lighting_for_environment(RID p_environment) const;
+	NextGIHitLightingGIVerdict evaluate_hit_lighting_gi_for_environment(RID p_environment) const;
 	bool is_hit_lighting_active_for_view(RID p_environment) const;
+	bool is_hit_lighting_gi_active_for_view(RID p_environment) const;
 	bool is_hit_lighting_translucent_enabled() const { return hit_lighting_translucent_active; }
 	NextGIHitLighting *ensure_hit_lighting();
 	NextGIHitLighting *get_hit_lighting() const { return hit_lighting; }

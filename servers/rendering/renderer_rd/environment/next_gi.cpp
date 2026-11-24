@@ -727,6 +727,14 @@ uint32_t NextGI::read_max_reflection_bounces() {
 	return nextgi_clamp_max_reflection_bounces(int(GLOBAL_GET("rendering/global_illumination/nextgi/max_reflection_bounces")));
 }
 
+bool NextGI::read_hit_lighting_gi() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings == nullptr || !settings->has_setting("rendering/global_illumination/nextgi/hit_lighting_gi")) {
+		return false;
+	}
+	return bool(GLOBAL_GET("rendering/global_illumination/nextgi/hit_lighting_gi"));
+}
+
 NextGIHitLightingVerdict NextGI::evaluate_hit_lighting_for_environment(RID p_environment) const {
 	int env_override = int(NEXTGI_ENV_RAY_LIGHTING_PROJECT_DEFAULT);
 	if (p_environment.is_valid() && RendererSceneRenderRD::get_singleton() != nullptr) {
@@ -746,8 +754,19 @@ NextGIHitLightingVerdict NextGI::evaluate_hit_lighting_for_environment(RID p_env
 			raygen_ready);
 }
 
+NextGIHitLightingGIVerdict NextGI::evaluate_hit_lighting_gi_for_environment(RID p_environment) const {
+	const NextGIHitLightingVerdict refl_verdict = evaluate_hit_lighting_for_environment(p_environment);
+	const bool epic = resolve_quality(quality_setting) == QUALITY_EPIC;
+	return nextgi_hit_lighting_gi_evaluate(read_hit_lighting_gi(), refl_verdict, epic);
+}
+
 bool NextGI::is_hit_lighting_active_for_view(RID p_environment) const {
 	const NextGIHitLightingVerdict verdict = evaluate_hit_lighting_for_environment(p_environment);
+	return verdict.active && hit_materials != nullptr && hit_materials->can_trace_hit_lighting();
+}
+
+bool NextGI::is_hit_lighting_gi_active_for_view(RID p_environment) const {
+	const NextGIHitLightingGIVerdict verdict = evaluate_hit_lighting_gi_for_environment(p_environment);
 	return verdict.active && hit_materials != nullptr && hit_materials->can_trace_hit_lighting();
 }
 
@@ -926,13 +945,16 @@ Dictionary NextGI::get_status() const {
 		driver = OS::get_singleton()->get_current_rendering_driver_name();
 	}
 	status["driver"] = driver;
-	// GodotNext: nextgi_hit_lighting (#129)
+	// GodotNext: nextgi_hit_lighting (#129, #128)
 	const NextGIRayLightingMode proj_mode = nextgi_ray_lighting_mode_from_setting(read_ray_lighting_mode());
 	status["ray_lighting_mode"] = String(nextgi_ray_lighting_mode_name(hit_lighting_last_requested != 0 ? NextGIRayLightingMode(hit_lighting_last_requested) : proj_mode));
 	status["ray_lighting_mode_effective"] = String(nextgi_ray_lighting_mode_name(NextGIRayLightingMode(hit_lighting_last_effective)));
 	status["hit_lighting_active"] = hit_lighting_last_active;
 	status["hit_lighting_reason"] = hit_lighting_last_active ? String("ACTIVE") : (hit_lighting_last_fallback ? String("HIT_LIGHTING_UNSUPPORTED") : String("SURFACE_CACHE"));
 	status["max_reflection_bounces"] = int64_t(read_max_reflection_bounces());
+	status["hit_lighting_gi"] = read_hit_lighting_gi();
+	status["hit_lighting_gi_active"] = hit_lighting_gi_last_active;
+	status["hit_lighting_gi_reason"] = String(hit_lighting_gi_last_reason);
 	_append_swrt_info(status);
 	return status;
 }
@@ -1031,12 +1053,19 @@ Dictionary NextGI::get_counters() const {
 	counters["gather_dispatches"] = int64_t(gather_dispatches);
 	counters["reflection_dispatches"] = int64_t(reflection_dispatches);
 	counters["lite_probe_traces"] = int64_t(lite_probe_traces);
-	// GodotNext: nextgi_hit_lighting (#129)
+	// GodotNext: nextgi_hit_lighting (#129, #128)
 	counters["hit_lighting_active"] = hit_lighting_last_active;
 	counters["hit_lighting_reason"] = hit_lighting_last_active ? String("ACTIVE") : (hit_lighting_last_fallback ? String("HIT_LIGHTING_UNSUPPORTED") : String("SURFACE_CACHE"));
 	counters["hit_lighting_translucent_instances"] = int64_t(rt_scene != nullptr ? rt_scene->get_translucent_instance_count() : 0u);
+	counters["hit_lighting_gi_active"] = hit_lighting_gi_last_active;
+	counters["hit_lighting_gi_reason"] = String(hit_lighting_gi_last_reason);
+	counters["hit_lighting_gi_rays"] = int64_t(0);
+	counters["hit_lighting_gi_marked_hits"] = int64_t(0);
+	counters["hit_lighting_gi_sorted_hits"] = int64_t(0);
+	counters["hit_lighting_gi_shadow_rays"] = int64_t(0);
+	counters["hit_lighting_gi_dispatches"] = int64_t(0);
 	if (hit_lighting != nullptr) {
-		hit_lighting->fill_counters(counters);
+		hit_lighting->fill_counters(counters, hit_lighting_gi_last_active);
 	}
 	// GodotNext: rt_shadows (#141). Standalone HWRT ray-traced shadows telemetry.
 	if (rt_shadows != nullptr) {
@@ -1247,7 +1276,7 @@ Dictionary NextGI::get_tier_info() const {
 	const NextGIHitAvailability hit_settings = nextgi_hit_setting_availability(get_hit_consumers(), NextGIHitMode(hit_mode));
 	info["hit_groups"] = nextgi_hit_availability_name(hit_settings != NEXTGI_HIT_AVAILABLE ? hit_settings : NextGIHitAvailability(hit_availability));
 	info["hardware_ray_tracing_mode"] = nextgi_hit_mode_name(NextGIHitMode(hit_mode));
-	// GodotNext: nextgi_hit_lighting (#129)
+	// GodotNext: nextgi_hit_lighting (#129, #128)
 	info["ray_lighting_mode"] = String(nextgi_ray_lighting_mode_name(NextGIRayLightingMode(hit_lighting_last_requested)));
 	info["ray_lighting_mode_effective"] = String(nextgi_ray_lighting_mode_name(NextGIRayLightingMode(hit_lighting_last_effective)));
 	info["hit_lighting_active"] = hit_lighting_last_active;
@@ -1255,6 +1284,13 @@ Dictionary NextGI::get_tier_info() const {
 	info["hit_lighting_ser"] = hit_materials != nullptr && hit_materials->has_hit_lighting_ser();
 	info["hit_lighting_ser_mode"] = String(hit_materials != nullptr ? hit_materials->get_hit_lighting_ser_mode() : "NONE");
 	info["max_reflection_bounces"] = int64_t(read_max_reflection_bounces());
+	info["hit_lighting_gi"] = read_hit_lighting_gi();
+	info["hit_lighting_gi_active"] = hit_lighting_gi_last_active;
+	info["hit_lighting_gi_reason"] = String(hit_lighting_gi_last_reason);
+	info["hit_lighting_gi_rays"] = int64_t(hit_lighting != nullptr && hit_lighting_gi_last_active ? hit_lighting->get_counters().last_gi_shaded_hits : 0u);
+	info["hit_lighting_gi_marked_hits"] = int64_t(hit_lighting != nullptr && hit_lighting_gi_last_active ? hit_lighting->get_counters().last_gi_marked_hits : 0u);
+	info["hit_lighting_gi_shadow_rays"] = int64_t(hit_lighting != nullptr && hit_lighting_gi_last_active ? hit_lighting->get_counters().last_gi_shadow_rays : 0u);
+	info["hit_lighting_gi_dispatches"] = int64_t(hit_lighting != nullptr ? hit_lighting->get_counters().gi_dispatches : 0u);
 	{
 		Dictionary by_consumer;
 		by_consumer["hit_lighting"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING)));
@@ -1842,6 +1878,19 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		hit_lighting_last_active = resolved_hl.active && scenario_active;
 		hit_lighting_last_fallback = resolved_hl.unsupported_fallback || (wants_hit_lighting && !scenario_active);
 		hit_lighting_last_effective = hit_lighting_last_active ? int(NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS) : int(NEXTGI_RAY_LIGHTING_SURFACE_CACHE);
+		// GodotNext: nextgi_hit_lighting_gi (#128). Evaluate Epic-only GI hit lighting gate after hit_materials updates.
+		const NextGIHitLightingGIVerdict resolved_gi_hl = evaluate_hit_lighting_gi_for_environment(p_render_data->environment);
+		const bool gi_diffuse_runs = !lite && !is_reflections_only();
+		hit_lighting_gi_last_active = resolved_gi_hl.active && scenario_active && gi_diffuse_runs;
+		if (hit_lighting_gi_last_active) {
+			hit_lighting_gi_last_reason = "ACTIVE";
+		} else if (!resolved_gi_hl.active) {
+			hit_lighting_gi_last_reason = resolved_gi_hl.reason;
+		} else if (!scenario_active) {
+			hit_lighting_gi_last_reason = "HIT_LIGHTING_UNSUPPORTED";
+		} else {
+			hit_lighting_gi_last_reason = "GI_DISABLED";
+		}
 		if (hit_lighting_last_fallback && !hit_lighting_unsupported_logged) {
 			hit_lighting_unsupported_logged = true;
 			WARN_PRINT("NextGI hit lighting: falling back to surface cache (HIT_LIGHTING_UNSUPPORTED).");
@@ -1854,6 +1903,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		hit_lighting_last_active = view_hl_verdict.active && hit_materials != nullptr && hit_materials->has_hit_lighting_raygen();
 		hit_lighting_last_fallback = view_hl_verdict.unsupported_fallback;
 		hit_lighting_last_effective = hit_lighting_last_active ? int(NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS) : int(NEXTGI_RAY_LIGHTING_SURFACE_CACHE);
+		const NextGIHitLightingGIVerdict view_gi_hl = evaluate_hit_lighting_gi_for_environment(p_render_data->environment);
+		const bool gi_diffuse_runs = !lite && !is_reflections_only();
+		hit_lighting_gi_last_active = view_gi_hl.active && hit_materials != nullptr && hit_materials->has_hit_lighting_raygen() && gi_diffuse_runs;
+		hit_lighting_gi_last_reason = hit_lighting_gi_last_active ? "ACTIVE" : (!view_gi_hl.active ? view_gi_hl.reason : (!gi_diffuse_runs ? "GI_DISABLED" : "HIT_LIGHTING_UNSUPPORTED"));
 	}
 	// GodotNext: nextgi_shadow_policy (#145). The check's rays come from the TLAS phase's sources.
 	const bool shadow_check_on = hwrt_frame && rt_scene != nullptr && GLOBAL_GET_CACHED(bool, "rendering/global_illumination/nextgi/debug/shadow_ray_check");

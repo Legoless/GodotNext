@@ -33,9 +33,14 @@
 #include "core/config/project_settings.h"
 #include "scene/resources/environment.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_lighting.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 #include "servers/rendering/rendering_server.h"
+
+#ifdef MODULE_GLSLANG_ENABLED
+#include "modules/glslang/register_types.h"
+#endif
 
 TEST_FORCE_LINK(test_nextgi_hit_lighting)
 
@@ -153,10 +158,20 @@ TEST_CASE("[NextGI][HitLighting] Hit record packing and unpacking round-trip") {
 	CHECK(Math::abs(out.cone.y - in.cone.y) < 1e-3f);
 	CHECK(Math::is_equal_approx(out.resume_distance, in.resume_distance));
 
-	// Fallback material key stays distinct in bucket 0xFFFF.
-	CHECK_EQ(nextgi_hit_light_material_key(UINT32_MAX, 5u), uint16_t(0xFFFFu));
-	CHECK_EQ(nextgi_hit_light_material_key(2u, UINT32_MAX), uint16_t(0xFFFFu));
-	CHECK_EQ(nextgi_hit_light_material_key(0xFFu, 0xFFu), uint16_t(0xFFFEu));
+	// Disjoint fallback & saturation material keys: reflections stay in [0x0000..0x7FFF],
+	// diffuse GI stays in [0x8000..0xFFFF] (#128).
+	CHECK_EQ(nextgi_hit_light_material_key(UINT32_MAX, 5u), uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK));
+	CHECK_EQ(nextgi_hit_light_material_key(2u, UINT32_MAX), uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK));
+	CHECK_EQ(nextgi_hit_light_material_key(0xFFu, 0xFFu), uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK - 1u));
+	CHECK_FALSE(nextgi_hit_light_key_is_gi(nextgi_hit_light_material_key(UINT32_MAX, 5u)));
+	CHECK_FALSE(nextgi_hit_light_key_is_gi(nextgi_hit_light_material_key(0xFFu, 0xFFu)));
+
+	CHECK_EQ(nextgi_hit_light_gi_material_key(11u, 37u), uint16_t(NEXTGI_HL_KEY_GI_BASE | (11u << 8u) | 37u));
+	CHECK_EQ(nextgi_hit_light_gi_material_key(UINT32_MAX, 5u), uint16_t(NEXTGI_HL_KEY_GI_FALLBACK));
+	CHECK_EQ(nextgi_hit_light_gi_material_key(2u, UINT32_MAX), uint16_t(NEXTGI_HL_KEY_GI_FALLBACK));
+	CHECK_EQ(nextgi_hit_light_gi_material_key(0xFFu, 0xFFu), uint16_t(NEXTGI_HL_KEY_GI_FALLBACK - 1u));
+	CHECK(nextgi_hit_light_key_is_gi(nextgi_hit_light_gi_material_key(0u, 0u)));
+	CHECK(nextgi_hit_light_key_is_gi(nextgi_hit_light_gi_material_key(UINT32_MAX, 0u)));
 }
 
 TEST_CASE("[NextGI][HitLighting] 16-bit counting sort orders active hits by material key") {
@@ -327,6 +342,235 @@ TEST_CASE("[NextGI][HitLighting] TLAS mask bit 1 reservation keeps shadow policy
 	// Non-shadow-casting translucent instance carries only bit 1 (not GI bit 7).
 	const uint32_t trans_mask = nextgi_shadow_instance_mask(allocator.get_allocation(), 0u, false) | NEXTGI_RT_MASK_TRANSLUCENT;
 	CHECK_EQ(trans_mask, uint32_t(NEXTGI_RT_MASK_TRANSLUCENT));
+}
+
+TEST_CASE("[NextGI][HitLighting][GI] Setting default is false, advanced, and off-mode does zero GI hit-lighting work") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	const String setting_name = "rendering/global_illumination/nextgi/hit_lighting_gi";
+	CHECK(ps->has_setting(setting_name));
+	CHECK(ps->is_builtin_setting(setting_name));
+	const Variant val = ps->get_setting(setting_name);
+	CHECK_EQ(val.get_type(), Variant::BOOL);
+	CHECK_FALSE(bool(val));
+	CHECK_FALSE(NextGI::read_hit_lighting_gi());
+
+	// Verify it is registered as an advanced setting (not basic: lacks PROPERTY_USAGE_BASIC).
+	List<PropertyInfo> prop_list;
+	ps->get_property_list(&prop_list);
+	bool found_prop = false;
+	for (const PropertyInfo &pi : prop_list) {
+		if (pi.name == setting_name) {
+			found_prop = true;
+			CHECK_EQ(pi.type, Variant::BOOL);
+			break;
+		}
+	}
+	CHECK(found_prop);
+
+	// Off-mode zero-work check on a fresh NextGI instance: zero active flags and zero GI counters.
+	NextGI next_gi;
+	NextGI::TierInputs hwrt_inputs;
+	hwrt_inputs.project_enabled = true;
+	hwrt_inputs.ray_query = true;
+	hwrt_inputs.ray_query_hw = true;
+	String tier_line;
+	next_gi.update_tier(hwrt_inputs, NextGI::QUALITY_EPIC, tier_line);
+	const Dictionary info = next_gi.get_tier_info();
+	const Dictionary counters = next_gi.get_counters();
+	const Dictionary status = next_gi.get_status();
+	CHECK_FALSE(bool(info["hit_lighting_gi"]));
+	CHECK_FALSE(bool(info["hit_lighting_gi_active"]));
+	CHECK_EQ(String(info["hit_lighting_gi_reason"]), String("OFF"));
+	CHECK_EQ(int64_t(info["hit_lighting_gi_rays"]), 0);
+	CHECK_EQ(int64_t(info["hit_lighting_gi_dispatches"]), 0);
+	CHECK_FALSE(bool(counters["hit_lighting_gi_active"]));
+	CHECK_EQ(int64_t(counters["hit_lighting_gi_rays"]), 0);
+	CHECK_EQ(int64_t(counters["hit_lighting_gi_marked_hits"]), 0);
+	CHECK_EQ(int64_t(counters["hit_lighting_gi_sorted_hits"]), 0);
+	CHECK_EQ(int64_t(counters["hit_lighting_gi_shadow_rays"]), 0);
+	CHECK_EQ(int64_t(counters["hit_lighting_gi_dispatches"]), 0);
+	CHECK_FALSE(bool(status["hit_lighting_gi"]));
+	CHECK_FALSE(bool(status["hit_lighting_gi_active"]));
+	CHECK_EQ(String(status["hit_lighting_gi_reason"]), String("OFF"));
+}
+
+TEST_CASE("[NextGI][HitLighting][GI] Epic + HWRT + ray_lighting_mode gating matrix") {
+	const NextGIHitLightingVerdict refl_active = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS, true, true, true, true, NEXTGI_HIT_MODE_FULL, true);
+	const NextGIHitLightingVerdict refl_sc = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_SURFACE_CACHE, true, true, true, true, NEXTGI_HIT_MODE_FULL, true);
+	const NextGIHitLightingVerdict refl_swrt = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS, false, true, true, true, NEXTGI_HIT_MODE_FULL, true);
+	const NextGIHitLightingVerdict refl_inline = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS, true, true, true, true, NEXTGI_HIT_MODE_INLINE, true);
+	const NextGIHitLightingVerdict refl_simplified = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS, true, true, true, true, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, true);
+	const NextGIHitLightingVerdict refl_no_rt_pipe = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS, true, false, true, true, NEXTGI_HIT_MODE_FULL, true);
+	const NextGIHitLightingVerdict refl_no_raygen = nextgi_hit_lighting_evaluate(
+			NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS, true, true, true, true, NEXTGI_HIT_MODE_FULL, false);
+
+	// Setting off: always OFF even when Epic + HWRT + hit_lighting_reflections are all met.
+	{
+		const NextGIHitLightingGIVerdict v = nextgi_hit_lighting_gi_evaluate(false, refl_active, true);
+		CHECK_FALSE(v.requested);
+		CHECK_FALSE(v.active);
+		CHECK_EQ(String(v.reason), String("OFF"));
+	}
+
+	// Setting on + Surface Cache ray_lighting_mode: inactive.
+	{
+		const NextGIHitLightingGIVerdict v = nextgi_hit_lighting_gi_evaluate(true, refl_sc, true);
+		CHECK(v.requested);
+		CHECK_FALSE(v.active);
+		CHECK_EQ(String(v.reason), String("RAY_LIGHTING_MODE_SURFACE_CACHE"));
+	}
+
+	// Setting on + hit_lighting_reflections + non-Epic quality (High / Medium): inactive.
+	{
+		const NextGIHitLightingGIVerdict v = nextgi_hit_lighting_gi_evaluate(true, refl_active, false);
+		CHECK(v.requested);
+		CHECK_FALSE(v.active);
+		CHECK_EQ(String(v.reason), String("QUALITY_NOT_EPIC"));
+	}
+
+	// Setting on + Epic + hit_lighting_reflections but missing HWRT / Full mode / RT pipeline / raygen: unsupported.
+	const NextGIHitLightingVerdict unsupported_cases[] = { refl_swrt, refl_inline, refl_simplified, refl_no_rt_pipe, refl_no_raygen };
+	for (const NextGIHitLightingVerdict &rv : unsupported_cases) {
+		const NextGIHitLightingGIVerdict v = nextgi_hit_lighting_gi_evaluate(true, rv, true);
+		CHECK(v.requested);
+		CHECK_FALSE(v.active);
+		CHECK_EQ(String(v.reason), String("HIT_LIGHTING_UNSUPPORTED"));
+	}
+
+	// Setting on + Epic + HWRT + hit_lighting_reflections + Full + RT pipelines + raygen: ACTIVE!
+	{
+		const NextGIHitLightingGIVerdict v = nextgi_hit_lighting_gi_evaluate(true, refl_active, true);
+		CHECK(v.requested);
+		CHECK(v.active);
+		CHECK_EQ(String(v.reason), String("ACTIVE"));
+	}
+
+	// GI shadowed light cap and 1.5x WRC handoff cutoff distance helper.
+	CHECK_EQ(int(NEXTGI_HIT_LIGHT_GI_MAX_SHADOWED_LIGHTS), 1);
+	CHECK(Math::is_equal_approx(nextgi_hit_light_gi_cutoff(1.5f, 200.0f), 2.25f));
+	CHECK(Math::is_equal_approx(nextgi_hit_light_gi_cutoff(12.0f, 200.0f), 18.0f));
+	CHECK(Math::is_equal_approx(nextgi_hit_light_gi_cutoff(150.0f, 200.0f), 200.0f));
+	CHECK(Math::is_equal_approx(nextgi_hit_light_gi_cutoff(-1.0f, 200.0f), 200.0f));
+}
+
+TEST_CASE("[NextGI][HitLighting][GI] Disjoint 16-bit key ranges keep reflections and diffuse GI cleanly separated after counting sort") {
+	// Verify every possible (shader_slot, material_id) pair produces strictly disjoint reflection and GI keys.
+	const uint32_t sample_slots[] = { 0u, 1u, 7u, 127u, 128u, 255u, 1024u, UINT32_MAX };
+	const uint32_t sample_mats[] = { 0u, 1u, 37u, 127u, 254u, 255u, 4096u, UINT32_MAX };
+	for (uint32_t s : sample_slots) {
+		for (uint32_t m : sample_mats) {
+			const uint16_t rk = nextgi_hit_light_material_key(s, m);
+			const uint16_t gk = nextgi_hit_light_gi_material_key(s, m);
+			CHECK(rk <= uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK));
+			CHECK(gk >= uint16_t(NEXTGI_HL_KEY_GI_BASE));
+			CHECK(rk < gk);
+			CHECK_FALSE(nextgi_hit_light_key_is_gi(rk));
+			CHECK(nextgi_hit_light_key_is_gi(gk));
+		}
+	}
+
+	// Interleave reflection hits (including fallback 0x7FFF) and diffuse GI hits (including 0x8000 and fallback 0xFFFF)
+	// in the same record buffer and run the 16-bit counting sort.
+	struct InputHit {
+		bool is_gi;
+		uint32_t shader_slot;
+		uint32_t material_id;
+	};
+	const InputHit inputs[] = {
+		{ true, 0u, 0u }, // GI min key 0x8000
+		{ false, UINT32_MAX, UINT32_MAX }, // Refl fallback 0x7FFF
+		{ true, UINT32_MAX, UINT32_MAX }, // GI fallback 0xFFFF
+		{ false, 0u, 0u }, // Refl min key 0x0000
+		{ true, 5u, 12u }, // GI 0x850C
+		{ false, 127u, 255u }, // Refl max non-fallback 0x7FFE
+		{ true, 5u, 12u }, // GI 0x850C duplicate
+		{ false, 3u, 9u }, // Refl 0x0309
+		{ true, 127u, 255u }, // GI max non-fallback 0xFFFE
+		{ false, 3u, 9u }, // Refl 0x0309 duplicate
+	};
+	const uint32_t count = sizeof(inputs) / sizeof(inputs[0]);
+	LocalVector<NextGIHitLightRecord> records;
+	records.resize(count);
+	uint32_t expected_refl = 0;
+	uint32_t expected_gi = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		NextGIHitLightRecordUnpacked u;
+		u.instance_index = i + 1;
+		u.flags = inputs[i].is_gi ? NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI : 0u;
+		u.material_key = inputs[i].is_gi
+				? nextgi_hit_light_gi_material_key(inputs[i].shader_slot, inputs[i].material_id)
+				: nextgi_hit_light_material_key(inputs[i].shader_slot, inputs[i].material_id);
+		u.ray_dir = Vector3(0.0f, 1.0f, 0.0f);
+		u.pixel = Vector2i(int(i), int(i * 2));
+		u.resume_distance = inputs[i].is_gi ? 4.25f : 0.5f;
+		records[i] = nextgi_hit_light_pack_record(u);
+		if (inputs[i].is_gi) {
+			expected_gi++;
+		} else {
+			expected_refl++;
+		}
+	}
+
+	LocalVector<uint32_t> sorted;
+	nextgi_hit_light_counting_sort(records.ptr(), count, sorted);
+	REQUIRE_EQ(sorted.size(), count);
+	REQUIRE_EQ(expected_refl, 5u);
+	REQUIRE_EQ(expected_gi, 5u);
+
+	// First [0 .. expected_refl - 1] must be strictly reflection hits in non-decreasing key order.
+	uint16_t prev_key = 0;
+	for (uint32_t i = 0; i < expected_refl; i++) {
+		const NextGIHitLightRecordUnpacked u = nextgi_hit_light_unpack_record(records[sorted[i]]);
+		CHECK_EQ(u.flags & NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI, 0u);
+		CHECK_FALSE(nextgi_hit_light_key_is_gi(u.material_key));
+		if (i > 0) {
+			CHECK(u.material_key >= prev_key);
+		}
+		prev_key = u.material_key;
+	}
+	// Remaining [expected_refl .. count - 1] must be strictly diffuse GI hits in non-decreasing key order.
+	for (uint32_t i = expected_refl; i < count; i++) {
+		const NextGIHitLightRecordUnpacked u = nextgi_hit_light_unpack_record(records[sorted[i]]);
+		CHECK_NE(u.flags & NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI, 0u);
+		CHECK(nextgi_hit_light_key_is_gi(u.material_key));
+		CHECK(u.material_key >= prev_key);
+		CHECK(Math::is_equal_approx(u.resume_distance, 4.25f));
+		prev_key = u.material_key;
+	}
+}
+
+TEST_CASE("[NextGI][HitLighting][GI] Gather MODE_HIT_LIGHTING_GI variant follows ray-query rules and compiles") {
+	const String source = RendererRD::NextGIGather::build_shader_source(7);
+	REQUIRE_FALSE(source.is_empty());
+	CHECK(source.contains("#define MODE_HIT_LIGHTING_GI"));
+	CHECK(source.contains("nextgi_hit_light_gi_material_key("));
+	CHECK(source.contains("NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI"));
+	CHECK(source.contains("gi_hit_records_out"));
+	CHECK_FALSE(source.contains("while"));
+	CHECK_FALSE(source.contains("shared uint"));
+	CHECK_FALSE(source.contains("shared float"));
+	CHECK_FALSE(source.contains("rayQueryGetIntersectionTriangleVertexPositionsEXT"));
+	CHECK_FALSE(source.contains("GL_EXT_buffer_reference"));
+#ifdef MODULE_GLSLANG_ENABLED
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(
+			RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+			source,
+			RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+			RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3,
+			&error);
+	if (spirv.is_empty()) {
+		FAIL_CHECK(("glslang failed to compile NextGI gather MODE_HIT_LIGHTING_GI:\n" + error).utf8().get_data());
+	}
+	REQUIRE_GE(spirv.size(), 20);
+#endif
 }
 
 } // namespace TestNextGIHitLighting

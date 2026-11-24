@@ -302,7 +302,7 @@ void main() {
 	float hit_t = rayQueryGetIntersectionTEXT(rq, true);
 	bool front_face = rayQueryGetIntersectionFrontFaceEXT(rq, true);
 
-	uint material_key = 0xFFFFu;
+	uint material_key = NEXTGI_HL_KEY_REFLECTION_FALLBACK;
 	bool is_translucent = false;
 	if (custom_index < mark_params.counts0.y) {
 		NextGIInstanceRecord inst = records.data[custom_index];

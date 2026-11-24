@@ -3249,6 +3249,9 @@
 		<member name="rendering/global_illumination/nextgi/hardware_ray_tracing_mode.windows" type="int" setter="" getter="">
 			Windows override for [member rendering/global_illumination/nextgi/hardware_ray_tracing_mode].
 		</member>
+		<member name="rendering/global_illumination/nextgi/hit_lighting_gi" type="bool" setter="" getter="" default="false">
+			Advanced setting. If [code]true[/code], NextGI screen-probe diffuse gather rays that hit before [code]1.5[/code] times the World Radiance Cache handoff distance are shaded through the sorted-deferred hit-lighting pipeline (with 1 shadowed light per hit from the world light grid) instead of the Surface Radiance Cache, replacing probe radiance before probe spatial and temporal filtering. Active only when [member rendering/global_illumination/nextgi/ray_lighting_mode] is [b]Hit Lighting for Reflections[/b] (or overridden on the [Environment]), [member rendering/global_illumination/nextgi/quality] is [b]Epic[/b], and the hardware ray tracing tier is active with ray-tracing pipelines and [b]Full[/b] [member rendering/global_illumination/nextgi/hardware_ray_tracing_mode]. When [code]false[/code] (default) or when any prerequisite is unmet, all GI hit-lighting work is bypassed with zero overhead.
+		</member>
 		<member name="rendering/global_illumination/nextgi/max_reflection_bounces" type="int" setter="" getter="" default="1">
 			Maximum number of specular reflection bounces traced when NextGI hit lighting for reflections is active ([member rendering/global_illumination/nextgi/ray_lighting_mode]). Values above [code]1[/code] re-trace mirror hits (roughness below [code]0.1[/code]) up to this bounce count, up to [code]4[/code].
 		</member>

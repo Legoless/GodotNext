@@ -120,12 +120,51 @@ NextGIHitLightingVerdict nextgi_hit_lighting_evaluate(
 	return verdict;
 }
 
+NextGIHitLightingGIVerdict nextgi_hit_lighting_gi_evaluate(
+		bool p_hit_lighting_gi_setting,
+		const NextGIHitLightingVerdict &p_reflection_verdict,
+		bool p_epic_quality) {
+	NextGIHitLightingGIVerdict verdict;
+	verdict.requested = p_hit_lighting_gi_setting;
+	if (!p_hit_lighting_gi_setting) {
+		verdict.active = false;
+		verdict.reason = "OFF";
+		return verdict;
+	}
+	if (p_reflection_verdict.requested_mode != NEXTGI_RAY_LIGHTING_HIT_LIGHTING_REFLECTIONS) {
+		verdict.active = false;
+		verdict.reason = "RAY_LIGHTING_MODE_SURFACE_CACHE";
+		return verdict;
+	}
+	if (!p_reflection_verdict.active) {
+		verdict.active = false;
+		verdict.reason = p_reflection_verdict.reason;
+		return verdict;
+	}
+	if (!p_epic_quality) {
+		verdict.active = false;
+		verdict.reason = "QUALITY_NOT_EPIC";
+		return verdict;
+	}
+	verdict.active = true;
+	verdict.reason = "ACTIVE";
+	return verdict;
+}
+
 uint16_t nextgi_hit_light_material_key(uint32_t p_shader_slot, uint32_t p_material_id) {
 	if (p_material_id == UINT32_MAX || p_shader_slot == UINT32_MAX) {
-		return 0xFFFFu;
+		return uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK);
 	}
-	const uint16_t key = uint16_t(((p_shader_slot & 0xFFu) << 8u) | (p_material_id & 0xFFu));
-	return key == 0xFFFFu ? uint16_t(0xFFFEu) : key;
+	const uint16_t key = uint16_t(((p_shader_slot & 0x7Fu) << 8u) | (p_material_id & 0xFFu));
+	return key == uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK) ? uint16_t(NEXTGI_HL_KEY_REFLECTION_FALLBACK - 1u) : key;
+}
+
+uint16_t nextgi_hit_light_gi_material_key(uint32_t p_shader_slot, uint32_t p_material_id) {
+	if (p_material_id == UINT32_MAX || p_shader_slot == UINT32_MAX) {
+		return uint16_t(NEXTGI_HL_KEY_GI_FALLBACK);
+	}
+	const uint16_t key = uint16_t(NEXTGI_HL_KEY_GI_BASE | ((p_shader_slot & 0x7Fu) << 8u) | (p_material_id & 0xFFu));
+	return key == uint16_t(NEXTGI_HL_KEY_GI_FALLBACK) ? uint16_t(NEXTGI_HL_KEY_GI_FALLBACK - 1u) : key;
 }
 
 static Vector2 _oct_encode_hl(const Vector3 &p_dir) {
@@ -607,7 +646,8 @@ bool NextGIHitLighting::_ensure_buffers(uint32_t p_max_rays, uint32_t p_light_co
 		const BitField<RD::BufferCreationBits> creation_bits = indirect_rt_supported
 				? BitField<RD::BufferCreationBits>(RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT)
 				: BitField<RD::BufferCreationBits>(0);
-		indirect_buffer = rd->storage_buffer_create(32u, {}, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT, creation_bits);
+		// 48 bytes (12 uints): [0..3] reflection RT indirect, [4..7] sort compute indirect, [8..11] GI RT indirect (#128).
+		indirect_buffer = rd->storage_buffer_create(48u, {}, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT, creation_bits);
 	}
 	if (light_grid_buffer.is_null()) {
 		light_grid_buffer = rd->storage_buffer_create(uint32_t(NEXTGI_LIGHT_GRID_CELLS) * uint32_t(NEXTGI_LIGHT_GRID_CELL_WORDS) * uint32_t(sizeof(uint32_t)));
@@ -723,6 +763,359 @@ uint32_t NextGIHitLighting::_upload_lights(RenderDataRD *p_render_data, NextGIRT
 	return count;
 }
 
+bool NextGIHitLighting::_dispatch_light_grid(const ExecuteParams &p_params, uint32_t p_light_count) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	const float radius = MAX(p_params.rt_radius, 1.0f);
+	const Vector3 grid_min = p_params.camera_pos - Vector3(radius, radius, radius);
+	const float cell_size = (2.0f * radius) / float(NEXTGI_LIGHT_GRID_DIM);
+
+	struct LightGridPush {
+		float grid_min[3];
+		float cell_size;
+		uint32_t light_count;
+		uint32_t pad[3];
+	};
+	static_assert(sizeof(LightGridPush) == 32, "LightGridPush must be 32 bytes.");
+	LightGridPush push = {};
+	push.grid_min[0] = grid_min.x;
+	push.grid_min[1] = grid_min.y;
+	push.grid_min[2] = grid_min.z;
+	push.cell_size = cell_size;
+	push.light_count = p_light_count;
+
+	RD::Uniform grid_uniforms[3] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, light_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, light_grid_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, counter_buffer),
+	};
+	const RID grid_set = rd->uniform_set_create(VectorView<RD::Uniform>(grid_uniforms, 3), shaders->grid_shader_rid, 0);
+	ERR_FAIL_COND_V(grid_set.is_null(), false);
+	rd->draw_command_begin_label("NextGI World Light Grid");
+	const RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, shaders->grid_pipeline);
+	rd->compute_list_bind_uniform_set(list, grid_set, 0);
+	rd->compute_list_set_push_constant(list, &push, sizeof(push));
+	const uint32_t grid_groups = NEXTGI_LIGHT_GRID_DIM / 4u;
+	rd->compute_list_dispatch(list, grid_groups, grid_groups, grid_groups);
+	rd->compute_list_end();
+	rd->draw_command_end_label();
+	rd->free_rid(grid_set);
+	return true;
+}
+
+bool NextGIHitLighting::_dispatch_mark(const ExecuteParams &p_params, uint32_t p_max_rays) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	const uint32_t trace_w = uint32_t(p_params.trace_size.width);
+	const uint32_t trace_h = uint32_t(p_params.trace_size.height);
+	const float radius = MAX(p_params.rt_radius, 1.0f);
+	const bool has_translucent = p_params.rt_scene->get_translucent_instance_count() > 0;
+
+	NextGIHitMarkParamsGPU mp;
+	_store_projection_hl(p_params.inv_view_proj, mp.inv_view_proj);
+	_store_projection_hl(p_params.view_proj, mp.view_proj);
+	mp.camera_pos_radius[0] = p_params.camera_pos.x;
+	mp.camera_pos_radius[1] = p_params.camera_pos.y;
+	mp.camera_pos_radius[2] = p_params.camera_pos.z;
+	mp.camera_pos_radius[3] = radius;
+	mp.screen_size_origin[0] = float(MAX(p_params.screen_size.width, 1));
+	mp.screen_size_origin[1] = float(MAX(p_params.screen_size.height, 1));
+	mp.screen_size_origin[2] = p_params.max_origin_offset;
+	mp.screen_size_origin[3] = p_params.max_trace_roughness;
+	mp.ambient_color_sky[0] = p_params.ambient_color.r;
+	mp.ambient_color_sky[1] = p_params.ambient_color.g;
+	mp.ambient_color_sky[2] = p_params.ambient_color.b;
+	mp.ambient_color_sky[3] = p_params.sky_enabled ? 1.0f : 0.0f;
+	mp.fog_params0[0] = p_params.fog_enabled ? 1.0f : 0.0f;
+	mp.fog_params0[1] = p_params.fog_depth_mode ? 1.0f : 0.0f;
+	mp.fog_params0[2] = p_params.fog_density;
+	mp.fog_params0[3] = p_params.fog_height;
+	mp.fog_params1[0] = p_params.fog_height_density;
+	mp.fog_params1[1] = p_params.fog_depth_begin;
+	mp.fog_params1[2] = p_params.fog_depth_end;
+	mp.fog_params1[3] = p_params.fog_depth_curve;
+	mp.fog_light_color[0] = p_params.fog_light_color.r;
+	mp.fog_light_color[1] = p_params.fog_light_color.g;
+	mp.fog_light_color[2] = p_params.fog_light_color.b;
+	mp.fog_light_color[3] = p_params.fog_light_energy;
+	NextGIViewMath::store_basis(p_params.view_to_world, mp.view_to_world);
+	mp.counts0[0] = p_params.frame;
+	mp.counts0[1] = p_params.hit_materials->get_record_count();
+	mp.counts0[2] = p_params.hit_materials->get_material_count();
+	mp.counts0[3] = p_max_rays;
+	mp.counts1[0] = p_params.reflect_enabled ? 1u : 0u;
+	mp.counts1[1] = p_params.reflect_debug ? 1u : 0u;
+	mp.counts1[2] = (p_params.blue_noise_mode ? 1u : 0u) | (p_params.front_layer ? 2u : 0u) | (has_translucent ? 4u : 0u);
+	mp.counts1[3] = p_params.hiz_max_mip;
+	rd->buffer_update(mark_params_buffer, 0, sizeof(mp), &mp);
+
+	const RID wrc_rad = (p_params.wrc != nullptr && p_params.wrc->is_ready() && p_params.wrc->get_radiance().is_valid()) ? p_params.wrc->get_radiance() : p_params.dummy_color;
+	const RID wrc_vis = (p_params.wrc != nullptr && p_params.wrc->is_ready() && p_params.wrc->get_visibility().is_valid()) ? p_params.wrc->get_visibility() : p_params.dummy_color;
+	const RID wrc_params = (p_params.wrc != nullptr && p_params.wrc->is_ready() && p_params.wrc->get_params_buffer().is_valid()) ? p_params.wrc->get_params_buffer() : p_params.dummy_buffer;
+	const RID records_buf = p_params.rt_scene->get_instance_record_buffer().is_valid() ? p_params.rt_scene->get_instance_record_buffer() : p_params.dummy_buffer;
+	const RID hit_surf_buf = p_params.hit_materials->get_hit_surface_buffer().is_valid() ? p_params.hit_materials->get_hit_surface_buffer() : p_params.dummy_buffer;
+	const RID hit_mat_buf = p_params.hit_materials->get_material_table_buffer().is_valid() ? p_params.hit_materials->get_material_table_buffer() : p_params.dummy_buffer;
+
+	RD::Uniform mark_uniforms[20] = {
+		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_params.rt_scene->get_tlas()),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ p_params.sampler_nearest, p_params.depth })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ p_params.sampler_nearest, p_params.normal_roughness })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ p_params.sampler_nearest, p_params.hiz })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ p_params.sampler_linear, p_params.last_frame })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ p_params.sampler_linear, p_params.sky_tex })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ p_params.sampler_nearest, p_params.blue_noise })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ p_params.sampler_linear, wrc_rad })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, Vector<RID>({ p_params.sampler_linear, wrc_vis })),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, records_buf),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, hit_surf_buf),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, hit_mat_buf),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, wrc_params),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, mark_params_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, record_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, counter_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, p_params.reflect_counter_buffer.is_valid() ? p_params.reflect_counter_buffer : p_params.dummy_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 17, p_params.reflection_out),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 18, p_params.hit_distance_out.is_valid() ? p_params.hit_distance_out : p_params.reflection_out),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 19, p_params.debug_out.is_valid() ? p_params.debug_out : p_params.reflection_out),
+	};
+	const RID mark_set = rd->uniform_set_create(VectorView<RD::Uniform>(mark_uniforms, 20), shaders->mark_shader_rid, 0);
+	ERR_FAIL_COND_V(mark_set.is_null(), false);
+	rd->draw_command_begin_label("NextGI Hit Mark");
+	const RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, shaders->mark_pipeline);
+	rd->compute_list_bind_uniform_set(list, mark_set, 0);
+	rd->compute_list_dispatch(list, MAX((trace_w + 7u) / 8u, 1u), MAX((trace_h + 7u) / 8u, 1u), 1);
+	rd->compute_list_end();
+	rd->draw_command_end_label();
+	rd->free_rid(mark_set);
+	return true;
+}
+
+bool NextGIHitLighting::_dispatch_sort(uint32_t p_max_rays) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	struct SortPush {
+		uint32_t max_rays;
+		uint32_t pad[3];
+	};
+	SortPush push = { p_max_rays, { 0, 0, 0 } };
+
+	// Each sort stage uses its own uniform set matching its exact shader variant bindings so RDG
+	// tracks STORAGE_BUFFER_READ_WRITE on indirect_buffer and block_sums_buffer accurately and emits
+	// full COMPUTE_SHADER_WRITE -> DRAW_INDIRECT_READ barriers before indirect dispatches/RT traces.
+	RD::Uniform clear_u[3] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, histogram_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, counter_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, indirect_buffer),
+	};
+	RD::Uniform hist_u[3] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, record_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, histogram_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, counter_buffer),
+	};
+	RD::Uniform scan_local_u[2] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, histogram_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, block_sums_buffer),
+	};
+	RD::Uniform scan_blocks_u[1] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, block_sums_buffer),
+	};
+	RD::Uniform scan_add_u[4] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, histogram_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, block_sums_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, counter_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, indirect_buffer),
+	};
+	RD::Uniform scatter_u[4] = {
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, record_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, histogram_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, sorted_index_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, counter_buffer),
+	};
+
+	const RID sort_sets[SORT_VARIANT_MAX] = {
+		rd->uniform_set_create(VectorView<RD::Uniform>(clear_u, 3), shaders->sort_shader_rids[SORT_VARIANT_CLEAR], 0),
+		rd->uniform_set_create(VectorView<RD::Uniform>(hist_u, 3), shaders->sort_shader_rids[SORT_VARIANT_HISTOGRAM], 0),
+		rd->uniform_set_create(VectorView<RD::Uniform>(scan_local_u, 2), shaders->sort_shader_rids[SORT_VARIANT_SCAN_LOCAL], 0),
+		rd->uniform_set_create(VectorView<RD::Uniform>(scan_blocks_u, 1), shaders->sort_shader_rids[SORT_VARIANT_SCAN_BLOCKS], 0),
+		rd->uniform_set_create(VectorView<RD::Uniform>(scan_add_u, 4), shaders->sort_shader_rids[SORT_VARIANT_SCAN_ADD], 0),
+		rd->uniform_set_create(VectorView<RD::Uniform>(scatter_u, 4), shaders->sort_shader_rids[SORT_VARIANT_SCATTER], 0),
+	};
+	auto free_sets = [&]() {
+		for (int i = 0; i < SORT_VARIANT_MAX; i++) {
+			if (sort_sets[i].is_valid()) {
+				rd->free_rid(sort_sets[i]);
+			}
+		}
+	};
+	for (int i = 0; i < SORT_VARIANT_MAX; i++) {
+		if (sort_sets[i].is_null()) {
+			free_sets();
+			ERR_FAIL_V_MSG(false, "NextGI hit lighting: failed to create sort uniform set.");
+		}
+	}
+
+	RENDER_TIMESTAMP("NextGI Hit Sort");
+	rd->draw_command_begin_label("NextGI Hit Sort");
+
+	// 3a. Clear histogram & write indirect dispatch arguments.
+	{
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_CLEAR]);
+		rd->compute_list_bind_uniform_set(list, sort_sets[SORT_VARIANT_CLEAR], 0);
+		rd->compute_list_set_push_constant(list, &push, sizeof(push));
+		rd->compute_list_dispatch(list, 256u, 1u, 1u);
+		rd->compute_list_end();
+	}
+
+	// 3b. Histogram active hits by 16-bit material key.
+	{
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_HISTOGRAM]);
+		rd->compute_list_bind_uniform_set(list, sort_sets[SORT_VARIANT_HISTOGRAM], 0);
+		rd->compute_list_set_push_constant(list, &push, sizeof(push));
+		rd->compute_list_dispatch_indirect(list, indirect_buffer, 16u);
+		rd->compute_list_end();
+	}
+
+	// 3c. Per-block exclusive prefix sum (256 blocks x 256 bins).
+	{
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCAN_LOCAL]);
+		rd->compute_list_bind_uniform_set(list, sort_sets[SORT_VARIANT_SCAN_LOCAL], 0);
+		rd->compute_list_dispatch(list, 256u, 1u, 1u);
+		rd->compute_list_end();
+	}
+
+	// 3d. Exclusive prefix sum over the 256 block sums.
+	{
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCAN_BLOCKS]);
+		rd->compute_list_bind_uniform_set(list, sort_sets[SORT_VARIANT_SCAN_BLOCKS], 0);
+		rd->compute_list_dispatch(list, 1u, 1u, 1u);
+		rd->compute_list_end();
+	}
+
+	// 3e. Add scanned block offsets to histogram bins (and emit reflection + GI indirect counts).
+	{
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCAN_ADD]);
+		rd->compute_list_bind_uniform_set(list, sort_sets[SORT_VARIANT_SCAN_ADD], 0);
+		rd->compute_list_set_push_constant(list, &push, sizeof(push));
+		rd->compute_list_dispatch(list, 256u, 1u, 1u);
+		rd->compute_list_end();
+	}
+
+	// 3f. Scatter active hit indices into sorted order.
+	{
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCATTER]);
+		rd->compute_list_bind_uniform_set(list, sort_sets[SORT_VARIANT_SCATTER], 0);
+		rd->compute_list_set_push_constant(list, &push, sizeof(push));
+		rd->compute_list_dispatch_indirect(list, indirect_buffer, 16u);
+		rd->compute_list_end();
+	}
+
+	rd->draw_command_end_label();
+	free_sets();
+	return true;
+}
+
+void NextGIHitLighting::_upload_hl_params(const ExecuteParams &p_params, uint32_t p_max_rays, uint32_t p_light_count, uint32_t p_max_bounces) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL(rd);
+	const uint32_t trace_w = uint32_t(p_params.trace_size.width);
+	const uint32_t trace_h = uint32_t(p_params.trace_size.height);
+	const float radius = MAX(p_params.rt_radius, 1.0f);
+	const Vector3 grid_min = p_params.camera_pos - Vector3(radius, radius, radius);
+	const float cell_size = (2.0f * radius) / float(NEXTGI_LIGHT_GRID_DIM);
+	const float inv_cell_size = 1.0f / MAX(cell_size, 1e-4f);
+	const bool has_translucent = p_params.rt_scene->get_translucent_instance_count() > 0;
+
+	NextGIHitLightParamsGPU hp;
+	hp.camera_pos_radius[0] = p_params.camera_pos.x;
+	hp.camera_pos_radius[1] = p_params.camera_pos.y;
+	hp.camera_pos_radius[2] = p_params.camera_pos.z;
+	hp.camera_pos_radius[3] = radius;
+	hp.grid_min_inv_cell[0] = grid_min.x;
+	hp.grid_min_inv_cell[1] = grid_min.y;
+	hp.grid_min_inv_cell[2] = grid_min.z;
+	hp.grid_min_inv_cell[3] = inv_cell_size;
+	hp.ambient_color_sky[0] = p_params.ambient_color.r;
+	hp.ambient_color_sky[1] = p_params.ambient_color.g;
+	hp.ambient_color_sky[2] = p_params.ambient_color.b;
+	hp.ambient_color_sky[3] = p_params.sky_enabled ? 1.0f : 0.0f;
+	hp.fog_params0[0] = p_params.fog_enabled ? 1.0f : 0.0f;
+	hp.fog_params0[1] = p_params.fog_depth_mode ? 1.0f : 0.0f;
+	hp.fog_params0[2] = p_params.fog_density;
+	hp.fog_params0[3] = p_params.fog_height;
+	hp.fog_params1[0] = p_params.fog_height_density;
+	hp.fog_params1[1] = p_params.fog_depth_begin;
+	hp.fog_params1[2] = p_params.fog_depth_end;
+	hp.fog_params1[3] = p_params.fog_depth_curve;
+	hp.fog_light_color[0] = p_params.fog_light_color.r;
+	hp.fog_light_color[1] = p_params.fog_light_color.g;
+	hp.fog_light_color[2] = p_params.fog_light_color.b;
+	hp.fog_light_color[3] = p_params.fog_light_energy;
+	if (p_params.wrc != nullptr && p_params.wrc->is_ready()) {
+		const Vector3 wrc_cam = p_params.camera_pos;
+		const Vector3 wrc_origin = nextgi_wrc_snap_origin(wrc_cam, 1.0f);
+		hp.wrc_camera[0] = wrc_cam.x;
+		hp.wrc_camera[1] = wrc_cam.y;
+		hp.wrc_camera[2] = wrc_cam.z;
+		hp.wrc_camera[3] = 1.0f;
+		hp.wrc_origin_spacing[0] = wrc_origin.x;
+		hp.wrc_origin_spacing[1] = wrc_origin.y;
+		hp.wrc_origin_spacing[2] = wrc_origin.z;
+		hp.wrc_origin_spacing[3] = 1.0f;
+	}
+	const bool has_src_indirect = p_params.src != nullptr && p_params.relight != nullptr &&
+			p_params.relight->get_indirect_texture().is_valid() && p_params.relight->get_page_rect_buffer().is_valid() &&
+			p_params.src->get_card_buffer().is_valid() && p_params.src->get_card_set_buffer().is_valid();
+	hp.counts0[0] = p_max_rays;
+	hp.counts0[1] = p_light_count;
+	hp.counts0[2] = p_max_bounces;
+	hp.counts0[3] = p_params.frame;
+	hp.counts1[0] = trace_w;
+	hp.counts1[1] = trace_h;
+	hp.counts1[2] = p_params.relight != nullptr ? p_params.relight->get_page_rect_count() : 0u;
+	hp.counts1[3] = (has_translucent ? uint32_t(NEXTGI_HL_PARAM_FLAG_TRANSLUCENT) : 0u) |
+			(p_params.reflect_debug ? uint32_t(NEXTGI_HL_PARAM_FLAG_REFLECT_DEBUG) : 0u) |
+			(p_params.blue_noise_mode ? uint32_t(NEXTGI_HL_PARAM_FLAG_BLUE_NOISE) : 0u) |
+			(has_src_indirect ? uint32_t(NEXTGI_HL_PARAM_FLAG_SRC_INDIRECT) : 0u);
+	rd->buffer_update(hl_params_buffer, 0, sizeof(hp), &hp);
+}
+
+bool NextGIHitLighting::_dispatch_raygen(const ExecuteParams &p_params, bool p_gi_pass, RID p_output_image, uint32_t p_max_rays, uint32_t p_indirect_offset) {
+	NextGIHitLightTrace trace;
+	trace.params = hl_params_buffer;
+	trace.records = record_buffer;
+	trace.sorted_indices = sorted_index_buffer;
+	trace.lights = light_buffer;
+	trace.light_grid = light_grid_buffer;
+	trace.counters = counter_buffer;
+	trace.indirect_buffer = indirect_rt_supported ? indirect_buffer : RID();
+	trace.indirect_offset = p_indirect_offset;
+	trace.src_material_depth = p_params.src != nullptr ? p_params.src->get_atlas_texture(NextGISRC::ATLAS_DEPTH) : RID();
+	trace.src_cards = p_params.src != nullptr ? p_params.src->get_card_buffer() : RID();
+	trace.src_card_sets = p_params.src != nullptr ? p_params.src->get_card_set_buffer() : RID();
+	trace.src_page_rects = p_params.relight != nullptr ? p_params.relight->get_page_rect_buffer() : RID();
+	trace.src_indirect = p_params.relight != nullptr ? p_params.relight->get_indirect_texture() : RID();
+	trace.wrc_radiance = (p_params.wrc != nullptr && p_params.wrc->is_ready()) ? p_params.wrc->get_radiance() : RID();
+	trace.wrc_visibility = (p_params.wrc != nullptr && p_params.wrc->is_ready()) ? p_params.wrc->get_visibility() : RID();
+	trace.sky = p_params.sky_tex;
+	trace.blue_noise = p_params.blue_noise;
+	trace.reflection_out = p_output_image;
+	trace.hit_distance_out = p_gi_pass ? RID() : p_params.hit_distance_out;
+	trace.debug_out = p_gi_pass ? RID() : p_params.debug_out;
+	trace.max_rays = p_max_rays;
+	trace.time = p_params.time;
+	trace.gi_pass = p_gi_pass;
+
+	return p_params.hit_materials->trace_hit_lighting(p_params.rt_scene, trace);
+}
+
 bool NextGIHitLighting::execute(const ExecuteParams &p_params) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd == nullptr || p_params.rt_scene == nullptr || p_params.hit_materials == nullptr || !p_params.rt_scene->is_tlas_traceable() || !p_params.hit_materials->can_trace_hit_lighting()) {
@@ -743,11 +1136,6 @@ bool NextGIHitLighting::execute(const ExecuteParams &p_params) {
 
 	const uint32_t light_count = _upload_lights(p_params.render_data, p_params.rt_scene);
 	const uint32_t max_bounces = nextgi_clamp_max_reflection_bounces(int(p_params.max_reflection_bounces));
-	const float radius = MAX(p_params.rt_radius, 1.0f);
-	const Vector3 grid_min = p_params.camera_pos - Vector3(radius, radius, radius);
-	const float cell_size = (2.0f * radius) / float(NEXTGI_LIGHT_GRID_DIM);
-	const float inv_cell_size = 1.0f / MAX(cell_size, 1e-4f);
-	const bool has_translucent = p_params.rt_scene->get_translucent_instance_count() > 0;
 
 	// Clear hit lighting counters and reflect counters.
 	NextGIHitLightCountersGPU zero_counters;
@@ -757,271 +1145,114 @@ bool NextGIHitLighting::execute(const ExecuteParams &p_params) {
 		rd->buffer_update(p_params.reflect_counter_buffer, 0, sizeof(zero_reflect), zero_reflect);
 	}
 
-	// Stage 1: Build 64^3 world-space light grid over [-rt_scene_radius, +rt_scene_radius]^3.
-	{
-		struct LightGridPush {
-			float grid_min[3];
-			float cell_size;
-			uint32_t light_count;
-			uint32_t pad[3];
-		};
-		static_assert(sizeof(LightGridPush) == 32, "LightGridPush must be 32 bytes.");
-		LightGridPush push = {};
-		push.grid_min[0] = grid_min.x;
-		push.grid_min[1] = grid_min.y;
-		push.grid_min[2] = grid_min.z;
-		push.cell_size = cell_size;
-		push.light_count = light_count;
-
-		RD::Uniform grid_uniforms[3] = {
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, light_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, light_grid_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, counter_buffer),
-		};
-		const RID grid_set = rd->uniform_set_create(VectorView<RD::Uniform>(grid_uniforms, 3), shaders->grid_shader_rid, 0);
-		ERR_FAIL_COND_V(grid_set.is_null(), false);
-		rd->draw_command_begin_label("NextGI World Light Grid");
-		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shaders->grid_pipeline);
-		rd->compute_list_bind_uniform_set(list, grid_set, 0);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		const uint32_t grid_groups = NEXTGI_LIGHT_GRID_DIM / 4u;
-		rd->compute_list_dispatch(list, grid_groups, grid_groups, grid_groups);
-		rd->compute_list_end();
-		rd->draw_command_end_label();
-		rd->free_rid(grid_set);
+	if (!_dispatch_light_grid(p_params, light_count)) {
+		return false;
 	}
-
-	// Stage 2: Mark primary reflection hits (nextgi_reflect.glsl).
-	{
-		NextGIHitMarkParamsGPU mp;
-		_store_projection_hl(p_params.inv_view_proj, mp.inv_view_proj);
-		_store_projection_hl(p_params.view_proj, mp.view_proj);
-		mp.camera_pos_radius[0] = p_params.camera_pos.x;
-		mp.camera_pos_radius[1] = p_params.camera_pos.y;
-		mp.camera_pos_radius[2] = p_params.camera_pos.z;
-		mp.camera_pos_radius[3] = radius;
-		mp.screen_size_origin[0] = float(MAX(p_params.screen_size.width, 1));
-		mp.screen_size_origin[1] = float(MAX(p_params.screen_size.height, 1));
-		mp.screen_size_origin[2] = p_params.max_origin_offset;
-		mp.screen_size_origin[3] = p_params.max_trace_roughness;
-		mp.ambient_color_sky[0] = p_params.ambient_color.r;
-		mp.ambient_color_sky[1] = p_params.ambient_color.g;
-		mp.ambient_color_sky[2] = p_params.ambient_color.b;
-		mp.ambient_color_sky[3] = p_params.sky_enabled ? 1.0f : 0.0f;
-		mp.fog_params0[0] = p_params.fog_enabled ? 1.0f : 0.0f;
-		mp.fog_params0[1] = p_params.fog_depth_mode ? 1.0f : 0.0f;
-		mp.fog_params0[2] = p_params.fog_density;
-		mp.fog_params0[3] = p_params.fog_height;
-		mp.fog_params1[0] = p_params.fog_height_density;
-		mp.fog_params1[1] = p_params.fog_depth_begin;
-		mp.fog_params1[2] = p_params.fog_depth_end;
-		mp.fog_params1[3] = p_params.fog_depth_curve;
-		mp.fog_light_color[0] = p_params.fog_light_color.r;
-		mp.fog_light_color[1] = p_params.fog_light_color.g;
-		mp.fog_light_color[2] = p_params.fog_light_color.b;
-		mp.fog_light_color[3] = p_params.fog_light_energy;
-		NextGIViewMath::store_basis(p_params.view_to_world, mp.view_to_world);
-		mp.counts0[0] = p_params.frame;
-		mp.counts0[1] = p_params.hit_materials->get_record_count();
-		mp.counts0[2] = p_params.hit_materials->get_material_count();
-		mp.counts0[3] = max_rays;
-		mp.counts1[0] = p_params.reflect_enabled ? 1u : 0u;
-		mp.counts1[1] = p_params.reflect_debug ? 1u : 0u;
-		mp.counts1[2] = (p_params.blue_noise_mode ? 1u : 0u) | (p_params.front_layer ? 2u : 0u) | (has_translucent ? 4u : 0u);
-		mp.counts1[3] = p_params.hiz_max_mip;
-		rd->buffer_update(mark_params_buffer, 0, sizeof(mp), &mp);
-
-		const RID wrc_rad = (p_params.wrc != nullptr && p_params.wrc->is_ready() && p_params.wrc->get_radiance().is_valid()) ? p_params.wrc->get_radiance() : p_params.dummy_color;
-		const RID wrc_vis = (p_params.wrc != nullptr && p_params.wrc->is_ready() && p_params.wrc->get_visibility().is_valid()) ? p_params.wrc->get_visibility() : p_params.dummy_color;
-		const RID wrc_params = (p_params.wrc != nullptr && p_params.wrc->is_ready() && p_params.wrc->get_params_buffer().is_valid()) ? p_params.wrc->get_params_buffer() : p_params.dummy_buffer;
-		const RID records_buf = p_params.rt_scene->get_instance_record_buffer().is_valid() ? p_params.rt_scene->get_instance_record_buffer() : p_params.dummy_buffer;
-		const RID hit_surf_buf = p_params.hit_materials->get_hit_surface_buffer().is_valid() ? p_params.hit_materials->get_hit_surface_buffer() : p_params.dummy_buffer;
-		const RID hit_mat_buf = p_params.hit_materials->get_material_table_buffer().is_valid() ? p_params.hit_materials->get_material_table_buffer() : p_params.dummy_buffer;
-
-		RD::Uniform mark_uniforms[20] = {
-			RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_params.rt_scene->get_tlas()),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ p_params.sampler_nearest, p_params.depth })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ p_params.sampler_nearest, p_params.normal_roughness })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ p_params.sampler_nearest, p_params.hiz })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ p_params.sampler_linear, p_params.last_frame })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ p_params.sampler_linear, p_params.sky_tex })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ p_params.sampler_nearest, p_params.blue_noise })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ p_params.sampler_linear, wrc_rad })),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, Vector<RID>({ p_params.sampler_linear, wrc_vis })),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, records_buf),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, hit_surf_buf),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, hit_mat_buf),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, wrc_params),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, mark_params_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, record_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, counter_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, p_params.reflect_counter_buffer.is_valid() ? p_params.reflect_counter_buffer : p_params.dummy_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 17, p_params.reflection_out),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 18, p_params.hit_distance_out.is_valid() ? p_params.hit_distance_out : p_params.reflection_out),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 19, p_params.debug_out.is_valid() ? p_params.debug_out : p_params.reflection_out),
-		};
-		const RID mark_set = rd->uniform_set_create(VectorView<RD::Uniform>(mark_uniforms, 20), shaders->mark_shader_rid, 0);
-		ERR_FAIL_COND_V(mark_set.is_null(), false);
-		rd->draw_command_begin_label("NextGI Hit Mark");
-		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shaders->mark_pipeline);
-		rd->compute_list_bind_uniform_set(list, mark_set, 0);
-		rd->compute_list_dispatch(list, MAX((trace_w + 7u) / 8u, 1u), MAX((trace_h + 7u) / 8u, 1u), 1);
-		rd->compute_list_end();
-		rd->draw_command_end_label();
-		rd->free_rid(mark_set);
+	if (!_dispatch_mark(p_params, max_rays)) {
+		return false;
 	}
-
-	// Stage 3: Compact & counting-sort active hits by 16-bit material key (nextgi_hit_sort.glsl).
-	{
-		struct SortPush {
-			uint32_t max_rays;
-			uint32_t pad[3];
-		};
-		SortPush push = { max_rays, { 0, 0, 0 } };
-
-		RD::Uniform sort_uniforms[6] = {
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, record_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, histogram_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, block_sums_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, sorted_index_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, counter_buffer),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, indirect_buffer),
-		};
-		const RID sort_set = rd->uniform_set_create(VectorView<RD::Uniform>(sort_uniforms, 6), shaders->sort_shader_rids[SORT_VARIANT_SCATTER], 0);
-		ERR_FAIL_COND_V(sort_set.is_null(), false);
-
-		RENDER_TIMESTAMP("NextGI Hit Sort");
-		rd->draw_command_begin_label("NextGI Hit Sort");
-		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_uniform_set(list, sort_set, 0);
-
-		// 3a. Clear histogram & write indirect dispatch arguments.
-		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_CLEAR]);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch(list, 256u, 1u, 1u);
-		rd->compute_list_add_barrier(list);
-
-		// 3b. Histogram active hits by 16-bit material key.
-		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_HISTOGRAM]);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch_indirect(list, indirect_buffer, 16u);
-		rd->compute_list_add_barrier(list);
-
-		// 3c. Per-block exclusive prefix sum (256 blocks x 256 bins).
-		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCAN_LOCAL]);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch(list, 256u, 1u, 1u);
-		rd->compute_list_add_barrier(list);
-
-		// 3d. Exclusive prefix sum over the 256 block sums.
-		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCAN_BLOCKS]);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch(list, 1u, 1u, 1u);
-		rd->compute_list_add_barrier(list);
-
-		// 3e. Add scanned block offsets to histogram bins.
-		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCAN_ADD]);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch(list, 256u, 1u, 1u);
-		rd->compute_list_add_barrier(list);
-
-		// 3f. Scatter active hit indices into sorted order.
-		rd->compute_list_bind_compute_pipeline(list, shaders->sort_pipelines[SORT_VARIANT_SCATTER]);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch_indirect(list, indirect_buffer, 16u);
-		rd->compute_list_end();
-		rd->draw_command_end_label();
-		rd->free_rid(sort_set);
+	if (!_dispatch_sort(max_rays)) {
+		return false;
 	}
+	_upload_hl_params(p_params, max_rays, light_count, max_bounces);
 
-	// Stage 4: Re-trace sorted hits into #130 material hit groups and shade with PBR + world light grid + shadows.
-	{
-		NextGIHitLightParamsGPU hp;
-		hp.camera_pos_radius[0] = p_params.camera_pos.x;
-		hp.camera_pos_radius[1] = p_params.camera_pos.y;
-		hp.camera_pos_radius[2] = p_params.camera_pos.z;
-		hp.camera_pos_radius[3] = radius;
-		hp.grid_min_inv_cell[0] = grid_min.x;
-		hp.grid_min_inv_cell[1] = grid_min.y;
-		hp.grid_min_inv_cell[2] = grid_min.z;
-		hp.grid_min_inv_cell[3] = inv_cell_size;
-		hp.ambient_color_sky[0] = p_params.ambient_color.r;
-		hp.ambient_color_sky[1] = p_params.ambient_color.g;
-		hp.ambient_color_sky[2] = p_params.ambient_color.b;
-		hp.ambient_color_sky[3] = p_params.sky_enabled ? 1.0f : 0.0f;
-		hp.fog_params0[0] = p_params.fog_enabled ? 1.0f : 0.0f;
-		hp.fog_params0[1] = p_params.fog_depth_mode ? 1.0f : 0.0f;
-		hp.fog_params0[2] = p_params.fog_density;
-		hp.fog_params0[3] = p_params.fog_height;
-		hp.fog_params1[0] = p_params.fog_height_density;
-		hp.fog_params1[1] = p_params.fog_depth_begin;
-		hp.fog_params1[2] = p_params.fog_depth_end;
-		hp.fog_params1[3] = p_params.fog_depth_curve;
-		hp.fog_light_color[0] = p_params.fog_light_color.r;
-		hp.fog_light_color[1] = p_params.fog_light_color.g;
-		hp.fog_light_color[2] = p_params.fog_light_color.b;
-		hp.fog_light_color[3] = p_params.fog_light_energy;
-		if (p_params.wrc != nullptr && p_params.wrc->is_ready()) {
-			const Vector3 wrc_cam = p_params.camera_pos;
-			const Vector3 wrc_origin = nextgi_wrc_snap_origin(wrc_cam, 1.0f);
-			hp.wrc_camera[0] = wrc_cam.x;
-			hp.wrc_camera[1] = wrc_cam.y;
-			hp.wrc_camera[2] = wrc_cam.z;
-			hp.wrc_camera[3] = 1.0f;
-			hp.wrc_origin_spacing[0] = wrc_origin.x;
-			hp.wrc_origin_spacing[1] = wrc_origin.y;
-			hp.wrc_origin_spacing[2] = wrc_origin.z;
-			hp.wrc_origin_spacing[3] = 1.0f;
-		}
-		const bool has_src_indirect = p_params.src != nullptr && p_params.relight != nullptr &&
-				p_params.relight->get_indirect_texture().is_valid() && p_params.relight->get_page_rect_buffer().is_valid() &&
-				p_params.src->get_card_buffer().is_valid() && p_params.src->get_card_set_buffer().is_valid();
-		hp.counts0[0] = max_rays;
-		hp.counts0[1] = light_count;
-		hp.counts0[2] = max_bounces;
-		hp.counts0[3] = p_params.frame;
-		hp.counts1[0] = trace_w;
-		hp.counts1[1] = trace_h;
-		hp.counts1[2] = p_params.relight != nullptr ? p_params.relight->get_page_rect_count() : 0u;
-		hp.counts1[3] = (has_translucent ? uint32_t(NEXTGI_HL_PARAM_FLAG_TRANSLUCENT) : 0u) |
-				(p_params.reflect_debug ? uint32_t(NEXTGI_HL_PARAM_FLAG_REFLECT_DEBUG) : 0u) |
-				(p_params.blue_noise_mode ? uint32_t(NEXTGI_HL_PARAM_FLAG_BLUE_NOISE) : 0u) |
-				(has_src_indirect ? uint32_t(NEXTGI_HL_PARAM_FLAG_SRC_INDIRECT) : 0u);
-		rd->buffer_update(hl_params_buffer, 0, sizeof(hp), &hp);
-
-		NextGIHitLightTrace trace;
-		trace.params = hl_params_buffer;
-		trace.records = record_buffer;
-		trace.sorted_indices = sorted_index_buffer;
-		trace.lights = light_buffer;
-		trace.light_grid = light_grid_buffer;
-		trace.counters = counter_buffer;
-		trace.indirect_buffer = indirect_rt_supported ? indirect_buffer : RID();
-		trace.src_material_depth = p_params.src != nullptr ? p_params.src->get_atlas_texture(NextGISRC::ATLAS_DEPTH) : RID();
-		trace.src_cards = p_params.src != nullptr ? p_params.src->get_card_buffer() : RID();
-		trace.src_card_sets = p_params.src != nullptr ? p_params.src->get_card_set_buffer() : RID();
-		trace.src_page_rects = p_params.relight != nullptr ? p_params.relight->get_page_rect_buffer() : RID();
-		trace.src_indirect = p_params.relight != nullptr ? p_params.relight->get_indirect_texture() : RID();
-		trace.wrc_radiance = (p_params.wrc != nullptr && p_params.wrc->is_ready()) ? p_params.wrc->get_radiance() : RID();
-		trace.wrc_visibility = (p_params.wrc != nullptr && p_params.wrc->is_ready()) ? p_params.wrc->get_visibility() : RID();
-		trace.sky = p_params.sky_tex;
-		trace.blue_noise = p_params.blue_noise;
-		trace.reflection_out = p_params.reflection_out;
-		trace.hit_distance_out = p_params.hit_distance_out;
-		trace.debug_out = p_params.debug_out;
-		trace.max_rays = max_rays;
-		trace.time = p_params.time;
-
-		RENDER_TIMESTAMP("NextGI Hit Lighting");
-		if (!p_params.hit_materials->trace_hit_lighting(p_params.rt_scene, trace)) {
-			return false;
-		}
+	RENDER_TIMESTAMP("NextGI Hit Lighting");
+	if (!_dispatch_raygen(p_params, false, p_params.reflection_out, max_rays, 0u)) {
+		return false;
 	}
 
 	counters.dispatches++;
+	counters.last_gi_marked_hits = 0;
+	counters.last_gi_sorted_hits = 0;
+	counters.last_gi_shaded_hits = 0;
+	counters.last_gi_shadow_rays = 0;
 	counters.last_light_count = light_count;
+	counters.last_max_bounces = max_bounces;
+	counters.indirect_dispatch = indirect_rt_supported;
+	_request_counters();
+	return true;
+}
+
+// GodotNext: nextgi_hit_lighting_gi (#128). Step A of the combined GI + reflections pipeline:
+// sizes the shared hit-record buffer for both GI and reflection rays, uploads scenario lights,
+// zeroes shared counters, and builds the 64^3 world light grid once.
+bool NextGIHitLighting::begin_combined(const ExecuteParams &p_params, uint32_t p_gi_max_rays) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr || p_params.rt_scene == nullptr || p_params.hit_materials == nullptr || !p_params.rt_scene->is_tlas_traceable() || !p_params.hit_materials->can_trace_hit_lighting()) {
+		return false;
+	}
+	if (p_params.trace_size.width <= 0 || p_params.trace_size.height <= 0 || !p_params.reflection_out.is_valid() || p_gi_max_rays == 0u) {
+		return false;
+	}
+	if (!_ensure_shaders()) {
+		return false;
+	}
+	const uint32_t reflect_max_rays = uint32_t(p_params.trace_size.width) * uint32_t(p_params.trace_size.height);
+	const uint32_t total_max_rays = p_gi_max_rays + reflect_max_rays;
+	if (!_ensure_buffers(total_max_rays, MAX(light_capacity, 1u))) {
+		return false;
+	}
+
+	const uint32_t light_count = _upload_lights(p_params.render_data, p_params.rt_scene);
+
+	NextGIHitLightCountersGPU zero_counters;
+	rd->buffer_update(counter_buffer, 0, sizeof(zero_counters), &zero_counters);
+	if (p_params.reflect_counter_buffer.is_valid()) {
+		const uint32_t zero_reflect[4] = {};
+		rd->buffer_update(p_params.reflect_counter_buffer, 0, sizeof(zero_reflect), zero_reflect);
+	}
+
+	if (!_dispatch_light_grid(p_params, light_count)) {
+		return false;
+	}
+
+	combined_max_rays = total_max_rays;
+	combined_gi_max_rays = p_gi_max_rays;
+	combined_reflect_max_rays = reflect_max_rays;
+	combined_light_count = light_count;
+	return true;
+}
+
+// Step D: after nextgi_gather.glsl (MODE_HIT_LIGHTING_GI) has appended diffuse GI hit records,
+// append reflection hit records into the same buffer, run the single 16-bit counting sort (splitting
+// reflections [0x0000..0x7FFF] from diffuse GI [0x8000..0xFFFF]), and shade diffuse GI into
+// probe_image BEFORE probe spatial/temporal filtering.
+bool NextGIHitLighting::mark_sort_and_shade_gi(const ExecuteParams &p_params, RID p_probe_image) {
+	if (combined_max_rays == 0u || !p_probe_image.is_valid()) {
+		return false;
+	}
+	if (!_dispatch_mark(p_params, combined_max_rays)) {
+		return false;
+	}
+	if (!_dispatch_sort(combined_max_rays)) {
+		return false;
+	}
+	const uint32_t max_bounces = nextgi_clamp_max_reflection_bounces(int(p_params.max_reflection_bounces));
+	_upload_hl_params(p_params, combined_max_rays, combined_light_count, max_bounces);
+
+	RENDER_TIMESTAMP("NextGI Hit Lighting GI");
+	if (!_dispatch_raygen(p_params, true, p_probe_image, combined_gi_max_rays, 32u)) {
+		return false;
+	}
+	counters.gi_dispatches++;
+	return true;
+}
+
+// Step F: after _denoise_probes(), shade the sorted reflection hit slice using the already-sorted
+// indices, world light grid, and hl_params_buffer.
+bool NextGIHitLighting::shade_reflections_combined(const ExecuteParams &p_params) {
+	if (combined_max_rays == 0u || !p_params.reflection_out.is_valid()) {
+		return false;
+	}
+	const uint32_t max_bounces = nextgi_clamp_max_reflection_bounces(int(p_params.max_reflection_bounces));
+
+	RENDER_TIMESTAMP("NextGI Hit Lighting");
+	if (!_dispatch_raygen(p_params, false, p_params.reflection_out, combined_reflect_max_rays, 0u)) {
+		return false;
+	}
+
+	counters.dispatches++;
+	counters.last_light_count = combined_light_count;
 	counters.last_max_bounces = max_bounces;
 	counters.indirect_dispatch = indirect_rt_supported;
 	_request_counters();
@@ -1077,6 +1308,11 @@ void NextGIHitLighting::_counters_received(const Vector<uint8_t> &p_data, uint64
 	memcpy(&got, p_data.ptr(), sizeof(got));
 	self->counters.last_marked_hits = got.marked_hits;
 	self->counters.last_sorted_hits = got.sorted_hits;
+	self->counters.last_refl_sorted_hits = got.refl_sorted_hits;
+	self->counters.last_gi_marked_hits = got.gi_marked_hits;
+	self->counters.last_gi_sorted_hits = got.gi_sorted_hits;
+	self->counters.last_gi_shaded_hits = got.gi_shaded_hits;
+	self->counters.last_gi_shadow_rays = got.gi_shadow_rays;
 	self->counters.last_shadow_rays = got.shadow_rays;
 	self->counters.last_unshadowed_lights = got.unshadowed_lights;
 	self->counters.last_bounce_rays = got.bounce_rays;
@@ -1084,10 +1320,16 @@ void NextGIHitLighting::_counters_received(const Vector<uint8_t> &p_data, uint64
 	self->counters.last_light_grid_overflow = got.light_grid_overflow;
 }
 
-void NextGIHitLighting::fill_counters(Dictionary &r_counters) const {
+void NextGIHitLighting::fill_counters(Dictionary &r_counters, bool p_gi_active) const {
 	r_counters["hit_lighting_dispatches"] = int64_t(counters.dispatches);
+	r_counters["hit_lighting_gi_dispatches"] = int64_t(counters.gi_dispatches);
 	r_counters["hit_lighting_marked_hits"] = int64_t(counters.last_marked_hits);
 	r_counters["hit_lighting_sorted_hits"] = int64_t(counters.last_sorted_hits);
+	r_counters["hit_lighting_refl_sorted_hits"] = int64_t(counters.last_refl_sorted_hits);
+	r_counters["hit_lighting_gi_marked_hits"] = int64_t(p_gi_active ? counters.last_gi_marked_hits : 0u);
+	r_counters["hit_lighting_gi_sorted_hits"] = int64_t(p_gi_active ? counters.last_gi_sorted_hits : 0u);
+	r_counters["hit_lighting_gi_rays"] = int64_t(p_gi_active ? counters.last_gi_shaded_hits : 0u);
+	r_counters["hit_lighting_gi_shadow_rays"] = int64_t(p_gi_active ? counters.last_gi_shadow_rays : 0u);
 	r_counters["hit_lighting_shadow_rays"] = int64_t(counters.last_shadow_rays);
 	r_counters["hit_lighting_unshadowed_lights"] = int64_t(counters.last_unshadowed_lights);
 	r_counters["hit_lighting_bounce_rays"] = int64_t(counters.last_bounce_rays);

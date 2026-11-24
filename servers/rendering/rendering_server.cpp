@@ -4440,6 +4440,8 @@ void RenderingServer::init() {
 	// GodotNext: nextgi_hit_lighting (#129). Ray Lighting Mode and multi-bounce specular cap.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/ray_lighting_mode", PROPERTY_HINT_ENUM, "Surface Cache,Hit Lighting for Reflections"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/max_reflection_bounces", PROPERTY_HINT_RANGE, "1,4,1"), 1);
+	// GodotNext: nextgi_hit_lighting_gi (#128). Advanced, Epic-only hit lighting for screen-probe diffuse GI rays.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/hit_lighting_gi", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field", false);

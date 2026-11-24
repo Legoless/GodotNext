@@ -2393,8 +2393,10 @@ bool NextGIHitMaterials::trace_hit_lighting(NextGIRTScene *p_rt_scene, const Nex
 	push.time = p_trace.time;
 	push.record_count = in.record_count;
 	push.material_count = in.material_index_count;
+	push.flags = p_trace.gi_pass ? uint32_t(NEXTGI_HIT_PARAMS_GI_LIGHTING) : 0u;
 
-	rd->draw_command_begin_label("NextGI Hit Lighting");
+	const char *label = p_trace.gi_pass ? "NextGI Hit Lighting GI" : "NextGI Hit Lighting";
+	rd->draw_command_begin_label(Span<char>(label, strlen(label)));
 	RD::RaytracingListID list = rd->raytracing_list_begin();
 	rd->raytracing_list_bind_raytracing_pipeline(list, in.linked);
 	rd->raytracing_list_bind_uniform_set(list, scene_set, 0);
@@ -2402,7 +2404,7 @@ bool NextGIHitMaterials::trace_hit_lighting(NextGIRTScene *p_rt_scene, const Nex
 	rd->raytracing_list_bind_uniform_set(list, in.params_table_set, 2);
 	rd->raytracing_list_set_push_constant(list, &push, sizeof(push));
 	if (p_trace.indirect_buffer.is_valid() && rd->has_feature(RD::SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT)) {
-		rd->raytracing_list_trace_rays_indirect(list, NEXTGI_HIT_RAYGEN_HIT_LIGHTING, in.hit_sbt, p_trace.indirect_buffer, 0);
+		rd->raytracing_list_trace_rays_indirect(list, NEXTGI_HIT_RAYGEN_HIT_LIGHTING, in.hit_sbt, p_trace.indirect_buffer, p_trace.indirect_offset);
 	} else {
 		rd->raytracing_list_trace_rays(list, NEXTGI_HIT_RAYGEN_HIT_LIGHTING, in.hit_sbt, p_trace.max_rays, 1, 1);
 	}

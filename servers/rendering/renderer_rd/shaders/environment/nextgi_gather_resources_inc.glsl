@@ -96,6 +96,8 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	// GodotNext: ps_swrt_trace (#186). The SRC card-set and card counts the detail hits' D6
 	// lookup checks its indices against (pad2 and pad4 in the hardware shader).
 	uint card_set_count;
+#elif defined(MODE_HIT_LIGHTING_GI)
+	uint hit_material_count;
 #else
 	uint pad2;
 #endif
@@ -108,6 +110,8 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint sampling_mode;
 #ifdef NEXTGI_TRACE_SDF
 	uint card_count;
+#elif defined(MODE_HIT_LIGHTING_GI)
+	uint hit_record_max_rays;
 #else
 	uint pad4;
 #endif
@@ -128,7 +132,11 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	float far_distance;
 	uint far_occlusion_only;
 	uint front_layer;
+#ifdef MODE_HIT_LIGHTING_GI
+	uint hit_record_count;
+#else
 	uint front_pad0;
+#endif
 	vec4 view_to_world[3]; // GodotNext: nextgi_view_math. The normal-roughness buffer is in view space.
 }
 params;

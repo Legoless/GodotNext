@@ -331,6 +331,9 @@ hit_params;
 // GodotNext: nextgi_shadow_policy (#145). The ray generation stage traces the shadow retrace records
 // (hit_shadow_retrace) instead of the check's samples.
 #define NEXTGI_HIT_PARAMS_SHADOW_RETRACE 2u
+// GodotNext: nextgi_hit_lighting_gi (#128). The hit-lighting raygen shades the diffuse GI hit slice
+// (1 shadowed light per hit) and writes hit-lit radiance into probe_image bound at slot 52.
+#define NEXTGI_HIT_PARAMS_GI_LIGHTING 4u
 
 // The payload (32 bytes): shading = (albedo RGBA8 with the opacity in alpha, octahedral normal
 // 2x snorm16, roughness | metallic << 8 | ao << 16 | flags << 24, emission R11G11B10F); hit = (t, material

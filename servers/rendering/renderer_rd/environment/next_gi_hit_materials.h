@@ -109,6 +109,9 @@ enum {
 	// GodotNext: nextgi_shadow_policy (#145). The ray generation stage traces the shadow retrace records
 	// (trace_shadow_retrace()).
 	NEXTGI_HIT_PARAMS_SHADOW_RETRACE = 2,
+	// GodotNext: nextgi_hit_lighting_gi (#128). The hit-lighting raygen shades the diffuse GI hit slice
+	// (1 shadowed light per hit) and writes hit-lit radiance into probe_image bound at slot 52.
+	NEXTGI_HIT_PARAMS_GI_LIGHTING = 4,
 };
 
 // Who needs the attribute stream and the hit groups. Hit lighting (#129) sets NEXTGI_HIT_CONSUMER_HIT_LIGHTING
@@ -163,7 +166,9 @@ struct NextGIHitLightTrace {
 	RID hit_distance_out;
 	RID debug_out;
 	uint32_t max_rays = 0;
+	uint32_t indirect_offset = 0; // Byte offset into indirect_buffer (0 = reflections, 32 = diffuse GI #128).
 	float time = 0.0f;
+	bool gi_pass = false; // True for diffuse GI hit lighting (#128): sets NEXTGI_HIT_PARAMS_GI_LIGHTING.
 };
 
 // GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169). One path tracer
