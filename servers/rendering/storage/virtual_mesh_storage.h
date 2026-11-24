@@ -136,6 +136,20 @@ public:
 		uint32_t surface_count = 0;
 	};
 
+	// GodotNext: nextgeo_tessellation (#163) & nextgeo_voxels (#165) shared 25-bit visibility cluster ID partition.
+	// 32-bit visibility ID = (25-bit vis_cluster << 7) | (7-bit triangle/micro-triangle index), background = 0xFFFFFFFF.
+	//   Normal clusters:         0x00000000 .. 0x017FFFFF (up to 24M visible clusters)
+	//   Tessellation patches:    0x01800000 .. 0x01BFFFFF (#163, 4M diced sub-patches, <= 128 micro-tris each)
+	//   Nanite Voxel bricks:     0x01C00000 .. 0x01FFFFFF (reserved for #165; 0x01FFFFFF|127 = background sentinel)
+	// Mirrored in nextgeo_visibility.h, nextgeo_raster_bins.h, shaders/nextgeo/visibility_inc.glsl,
+	// nextgeo_records_inc.glsl, and nextgeo_cull_inc.glsl: change all in the same commit.
+	static constexpr uint32_t VIS_NORMAL_MAX = 0x017FFFFFu;
+	static constexpr uint32_t VIS_PATCH_BASE = 0x01800000u;
+	static constexpr uint32_t VIS_PATCH_MASK = 0x01C00000u;
+	static constexpr uint32_t VIS_PATCH_INDEX_MASK = 0x003FFFFFu;
+	static constexpr uint32_t VIS_VOXEL_BASE = 0x01C00000u;
+	static constexpr uint32_t VIS_VOXEL_MASK = 0x01C00000u;
+
 	// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N3). The raster-feature table. A raster bin is keyed
 	// by (feature mask, material shader version); the fixed-function bin has no feature bit. Each entry
 	// names the pass it rasterizes for, so the VSM page raster (#217) shares the table, and every later

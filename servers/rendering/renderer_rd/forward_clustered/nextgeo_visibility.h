@@ -50,6 +50,26 @@ static constexpr uint32_t NEXTGEO_INSTANCE_ID_LEGACY = 0xFFFFFFFFu;
 // so valid visible-cluster indices stay strictly below 0x1FFFFFF.
 static constexpr uint32_t NEXTGEO_VISIBILITY_MAX_CLUSTERS = (1u << 25u) - 1u;
 
+// GodotNext: nextgeo_tessellation (#163) & nextgeo_voxels (#165) reserved 25-bit visibility cluster ID partition.
+// Shared across C++ (virtual_mesh_storage.h, nextgeo_visibility.h, nextgeo_raster_bins.h) and GLSL
+// (visibility_inc.glsl, nextgeo_records_inc.glsl, nextgeo_cull_inc.glsl):
+//   - Normal clusters:             0x00000000u .. 0x017FFFFFu (24M visible clusters)
+//   - Tessellation diced patches:  0x01800000u .. 0x01BFFFFFu (#163; patch_idx = vis_cluster & 0x003FFFFFu)
+//   - Nanite Voxel bricks:         0x01C00000u .. 0x01FFFFFFu (reserved for #165)
+static constexpr uint32_t NEXTGEO_VIS_NORMAL_MAX = 0x017FFFFFu;
+static constexpr uint32_t NEXTGEO_VIS_PATCH_BASE = 0x01800000u;
+static constexpr uint32_t NEXTGEO_VIS_PATCH_MASK = 0x01C00000u;
+static constexpr uint32_t NEXTGEO_VIS_PATCH_INDEX_MASK = 0x003FFFFFu;
+static constexpr uint32_t NEXTGEO_VIS_PATCH_MAX_COUNT = NEXTGEO_VIS_PATCH_INDEX_MASK + 1u; // 4,194,304
+static constexpr uint32_t NEXTGEO_VIS_VOXEL_BASE = 0x01C00000u;
+static constexpr uint32_t NEXTGEO_VIS_VOXEL_MASK = 0x01C00000u;
+
+static_assert(NEXTGEO_VIS_NORMAL_MAX + 1u == NEXTGEO_VIS_PATCH_BASE, "Normal cluster range must end strictly before NEXTGEO_VIS_PATCH_BASE.");
+static_assert((NEXTGEO_VIS_PATCH_BASE & NEXTGEO_VIS_PATCH_MASK) == NEXTGEO_VIS_PATCH_BASE, "Patch base must match patch mask.");
+static_assert((NEXTGEO_VIS_VOXEL_BASE & NEXTGEO_VIS_VOXEL_MASK) == NEXTGEO_VIS_VOXEL_BASE, "Voxel base must match voxel mask.");
+static_assert((NEXTGEO_VIS_PATCH_BASE + NEXTGEO_VIS_PATCH_MAX_COUNT) == NEXTGEO_VIS_VOXEL_BASE, "Patch range must be contiguous and disjoint from voxel range.");
+static_assert((NEXTGEO_VIS_PATCH_BASE & NEXTGEO_VIS_VOXEL_MASK) != NEXTGEO_VIS_VOXEL_BASE, "Patch range must not collide with voxel range.");
+
 struct NextGeoDrawIndirectCommand {
 	uint32_t vertex_count = NEXTGEO_RASTER_VERTEX_COUNT;
 	uint32_t instance_count = 0;
@@ -84,6 +104,29 @@ inline uint32_t nextgeo_unpack_visibility_cluster(uint32_t p_visibility_id) {
 
 inline uint32_t nextgeo_unpack_visibility_triangle(uint32_t p_visibility_id) {
 	return p_visibility_id & NEXTGEO_VISIBILITY_TRIANGLE_MASK;
+}
+
+inline bool nextgeo_visibility_cluster_is_normal(uint32_t p_vis_cluster) {
+	return p_vis_cluster <= NEXTGEO_VIS_NORMAL_MAX;
+}
+
+inline bool nextgeo_visibility_cluster_is_patch(uint32_t p_vis_cluster) {
+	return (p_vis_cluster & NEXTGEO_VIS_PATCH_MASK) == NEXTGEO_VIS_PATCH_BASE;
+}
+
+inline bool nextgeo_visibility_cluster_is_voxel(uint32_t p_vis_cluster) {
+	return (p_vis_cluster & NEXTGEO_VIS_VOXEL_MASK) == NEXTGEO_VIS_VOXEL_BASE;
+}
+
+inline uint32_t nextgeo_pack_patch_visibility_id(uint32_t p_patch_index, uint32_t p_micro_triangle) {
+	if (p_patch_index >= NEXTGEO_VIS_PATCH_MAX_COUNT || p_micro_triangle >= NEXTGEO_MAX_CLUSTER_TRIANGLES) {
+		return NEXTGEO_VISIBILITY_BACKGROUND;
+	}
+	return ((NEXTGEO_VIS_PATCH_BASE | (p_patch_index & NEXTGEO_VIS_PATCH_INDEX_MASK)) << NEXTGEO_VISIBILITY_TRIANGLE_BITS) | (p_micro_triangle & NEXTGEO_VISIBILITY_TRIANGLE_MASK);
+}
+
+inline uint32_t nextgeo_unpack_patch_index(uint32_t p_vis_cluster) {
+	return p_vis_cluster & NEXTGEO_VIS_PATCH_INDEX_MASK;
 }
 
 // NextGI always writes prepass velocity (for its own temporal passes); NextGeo

@@ -3554,6 +3554,14 @@
 			The number of samples Shadow Map Ray Tracing (SMRT) takes along each ray through the virtual shadow map, for every light sampled through virtual shadow maps. More samples resolve the penumbra of distant occluders better and cost more. [code]-1[/code] uses the value of the active [member rendering/lights_and_shadows/virtual_shadows/quality] preset: 4 at Low and Medium, and 6 at High and Epic. The preset values are provisional until the penumbra measurements of the final test phase set them.
 			[b]Note:[/b] Virtual shadow maps are only used with the Forward+ renderer.
 		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/tessellation_directional" type="bool" setter="" getter="" default="true">
+			When [member rendering/nextgeo/experimental/tessellation] is enabled, dice displaced virtual-geometry clusters in directional virtual shadow map pages so directional shadows follow displaced silhouettes. When disabled, directional virtual shadow maps rasterize the base undisplaced cluster geometry.
+			[b]Note:[/b] Virtual shadow maps are only used with the Forward+ renderer.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/tessellation_local" type="bool" setter="" getter="" default="false">
+			When [member rendering/nextgeo/experimental/tessellation] is enabled, dice displaced virtual-geometry clusters in local ([OmniLight3D], [SpotLight3D], and [AreaLight3D]) virtual shadow map pages. Disabled by default to bound local-light shadow rasterization cost.
+			[b]Note:[/b] Virtual shadow maps are only used with the Forward+ renderer.
+		</member>
 		<member name="rendering/lights_and_shadows/virtual_shadows/translucent_quality" type="int" setter="" getter="" default="0">
 			How forward transparent surfaces sample virtual shadow maps. [b]Coarse[/b] ([code]0[/code], default) takes one depth tap from the coarse pages kept resident for transparent objects, with no Shadow Map Ray Tracing (SMRT). [b]Full SMRT[/b] ([code]1[/code]) runs the full SMRT filter on transparent receivers, matching opaque surfaces at higher shading cost.
 			[b]Note:[/b] Virtual shadow maps are only used with the Forward+ renderer.
@@ -3640,6 +3648,9 @@
 		<member name="rendering/nextgeo/debug_vis64_buffer" type="bool" setter="" getter="" default="false">
 			Use the storage-buffer form of the hybrid raster's 64-bit visibility buffer even where 64-bit image atomics are available. The buffer form is the one devices without 64-bit image atomics use; this setting exercises it on other devices for testing.
 		</member>
+		<member name="rendering/nextgeo/experimental/tessellation" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite runtime displacement tessellation">
+			Enable experimental runtime displacement tessellation for NextGeo virtual geometry. Displaced materials (spatial shaders with a [code]displacement()[/code] function or [BaseMaterial3D] with [constant BaseMaterial3D.HEIGHTMAP_MODE_DISPLACEMENT] and positive [member Material.displacement_magnitude]) are diced at [member rendering/nextgeo/tessellation/dicing_rate] pixels per edge with crack-free canonical edge factors, rasterized into the 64-bit visibility buffer via software rasterization and a bounded hardware stream, and resolved deterministically during shading. When disabled, zero dicing buffers are allocated and zero dicing passes run.
+		</member>
 		<member name="rendering/nextgeo/hiz_debug" type="bool" setter="" getter="" default="false">
 			Read the previous and current Hi-Z chains back with the cut debug stats and report their center depth. It is a debug-only readback and stalls the GPU.
 		</member>
@@ -3671,6 +3682,12 @@
 		</member>
 		<member name="rendering/nextgeo/sw_raster_max_edge_px" type="float" setter="" getter="" default="8.0">
 			The triangle-size switch of the [code]Hybrid[/code] raster mode, in pixels at the internal resolution. A cluster goes to the software rasterizer when its longest edge projects below this value and it lies entirely in front of the near plane; every other cluster goes to the hardware rasterizer. [code]0[/code] sends every cluster to the hardware rasterizer. Values above [code]64[/code] are clamped to [code]64[/code], so every software-rasterized triangle keeps the full subpixel precision. The default is provisional.
+		</member>
+		<member name="rendering/nextgeo/tessellation/debug_max_patches" type="int" setter="" getter="" default="0">
+			Optional test cap on the number of diced tessellation sub-patches allocated per frame ([code]0[/code] uses the full default capacity). Used to exercise patch-buffer overflow coarsening and the [code]dicing_overflow[/code] debug counter.
+		</member>
+		<member name="rendering/nextgeo/tessellation/dicing_rate" type="float" setter="" getter="" default="2.0">
+			Target screen-space edge length in pixels for NextGeo runtime displacement tessellation (clamped to [code][0.5, 16.0][/code]). Smaller values subdivide displaced triangles more finely at higher GPU cost; larger values produce coarser micro-triangles. Effective only when [member rendering/nextgeo/experimental/tessellation] is enabled. The default is provisional.
 		</member>
 		<member name="rendering/nextgeo/vertex_offset_max_default" type="float" setter="" getter="" default="0.5">
 			Default maximum vertex offset distance in meters inherited by spatial materials whose [member Material.vertex_offset_max] is negative ([code]-1.0[/code]). NextGeo inflates instance and cluster culling bounds by this distance (scaled by the instance's maximum scale axis) and clamps vertex offsets that exceed it. The default is provisional.

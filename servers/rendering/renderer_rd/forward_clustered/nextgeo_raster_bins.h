@@ -35,6 +35,7 @@
 #include "core/string/ustring.h"
 #include "core/typedefs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/shader_compiler.h"
 #include "servers/rendering/storage/virtual_mesh_storage.h"

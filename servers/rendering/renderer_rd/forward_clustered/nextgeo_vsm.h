@@ -82,6 +82,7 @@ enum NextGeoVSMCullFlags : uint32_t {
 	NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 1, // Route programmable-bin surfaces via #155 bins.
 	NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK = 1u << 2, // Step 6 hook (#212): route moving/WPO instances to layer 1.
 	NEXTGEO_VSM_CULL_FLAG_COUNT_SW_WRITES = 1u << 3, // Accumulate SW texel writes for telemetry.
+	NEXTGEO_VSM_CULL_FLAG_TESSELLATION = 1u << 4, // GodotNext: nextgeo_tessellation (#163): dice displaced clusters on this chain.
 };
 
 enum NextGeoVSMMapMetaFlags : uint32_t {
@@ -116,7 +117,7 @@ struct NextGeoVSMParams {
 	float max_texel_error = NEXTGEO_VSM_DEFAULT_MAX_TEXEL_ERROR;
 	float lod_bias = 1.0f;
 	float sw_max_edge_texels = NEXTGEO_VSM_DEFAULT_SW_MAX_EDGE_TEXELS;
-	float pad0 = 0.0f;
+	float dicing_rate = 2.0f; // GodotNext: nextgeo_tessellation (#163). Shadow texels per diced edge.
 
 	float camera_position[4] = {};
 	uint32_t bin_features[68] = {}; // Indexed by bin 0..64, padded to 16 bytes.

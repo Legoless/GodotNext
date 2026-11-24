@@ -3662,6 +3662,22 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
 	RENDER_TIMESTAMP("VSM Page Marking");
 
+	// GodotNext: nextgeo_tessellation (#163). Invalidate cached VSM pages whenever VSM tessellation settings change.
+	{
+		const bool tess_on = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
+		const bool tess_dir = bool(_vsm_setting("tessellation_directional", true));
+		const bool tess_loc = bool(_vsm_setting("tessellation_local", false));
+		const float tess_rate = RendererRD::nextgeo_tessellation_clamp_dicing_rate(float(GLOBAL_GET("rendering/nextgeo/tessellation/dicing_rate")));
+		if (tess_on != vsm_last_tessellation_enabled || tess_dir != vsm_last_tess_directional || tess_loc != vsm_last_tess_local || (tess_on && tess_rate != vsm_last_tess_dicing_rate)) {
+			vsm_last_tessellation_enabled = tess_on;
+			vsm_last_tess_directional = tess_dir;
+			vsm_last_tess_local = tess_loc;
+			vsm_last_tess_dicing_rate = tess_rate;
+			vsm->invalidate_all_maps(RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
+			nextgeo_cut.invalidate_vsm_hiz();
+		}
+	}
+
 	RendererRD::VirtualShadowMapStorage::MarkInput input;
 	input.depth_texture = rb->get_depth_texture(0);
 	input.size = rb->get_internal_size();
@@ -5228,6 +5244,12 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 	// GodotNext: vsm_caching (#212). Enable #217's static/dynamic layer routing in production frames.
 	inputs.dynamic_layer_hook = true;
 	inputs.count_sw_writes = bool(GLOBAL_GET("rendering/nextgeo/debug_stats")) || bool(_vsm_setting("debug_nanite_dynamic_layer", false));
+	// GodotNext: nextgeo_tessellation (#163). Per-chain VSM tessellation toggles (gated by experimental/tessellation).
+	const bool vsm_tess_master = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
+	inputs.tessellation_directional = vsm_tess_master && bool(_vsm_setting("tessellation_directional", true));
+	inputs.tessellation_local = vsm_tess_master && bool(_vsm_setting("tessellation_local", false));
+	inputs.tessellation_dicing_rate = float(GLOBAL_GET("rendering/nextgeo/tessellation/dicing_rate"));
+	inputs.tessellation_debug_max_patches = uint32_t(MAX(int(GLOBAL_GET("rendering/nextgeo/tessellation/debug_max_patches")), 0));
 
 	// Build per-map metadata (shadow_caster_mask, reverse_cull, active) so one directional chain and
 	// one local chain cull every active VSM light cleanly without per-light CPU loops.
@@ -5382,9 +5404,17 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 				// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
 				program.features = owner.material->get_raster_features();
 				program.vertex_offset_max = owner.material->get_effective_vertex_offset_max(float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default")));
+				program.disp_magnitude = owner.material->displacement_magnitude;
+				program.disp_center = owner.material->displacement_center;
 				program.sw_shader = sw_sh;
 				program.hw_shader = hw_sh;
 				program.hw_mesh_shader = hw_mesh_sh;
+				if ((inputs.tessellation_directional || inputs.tessellation_local) &&
+						(program.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+						owner.shader->has_displacement && owner.shader->ensure_tessellation_target()) {
+					program.tess_dice_shader = owner.shader->get_tessellation_vsm_dice_shader();
+					program.tess_hw_shader = owner.shader->get_tessellation_vsm_hw_shader();
+				}
 				Vector<RD::Uniform> material_uniforms;
 				// GodotNext: nextgeo_texture_cache_refresh (#305) x vsm_nanite (#217). Guard VSM programmable bins against freed textures mid-frame.
 				bool uniforms_valid = owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
@@ -6767,6 +6797,39 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	nextgeo_virtual_active = using_nextgeo;
 	nextgeo_visibility_only_active = visibility_only;
+	// GodotNext: nextgeo_tessellation (#163). Re-bin displaced virtual surfaces immediately when
+	// experimental/tessellation toggles at runtime.
+	{
+		const bool tess_enabled_now = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
+		if (tess_enabled_now != nextgeo_last_tessellation_enabled) {
+			nextgeo_last_tessellation_enabled = tess_enabled_now;
+			bool marked_any = false;
+			if (p_render_data->instances != nullptr) {
+				for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
+					GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
+					if (inst == nullptr) {
+						continue;
+					}
+					for (GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf != nullptr; surf = surf->next) {
+						if (surf->material != nullptr && (surf->material->get_raster_features() & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u) {
+							inst->_mark_dirty();
+							marked_any = true;
+							break;
+						}
+					}
+				}
+			}
+			for (GeometryInstanceSurfaceDataCache &surf : geometry_surface_compilation_all_list) {
+				if (surf.owner != nullptr && surf.material != nullptr && (surf.material->get_raster_features() & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u) {
+					surf.owner->_mark_dirty();
+					marked_any = true;
+				}
+			}
+			if (marked_any) {
+				_update_dirty_geometry_instances();
+			}
+		}
+	}
 	// GodotNext: nextgeo_raster_bins (#155). Programmable raster bins draw on the hybrid main view only;
 	// elsewhere their surfaces draw on legacy raster.
 	{
@@ -7224,6 +7287,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					const RendererRD::NextGeoHWRasterSelection hw_raster_sel = nextgeo_cut.select_hw_raster_path(hw_raster_setting, scene_data->view_count > 1);
 					raster_inputs.use_mesh_hw_raster = hw_raster_sel.use_mesh;
 					raster_inputs.hw_raster_reason = hw_raster_sel.reason;
+					// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Runtime displacement tessellation.
+					raster_inputs.tessellation_enabled = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
+					raster_inputs.tessellation_dicing_rate = float(GLOBAL_GET("rendering/nextgeo/tessellation/dicing_rate"));
+					raster_inputs.tessellation_debug_max_patches = uint32_t(MAX(int(GLOBAL_GET("rendering/nextgeo/tessellation/debug_max_patches")), 0));
 					// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). This frame's programmable bins:
 					// each bin's raster target and material parameters, and the scene environment.
 					if (nextgeo_programmable_view_active && nextgeo_raster_bins_used != 0u && !nextgeo_raster_bin_table.is_empty()) {
@@ -7238,10 +7305,18 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164).
 							program.features = owner.material->get_raster_features();
 							program.vertex_offset_max = owner.material->get_effective_vertex_offset_max(float(GLOBAL_GET("rendering/nextgeo/vertex_offset_max_default")));
+							program.disp_magnitude = owner.material->displacement_magnitude;
+							program.disp_center = owner.material->displacement_center;
 							program.sw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(false, buffer);
 							program.hw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(true, buffer);
 							if (hw_raster_sel.use_mesh) {
 								program.hw_mesh_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_mesh_shader(buffer);
+							}
+							if (raster_inputs.tessellation_enabled &&
+									(program.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+									owner.shader->has_displacement && owner.shader->ensure_tessellation_target()) {
+								program.tess_dice_shader[buffer ? 1 : 0] = owner.shader->get_tessellation_dice_shader(buffer);
+								program.tess_hw_shader[buffer ? 1 : 0] = owner.shader->get_tessellation_hw_shader(buffer);
 							}
 							Vector<RD::Uniform> material_uniforms;
 							// GodotNext: nextgeo_texture_cache_refresh (#305). Streaming swaps refresh texture_cache in
@@ -7276,6 +7351,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 
 			nextgeo_drew = nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")), &raster_inputs, is_nextgeo_main_view);
+			// GodotNext: nextgeo_tessellation (#163). Bind diced patches buffer (invalid -> dummy when tessellation is off).
+			nextgeo_resolve.set_diced_patches_buffer(nextgeo_cut.get_diced_patches_buffer());
 			if (nextgeo_drew && !visibility_only && nextgeo_resolve.get_bucket_count() > 0) {
 				RENDER_TIMESTAMP("NextGeo Resolve Classify");
 				RD::get_singleton()->draw_command_begin_label("NextGeo Resolve Classify");
@@ -8152,6 +8229,7 @@ void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_
 	scene_params.cull_sign = p_reverse_cull ? -1.0f : 1.0f;
 	scene_params.using_nextgeo = p_nextgeo_drew;
 	scene_params.visible_clusters_buf = nextgeo_cut.get_clusters_buffer();
+	scene_params.diced_patches_buf = nextgeo_cut.get_diced_patches_buffer();
 	scene_params.visible_capacity = NextGeoCut::CLUSTER_CAPACITY;
 	scene_params.bucket_table_buf = nextgeo_resolve.get_bucket_table_buffer();
 	scene_params.bucket_table_words = nextgeo_bucket_table.size();
@@ -10655,18 +10733,22 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	if (material_displaced && material_raster_rejects != 0u && route_facts.material_fallback == RendererRD::NEXTGEO_FALLBACK_NONE) {
 		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE;
 	}
-	// GodotNext: nextgeo_masked_two_sided (#153), depth_offset (#149), nextgeo_vertex_offset (#164), nextgeo_raster_bins (#155, plan §21.4 N3, N5, N6).
+	// GodotNext: nextgeo_masked_two_sided (#153), depth_offset (#149), nextgeo_vertex_offset (#164), nextgeo_tessellation (#163), nextgeo_raster_bins (#155, plan §21.4 N3, N5, N6, N11).
 	// Pixel-programmable surfaces (masked: alpha scissor, alpha hash, fragment discard; depth offset: DEPTH_OFFSET)
 	// and vertex-offset (VERTEX write) surfaces route into programmable raster bins by default on the Nanite
-	// device tier. Displacement (#163) remains behind rendering/nextgeo/debug_programmable_raster until its issue ships.
+	// device tier. Displacement (#163) routes into programmable bins when rendering/nextgeo/experimental/tessellation
+	// is enabled (or debug_programmable_raster).
 	bool admit_programmable = false;
 	const bool default_prog_admitted = (material_raster_features & (RendererVirtualMeshStorage::RASTER_PIXEL_PROGRAMMABLE_FEATURES | RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET)) != 0u &&
 			p_material->shader_data->nextgeo_masked_fallback == RendererRD::NEXTGEO_FALLBACK_NONE;
+	const bool tess_admitted = material_displaced &&
+			p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
+			bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
 	const bool wants_debug_programmable = (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE) || material_displaced;
 	const bool debug_admitted = wants_debug_programmable &&
 			p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
 			bool(GLOBAL_GET("rendering/nextgeo/debug_programmable_raster"));
-	if ((default_prog_admitted || debug_admitted) && material_raster_rejects == 0u &&
+	if ((default_prog_admitted || tess_admitted || debug_admitted) && material_raster_rejects == 0u &&
 			p_material->shader_data->has_raster_target() && route_facts.mesh_has_virtual_geometry &&
 			RSG::virtual_mesh_storage != nullptr && nextgeo_cut.is_hybrid_raster_available() &&
 			p_material->shader_data->ensure_raster_target()) {

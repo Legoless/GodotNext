@@ -64,11 +64,14 @@ struct CutParams {
 	// GodotNext: nextgeo_sw_raster (#162). The triangle-size switch; zero for shadow views.
 	float raster_forward[4]; // xyz = camera forward axis, w = z_near.
 	float raster_params[4]; // x = T px, y = px scale, z = 1 for an orthographic view.
-	// GodotNext: nextgeo_masked_two_sided (#153). xy = 64-bit mask of pixel-programmable bins (1..64)
-	// that demote to FIXED past GeometryInstance3D.programmable_raster_distance.
+	// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164).
+	// xy = pixel-programmable bins (1..64) demotable past programmable_raster_distance;
+	// zw = vertex-offset bins (1..64) demotable past vertex_offset_disable_distance.
 	uint32_t raster_bin_demote_mask[4];
+	// GodotNext: nextgeo_tessellation (#163). xy = tessellated displaced bins (1..64).
+	uint32_t raster_bin_tess_mask[4];
 };
-static_assert(sizeof(CutParams) == 320, "CutParams must match NextGeoCullParamsData (320 bytes).");
+static_assert(sizeof(CutParams) == 336, "CutParams must match NextGeoCullParamsData (336 bytes).");
 
 struct CutCounters {
 	uint32_t phase1;
@@ -126,7 +129,7 @@ struct RasterParams {
 	float inv_view_proj[16];
 	uint32_t size[2];
 	uint32_t raster_region;
-	uint32_t pad;
+	uint32_t patch_capacity; // GodotNext: nextgeo_tessellation (#163)
 };
 static_assert(sizeof(RasterParams) == 368, "RasterParams must stay 368 bytes.");
 
@@ -179,6 +182,13 @@ uint32_t s_programmable_bins = 0;
 // GodotNext: nextgeo_mesh_raster (#154). The last main view's HW raster path, for stats and tests.
 const char *s_hw_raster_path = "vertex";
 const char *s_hw_raster_reason = "AUTO_PENDING_PQ";
+// GodotNext: nextgeo_tessellation (#163). Tessellation debug stats exposed via virtual_geometry_get_debug_stats().
+bool s_tessellation_enabled = false;
+bool s_tessellation_buffers_allocated = false;
+uint32_t s_tessellation_dicing_dispatches = 0;
+float s_tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
+uint32_t s_tess_gpu_stats[RendererRD::NEXTGEO_TESS_STATS_WORDS] = {};
+bool s_tess_have_gpu_stats = false;
 
 Mutex s_page_req_registry_mutex;
 HashMap<uint64_t, NextGeoCut *> s_page_req_registry;
@@ -987,14 +997,15 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, clusters));
 		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_params));
 		export_u.push_back(RD::Uniform(vis64_type, 3, p_raster.vis64));
+		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, (tess_active && tess_diced_patches.is_valid()) ? tess_diced_patches : dummy_page_buf));
 		if (with_velocity) {
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, page_buf));
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cluster_buf));
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, skin_palette_buf));
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_inst_buf));
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, cluster_skin_buf));
-			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, page_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, cluster_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_palette_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, skin_inst_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, cluster_skin_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, spline_buf));
 		}
 		RID set = uniform_set_cache->get_cache_vec(shader, 0, export_u);
 		if (!pipeline.is_valid() || !set.is_valid()) {
@@ -1210,6 +1221,27 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	};
 	static_assert(sizeof(BinPush) == 32, "BinPush must match raster_material_inc.glsl's RasterBinPush.");
 
+	struct TessPush {
+		uint32_t list_base;
+		uint32_t phase;
+		uint32_t bin;
+		uint32_t flags;
+		int32_t size[2];
+		uint32_t cluster_capacity;
+		uint32_t wpo_max_bits;
+		float dicing_rate;
+		float px_scale;
+		float sw_max_edge;
+		float z_near;
+		float disp_magnitude;
+		float disp_center;
+		uint32_t hw_bin_base;
+		uint32_t hw_bin_capacity;
+		uint32_t patch_capacity;
+		uint32_t tess_pad[3];
+	};
+	static_assert(sizeof(TessPush) == 80, "TessPush must match raster_material_inc.glsl's NEXTGEO_TESSELLATION RasterBinPush.");
+
 	// The sets of one form of a bin's raster target; false when a set cannot be made.
 	auto bind_sets = [&](RID p_shader, const NextGeoRasterBinProgram &p_program, RID r_sets[4]) -> bool {
 		r_sets[0] = uniform_set_cache->get_cache_vec(p_shader, 0, geometry_uniforms);
@@ -1232,10 +1264,115 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 		return BinPush{ p_list_base, p_phase, p_program.bin, flags, { size.x, size.y }, { 0u, wpo_bits } };
 	};
 
-	// Software clusters: one workgroup each, dispatched indirectly per bin.
+	auto is_tess_program = [&](const NextGeoRasterBinProgram &p_program) -> bool {
+		return tess_active &&
+				(p_program.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+				p_program.tess_dice_shader[storage].is_valid() &&
+				p_program.tess_hw_shader[storage].is_valid();
+	};
+
+	uint32_t active_tess_bins = 0u;
+	if (tess_active) {
+		for (const NextGeoRasterBinProgram &program : p_raster.raster_bin_programs) {
+			if (is_tess_program(program)) {
+				active_tess_bins++;
+			}
+		}
+		if (active_tess_bins > 0u) {
+			uint32_t hw_args_init[RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX * 4u] = {};
+			for (uint32_t b = 0; b < RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX; b++) {
+				hw_args_init[b * 4u + 0u] = RendererRD::NEXTGEO_RASTER_VERTEX_COUNT;
+			}
+			rd->buffer_update(tess_hw_args, 0, sizeof(hw_args_init), hw_args_init);
+			// Clear only hw_bin_alloc[0..63] per phase; preserve patch_count and diced_patches across Phase 1 & Phase 2.
+			rd->buffer_clear(tess_state, offsetof(RendererRD::NextGeoTessState, hw_bin_alloc), sizeof(uint32_t) * 64u);
+		}
+	}
+
+	LocalVector<RD::Uniform> tess_dice_bin_uniforms;
+	LocalVector<RD::Uniform> tess_hw_bin_uniforms;
+	if (active_tess_bins > 0u) {
+		tess_dice_bin_uniforms = bin_uniforms;
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, tess_diced_patches));
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, tess_hw_patches));
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, tess_state));
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tess_hw_args));
+
+		tess_hw_bin_uniforms = bin_uniforms;
+		tess_hw_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, tess_diced_patches));
+		tess_hw_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, tess_hw_patches));
+	}
+
+	auto bind_tess_sets = [&](RID p_shader, const NextGeoRasterBinProgram &p_program, const LocalVector<RD::Uniform> &p_set2, RID r_sets[4]) -> bool {
+		r_sets[0] = uniform_set_cache->get_cache_vec(p_shader, 0, geometry_uniforms);
+		r_sets[1] = uniform_set_cache->get_cache_vec(p_shader, 1, p_raster.environment_uniforms);
+		r_sets[2] = uniform_set_cache->get_cache_vec(p_shader, 2, p_set2);
+		r_sets[3] = p_program.material_uniforms.is_empty() ? RID() : uniform_set_cache->get_cache_vec(p_shader, 3, p_program.material_uniforms);
+		return r_sets[0].is_valid() && r_sets[1].is_valid() && r_sets[2].is_valid() && (p_program.material_uniforms.is_empty() || r_sets[3].is_valid());
+	};
+
+	const uint32_t tess_base_flags = base_bin_flags | (p_raster.orthographic ? (1u << 3u) : 0u);
+	const float tess_dicing_rate = RendererRD::nextgeo_tessellation_clamp_dicing_rate(p_raster.tessellation_dicing_rate);
+	const float tess_px_scale = RendererRD::nextgeo_sw_raster_px_scale(p_raster.proj, float(size.x), float(size.y), p_raster.orthographic);
+	const float tess_sw_max_edge = RendererRD::nextgeo_sw_raster_switch_px(p_raster.sw_raster_max_edge_px);
+	const uint32_t hw_per_bin = active_tess_bins > 0u ? (RendererRD::NEXTGEO_TESS_HW_PATCH_CAPACITY / active_tess_bins) : 0u;
+	auto fill_tess_push = [&](const NextGeoRasterBinProgram &p_program, uint32_t p_tess_bin_idx, uint32_t p_hw_per_bin) -> TessPush {
+		const uint32_t bslot = (p_program.bin - 1u) & 0x3Fu;
+		const bool has_wpo = (p_program.features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+		uint32_t flags = tess_base_flags | (bslot << 16u);
+		uint32_t wpo_bits = 0u;
+		if (has_wpo) {
+			flags |= (1u << 1u) | (1u << 2u);
+			const float limit = MAX(p_program.vertex_offset_max, 0.0f);
+			memcpy(&wpo_bits, &limit, sizeof(uint32_t));
+		}
+		TessPush push = {};
+		push.list_base = p_list_base;
+		push.phase = p_phase;
+		push.bin = p_program.bin;
+		push.flags = flags;
+		push.size[0] = size.x;
+		push.size[1] = size.y;
+		push.cluster_capacity = CLUSTER_CAPACITY;
+		push.wpo_max_bits = wpo_bits;
+		push.dicing_rate = tess_dicing_rate;
+		push.px_scale = tess_px_scale;
+		push.sw_max_edge = tess_sw_max_edge;
+		push.z_near = p_raster.z_near;
+		push.disp_magnitude = p_program.disp_magnitude;
+		push.disp_center = p_program.disp_center;
+		push.hw_bin_base = p_tess_bin_idx * p_hw_per_bin;
+		push.hw_bin_capacity = p_hw_per_bin;
+		push.patch_capacity = tess_effective_patch_capacity;
+		return push;
+	};
+
+	// Software clusters (and tessellation dicing compute): one workgroup each, dispatched indirectly per bin.
 	{
 		RD::ComputeListID list = rd->compute_list_begin();
+		uint32_t tess_bin_idx = 0u;
 		for (const NextGeoRasterBinProgram &program : p_raster.raster_bin_programs) {
+			if (is_tess_program(program)) {
+				const RID shader = program.tess_dice_shader[storage];
+				const RID pipeline = _raster_bin_compute_pipeline(shader);
+				RID sets[4];
+				if (pipeline.is_null() || !bind_tess_sets(shader, program, tess_dice_bin_uniforms, sets)) {
+					tess_bin_idx++;
+					continue;
+				}
+				const TessPush push = fill_tess_push(program, tess_bin_idx, hw_per_bin);
+				rd->compute_list_bind_compute_pipeline(list, pipeline);
+				for (uint32_t set = 0; set < 4; set++) {
+					if (sets[set].is_valid()) {
+						rd->compute_list_bind_uniform_set(list, sets[set], set);
+					}
+				}
+				rd->compute_list_set_push_constant(list, &push, sizeof(push));
+				rd->compute_list_dispatch_indirect(list, raster_bin_args, RendererRD::nextgeo_raster_bin_args_word(p_phase, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_SW) * sizeof(uint32_t));
+				tess_dispatches_last_frame++;
+				tess_bin_idx++;
+				continue;
+			}
 			const RID shader = program.sw_shader[storage];
 			if (shader.is_null()) {
 				continue;
@@ -1258,7 +1395,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 		rd->compute_list_end();
 	}
 
-	// Hardware clusters: one indirect draw per bin, with no attachments.
+	// Hardware clusters (and bounded HW diced patch streams): one indirect draw per bin, with no attachments.
 	{
 		const RID fb = _get_vis64_framebuffer(size);
 		if (fb.is_null()) {
@@ -1266,7 +1403,29 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 		}
 		const RD::FramebufferFormatID format = rd->framebuffer_get_format(fb);
 		RD::DrawListID dl = rd->draw_list_begin(fb, RD::DRAW_DEFAULT_ALL);
+		uint32_t tess_bin_idx = 0u;
 		for (const NextGeoRasterBinProgram &program : p_raster.raster_bin_programs) {
+			if (is_tess_program(program)) {
+				const RID shader = program.tess_hw_shader[storage];
+				const RID pipeline = _raster_bin_render_pipeline(shader, format);
+				RID sets[4];
+				if (pipeline.is_null() || !bind_tess_sets(shader, program, tess_hw_bin_uniforms, sets)) {
+					tess_bin_idx++;
+					continue;
+				}
+				const uint32_t bslot = (program.bin - 1u) & 0x3Fu;
+				const TessPush push = fill_tess_push(program, tess_bin_idx, hw_per_bin);
+				rd->draw_list_bind_render_pipeline(dl, pipeline);
+				for (uint32_t set = 0; set < 4; set++) {
+					if (sets[set].is_valid()) {
+						rd->draw_list_bind_uniform_set(dl, sets[set], set);
+					}
+				}
+				rd->draw_list_set_push_constant(dl, &push, sizeof(push));
+				rd->draw_list_draw_indirect(dl, false, tess_hw_args, bslot * 16u, 1u, 0u);
+				tess_bin_idx++;
+				continue;
+			}
 			const bool use_mesh = p_raster.use_mesh_hw_raster && program.hw_mesh_shader[storage].is_valid();
 			const RID shader = use_mesh ? program.hw_mesh_shader[storage] : program.hw_shader[storage];
 			if (shader.is_null()) {
@@ -1292,6 +1451,123 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 			}
 		}
 		rd->draw_list_end();
+	}
+}
+
+// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Lazy main-view tessellation buffers;
+// 0 buffers are allocated while rendering/nextgeo/experimental/tessellation is false.
+bool NextGeoCut::_ensure_tessellation(RenderingDevice *p_rd) {
+	if (tess_ready) {
+		return true;
+	}
+	if (p_rd == nullptr) {
+		return false;
+	}
+	if (tess_diced_patches.is_null()) {
+		tess_diced_patches = _storage(RendererRD::NEXTGEO_TESS_PATCH_CAPACITY * sizeof(RendererRD::NextGeoDicedPatchRecord));
+	}
+	if (tess_hw_patches.is_null()) {
+		tess_hw_patches = _storage(RendererRD::NEXTGEO_TESS_HW_PATCH_CAPACITY * sizeof(uint32_t));
+	}
+	if (tess_state.is_null()) {
+		tess_state = _storage(sizeof(RendererRD::NextGeoTessState));
+	}
+	if (tess_hw_args.is_null()) {
+		tess_hw_args = p_rd->storage_buffer_create(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX * 4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	}
+	for (int ring = 0; ring < 3; ring++) {
+		if (tess_stats_ring[ring].is_null()) {
+			tess_stats_ring[ring] = _storage(RendererRD::NEXTGEO_TESS_STATS_WORDS * sizeof(uint32_t));
+		}
+		tess_stats_ring_pending[ring] = false;
+	}
+	tess_ready = tess_diced_patches.is_valid() && tess_hw_patches.is_valid() && tess_state.is_valid() && tess_hw_args.is_valid() &&
+			tess_stats_ring[0].is_valid() && tess_stats_ring[1].is_valid() && tess_stats_ring[2].is_valid();
+	if (!tess_ready) {
+		_free_tessellation_resources();
+	}
+	return tess_ready;
+}
+
+void NextGeoCut::_free_tessellation_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	for (int ring = 0; ring < 3; ring++) {
+		tess_stats_ring_pending[ring] = false;
+	}
+	if (rd != nullptr) {
+		for (RID *buf : { &tess_diced_patches, &tess_hw_patches, &tess_state, &tess_hw_args, &tess_stats_ring[0], &tess_stats_ring[1], &tess_stats_ring[2] }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+	}
+	tess_ready = false;
+	tess_active = false;
+	tess_effective_patch_capacity = 0;
+	tess_dispatches_last_frame = 0;
+	tess_have_gpu_stats = false;
+	memset(tess_last_gpu_stats, 0, sizeof(tess_last_gpu_stats));
+}
+
+void NextGeoCut::_readback_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot) {
+	NextGeoCut *self = nullptr;
+	{
+		MutexLock lock(s_page_req_registry_mutex);
+		NextGeoCut **found = s_page_req_registry.getptr(p_token);
+		if (found != nullptr) {
+			self = *found;
+		}
+		s_page_req_registry.erase(p_token);
+	}
+	if (self != nullptr) {
+		self->pending_readback_tokens.erase(p_token);
+		self->_publish_tess_stats(p_data, p_ring_slot);
+	}
+}
+
+void NextGeoCut::_publish_tess_stats(const PackedByteArray &p_data, uint32_t p_ring_slot) {
+	uint32_t cap = RendererRD::NEXTGEO_TESS_PATCH_CAPACITY;
+	if (p_ring_slot < 3u) {
+		tess_stats_ring_pending[p_ring_slot] = false;
+		cap = tess_stats_ring_cap[p_ring_slot];
+	}
+	const uint32_t expected = RendererRD::NEXTGEO_TESS_STATS_WORDS * sizeof(uint32_t);
+	if (uint32_t(p_data.size()) < expected) {
+		return;
+	}
+	memcpy(tess_last_gpu_stats, p_data.ptr(), expected);
+	// Clamp the atomic allocator cursor to the frame's effective patch buffer capacity.
+	if (tess_last_gpu_stats[0] > cap) {
+		tess_last_gpu_stats[0] = cap;
+	}
+	tess_have_gpu_stats = true;
+	MutexLock lock(s_stats_mutex);
+	memcpy(s_tess_gpu_stats, tess_last_gpu_stats, expected);
+	s_tess_have_gpu_stats = true;
+}
+
+void NextGeoCut::_request_tess_stats(uint32_t p_ring_slot) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_ring_slot >= 3u || tess_stats_ring_pending[p_ring_slot] || tess_stats_ring[p_ring_slot].is_null() || tess_state.is_null()) {
+		return;
+	}
+	tess_stats_ring_cap[p_ring_slot] = tess_effective_patch_capacity;
+	const uint32_t bytes = RendererRD::NEXTGEO_TESS_STATS_WORDS * sizeof(uint32_t);
+	rd->buffer_copy(tess_state, tess_stats_ring[p_ring_slot], 0, 0, bytes);
+	uint64_t token = 0;
+	{
+		MutexLock lock(s_page_req_registry_mutex);
+		token = s_page_req_next_token++;
+		s_page_req_registry[token] = this;
+	}
+	pending_readback_tokens.push_back(token);
+	tess_stats_ring_pending[p_ring_slot] = true;
+	if (rd->buffer_get_data_async(tess_stats_ring[p_ring_slot], callable_mp_static(&NextGeoCut::_readback_tess_stats_static).bind(token, p_ring_slot), 0, bytes) != OK) {
+		tess_stats_ring_pending[p_ring_slot] = false;
+		pending_readback_tokens.erase(token);
+		MutexLock lock(s_page_req_registry_mutex);
+		s_page_req_registry.erase(token);
 	}
 }
 
@@ -1761,6 +2037,18 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 		info["shadow_raster_draws"] = int64_t(s_shadow_raster_draws);
 		info["shadow_cull_gpu_ms"] = s_shadow_cull_gpu_ms;
 		info["shadow_raster_gpu_ms"] = s_shadow_raster_gpu_ms;
+		// GodotNext: nextgeo_tessellation (#163).
+		info["tessellation_enabled"] = s_tessellation_enabled;
+		info["tessellation_buffers_allocated"] = s_tessellation_buffers_allocated;
+		info["tessellation_dicing_dispatches"] = int64_t(s_tessellation_dicing_dispatches);
+		info["tessellation_dicing_rate"] = double(s_tessellation_dicing_rate);
+		info["tessellation_patches"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[0] : 0u);
+		info["dicing_overflow"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[1] : 0u);
+		info["tessellation_sw_micro_tris"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[2] : 0u);
+		info["tessellation_hw_patches"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[3] : 0u);
+		info["tessellation_hw_stream_overflow"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[4] : 0u);
+		info["tessellation_coarsened_tris"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[5] : 0u);
+		info["tessellation_diced_clusters"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[6] : 0u);
 		s_last_stats = info.duplicate();
 	}
 	stats_ring_info[p_ring_slot].clear();
@@ -1925,6 +2213,50 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		s_hw_raster_path = RendererRD::nextgeo_hw_raster_path_name(mesh_hw_active);
 		s_hw_raster_reason = RendererRD::nextgeo_hw_raster_reason_name(hw_reason);
 	}
+	// GodotNext: nextgeo_raster_bins (#155). Programmable bins run on the hybrid main view only; with no
+	// programmable bin this frame, cull and raster stay #162's.
+	raster_bins_active = hybrid && p_is_main_view && _prepare_raster_bins(*p_raster);
+	// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Feature-off invariant: when
+	// experimental/tessellation is false, allocate 0 dicing buffers and run 0 dicing passes.
+	const bool tess_requested = p_raster != nullptr && p_raster->tessellation_enabled;
+	if (!tess_requested && tess_ready) {
+		_free_tessellation_resources();
+	}
+	tess_active = false;
+	tess_effective_patch_capacity = 0;
+	tess_dispatches_last_frame = 0;
+	const int vis64_storage_idx = (p_raster != nullptr && p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER) ? 1 : 0;
+	bool has_tess_bin = false;
+	if (tess_requested && raster_bins_active) {
+		for (const NextGeoRasterBinProgram &prog : p_raster->raster_bin_programs) {
+			if ((prog.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+					prog.tess_dice_shader[vis64_storage_idx].is_valid() &&
+					prog.tess_hw_shader[vis64_storage_idx].is_valid()) {
+				has_tess_bin = true;
+				break;
+			}
+		}
+		if (has_tess_bin && _ensure_tessellation(rd)) {
+			tess_active = true;
+			tess_effective_patch_capacity = p_raster->tessellation_debug_max_patches > 0u
+					? MIN(p_raster->tessellation_debug_max_patches, RendererRD::NEXTGEO_TESS_PATCH_CAPACITY)
+					: RendererRD::NEXTGEO_TESS_PATCH_CAPACITY;
+			rd->buffer_clear(tess_state, 0, sizeof(RendererRD::NextGeoTessState));
+		}
+	}
+	if (p_is_main_view) {
+		MutexLock lock(s_stats_mutex);
+		s_programmable_bins = raster_bins_active ? p_raster->raster_bin_programs.size() : 0u;
+		s_tessellation_enabled = tess_requested;
+		s_tessellation_buffers_allocated = tess_ready;
+		s_tessellation_dicing_rate = p_raster != nullptr ? RendererRD::nextgeo_tessellation_clamp_dicing_rate(p_raster->tessellation_dicing_rate) : RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
+		if (!tess_active) {
+			s_tessellation_dicing_dispatches = 0;
+			s_tess_have_gpu_stats = false;
+			memset(s_tess_gpu_stats, 0, sizeof(s_tess_gpu_stats));
+		}
+	}
+
 	if (can_raster) {
 		RasterParams rp = {};
 		RendererRD::MaterialStorage::store_camera(p_raster->proj, rp.proj);
@@ -1945,6 +2277,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		rp.size[0] = uint32_t(MAX(p_internal_size.x, 1));
 		rp.size[1] = uint32_t(MAX(p_internal_size.y, 1));
 		rp.raster_region = PHASE2_CLUSTER_BASE;
+		rp.patch_capacity = tess_effective_patch_capacity;
 		rd->buffer_update(raster_params, 0, sizeof(RasterParams), &rp);
 		_clear_visibility_targets(p_raster->visibility, p_raster->instance_id, p_internal_size);
 		if (hybrid) {
@@ -1964,13 +2297,6 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			const uint32_t counts_init[4] = { 0u, 0u, 0u, 0u };
 			rd->buffer_update(raster_counts, 0, sizeof(counts_init), counts_init);
 		}
-	}
-	// GodotNext: nextgeo_raster_bins (#155). Programmable bins run on the hybrid main view only; with no
-	// programmable bin this frame, cull and raster stay #162's.
-	raster_bins_active = hybrid && p_is_main_view && _prepare_raster_bins(*p_raster);
-	if (p_is_main_view) {
-		MutexLock lock(s_stats_mutex);
-		s_programmable_bins = raster_bins_active ? p_raster->raster_bin_programs.size() : 0u;
 	}
 
 	const bool use_occlusion = p_is_main_view && p_occlusion;
@@ -2013,6 +2339,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	memset(cut.raster_forward, 0, sizeof(cut.raster_forward));
 	memset(cut.raster_params, 0, sizeof(cut.raster_params));
 	memset(cut.raster_bin_demote_mask, 0, sizeof(cut.raster_bin_demote_mask));
+	memset(cut.raster_bin_tess_mask, 0, sizeof(cut.raster_bin_tess_mask));
 	if (hybrid) {
 		const Vector3 forward = p_raster->camera_forward.normalized();
 		cut.raster_forward[0] = forward.x;
@@ -2035,6 +2362,19 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 					}
 					if ((prog.features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u) {
 						cut.raster_bin_demote_mask[2u + (bit >> 5u)] |= 1u << (bit & 31u);
+					}
+				}
+			}
+			if (tess_active) {
+				cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_TESSELLATION;
+				cut.raster_params[3] = RendererRD::nextgeo_tessellation_clamp_dicing_rate(p_raster->tessellation_dicing_rate);
+				for (const NextGeoRasterBinProgram &prog : p_raster->raster_bin_programs) {
+					if (prog.bin > 0u && prog.bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT &&
+							(prog.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+							prog.tess_dice_shader[vis64_storage_idx].is_valid() &&
+							prog.tess_hw_shader[vis64_storage_idx].is_valid()) {
+						const uint32_t bit = prog.bin - 1u;
+						cut.raster_bin_tess_mask[bit >> 5u] |= 1u << (bit & 31u);
 					}
 				}
 			}
@@ -2280,6 +2620,10 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	// Order-independent cut hash on the GPU, so a readback only needs the
 	// counters instead of the whole cluster list.
 	if (p_is_main_view) {
+		{
+			MutexLock lock(s_stats_mutex);
+			s_tessellation_dicing_dispatches = tess_dispatches_last_frame;
+		}
 		if (capture_stats) {
 			LocalVector<RD::Uniform> uniforms;
 			_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, level_b, level_a, groups, clusters, bvh_args[0], dummy_page_buf, false);
@@ -2292,6 +2636,9 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 				rd->compute_list_end();
 			}
 			_request_stats(stats_slot, active_counters, record_count, max_levels, &cut, use_occlusion, have_prev, raster_draws);
+			if (tess_active) {
+				_request_tess_stats(tess_stats_ring_cursor++ % 3u);
+			}
 		}
 
 		if (build_hiz && hiz_texture[1].is_valid()) {
@@ -2995,7 +3342,120 @@ void NextGeoCut::_compact_vsm_bins() {
 	rd->compute_list_end();
 }
 
-void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inputs) {
+// GodotNext: nextgeo_tessellation (#163). Lazy VSM tessellation buffers (0 allocated when VSM tessellation is off).
+bool NextGeoCut::_ensure_vsm_tessellation(RenderingDevice *p_rd) {
+	if (vsm_tess_ready) {
+		return true;
+	}
+	if (p_rd == nullptr) {
+		return false;
+	}
+	if (vsm_tess_diced_patches.is_null()) {
+		vsm_tess_diced_patches = _storage(RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY * sizeof(RendererRD::NextGeoDicedPatchRecord));
+	}
+	if (vsm_tess_hw_patches.is_null()) {
+		vsm_tess_hw_patches = _storage(RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY * sizeof(uint32_t));
+	}
+	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
+		if (vsm_tess_state[chain].is_null()) {
+			vsm_tess_state[chain] = _storage(sizeof(RendererRD::NextGeoTessState));
+		}
+	}
+	if (vsm_tess_hw_args.is_null()) {
+		vsm_tess_hw_args = p_rd->storage_buffer_create(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX * 4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	}
+	for (int ring = 0; ring < 3; ring++) {
+		if (vsm_tess_stats_ring[ring].is_null()) {
+			vsm_tess_stats_ring[ring] = _storage(RendererRD::NEXTGEO_VSM_CHAIN_COUNT * RendererRD::NEXTGEO_TESS_STATS_WORDS * sizeof(uint32_t));
+		}
+		vsm_tess_stats_ring_pending[ring] = false;
+	}
+	vsm_tess_ready = vsm_tess_diced_patches.is_valid() && vsm_tess_hw_patches.is_valid() &&
+			vsm_tess_state[0].is_valid() && vsm_tess_state[1].is_valid() && vsm_tess_hw_args.is_valid() &&
+			vsm_tess_stats_ring[0].is_valid() && vsm_tess_stats_ring[1].is_valid() && vsm_tess_stats_ring[2].is_valid();
+	if (!vsm_tess_ready) {
+		_free_vsm_tessellation_resources();
+	}
+	return vsm_tess_ready;
+}
+
+void NextGeoCut::_free_vsm_tessellation_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	for (int ring = 0; ring < 3; ring++) {
+		vsm_tess_stats_ring_pending[ring] = false;
+	}
+	if (rd != nullptr) {
+		for (RID *buf : { &vsm_tess_diced_patches, &vsm_tess_hw_patches, &vsm_tess_state[0], &vsm_tess_state[1], &vsm_tess_hw_args, &vsm_tess_stats_ring[0], &vsm_tess_stats_ring[1], &vsm_tess_stats_ring[2] }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+	}
+	vsm_tess_ready = false;
+	vsm_tess_dispatches_last_frame = 0;
+	vsm_tess_have_gpu_stats = false;
+	memset(vsm_tess_last_gpu_stats, 0, sizeof(vsm_tess_last_gpu_stats));
+}
+
+void NextGeoCut::_readback_vsm_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot) {
+	NextGeoCut *self = nullptr;
+	{
+		MutexLock lock(s_page_req_registry_mutex);
+		NextGeoCut **found = s_page_req_registry.getptr(p_token);
+		if (found != nullptr) {
+			self = *found;
+		}
+		s_page_req_registry.erase(p_token);
+	}
+	if (self != nullptr) {
+		self->pending_readback_tokens.erase(p_token);
+		self->_publish_vsm_tess_stats(p_data, p_ring_slot);
+	}
+}
+
+void NextGeoCut::_publish_vsm_tess_stats(const PackedByteArray &p_data, uint32_t p_ring_slot) {
+	if (p_ring_slot < 3u) {
+		vsm_tess_stats_ring_pending[p_ring_slot] = false;
+	}
+	const uint32_t expected = RendererRD::NEXTGEO_VSM_CHAIN_COUNT * RendererRD::NEXTGEO_TESS_STATS_WORDS * sizeof(uint32_t);
+	if (uint32_t(p_data.size()) < expected) {
+		return;
+	}
+	memcpy(vsm_tess_last_gpu_stats, p_data.ptr(), expected);
+	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
+		if (vsm_tess_last_gpu_stats[chain][0] > RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY) {
+			vsm_tess_last_gpu_stats[chain][0] = RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY;
+		}
+	}
+	vsm_tess_have_gpu_stats = true;
+}
+
+void NextGeoCut::_request_vsm_tess_stats(uint32_t p_ring_slot) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_ring_slot >= 3u || vsm_tess_stats_ring_pending[p_ring_slot] || vsm_tess_stats_ring[p_ring_slot].is_null() || vsm_tess_state[0].is_null() || vsm_tess_state[1].is_null()) {
+		return;
+	}
+	const uint32_t one = RendererRD::NEXTGEO_TESS_STATS_WORDS * sizeof(uint32_t);
+	rd->buffer_copy(vsm_tess_state[0], vsm_tess_stats_ring[p_ring_slot], 0, 0, one);
+	rd->buffer_copy(vsm_tess_state[1], vsm_tess_stats_ring[p_ring_slot], 0, one, one);
+	uint64_t token = 0;
+	{
+		MutexLock lock(s_page_req_registry_mutex);
+		token = s_page_req_next_token++;
+		s_page_req_registry[token] = this;
+	}
+	pending_readback_tokens.push_back(token);
+	vsm_tess_stats_ring_pending[p_ring_slot] = true;
+	if (rd->buffer_get_data_async(vsm_tess_stats_ring[p_ring_slot], callable_mp_static(&NextGeoCut::_readback_vsm_tess_stats_static).bind(token, p_ring_slot), 0, one * RendererRD::NEXTGEO_VSM_CHAIN_COUNT) != OK) {
+		vsm_tess_stats_ring_pending[p_ring_slot] = false;
+		pending_readback_tokens.erase(token);
+		MutexLock lock(s_page_req_registry_mutex);
+		s_page_req_registry.erase(token);
+	}
+}
+
+void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inputs, bool p_chain_tess) {
 	RenderingDevice *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
@@ -3032,10 +3492,76 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	};
 	static_assert(sizeof(BinPush) == 32, "BinPush must match raster_material_inc.glsl's RasterBinPush.");
 
+	struct VsmTessPush {
+		uint32_t list_base;
+		uint32_t phase;
+		uint32_t bin;
+		uint32_t flags;
+		int32_t size[2];
+		uint32_t cluster_capacity;
+		uint32_t wpo_max_bits;
+		float dicing_rate;
+		float px_scale;
+		float sw_max_edge;
+		float z_near;
+		float disp_magnitude;
+		float disp_center;
+		uint32_t hw_bin_base;
+		uint32_t hw_bin_capacity;
+		uint32_t patch_capacity;
+		uint32_t tess_pad[3];
+	};
+	static_assert(sizeof(VsmTessPush) == 80, "VsmTessPush must match raster_material_inc.glsl's NEXTGEO_TESSELLATION RasterBinPush.");
+
 	auto bind_sets = [&](RID p_shader, const NextGeoVSMBinProgram &p_program, RID r_sets[4]) -> bool {
 		r_sets[0] = uniform_set_cache->get_cache_vec(p_shader, 0, geometry_uniforms);
 		r_sets[1] = uniform_set_cache->get_cache_vec(p_shader, 1, p_inputs.environment_uniforms);
 		r_sets[2] = uniform_set_cache->get_cache_vec(p_shader, 2, bin_uniforms);
+		r_sets[3] = p_program.material_uniforms.is_empty() ? RID() : uniform_set_cache->get_cache_vec(p_shader, 3, p_program.material_uniforms);
+		return r_sets[0].is_valid() && r_sets[1].is_valid() && r_sets[2].is_valid() && (p_program.material_uniforms.is_empty() || r_sets[3].is_valid());
+	};
+
+	auto is_vsm_tess_program = [&](const NextGeoVSMBinProgram &p_program) -> bool {
+		return p_chain_tess && vsm_tess_ready &&
+				(p_program.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+				p_program.tess_dice_shader.is_valid() &&
+				p_program.tess_hw_shader.is_valid();
+	};
+
+	uint32_t active_tess_bins = 0u;
+	if (p_chain_tess && vsm_tess_ready) {
+		for (const NextGeoVSMBinProgram &program : p_inputs.raster_bin_programs) {
+			if (is_vsm_tess_program(program)) {
+				active_tess_bins++;
+			}
+		}
+		if (active_tess_bins > 0u) {
+			uint32_t hw_args_init[RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX * 4u] = {};
+			for (uint32_t b = 0; b < RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX; b++) {
+				hw_args_init[b * 4u + 0u] = RendererRD::NEXTGEO_RASTER_VERTEX_COUNT;
+			}
+			rd->buffer_update(vsm_tess_hw_args, 0, sizeof(hw_args_init), hw_args_init);
+		}
+	}
+
+	LocalVector<RD::Uniform> tess_dice_bin_uniforms;
+	LocalVector<RD::Uniform> tess_hw_bin_uniforms;
+	if (active_tess_bins > 0u) {
+		tess_dice_bin_uniforms = bin_uniforms;
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_tess_diced_patches));
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_tess_hw_patches));
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, vsm_tess_state[p_chain]));
+		tess_dice_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, vsm_tess_hw_args));
+
+		tess_hw_bin_uniforms = bin_uniforms;
+		tess_hw_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_tess_diced_patches));
+		tess_hw_bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_tess_hw_patches));
+	}
+
+	auto bind_tess_sets = [&](RID p_shader, const NextGeoVSMBinProgram &p_program, const LocalVector<RD::Uniform> &p_set2, RID r_sets[4]) -> bool {
+		r_sets[0] = uniform_set_cache->get_cache_vec(p_shader, 0, geometry_uniforms);
+		r_sets[1] = uniform_set_cache->get_cache_vec(p_shader, 1, p_inputs.environment_uniforms);
+		r_sets[2] = uniform_set_cache->get_cache_vec(p_shader, 2, p_set2);
 		r_sets[3] = p_program.material_uniforms.is_empty() ? RID() : uniform_set_cache->get_cache_vec(p_shader, 3, p_program.material_uniforms);
 		return r_sets[0].is_valid() && r_sets[1].is_valid() && r_sets[2].is_valid() && (p_program.material_uniforms.is_empty() || r_sets[3].is_valid());
 	};
@@ -3052,9 +3578,66 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 		}
 		return BinPush{ 0u, 0u, p_program.bin, flags, { ps, ps }, { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, wpo_bits } };
 	};
+	const uint32_t vsm_patch_cap = p_inputs.tessellation_debug_max_patches > 0u
+			? MIN(p_inputs.tessellation_debug_max_patches, RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY)
+			: RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY;
+	const float vsm_dicing_rate = RendererRD::nextgeo_tessellation_clamp_dicing_rate(p_inputs.tessellation_dicing_rate);
+	const float vsm_sw_max_edge = RendererRD::nextgeo_vsm_sw_switch_texels(p_inputs.sw_max_edge_texels);
+	const uint32_t hw_per_bin = active_tess_bins > 0u ? (RendererRD::NEXTGEO_TESS_VSM_PATCH_CAPACITY / active_tess_bins) : 0u;
+	auto fill_vsm_tess_push = [&](const NextGeoVSMBinProgram &p_program, uint32_t p_tess_bin_idx) -> VsmTessPush {
+		const uint32_t bslot = (p_program.bin - 1u) & 0x3Fu;
+		const bool has_wpo = (p_program.features & RendererVirtualMeshStorage::RASTER_FEATURE_VERTEX_OFFSET) != 0u;
+		uint32_t flags = bslot << 16u;
+		uint32_t wpo_bits = 0u;
+		if (has_wpo) {
+			flags |= (1u << 1u) | (1u << 2u);
+			const float limit = MAX(p_program.vertex_offset_max, 0.0f);
+			memcpy(&wpo_bits, &limit, sizeof(uint32_t));
+		}
+		VsmTessPush push = {};
+		push.list_base = 0u;
+		push.phase = 0u;
+		push.bin = p_program.bin;
+		push.flags = flags;
+		push.size[0] = ps;
+		push.size[1] = ps;
+		push.cluster_capacity = RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY;
+		push.wpo_max_bits = wpo_bits;
+		push.dicing_rate = vsm_dicing_rate;
+		push.px_scale = 0.0f;
+		push.sw_max_edge = vsm_sw_max_edge;
+		push.z_near = 0.0f;
+		push.disp_magnitude = p_program.disp_magnitude;
+		push.disp_center = p_program.disp_center;
+		push.hw_bin_base = p_tess_bin_idx * hw_per_bin;
+		push.hw_bin_capacity = hw_per_bin;
+		push.patch_capacity = vsm_patch_cap;
+		return push;
+	};
 	{
 		RD::ComputeListID list = rd->compute_list_begin();
+		uint32_t tess_bin_idx = 0u;
 		for (const NextGeoVSMBinProgram &program : p_inputs.raster_bin_programs) {
+			if (is_vsm_tess_program(program)) {
+				const RID pipeline = _raster_bin_compute_pipeline(program.tess_dice_shader);
+				RID sets[4];
+				if (pipeline.is_null() || !bind_tess_sets(program.tess_dice_shader, program, tess_dice_bin_uniforms, sets)) {
+					tess_bin_idx++;
+					continue;
+				}
+				const VsmTessPush push = fill_vsm_tess_push(program, tess_bin_idx);
+				rd->compute_list_bind_compute_pipeline(list, pipeline);
+				for (uint32_t set = 0; set < 4; set++) {
+					if (sets[set].is_valid()) {
+						rd->compute_list_bind_uniform_set(list, sets[set], set);
+					}
+				}
+				rd->compute_list_set_push_constant(list, &push, sizeof(push));
+				rd->compute_list_dispatch_indirect(list, vsm_bin_args, RendererRD::nextgeo_raster_bin_args_word(0u, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_SW) * sizeof(uint32_t));
+				vsm_tess_dispatches_last_frame++;
+				tess_bin_idx++;
+				continue;
+			}
 			if (program.sw_shader.is_null()) {
 				continue;
 			}
@@ -3079,7 +3662,32 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	{
 		const RD::FramebufferFormatID format = rd->framebuffer_get_format(vsm_empty_fb);
 		RD::DrawListID dl = rd->draw_list_begin(vsm_empty_fb, RD::DRAW_DEFAULT_ALL);
+		uint32_t tess_bin_idx = 0u;
 		for (const NextGeoVSMBinProgram &program : p_inputs.raster_bin_programs) {
+			if (is_vsm_tess_program(program)) {
+				const RID pipeline = _vsm_bin_render_pipeline(program.tess_hw_shader, format);
+				RID sets[4];
+				if (pipeline.is_null() || !bind_tess_sets(program.tess_hw_shader, program, tess_hw_bin_uniforms, sets)) {
+					tess_bin_idx++;
+					continue;
+				}
+				const uint32_t bslot = (program.bin - 1u) & 0x3Fu;
+				const VsmTessPush push = fill_vsm_tess_push(program, tess_bin_idx);
+				rd->draw_list_bind_render_pipeline(dl, pipeline);
+				for (uint32_t set = 0; set < 4; set++) {
+					if (sets[set].is_valid()) {
+						rd->draw_list_bind_uniform_set(dl, sets[set], set);
+					}
+				}
+				rd->draw_list_set_push_constant(dl, &push, sizeof(push));
+				if (rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT) && vsm_bin_draw_count.is_valid()) {
+					rd->draw_list_draw_indirect_count(dl, false, vsm_tess_hw_args, bslot * 16u, vsm_bin_draw_count, 0u, 1u, 0u);
+				} else {
+					rd->draw_list_draw_indirect(dl, false, vsm_tess_hw_args, bslot * 16u, 1u, 0u);
+				}
+				tess_bin_idx++;
+				continue;
+			}
 			const bool use_mesh = p_inputs.use_mesh_hw_raster && program.hw_mesh_shader.is_valid();
 			const RID shader = use_mesh ? program.hw_mesh_shader : program.hw_shader;
 			if (shader.is_null()) {
@@ -3330,12 +3938,31 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, p_nodes_in));
 	};
 
+	// GodotNext: nextgeo_tessellation (#163). Allocate VSM tessellation buffers only when VSM tessellation is active.
+	const bool vsm_tess_requested = use_bins && (p_inputs.tessellation_directional || p_inputs.tessellation_local);
+	bool vsm_has_tess_bin = false;
+	if (vsm_tess_requested) {
+		for (const NextGeoVSMBinProgram &prog : p_inputs.raster_bin_programs) {
+			if ((prog.features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u &&
+					prog.tess_dice_shader.is_valid() && prog.tess_hw_shader.is_valid()) {
+				vsm_has_tess_bin = true;
+				break;
+			}
+		}
+	}
+	if (!vsm_tess_requested && vsm_tess_ready) {
+		_free_vsm_tessellation_resources();
+	}
+	const bool vsm_tess_active = vsm_has_tess_bin && _ensure_vsm_tessellation(rd);
+	vsm_tess_dispatches_last_frame = 0;
+
 	rd->draw_command_begin_label("VSM NextGeo Cull and Raster");
 
 	// GodotNext: vsm_local_lights (#216). Count indirect raster dispatches issued for local maps (chain 1).
 	uint32_t local_raster_indirect_dispatches = 0u;
 	// Chain 0: all directional maps; Chain 1: all local maps (1 indirect dispatch chain each).
 	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
+		const bool chain_tess = vsm_tess_active && (chain == 0u ? p_inputs.tessellation_directional : p_inputs.tessellation_local);
 		RendererRD::NextGeoVSMParams vp = {};
 		vp.table_maps = p_inputs.table_maps;
 		vp.pool_pages = p_inputs.pool_pages;
@@ -3344,12 +3971,13 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		vp.node_capacity = RendererRD::NEXTGEO_VSM_NODE_CAPACITY;
 		vp.group_capacity = RendererRD::NEXTGEO_VSM_GROUP_CAPACITY;
 		vp.cluster_capacity = RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY;
-		vp.cull_flags = cull_flags;
+		vp.cull_flags = cull_flags | (chain_tess ? RendererRD::NEXTGEO_VSM_CULL_FLAG_TESSELLATION : 0u);
 		vp.chain_index = chain;
 		vp.bucket_table_words = use_bins ? p_inputs.raster_bin_table_words : 0u;
 		vp.max_texel_error = p_inputs.max_texel_error;
 		vp.lod_bias = p_inputs.lod_bias;
 		vp.sw_max_edge_texels = sw_threshold;
+		vp.dicing_rate = RendererRD::nextgeo_tessellation_clamp_dicing_rate(p_inputs.tessellation_dicing_rate);
 		vp.camera_position[0] = float(p_inputs.camera_position.x);
 		vp.camera_position[1] = float(p_inputs.camera_position.y);
 		vp.camera_position[2] = float(p_inputs.camera_position.z);
@@ -3363,6 +3991,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		}
 		rd->buffer_update(vsm_params_buffer, 0, sizeof(vp), &vp);
 		rd->buffer_clear(vsm_counters[chain], 0, sizeof(RendererRD::NextGeoVSMCounters));
+		if (vsm_tess_ready && vsm_tess_state[chain].is_valid()) {
+			rd->buffer_clear(vsm_tess_state[chain], 0, sizeof(RendererRD::NextGeoTessState));
+		}
 		rd->buffer_update(vsm_seed_args, 0, sizeof(seed_init), seed_init);
 		rd->buffer_update(vsm_bvh_args[0], 0, sizeof(bvh_init), bvh_init);
 		rd->buffer_update(vsm_bvh_args[1], 0, sizeof(bvh_init), bvh_init);
@@ -3558,10 +4189,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			}
 		}
 
-		// 7. Programmable raster bins (Step 7, shared table with #155).
+		// 7. Programmable raster bins (Step 7, shared table with #155; tessellation #163 per chain).
 		if (use_bins) {
 			_compact_vsm_bins();
-			_draw_vsm_bins(chain, p_inputs);
+			_draw_vsm_bins(chain, p_inputs, chain_tess);
 			if (chain == 1u) {
 				local_raster_indirect_dispatches += 2u * p_inputs.raster_bin_programs.size();
 			}
@@ -3575,6 +4206,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 
 	vsm_dispatched_views++;
 	_request_vsm_stats(vsm_counters_ring_cursor++ % 3u);
+	if (vsm_tess_active) {
+		_request_vsm_tess_stats(vsm_tess_stats_ring_cursor++ % 3u);
+	}
 
 	if (r_stats != nullptr) {
 		Dictionary stats;
@@ -3594,6 +4228,18 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		stats["hiz_enabled"] = p_inputs.hiz_enabled;
 		stats["dynamic_layer_hook"] = p_inputs.dynamic_layer_hook;
 		stats["programmable_bins"] = int64_t(use_bins ? p_inputs.raster_bin_programs.size() : 0u);
+		// GodotNext: nextgeo_tessellation (#163).
+		stats["tessellation_directional"] = p_inputs.tessellation_directional;
+		stats["tessellation_local"] = p_inputs.tessellation_local;
+		stats["tessellation_buffers_allocated"] = vsm_tess_ready;
+		stats["tessellation_dicing_dispatches"] = int64_t(vsm_tess_dispatches_last_frame);
+		stats["tessellation_directional_diced_clusters"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[0][6] : 0u);
+		stats["tessellation_local_diced_clusters"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[1][6] : 0u);
+		stats["tessellation_directional_sw_micro_tris"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[0][2] : 0u);
+		stats["tessellation_local_sw_micro_tris"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[1][2] : 0u);
+		stats["tessellation_directional_hw_patches"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[0][3] : 0u);
+		stats["tessellation_local_hw_patches"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[1][3] : 0u);
+		stats["tessellation_dicing_overflow"] = int64_t(vsm_tess_have_gpu_stats ? (vsm_tess_last_gpu_stats[0][1] + vsm_tess_last_gpu_stats[1][1]) : 0u);
 		stats["gpu_counters_valid"] = vsm_have_gpu_counters;
 		if (vsm_have_gpu_counters) {
 			const RendererRD::NextGeoVSMCounters &dc = vsm_last_gpu_counters[0];
@@ -3628,6 +4274,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 }
 
 void NextGeoCut::_free_vsm_resources() {
+	_free_vsm_tessellation_resources();
 	RenderingDevice *rd = RD::get_singleton();
 	for (int ring = 0; ring < 3; ring++) {
 		vsm_counters_ring_pending[ring] = false;
@@ -3715,6 +4362,7 @@ void NextGeoCut::free_resources() {
 		return;
 	}
 	_free_vsm_resources();
+	_free_tessellation_resources();
 	_release_hiz();
 	for (int variant = 0; variant < 4; variant++) {
 		raster_pipelines[variant].clear();
@@ -3837,6 +4485,12 @@ void NextGeoCut::free_resources() {
 		s_shadow_raster_draws = 0;
 		s_shadow_cull_gpu_ms = 0.0;
 		s_shadow_raster_gpu_ms = 0.0;
+		s_tessellation_enabled = false;
+		s_tessellation_buffers_allocated = false;
+		s_tessellation_dicing_dispatches = 0;
+		s_tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
+		s_tess_have_gpu_stats = false;
+		memset(s_tess_gpu_stats, 0, sizeof(s_tess_gpu_stats));
 	}
 	initialized = false;
 }
@@ -3874,5 +4528,17 @@ Dictionary NextGeoCut::get_last_stats() {
 	stats["programmable_bins"] = int64_t(s_programmable_bins);
 	stats["hw_raster_path"] = s_hw_raster_path;
 	stats["hw_raster_reason"] = s_hw_raster_reason;
+	// GodotNext: nextgeo_tessellation (#163).
+	stats["tessellation_enabled"] = s_tessellation_enabled;
+	stats["tessellation_buffers_allocated"] = s_tessellation_buffers_allocated;
+	stats["tessellation_dicing_dispatches"] = int64_t(s_tessellation_dicing_dispatches);
+	stats["tessellation_dicing_rate"] = double(s_tessellation_dicing_rate);
+	stats["tessellation_patches"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[0] : 0u);
+	stats["dicing_overflow"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[1] : 0u);
+	stats["tessellation_sw_micro_tris"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[2] : 0u);
+	stats["tessellation_hw_patches"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[3] : 0u);
+	stats["tessellation_hw_stream_overflow"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[4] : 0u);
+	stats["tessellation_coarsened_tris"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[5] : 0u);
+	stats["tessellation_diced_clusters"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[6] : 0u);
 	return stats;
 }

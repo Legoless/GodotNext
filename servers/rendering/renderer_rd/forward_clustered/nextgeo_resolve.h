@@ -153,6 +153,8 @@ public:
 	// GodotNext: nextgeo_raster_bins (#155). The per-record InstanceData the resolve binds; a programmable
 	// raster bin's material code reads it too.
 	RID get_instance_data_buffer();
+	// GodotNext: nextgeo_tessellation (#163). Diced patch records buffer (invalid when tessellation is off).
+	void set_diced_patches_buffer(RID p_buffer) { diced_patches_buffer = p_buffer; }
 
 	bool classify(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, const Size2i &p_viewport_size);
 
@@ -214,6 +216,8 @@ private:
 
 	RID dummy_buffer;
 	RID dummy_vis_tex;
+	// GodotNext: nextgeo_tessellation (#163). Non-owning handle to NextGeoCut's diced patch buffer for this frame.
+	RID diced_patches_buffer;
 
 	// GodotNext: nextgeo_shading_bins (#158). Made on the first bin(), so tile quads allocate nothing new.
 	ShadingBinningShaderRD binning_shader;

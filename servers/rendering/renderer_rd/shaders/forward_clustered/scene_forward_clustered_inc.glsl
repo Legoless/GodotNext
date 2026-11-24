@@ -45,6 +45,7 @@
 
 #ifdef MODE_VISIBILITY_RESOLVE
 #include "../nextgeo/nextgeo_records_inc.glsl"
+#include "../nextgeo/tessellation_inc.glsl"
 #endif
 
 // GodotNext: vsm_non_nanite (#218) / vsm_projection (#222). In every variant (the VSM_* defines reach them
@@ -998,6 +999,12 @@ nextgeo_cluster_skin;
 // clang-format off
 #include "../nextgeo/skinning_inc.glsl"
 // clang-format on
+
+// GodotNext: nextgeo_tessellation (#163). Compact diced patch records (binding 20 avoids 9..15 compute, 16 splines, 17..19 skin).
+layout(set = 2, binding = 20, std430) restrict readonly buffer NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+nextgeo_diced_patches;
 
 #else
 

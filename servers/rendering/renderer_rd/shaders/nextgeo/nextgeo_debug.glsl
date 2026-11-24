@@ -29,6 +29,7 @@ void main() {
 
 // clang-format off
 #include "nextgeo_records_inc.glsl"
+#include "tessellation_inc.glsl"
 // clang-format on
 
 layout(location = 0) in vec2 uv_interp;
@@ -91,6 +92,12 @@ layout(set = 0, binding = 12, std430) buffer restrict Histogram {
 	uint bins[16];
 }
 histogram;
+
+// GodotNext: nextgeo_tessellation (#163). Compact diced patch records (dummy buffer when off).
+layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+diced_patches;
 
 layout(push_constant, std430) uniform PushParams {
 	vec2 internal_size;
@@ -294,9 +301,21 @@ void main() {
 		}
 	}
 
-	// Decode visible virtual cluster & triangle.
-	uint vis_cluster = vis_id >> 7u;
-	uint tri_idx = vis_id & 0x7Fu;
+	// Decode visible virtual cluster & triangle (supporting #163 diced patch IDs).
+	uint raw_vis_cluster = vis_id >> 7u;
+	uint raw_tri_idx = vis_id & 0x7Fu;
+	bool is_patch = nextgeo_vis_is_patch(raw_vis_cluster);
+	uint vis_cluster = raw_vis_cluster;
+	uint tri_idx = raw_tri_idx;
+	NextGeoDicedPatchRecord patch_rec;
+	if (is_patch) {
+		patch_rec = diced_patches.data[nextgeo_vis_patch_index(raw_vis_cluster)];
+		vis_cluster = patch_rec.cluster_slot;
+		tri_idx = patch_rec.tri_and_sub & 0xFFu;
+	} else if (!nextgeo_vis_is_normal(raw_vis_cluster)) {
+		frag_color = (push_params.mode == MODE_CRACKS) ? vec4(0.45, 0.45, 0.45, 1.0) : vec4(0.05, 0.05, 0.05, 1.0);
+		return;
+	}
 	if (vis_cluster >= push_params.visible_capacity) {
 		frag_color = (push_params.mode == MODE_CRACKS) ? vec4(0.45, 0.45, 0.45, 1.0) : vec4(0.05, 0.05, 0.05, 1.0);
 		return;
@@ -339,9 +358,16 @@ void main() {
 	}
 
 	if (push_params.mode == MODE_VISIBILITY_ID) {
-		vec3 cluster_col = hash_color(entry.x * 0x9e3779b9u ^ entry.y);
-		vec3 tri_col = hash_color((entry.y << 8u) ^ tri_idx);
-		frag_color = vec4(mix(cluster_col, tri_col, 0.25), 1.0);
+		if (is_patch) {
+			uint pid = nextgeo_vis_patch_index(raw_vis_cluster);
+			vec3 patch_col = hash_color(entry.x * 0x9e3779b9u ^ (pid + 0x517cc1b7u));
+			vec3 micro_col = hash_color((pid << 8u) ^ raw_tri_idx);
+			frag_color = vec4(mix(patch_col, micro_col, 0.35), 1.0);
+		} else {
+			vec3 cluster_col = hash_color(entry.x * 0x9e3779b9u ^ entry.y);
+			vec3 tri_col = hash_color((entry.y << 8u) ^ tri_idx);
+			frag_color = vec4(mix(cluster_col, tri_col, 0.25), 1.0);
+		}
 		return;
 	}
 
@@ -411,8 +437,7 @@ void main() {
 		return;
 	}
 
-	vec4 tri_clip[3];
-	vec3 tri_view[3];
+	vec3 src_local[3];
 	for (uint c = 0u; c < 3u; c++) {
 		uint ib = desc.y + tri_idx * 3u + c;
 		uint vi = (pages.data[ib >> 2u] >> ((ib & 3u) * 8u)) & 0xFFu;
@@ -421,11 +446,27 @@ void main() {
 			return;
 		}
 		uint pw = desc.x + vi * stride;
-		vec3 lp = vec3(
+		src_local[c] = vec3(
 				uintBitsToFloat(pages.data[pw + 0u]),
 				uintBitsToFloat(pages.data[pw + 1u]),
 				uintBitsToFloat(pages.data[pw + 2u]));
-		vec3 wp = instance_point(record, lp);
+	}
+	vec3 corner_local[3] = src_local;
+	if (is_patch) {
+		uint f0 = patch_rec.packed_factors & 0xFFu;
+		uint f1 = (patch_rec.packed_factors >> 8u) & 0xFFu;
+		uint f2 = (patch_rec.packed_factors >> 16u) & 0xFFu;
+		NextGeoTessVertexCoord mc[3];
+		nextgeo_tess_micro_tri_coords(f0, f1, f2, patch_rec.micro_tri_base + raw_tri_idx, mc[0], mc[1], mc[2]);
+		for (uint c = 0u; c < 3u; c++) {
+			corner_local[c] = src_local[0] * mc[c].bary.x + src_local[1] * mc[c].bary.y + src_local[2] * mc[c].bary.z;
+		}
+	}
+
+	vec4 tri_clip[3];
+	vec3 tri_view[3];
+	for (uint c = 0u; c < 3u; c++) {
+		vec3 wp = instance_point(record, corner_local[c]);
 		vec3 vp = (dbg.view * vec4(wp, 1.0)).xyz;
 		tri_view[c] = vp;
 		tri_clip[c] = dbg.proj * vec4(vp, 1.0);

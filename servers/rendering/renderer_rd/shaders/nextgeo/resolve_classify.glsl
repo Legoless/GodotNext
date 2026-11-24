@@ -11,6 +11,7 @@
 
 // clang-format off
 #include "nextgeo_records_inc.glsl"
+#include "tessellation_inc.glsl"
 // clang-format on
 
 #ifdef INIT_INDIRECT
@@ -63,6 +64,12 @@ layout(set = 0, binding = 7, std430) buffer restrict writeonly TileList {
 }
 tile_list;
 
+// GodotNext: nextgeo_tessellation (#163). Compact diced patch records (dummy buffer when off).
+layout(set = 0, binding = 8, std430) buffer restrict readonly NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+diced_patches;
+
 #ifdef INIT_INDIRECT
 void main() {
 	uint slot = gl_GlobalInvocationID.x;
@@ -84,19 +91,27 @@ void main() {
 		uint vis_id = texelFetch(visibility_tex, px, 0).r;
 		if (vis_id != 0xFFFFFFFFu) {
 			uint vis_cluster = vis_id >> 7u;
-			uvec2 entry = visible_clusters.data[vis_cluster];
-			NextGeoInstanceRecord record = records.data[entry.x];
-			if ((record.flags & NEXTGEO_RECORD_VALID) != 0u) {
-				NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
-				if (mesh.page_count > 0u && entry.y >= mesh.cluster_offset) {
-					uint local_cluster = entry.y - mesh.cluster_offset;
-					if (local_cluster < mesh.cluster_count) {
-						uvec4 desc = cluster_table.data[mesh.page_table_offset + local_cluster];
-						uint surface_id = desc.w & 0xFFFFu;
-						if (surface_id < 32u && (record.surface_mask & (1u << surface_id)) != 0u) {
-							uint candidate = bucket_table.data[record.bucket_base + surface_id] & NEXTGEO_BUCKET_ID_MASK;
-							if (candidate < push_params.bucket_count) {
-								my_bucket = candidate;
+			bool valid_vis = true;
+			if (nextgeo_vis_is_patch(vis_cluster)) {
+				vis_cluster = diced_patches.data[nextgeo_vis_patch_index(vis_cluster)].cluster_slot;
+			} else if (!nextgeo_vis_is_normal(vis_cluster)) {
+				valid_vis = false;
+			}
+			if (valid_vis) {
+				uvec2 entry = visible_clusters.data[vis_cluster];
+				NextGeoInstanceRecord record = records.data[entry.x];
+				if ((record.flags & NEXTGEO_RECORD_VALID) != 0u) {
+					NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+					if (mesh.page_count > 0u && entry.y >= mesh.cluster_offset) {
+						uint local_cluster = entry.y - mesh.cluster_offset;
+						if (local_cluster < mesh.cluster_count) {
+							uvec4 desc = cluster_table.data[mesh.page_table_offset + local_cluster];
+							uint surface_id = desc.w & 0xFFFFu;
+							if (surface_id < 32u && (record.surface_mask & (1u << surface_id)) != 0u) {
+								uint candidate = bucket_table.data[record.bucket_base + surface_id] & NEXTGEO_BUCKET_ID_MASK;
+								if (candidate < push_params.bucket_count) {
+									my_bucket = candidate;
+								}
 							}
 						}
 					}

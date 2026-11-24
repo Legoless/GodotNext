@@ -149,6 +149,7 @@ void NextGeoResolve::begin_frame() {
 	bucket_map.clear();
 	current_max_tiles = 0;
 	binned = false; // GodotNext: nextgeo_shading_bins (#158)
+	diced_patches_buffer = RID(); // GodotNext: nextgeo_tessellation (#163)
 }
 
 uint32_t NextGeoResolve::register_bucket(SceneShaderForwardClustered::MaterialData *p_material, SceneShaderForwardClustered::ShaderData *p_shader, RID p_material_uniform_set, uint32_t p_material_feedback_index, SceneShaderForwardClustered::ShaderSpecialization p_specialization) {
@@ -356,6 +357,7 @@ bool NextGeoResolve::classify(RendererVirtualMeshStorage *p_storage, RID p_visib
 	const RID mesh_buf = p_storage->get_mesh_record_buffer().is_valid() ? p_storage->get_mesh_record_buffer() : dummy_buffer;
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_buffer;
 	const RID bucket_buf = bucket_table_buffer.is_valid() ? bucket_table_buffer : dummy_buffer;
+	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_visibility_tex));
@@ -366,6 +368,7 @@ bool NextGeoResolve::classify(RendererVirtualMeshStorage *p_storage, RID p_visib
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, bucket_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, indirect_args_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tile_list_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, patches_buf));
 
 	ClassifyPush push;
 	push.viewport_width = width;
@@ -417,6 +420,7 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	const RID skin_palette_buf = p_storage->get_skin_palette_buffer().is_valid() ? p_storage->get_skin_palette_buffer() : dummy_buffer;
 	const RID skin_inst_buf = p_storage->get_skin_instance_buffer().is_valid() ? p_storage->get_skin_instance_buffer() : dummy_buffer;
 	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_buffer;
+	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, vis_tex));
@@ -433,6 +437,8 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, skin_palette_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, skin_inst_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, cluster_skin_buf));
+	// GodotNext: nextgeo_tessellation (#163). Binding 20 holds compact diced patch records.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, patches_buf));
 
 	return uniform_set_cache->get_cache_vec(p_shader_rid, RenderForwardClustered::TRANSFORMS_UNIFORM_SET, uniforms);
 }
@@ -527,6 +533,7 @@ bool NextGeoResolve::bin(RendererVirtualMeshStorage *p_storage, RID p_visibility
 	const RID record_buf = p_storage->get_record_buffer().is_valid() ? p_storage->get_record_buffer() : dummy_buffer;
 	const RID mesh_buf = p_storage->get_mesh_record_buffer().is_valid() ? p_storage->get_mesh_record_buffer() : dummy_buffer;
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_buffer;
+	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_visibility_tex));
@@ -539,6 +546,7 @@ bool NextGeoResolve::bin(RendererVirtualMeshStorage *p_storage, RID p_visibility
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, shading_args_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, shading_pixel_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bucket_table_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, patches_buf));
 
 	BinningPush push;
 	push.viewport_width = width;
@@ -602,6 +610,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	const RID skin_palette_buf = p_storage->get_skin_palette_buffer().is_valid() ? p_storage->get_skin_palette_buffer() : dummy_buffer;
 	const RID skin_inst_buf = p_storage->get_skin_instance_buffer().is_valid() ? p_storage->get_skin_instance_buffer() : dummy_buffer;
 	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_buffer;
+	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
 
 	// The resolve set of the tile quads, with the pixel list at binding 7, the bin state and the images.
 	LocalVector<RD::Uniform> resolve_uniforms;
@@ -624,6 +633,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, skin_palette_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, skin_inst_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, cluster_skin_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, patches_buf));
 
 	for (uint32_t i = 0; i < buckets.size(); i++) {
 		const MaterialBucket &bucket = buckets[i];
@@ -1036,6 +1046,7 @@ void NextGeoResolve::free_resources() {
 	instance_data_byte_capacity = 0;
 	dummy_buffer = RID();
 	dummy_vis_tex = RID();
+	diced_patches_buffer = RID();
 	classify_version = RID();
 	init_indirect_pipeline = RID();
 	classify_pipeline = RID();

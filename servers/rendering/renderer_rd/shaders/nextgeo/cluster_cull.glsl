@@ -72,6 +72,7 @@ const uint NEXTGEO_VSM_HIZ_PAGE_SIZE = 8u;
 const uint NEXTGEO_VSM_CULL_FLAG_HIZ = 1u << 0u;
 const uint NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 1u;
 const uint NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK = 1u << 2u;
+const uint NEXTGEO_VSM_CULL_FLAG_TESSELLATION = 1u << 4u; // #163: dice displaced clusters on this chain
 const uint NEXTGEO_VSM_MAP_META_REVERSE_CULL = 1u << 0u;
 const uint NEXTGEO_VSM_MAP_META_ACTIVE = 1u << 1u;
 
@@ -106,7 +107,7 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly VSMParams {
 	float max_texel_error;
 	float lod_bias;
 	float sw_max_edge_texels;
-	float pad0;
+	float dicing_rate; // #163: shadow texels per diced edge
 	vec4 camera_position;
 	uint bin_features[68];
 }
@@ -795,8 +796,9 @@ void main() {
 	bool prog_enabled = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS) != 0u;
 	bool pure_fixed = !prog_enabled || (record.surface_mask == record.pad0);
 	if (pure_fixed && !is_skinned) {
-		vec3 g_min = vec3(vsm_dag_float(base + 36u), vsm_dag_float(base + 40u), vsm_dag_float(base + 44u));
-		vec3 g_max = vec3(vsm_dag_float(base + 48u), vsm_dag_float(base + 52u), vsm_dag_float(base + 56u));
+		float disp_bound = max(record.prev_world_aabb_max.w, 0.0);
+		vec3 g_min = vec3(vsm_dag_float(base + 36u), vsm_dag_float(base + 40u), vsm_dag_float(base + 44u)) - vec3(disp_bound);
+		vec3 g_max = vec3(vsm_dag_float(base + 48u), vsm_dag_float(base + 52u), vsm_dag_float(base + 56u)) + vec3(disp_bound);
 		vec2 px_min;
 		vec2 px_max;
 		float min_depth;
@@ -955,6 +957,13 @@ void main() {
 				software = vsm_sw_raster_route(record, route_scale, bounds, max_edge, md, mip);
 			}
 		}
+		// GodotNext: nextgeo_tessellation (#163). When VSM tessellation is active on this chain,
+		// route displaced clusters into the bin's SW worklist for tessellation_dice.glsl.
+		if (bin != NEXTGEO_RASTER_BIN_FIXED &&
+				(vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_TESSELLATION) != 0u &&
+				(bin_features & NEXTGEO_RASTER_FEATURE_DISPLACED) != 0u) {
+			software = true;
+		}
 
 		uint cslot = atomicAdd(vsm_counters.cluster_count, 1u);
 		if (cslot >= vsm_params.cluster_capacity) {
@@ -1056,8 +1065,9 @@ void main() {
 	bool prog_enabled = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS) != 0u;
 	bool pure_fixed = !prog_enabled || (record.surface_mask == record.pad0);
 	if (pure_fixed && !is_skinned) {
-		vec3 n_min = vec3(vsm_dag_float(base + 20u), vsm_dag_float(base + 24u), vsm_dag_float(base + 28u));
-		vec3 n_max = vec3(vsm_dag_float(base + 32u), vsm_dag_float(base + 36u), vsm_dag_float(base + 40u));
+		float disp_bound = max(record.prev_world_aabb_max.w, 0.0);
+		vec3 n_min = vec3(vsm_dag_float(base + 20u), vsm_dag_float(base + 24u), vsm_dag_float(base + 28u)) - vec3(disp_bound);
+		vec3 n_max = vec3(vsm_dag_float(base + 32u), vsm_dag_float(base + 36u), vsm_dag_float(base + 40u)) + vec3(disp_bound);
 		vec2 px_min;
 		vec2 px_max;
 		float min_depth;
@@ -1248,6 +1258,7 @@ layout(set = 0, binding = 22, std430) buffer restrict RasterBinState {
 raster_bin_state;
 
 const uint NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 6u;
+const uint NEXTGEO_CULL_FLAG_TESSELLATION = 1u << 7u;
 #endif
 
 // GodotNext: spline_meshes (#161). Bound in BVH_LEVEL and CLUSTER_CULL (main and shadow) at binding 26.
@@ -1806,6 +1817,15 @@ void main() {
 			if (bin == NEXTGEO_RASTER_BIN_FIXED) {
 				raster_route(params.list_base + slot, software);
 			} else {
+				// GodotNext: nextgeo_tessellation (#163). When tessellation is active, route displaced
+				// bins into their SW dicing worklist so tessellation_dice.glsl dices and splits them.
+				if ((cull.cull.w & NEXTGEO_CULL_FLAG_TESSELLATION) != 0u && bin < NEXTGEO_RASTER_BIN_LIMIT) {
+					uint tess_bit = bin - 1u;
+					uint tess_word = tess_bit < 32u ? cull.raster_bin_tess_mask.x : cull.raster_bin_tess_mask.y;
+					if ((tess_word & (1u << (tess_bit & 31u))) != 0u) {
+						software = true;
+					}
+				}
 				raster_bin_route(params.list_base + slot, bin, software);
 			}
 		}

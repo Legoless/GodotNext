@@ -43,10 +43,11 @@ struct NextGeoCullParamsData {
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
 	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins)
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins, bit 7 = tessellation #163)
 	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
-	vec4 raster_params; // #162: x = T px, y = px scale, z = 1 for an orthographic view
+	vec4 raster_params; // #162/#163: x = T px, y = px scale, z = 1 for an orthographic view, w = tessellation dicing rate px
 	uvec4 raster_bin_demote_mask; // #153/#164: xy = pixel-programmable bins (1..64) demotable past programmable_raster_distance; zw = vertex-offset bins (1..64) demotable past vertex_offset_disable_distance
+	uvec4 raster_bin_tess_mask; // #163: xy = tessellated displaced bins (1..64) routed to runtime dicing worklist
 };
 
 struct NextGeoCountersData {
@@ -89,10 +90,11 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly CullParams {
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
 	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins)
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins, bit 7 = tessellation #163)
 	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
-	vec4 raster_params; // #162: x = T px, y = px scale, z = 1 for an orthographic view
+	vec4 raster_params; // #162/#163: x = T px, y = px scale, z = 1 for an orthographic view, w = tessellation dicing rate px
 	uvec4 raster_bin_demote_mask; // #153/#164: xy = pixel-programmable bins (1..64) demotable past programmable_raster_distance; zw = vertex-offset bins (1..64) demotable past vertex_offset_disable_distance
+	uvec4 raster_bin_tess_mask; // #163: xy = tessellated displaced bins (1..64) routed to runtime dicing worklist
 }
 cull;
 #endif

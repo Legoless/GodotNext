@@ -22,6 +22,7 @@
 // clang-format off
 #include "nextgeo_records_inc.glsl"
 #include "shading_bins_inc.glsl"
+#include "tessellation_inc.glsl"
 // clang-format on
 
 #if defined(MODE_CLEAR) || defined(MODE_PREFIX)
@@ -88,6 +89,12 @@ layout(set = 0, binding = 9, std430) buffer restrict readonly BucketTable {
 }
 bucket_table;
 
+// GodotNext: nextgeo_tessellation (#163). Compact diced patch records (dummy buffer when off).
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+diced_patches;
+
 #if defined(MODE_COUNT) || defined(MODE_SCATTER)
 // The pixel's shading bin, or NEXTGEO_SHADING_BIN_NONE. The visibility-ID decode of resolve_classify.glsl.
 uint pixel_bin(ivec2 p_px) {
@@ -101,7 +108,13 @@ uint pixel_bin(ivec2 p_px) {
 	if (vis_id == 0xFFFFFFFFu) {
 		return NEXTGEO_SHADING_BIN_NONE;
 	}
-	uvec2 entry = visible_clusters.data[vis_id >> 7u];
+	uint vis_cluster = vis_id >> 7u;
+	if (nextgeo_vis_is_patch(vis_cluster)) {
+		vis_cluster = diced_patches.data[nextgeo_vis_patch_index(vis_cluster)].cluster_slot;
+	} else if (!nextgeo_vis_is_normal(vis_cluster)) {
+		return NEXTGEO_SHADING_BIN_NONE;
+	}
+	uvec2 entry = visible_clusters.data[vis_cluster];
 	NextGeoInstanceRecord record = records.data[entry.x];
 	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u) {
 		return NEXTGEO_SHADING_BIN_NONE;

@@ -41,6 +41,9 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/resolve_compute.glsl.gen.h"
 // GodotNext: nextgeo_vertex_offset (#164)
 #include "servers/rendering/renderer_rd/shaders/nextgeo/rt_vertex_offset.glsl.gen.h"
+// GodotNext: nextgeo_tessellation (#163)
+#include "servers/rendering/renderer_rd/shaders/nextgeo/tessellation_dice.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/tessellation_hw.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -517,6 +520,9 @@ public:
 		RID raster_hw_mesh_version;
 		// GodotNext: nextgeo_vertex_offset (#164). Lazily compiled RT proxy vertex-offset compute shader.
 		RID rt_vertex_offset_version;
+		// GodotNext: nextgeo_tessellation (#163). Lazy dicing compute & bounded HW patch versions (created only when tessellation is active).
+		RID tessellation_dice_version;
+		RID tessellation_hw_version;
 		bool nextgeo_raster_reject_logged = false;
 		// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The Stage A/B resolve's compute form: whether
 		// the material has one (a material NextGeo resolves, and whose code cannot discard or write DEPTH),
@@ -603,6 +609,13 @@ public:
 		// material raster target (groups 0/1 = VIS64 image/buffer, group 2 = VSM depth-only).
 		RID get_raster_target_mesh_shader(bool p_buffer) const;
 		RID get_raster_target_vsm_mesh_shader() const;
+		// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Dicing compute + bounded HW stream
+		// shader variants (groups 0/1 = VIS64 image/buffer, group 2 = VSM depth-only); lazily allocated.
+		bool ensure_tessellation_target();
+		RID get_tessellation_dice_shader(bool p_buffer) const;
+		RID get_tessellation_hw_shader(bool p_buffer) const;
+		RID get_tessellation_vsm_dice_shader() const;
+		RID get_tessellation_vsm_hw_shader() const;
 		void _free_raster_target();
 		// GodotNext: nextgeo_shading_bins (#158). The compute form's shader and pipeline for one variant and
 		// specialization; invalid when the material has no compute form or it did not compile, which also
@@ -678,6 +691,9 @@ public:
 	RasterMaterialHwShaderRD raster_hw_shader;
 	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader form of the HW material raster target.
 	RasterMaterialHwMeshShaderRD raster_hw_mesh_shader;
+	// GodotNext: nextgeo_tessellation (#163). Dicing compute & bounded HW patch raster shaders (groups 0/1 VIS64, 2 VSM).
+	TessellationDiceShaderRD tessellation_dice_shader;
+	TessellationHwShaderRD tessellation_hw_shader;
 	// GodotNext: nextgeo_shading_bins (#158). The Stage A/B resolve's compute form, one group per
 	// ResolveComputeVariant; groups enable when a shading bin first uses them.
 	ResolveComputeShaderRD resolve_compute_shader;

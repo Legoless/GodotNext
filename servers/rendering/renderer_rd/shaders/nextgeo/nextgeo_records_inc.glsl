@@ -94,3 +94,6 @@ const uint NEXTGEO_BUCKET_ID_MASK = 0x0FFFFFFFu;
 const uint NEXTGEO_BUCKET_INVALID = 0x0FFFFFFFu;
 const uint NEXTGEO_BUCKET_CULL_FRONT = 1u << 28u;
 const uint NEXTGEO_BUCKET_CULL_DISABLED = 1u << 29u;
+
+// GodotNext: nextgeo_tessellation (#163) & nextgeo_voxels (#165) reserved 25-bit visibility cluster ID partition.
+#include "visibility_inc.glsl"

@@ -369,6 +369,16 @@ void VirtualShadowMapStorage::_table_invalidate_map(uint32_t p_map, uint32_t p_d
 	pending_map_invalidations.push_back(item);
 }
 
+void VirtualShadowMapStorage::invalidate_all_maps(uint32_t p_dirty_flags) {
+	if (!active || p_dirty_flags == 0u) {
+		return;
+	}
+	const uint32_t maps = get_table_capacity();
+	for (uint32_t m = 0; m < maps; m++) {
+		_table_invalidate_map(m, p_dirty_flags, false);
+	}
+}
+
 void VirtualShadowMapStorage::_table_scroll(uint32_t p_map, const ClipmapScroll &p_scroll) {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL(rd);

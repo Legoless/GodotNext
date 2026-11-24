@@ -44,6 +44,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_mesh_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
+// GodotNext: nextgeo_tessellation (#163).
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_tessellation.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_vsm.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
@@ -98,6 +100,11 @@ struct NextGeoRasterBinProgram {
 	RID hw_shader[2];
 	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW variant per visibility-buffer storage.
 	RID hw_mesh_shader[2];
+	// GodotNext: nextgeo_tessellation (#163). Dicing compute + bounded HW stream shaders & displacement params.
+	RID tess_dice_shader[2];
+	RID tess_hw_shader[2];
+	float disp_magnitude = 0.0f;
+	float disp_center = 0.5f;
 	LocalVector<RD::Uniform> material_uniforms;
 };
 
@@ -112,6 +119,11 @@ struct NextGeoVSMBinProgram {
 	RID hw_shader;
 	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW depth-only VSM variant.
 	RID hw_mesh_shader;
+	// GodotNext: nextgeo_tessellation (#163). Depth-only VSM dicing compute + bounded HW patch shaders.
+	RID tess_dice_shader;
+	RID tess_hw_shader;
+	float disp_magnitude = 0.0f;
+	float disp_center = 0.5f;
 	LocalVector<RD::Uniform> material_uniforms;
 };
 
@@ -137,6 +149,11 @@ struct NextGeoVSMInputs {
 	// GodotNext: nextgeo_mesh_raster (#154). Mesh-shader HW raster path selection for VSM.
 	bool use_mesh_hw_raster = false;
 	RendererRD::NextGeoHWRasterReason hw_raster_reason = RendererRD::NEXTGEO_HW_RASTER_REASON_AUTO_PENDING_PQ;
+	// GodotNext: nextgeo_tessellation (#163). Per-chain VSM tessellation toggles & dicing rate.
+	bool tessellation_directional = false;
+	bool tessellation_local = false;
+	float tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
+	uint32_t tessellation_debug_max_patches = 0u;
 	LocalVector<RendererRD::NextGeoVSMMapMeta> map_meta;
 	const uint32_t *raster_bin_table = nullptr;
 	uint32_t raster_bin_table_words = 0;
@@ -183,6 +200,10 @@ struct NextGeoRasterInputs {
 	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Mesh-shader HW raster path selection.
 	bool use_mesh_hw_raster = false;
 	RendererRD::NextGeoHWRasterReason hw_raster_reason = RendererRD::NEXTGEO_HW_RASTER_REASON_AUTO_PENDING_PQ;
+	// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Experimental runtime displacement tessellation.
+	bool tessellation_enabled = false;
+	float tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
+	uint32_t tessellation_debug_max_patches = 0u;
 };
 
 // GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
@@ -230,6 +251,8 @@ public:
 	void free_resources();
 
 	RID get_clusters_buffer() const { return clusters; }
+	// GodotNext: nextgeo_tessellation (#163). Invalid when experimental/tessellation is off (zero buffers allocated).
+	RID get_diced_patches_buffer() const { return tess_active ? tess_diced_patches : RID(); }
 	static void set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote);
 	// GodotNext: nextgeo_shading_bins (#158). The shading path of the last main view's Stage A/B (keys
 	// shading_*), merged into the stats.
@@ -260,9 +283,20 @@ private:
 	void _dispatch_vsm_hiz_build(RID p_pool_texture, RID p_dirty_buffer, RID p_alloc_state_buffer, RID p_indirect_buffer, uint32_t p_table_maps, uint32_t p_pool_pages, uint32_t p_grid_width);
 	bool _ensure_vsm_bins(RenderingDevice *p_rd);
 	void _compact_vsm_bins();
-	void _draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inputs);
+	void _draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inputs, bool p_chain_tess);
 	RID _vsm_bin_render_pipeline(RID p_shader, RD::FramebufferFormatID p_format);
 	void _free_vsm_resources();
+	// GodotNext: nextgeo_tessellation (#163). Lazy main-view and VSM tessellation buffers (0 allocated when off).
+	bool _ensure_tessellation(RenderingDevice *p_rd);
+	void _free_tessellation_resources();
+	void _request_tess_stats(uint32_t p_ring_slot);
+	void _publish_tess_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
+	static void _readback_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
+	bool _ensure_vsm_tessellation(RenderingDevice *p_rd);
+	void _free_vsm_tessellation_resources();
+	void _request_vsm_tess_stats(uint32_t p_ring_slot);
+	void _publish_vsm_tess_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
+	static void _readback_vsm_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
 	void _request_vsm_stats(uint32_t p_ring_slot);
 	void _publish_vsm_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
 	static void _readback_vsm_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
@@ -484,4 +518,32 @@ private:
 	RendererRD::NextGeoVSMCounters vsm_last_gpu_counters[RendererRD::NEXTGEO_VSM_CHAIN_COUNT];
 	bool vsm_have_gpu_counters = false;
 	uint64_t vsm_dispatched_views = 0;
+
+	// GodotNext: nextgeo_tessellation (#163). Lazily allocated ONLY when experimental/tessellation == true.
+	bool tess_ready = false;
+	bool tess_active = false;
+	uint32_t tess_effective_patch_capacity = 0;
+	uint32_t tess_dispatches_last_frame = 0;
+	RID tess_diced_patches;
+	RID tess_hw_patches;
+	RID tess_state;
+	RID tess_hw_args;
+	RID tess_stats_ring[3];
+	uint32_t tess_stats_ring_cursor = 0;
+	bool tess_stats_ring_pending[3] = { false, false, false };
+	uint32_t tess_stats_ring_cap[3] = { 0, 0, 0 };
+	uint32_t tess_last_gpu_stats[RendererRD::NEXTGEO_TESS_STATS_WORDS] = {};
+	bool tess_have_gpu_stats = false;
+
+	bool vsm_tess_ready = false;
+	uint32_t vsm_tess_dispatches_last_frame = 0;
+	RID vsm_tess_diced_patches;
+	RID vsm_tess_hw_patches;
+	RID vsm_tess_state[RendererRD::NEXTGEO_VSM_CHAIN_COUNT];
+	RID vsm_tess_hw_args;
+	RID vsm_tess_stats_ring[3];
+	uint32_t vsm_tess_stats_ring_cursor = 0;
+	bool vsm_tess_stats_ring_pending[3] = { false, false, false };
+	uint32_t vsm_tess_last_gpu_stats[RendererRD::NEXTGEO_VSM_CHAIN_COUNT][RendererRD::NEXTGEO_TESS_STATS_WORDS] = {};
+	bool vsm_tess_have_gpu_stats = false;
 };

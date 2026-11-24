@@ -579,6 +579,8 @@ public:
 	};
 	// GodotNext: vsm_caching (#212).
 	uint32_t get_deferred_invalidation_budget() const { return deferred_invalidation_budget; }
+	// GodotNext: nextgeo_tessellation (#163). Invalidate all active maps when VSM tessellation toggles at runtime.
+	void invalidate_all_maps(uint32_t p_dirty_flags = ENTRY_DIRTY_STATIC);
 	// Whether VSM marks pages for views (VSM on, the pool and the marking shaders ready).
 	bool is_marking_enabled();
 	void mark_and_allocate(const MarkInput &p_input);

@@ -581,6 +581,15 @@ void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
 		SceneShaderForwardClustered::singleton->rt_vertex_offset_shader.version_free(rt_vertex_offset_version);
 		rt_vertex_offset_version = RID();
 	}
+	// GodotNext: nextgeo_tessellation (#163).
+	if (tessellation_dice_version.is_valid()) {
+		SceneShaderForwardClustered::singleton->tessellation_dice_shader.version_free(tessellation_dice_version);
+		tessellation_dice_version = RID();
+	}
+	if (tessellation_hw_version.is_valid()) {
+		SceneShaderForwardClustered::singleton->tessellation_hw_shader.version_free(tessellation_hw_version);
+		tessellation_hw_version = RID();
+	}
 }
 
 // GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5, GN-12). Lazily compiles the RT proxy
@@ -601,6 +610,79 @@ RID SceneShaderForwardClustered::ShaderData::get_rt_vertex_offset_shader() {
 		rt_shader.enable_group(0);
 	}
 	return rt_shader.version_get_shader(rt_vertex_offset_version, 0);
+}
+
+// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Lazily compiles tessellation_dice.glsl
+// and tessellation_hw.glsl using #150's displacement() compiler output only when tessellation is active.
+bool SceneShaderForwardClustered::ShaderData::ensure_tessellation_target() {
+	if (!raster_target_valid || !has_displacement || SceneShaderForwardClustered::singleton == nullptr) {
+		return false;
+	}
+	if (tessellation_dice_version.is_valid() && tessellation_hw_version.is_valid()) {
+		return true;
+	}
+	MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
+	if (tessellation_dice_version.is_null()) {
+		tessellation_dice_version = SceneShaderForwardClustered::singleton->tessellation_dice_shader.version_create(false);
+		SceneShaderForwardClustered::singleton->tessellation_dice_shader.version_set_compute_code(tessellation_dice_version, raster_code, raster_uniforms, raster_globals, raster_defines);
+	}
+	if (tessellation_hw_version.is_null()) {
+		tessellation_hw_version = SceneShaderForwardClustered::singleton->tessellation_hw_shader.version_create(false);
+		SceneShaderForwardClustered::singleton->tessellation_hw_shader.version_set_code(tessellation_hw_version, raster_code, raster_uniforms, raster_globals, raster_globals, raster_defines);
+	}
+	return tessellation_dice_version.is_valid() && tessellation_hw_version.is_valid();
+}
+
+RID SceneShaderForwardClustered::ShaderData::get_tessellation_dice_shader(bool p_buffer) const {
+	if (tessellation_dice_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_target_ready) {
+		return RID();
+	}
+	const bool supported = p_buffer ? SceneShaderForwardClustered::singleton->raster_buffer_int64_supported : SceneShaderForwardClustered::singleton->raster_image_int64_supported;
+	if (!supported) {
+		return RID();
+	}
+	const int group = p_buffer ? 1 : 0;
+	if (!SceneShaderForwardClustered::singleton->tessellation_dice_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->tessellation_dice_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->tessellation_dice_shader.version_get_shader(tessellation_dice_version, group);
+}
+
+RID SceneShaderForwardClustered::ShaderData::get_tessellation_hw_shader(bool p_buffer) const {
+	if (tessellation_hw_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_target_ready) {
+		return RID();
+	}
+	const bool supported = p_buffer ? SceneShaderForwardClustered::singleton->raster_buffer_int64_supported : SceneShaderForwardClustered::singleton->raster_image_int64_supported;
+	if (!supported) {
+		return RID();
+	}
+	const int group = p_buffer ? 1 : 0;
+	if (!SceneShaderForwardClustered::singleton->tessellation_hw_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->tessellation_hw_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->tessellation_hw_shader.version_get_shader(tessellation_hw_version, group);
+}
+
+RID SceneShaderForwardClustered::ShaderData::get_tessellation_vsm_dice_shader() const {
+	if (tessellation_dice_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_vsm_supported) {
+		return RID();
+	}
+	constexpr int group = 2;
+	if (!SceneShaderForwardClustered::singleton->tessellation_dice_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->tessellation_dice_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->tessellation_dice_shader.version_get_shader(tessellation_dice_version, group);
+}
+
+RID SceneShaderForwardClustered::ShaderData::get_tessellation_vsm_hw_shader() const {
+	if (tessellation_hw_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_vsm_supported) {
+		return RID();
+	}
+	constexpr int group = 2;
+	if (!SceneShaderForwardClustered::singleton->tessellation_hw_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->tessellation_hw_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->tessellation_hw_shader.version_get_shader(tessellation_hw_version, group);
 }
 
 RID SceneShaderForwardClustered::ShaderData::get_raster_target_shader(bool p_hardware, bool p_buffer) const {
@@ -1826,6 +1908,13 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		Vector<ShaderRD::VariantDefine> rt_wpo_variants;
 		rt_wpo_variants.push_back(ShaderRD::VariantDefine(0, "", false));
 		rt_vertex_offset_shader.initialize(rt_wpo_variants, raster_defines);
+		// GodotNext: nextgeo_tessellation (#163). Dicing compute + bounded HW stream shaders (groups stay disabled until active).
+		tessellation_dice_shader.initialize(raster_variants, raster_defines);
+		tessellation_dice_shader.set_group_int64_atomics(0, true, false);
+		tessellation_dice_shader.set_group_int64_atomics(1, false, true);
+		tessellation_hw_shader.initialize(raster_variants, raster_defines);
+		tessellation_hw_shader.set_group_int64_atomics(0, true, false);
+		tessellation_hw_shader.set_group_int64_atomics(1, false, true);
 
 		const RendererRD::NextGeoRasterTier tier = RendererRD::nextgeo_raster_tier(RD::get_singleton());
 		raster_target_ready = tier.hybrid;

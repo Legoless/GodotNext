@@ -31,6 +31,7 @@ void main() {
 // clang-format off
 #include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
+#include "tessellation_inc.glsl"
 // clang-format on
 
 layout(location = 0) out uint visibility_out;
@@ -64,7 +65,7 @@ layout(set = 0, binding = 2, std430) buffer restrict readonly RasterParams {
 	mat4 inv_view_proj;
 	uvec2 size;
 	uint raster_region;
-	uint pad;
+	uint patch_capacity; // GodotNext: nextgeo_tessellation (#163)
 }
 raster;
 
@@ -77,40 +78,46 @@ vis64;
 layout(set = 0, binding = 3, r64ui) uniform restrict readonly u64image2D vis64;
 #endif
 
+// GodotNext: nextgeo_tessellation (#163). Compact diced patch records (dummy buffer when tessellation is off).
+layout(set = 0, binding = 4, std430) buffer restrict readonly NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+diced_patches;
+
 #ifdef WITH_VELOCITY
-// GodotNext: nextgeo_skinned_runtime (#160) + spline_meshes (#161). Bindings 4..10 reconstruct exact
+// GodotNext: nextgeo_skinned_runtime (#160) + spline_meshes (#161). Bindings 5..11 reconstruct exact
 // current/previous triangle motion vectors for skinned and spline-deformed virtual geometry instances.
-layout(set = 0, binding = 4, std430) buffer restrict readonly Meshes {
+layout(set = 0, binding = 5, std430) buffer restrict readonly Meshes {
 	NextGeoMeshRecord data[];
 }
 meshes;
 
-layout(set = 0, binding = 5, std430) buffer restrict readonly Pages {
+layout(set = 0, binding = 6, std430) buffer restrict readonly Pages {
 	uint data[];
 }
 pages;
 
-layout(set = 0, binding = 6, std430) buffer restrict readonly ClusterTable {
+layout(set = 0, binding = 7, std430) buffer restrict readonly ClusterTable {
 	uvec4 data[];
 }
 cluster_table;
 
-layout(set = 0, binding = 7, std430) buffer restrict readonly NextGeoSkinPalette {
+layout(set = 0, binding = 8, std430) buffer restrict readonly NextGeoSkinPalette {
 	vec4 data[];
 }
 nextgeo_skin_palette;
 
-layout(set = 0, binding = 8, std430) buffer restrict readonly NextGeoSkinInstances {
+layout(set = 0, binding = 9, std430) buffer restrict readonly NextGeoSkinInstances {
 	uvec4 data[];
 }
 nextgeo_skin_instances;
 
-layout(set = 0, binding = 9, std430) buffer restrict readonly NextGeoClusterSkin {
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoClusterSkin {
 	uint data[];
 }
 nextgeo_cluster_skin;
 
-layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSplines {
+layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoSplines {
 	SplineDeformEntry data[];
 }
 spline_deforms;
@@ -131,13 +138,26 @@ void main() {
 	uint vis_id = uint(texel & uint64_t(0xFFFFFFFFu));
 	uint vis_cluster = vis_id >> 7u;
 	// A zero depth word is an empty texel: the R32 targets keep their 0xFFFFFFFF clear.
-	if (depth_bits == 0u || vis_cluster >= raster.visible_capacity) {
+	if (depth_bits == 0u) {
+		discard;
+	}
+	uint cluster_slot = vis_cluster;
+	if (nextgeo_vis_is_patch(vis_cluster)) {
+		uint patch_idx = nextgeo_vis_patch_index(vis_cluster);
+		if (patch_idx >= raster.patch_capacity) {
+			discard;
+		}
+		cluster_slot = diced_patches.data[patch_idx].cluster_slot;
+	} else if (!nextgeo_vis_is_normal(vis_cluster)) {
+		discard;
+	}
+	if (cluster_slot >= raster.visible_capacity) {
 		discard;
 	}
 	float depth = uintBitsToFloat(depth_bits);
 	gl_FragDepth = depth;
 	visibility_out = vis_id;
-	uvec2 entry = visible_clusters.data[vis_cluster];
+	uvec2 entry = visible_clusters.data[cluster_slot];
 	instance_id_out = entry.x;
 
 #ifdef WITH_VELOCITY
@@ -151,7 +171,7 @@ void main() {
 		vec4 prev_clip = vec4(0.0);
 		bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
 		bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
-		if ((is_skinned || has_spline) && record.virtual_mesh != 0xFFFFFFFFu) {
+		if (nextgeo_vis_is_normal(vis_cluster) && (is_skinned || has_spline) && record.virtual_mesh != 0xFFFFFFFFu) {
 			NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
 			if (mesh.page_count > 0u && entry.y >= mesh.cluster_offset) {
 				uint local_cluster = entry.y - mesh.cluster_offset;

@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/nextgeo_tessellation/nextgeo_tessellation_check.gd" id="1"]
+
+[node name="NextGeoTessellationCheck" type="Node3D"]
+script = ExtResource("1")

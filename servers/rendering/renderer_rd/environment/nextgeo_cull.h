@@ -54,6 +54,8 @@ enum NextGeoCutFlags : uint32_t {
 	// GodotNext: nextgeo_raster_bins (#155). Hybrid main view with programmable raster bins: cluster cull
 	// reads each cluster's raster bin and appends programmable-bin clusters for the per-bin compaction.
 	NEXTGEO_CUT_FLAG_PROGRAMMABLE_BINS = 1u << 6,
+	// GodotNext: nextgeo_tessellation (#163). Route displaced bins into runtime tessellation dicing.
+	NEXTGEO_CUT_FLAG_TESSELLATION = 1u << 7,
 };
 
 // Projected error in pixels for a mesh-space sphere (plan §7.3 step 3).

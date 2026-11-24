@@ -24,6 +24,9 @@
 #include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 #include "raster_features_inc.glsl"
+#ifdef NEXTGEO_TESSELLATION
+#include "tessellation_inc.glsl"
+#endif
 // GodotNext: vsm_nanite (#217). Depth-only VSM page raster shares the material raster target.
 #ifdef NEXTGEO_RASTER_DEPTH_ONLY
 #include "../vsm_mark_inc.glsl"
@@ -227,6 +230,51 @@ cut_counters;
 const uint NEXTGEO_RASTER_BIN_FLAG_VERTEX_OFFSET = 1u << 1u;
 const uint NEXTGEO_RASTER_BIN_FLAG_COUNT_CLAMPED = 1u << 2u;
 
+#ifdef NEXTGEO_TESSELLATION
+// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Diced patch records and bounded HW stream.
+// Vertex stages keep all storage buffers NonWritable (VUID-RuntimeSpirv-NonWritable-06341).
+#ifdef NEXTGEO_RASTER_SW
+layout(set = 2, binding = 4, std430) buffer restrict writeonly NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+diced_patches;
+
+layout(set = 2, binding = 5, std430) buffer restrict writeonly NextGeoTessHWPatches {
+	uint data[];
+}
+tess_hw_patches;
+
+layout(set = 2, binding = 6, std430) buffer restrict NextGeoTessStateBuf {
+	uint patch_count;
+	uint dicing_overflow;
+	uint sw_micro_tris;
+	uint hw_patches;
+	uint hw_stream_overflow;
+	uint coarsened_tris;
+	uint diced_clusters;
+	uint sink;
+	uint hw_bin_alloc[64];
+	uint pad[8];
+}
+tess_state;
+
+layout(set = 2, binding = 7, std430) buffer restrict NextGeoTessHWArgs {
+	uint data[]; // 64 * 4 words: VkDrawIndirectCommand { 384, instanceCount, 0, 0 }
+}
+tess_hw_args;
+#else
+layout(set = 2, binding = 4, std430) buffer restrict readonly NextGeoDicedPatches {
+	NextGeoDicedPatchRecord data[];
+}
+diced_patches;
+
+layout(set = 2, binding = 5, std430) buffer restrict readonly NextGeoTessHWPatches {
+	uint data[];
+}
+tess_hw_patches;
+#endif
+#endif
+
 layout(push_constant, std430) uniform RasterBinPush {
 	uint list_base; // First entry of the phase's region in raster_bin_lists.
 	uint phase;
@@ -234,6 +282,20 @@ layout(push_constant, std430) uniform RasterBinPush {
 	uint flags;
 	ivec2 size; // The visibility buffer's size.
 	uvec2 pad; // pad.x = VSM cluster_capacity (under DEPTH_ONLY), pad.y = floatBitsToUint(vertex_offset_max) (#164).
+#ifdef NEXTGEO_TESSELLATION
+	float dicing_rate;
+	float px_scale;
+	float sw_max_edge;
+	float z_near;
+	float disp_magnitude;
+	float disp_center;
+	uint hw_bin_base;
+	uint hw_bin_capacity;
+	uint patch_capacity;
+	uint tess_pad0;
+	uint tess_pad1;
+	uint tess_pad2;
+#endif
 }
 bin_push;
 
@@ -1026,6 +1088,227 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 	return true;
 }
 #endif
+
+#ifdef NEXTGEO_TESSELLATION
+// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Cached source triangle attributes
+// and deterministic displaced micro-triangle loader shared by tessellation_dice.glsl and tessellation_hw.glsl.
+struct _NgTessSourceTri {
+	vec3 pos[3];
+	vec3 nrm[3];
+	vec3 tan[3];
+	vec3 bin[3];
+	vec2 uv[3];
+	vec2 uv2[3];
+	vec4 col[3];
+	uint v_idx[3];
+};
+
+bool _ng_tess_load_source_tri(uvec4 p_desc, uint p_tri, out _NgTessSourceTri r_tri) {
+	uint _ng_stride = p_desc.z & 0xFFu;
+	uint _ng_vert_count = (p_desc.z >> 8u) & 0xFFu;
+	uint _ng_tri_count = (p_desc.z >> 16u) & 0xFFu;
+	uint _ng_layout = (p_desc.z >> 24u) & 0xFFu;
+	if (p_tri >= _ng_tri_count || _ng_stride < 3u || _ng_vert_count == 0u) {
+		return false;
+	}
+	if (_ng_layout == 0u) {
+		if (_ng_stride == 3u) {
+			_ng_layout = 0x01u;
+		} else if (_ng_stride == 5u) {
+			_ng_layout = 0x09u;
+		} else if (_ng_stride == 6u) {
+			_ng_layout = 0x03u;
+		} else if (_ng_stride == 7u) {
+			_ng_layout = 0x21u;
+		} else if (_ng_stride == 8u) {
+			_ng_layout = 0x0Bu;
+		} else if (_ng_stride == 10u) {
+			_ng_layout = 0x07u;
+		} else if (_ng_stride == 12u) {
+			_ng_layout = 0x0Fu;
+		} else if (_ng_stride == 14u) {
+			_ng_layout = 0x1Fu;
+		} else if (_ng_stride == 16u) {
+			_ng_layout = 0x2Fu;
+		} else if (_ng_stride >= 18u) {
+			_ng_layout = 0x3Fu;
+		}
+	}
+
+	for (uint c = 0u; c < 3u; c++) {
+		uint idx_byte = p_desc.y + p_tri * 3u + c;
+		uint v_idx = (nextgeo_pages.data[idx_byte >> 2u] >> ((idx_byte & 3u) * 8u)) & 0xFFu;
+		if (v_idx >= _ng_vert_count) {
+			return false;
+		}
+		r_tri.v_idx[c] = v_idx;
+		uint w = p_desc.x + v_idx * _ng_stride;
+		r_tri.pos[c] = vec3(
+				uintBitsToFloat(nextgeo_pages.data[w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[w + 1u]),
+				uintBitsToFloat(nextgeo_pages.data[w + 2u]));
+		w += 3u;
+
+		vec3 nrm = vec3(0.0, 0.0, 1.0);
+		if ((_ng_layout & 0x02u) != 0u) {
+			nrm = vec3(
+					uintBitsToFloat(nextgeo_pages.data[w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 2u]));
+			w += 3u;
+		}
+		r_tri.nrm[c] = nrm;
+
+		vec3 tan_v = vec3(1.0, 0.0, 0.0);
+		vec3 bin_v = vec3(0.0, 1.0, 0.0);
+		if ((_ng_layout & 0x04u) != 0u) {
+			vec4 tan4 = vec4(
+					uintBitsToFloat(nextgeo_pages.data[w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 2u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 3u]));
+			w += 4u;
+			tan_v = tan4.xyz;
+			bin_v = _ng_safe_normalize(cross(nrm, tan4.xyz) * tan4.w, vec3(0.0, 1.0, 0.0));
+		}
+		r_tri.tan[c] = tan_v;
+		r_tri.bin[c] = bin_v;
+
+		vec2 uv_v = vec2(0.0);
+		if ((_ng_layout & 0x08u) != 0u) {
+			uv_v = vec2(
+					uintBitsToFloat(nextgeo_pages.data[w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 1u]));
+			w += 2u;
+		}
+		r_tri.uv[c] = uv_v;
+
+		vec2 uv2_v = vec2(0.0);
+		if ((_ng_layout & 0x10u) != 0u) {
+			uv2_v = vec2(
+					uintBitsToFloat(nextgeo_pages.data[w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 1u]));
+			w += 2u;
+		}
+		r_tri.uv2[c] = uv2_v;
+
+		vec4 col_v = vec4(1.0);
+		if ((_ng_layout & 0x20u) != 0u) {
+			col_v = vec4(
+					uintBitsToFloat(nextgeo_pages.data[w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 2u]),
+					uintBitsToFloat(nextgeo_pages.data[w + 3u]));
+			w += 4u;
+		}
+		r_tri.col[c] = col_v;
+	}
+	return true;
+}
+
+void _ng_tess_eval_micro_triangle(
+		in uint p_instance_index,
+		in NextGeoInstanceRecord p_record,
+		in _NgTessSourceTri p_src,
+		in uint p_f0,
+		in uint p_f1,
+		in uint p_f2,
+		in uint p_global_micro_tri,
+		in float p_disp_mag,
+		in float p_disp_center) {
+	instance_index_interp = p_instance_index;
+	_ng_instance_id = int(p_instance_index);
+	mat3x4 cur_xform = mat3x4(p_record.transform[0], p_record.transform[1], p_record.transform[2]);
+	uint n_in = nextgeo_tess_interior_factor(p_f0, p_f1, p_f2);
+
+	NextGeoTessVertexCoord coords[3];
+	nextgeo_tess_micro_tri_coords(p_f0, p_f1, p_f2, p_global_micro_tri, coords[0], coords[1], coords[2]);
+
+	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
+		vec3 d_pos;
+		vec3 d_nrm;
+		vec3 d_tan;
+		vec3 d_bin;
+		vec2 d_uv;
+		vec2 d_uv2;
+		vec4 d_col;
+		vec3 pos_ddx;
+		vec3 pos_ddy;
+		vec3 nrm_ddx;
+		vec3 nrm_ddy;
+		vec2 uv_ddx;
+		vec2 uv_ddy;
+		vec2 uv2_ddx;
+		vec2 uv2_ddy;
+		vec4 col_ddx;
+		vec4 col_ddy;
+		nextgeo_tess_eval_vertex_attribs(
+				p_src.pos, p_src.nrm, p_src.tan, p_src.bin, p_src.uv, p_src.uv2, p_src.col,
+				coords[_ng_corner], n_in,
+				d_pos, d_nrm, d_tan, d_bin, d_uv, d_uv2, d_col,
+				pos_ddx, pos_ddy, nrm_ddx, nrm_ddy, uv_ddx, uv_ddy, uv2_ddx, uv2_ddy, col_ddx, col_ddy);
+
+		vec3 unit_nrm = _ng_safe_normalize(d_nrm, vec3(0.0, 0.0, 1.0));
+		vec3 unit_tan = _ng_safe_normalize(d_tan, vec3(1.0, 0.0, 0.0));
+		vec3 unit_bin = _ng_safe_normalize(d_bin, vec3(0.0, 1.0, 0.0));
+		if (p_disp_mag > 0.0) {
+			float disp_val = _ng_eval_displacement(
+					d_pos, unit_nrm, d_uv, d_uv2, d_col, vec4(0.0),
+					pos_ddx, pos_ddy, nrm_ddx, nrm_ddy, uv_ddx, uv_ddy, uv2_ddx, uv2_ddy, col_ddx, col_ddy,
+					scene_data_block.data);
+			if (!isnan(disp_val) && !isinf(disp_val)) {
+				d_pos += unit_nrm * ((disp_val - p_disp_center) * p_disp_mag);
+			}
+		}
+
+		_ng_vertex_id = int(coords[_ng_corner].kind < 3u ? p_src.v_idx[coords[_ng_corner].kind] : p_src.v_idx[0]);
+		uv_attrib = d_uv;
+		uv2_attrib = d_uv2;
+		color_attrib = d_col;
+
+		_ng_resolve_vertex_corner(
+				d_pos,
+				unit_nrm,
+				unit_tan,
+				unit_bin,
+				p_instance_index,
+				scene_data_block.data,
+				cur_xform,
+#ifdef USE_DOUBLE_PRECISION
+				p_record.model_precision.xyz,
+#endif
+				_ng_clip_c[_ng_corner]);
+
+		_ng_vtx_c[_ng_corner] = vertex_interp;
+		_ng_nrm_c[_ng_corner] = normal_interp;
+		_ng_tan_c[_ng_corner] = tangent_interp;
+		_ng_bin_c[_ng_corner] = binormal_interp;
+		_ng_uv_c[_ng_corner] = uv_interp;
+		_ng_uv2_c[_ng_corner] = uv2_interp;
+		_ng_col_c[_ng_corner] = color_interp;
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+		_ng_vsm_depth_c[_ng_corner] = _ng_vsm_last_depth;
+#endif
+#ifndef NEXTGEO_RASTER_HW_VERTEX
+		{
+#CODE : RESOLVE_VERTEX_STORE
+		}
+#endif
+	}
+}
+
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+vec3 _ng_tess_vsm_light_origin(VSMMapData md) {
+	float len0 = length(md.row0.xyz);
+	float inv_cot = len0 > 1.0e-20 ? (1.0 / len0) : 0.0;
+	vec3 x_axis = md.row0.xyz * inv_cot;
+	vec3 y_axis = md.row1.xyz * inv_cot;
+	vec3 z_axis = -md.row3.xyz;
+	vec3 t = vec3(md.row0.w * inv_cot, md.row1.w * inv_cot, -md.row3.w);
+	return -(x_axis * t.x + y_axis * t.y + z_axis * t.z);
+}
+#endif
+#endif // NEXTGEO_TESSELLATION
 
 #ifndef NEXTGEO_RASTER_HW_VERTEX
 // The interpolants at framebuffer position p_frag_xy (a pixel center), evaluated in homogeneous 2D

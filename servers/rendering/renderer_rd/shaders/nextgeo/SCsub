@@ -19,8 +19,9 @@ if "RD_GLSL" in env["BUILDERS"]:
         + [str(f) for f in Glob("../forward_clustered/*_inc.glsl")]
         + [str(f) for f in Glob("../*_inc.glsl")],
     )
-    # GodotNext: vsm_nanite (#217), nextgeo_mesh_raster (#154). VSM_VIEW in cluster_cull.glsl and
-    # NEXTGEO_RASTER_DEPTH_ONLY in raster_material_{hw,hw_mesh,sw}.glsl include parent VSM headers.
+    # GodotNext: vsm_nanite (#217), nextgeo_mesh_raster (#154), nextgeo_tessellation (#163). VSM_VIEW in
+    # cluster_cull.glsl and NEXTGEO_RASTER_DEPTH_ONLY in raster_material_{hw,hw_mesh,sw}.glsl and
+    # tessellation_{dice,hw}.glsl include parent VSM headers.
     vsm_includes = [str(f) for f in Glob("../vsm_*_inc.glsl")]
     env.Depends("cluster_cull.glsl.gen.h", vsm_includes)
     env.Depends("raster_material_hw.glsl.gen.h", vsm_includes)
@@ -28,6 +29,8 @@ if "RD_GLSL" in env["BUILDERS"]:
     env.Depends("raster_material_sw.glsl.gen.h", vsm_includes)
     # GodotNext: nextgeo_vertex_offset (#164). RT proxy vertex-offset compute shader includes parent headers.
     env.Depends("rt_vertex_offset.glsl.gen.h", [str(f) for f in Glob("../*_inc.glsl")])
+    env.Depends("tessellation_dice.glsl.gen.h", vsm_includes)
+    env.Depends("tessellation_hw.glsl.gen.h", vsm_includes)
 
     for glsl_file in gl_include_files:
         env.GLSL_HEADER(glsl_file)

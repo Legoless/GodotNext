@@ -4223,6 +4223,10 @@ void RenderingServer::init() {
 		// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). Provisional SW/HW triangle-edge switch in
 		// shadow texels of the target page's mip (0 sends every cluster to HW; measured and tuned in PQ).
 		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/lights_and_shadows/virtual_shadows/nanite_sw_raster_max_edge_texels", PROPERTY_HINT_RANGE, "0,64,0.25,suffix:tx"), 8.0);
+		// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11). Per-chain VSM tessellation toggles
+		// (honoured only when rendering/nextgeo/experimental/tessellation is enabled).
+		GLOBAL_DEF("rendering/lights_and_shadows/virtual_shadows/tessellation_directional", true);
+		GLOBAL_DEF("rendering/lights_and_shadows/virtual_shadows/tessellation_local", false);
 		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Deferred static invalidation budget in
 		// pages per frame (0 = unlimited).
 		GLOBAL_DEF(PropertyInfo(Variant::INT, VSM::SETTING_DEFERRED_INVALIDATION_BUDGET, PROPERTY_HINT_RANGE, "0,16384,1,or_greater"), 0);
@@ -4370,6 +4374,11 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_rt_native (#156). EXPERIMENTAL native Nanite ray tracing; Fallback (the
 	// fixed RT proxy, D13) stays the default.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/ray_tracing_mode", PROPERTY_HINT_ENUM, "Fallback,Native (Experimental)"), 0);
+	// GodotNext: nextgeo_tessellation (#163, plan §21.4 contract N11, GN-6, GN-12, N5).
+	// EXPERIMENTAL Nanite runtime displacement tessellation; off by default with zero buffers/dispatches.
+	GLOBAL_DEF("rendering/nextgeo/experimental/tessellation", false);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/tessellation/dicing_rate", PROPERTY_HINT_RANGE, "0.5,16.0,0.25,suffix:px"), 2.0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/tessellation/debug_max_patches", PROPERTY_HINT_RANGE, "0,4194304,1"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);
