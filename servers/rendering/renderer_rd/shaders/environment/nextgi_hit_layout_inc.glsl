@@ -158,6 +158,10 @@ layout(set = 0, binding = 34, std430) restrict buffer HitShadowRetrace {
 }
 hit_shadow_retrace;
 
+// GodotNext: path_tracer_denoise (#168). First-hit albedo and world normal guides accumulated by path_tracer_hit.glsl.
+layout(rgba32f, set = 0, binding = 35) restrict uniform image2D hit_pt_guide_albedo;
+layout(rgba32f, set = 0, binding = 36) restrict uniform image2D hit_pt_guide_normal;
+
 layout(set = 1, binding = 0) uniform texture2D hit_textures[];
 
 // Indexes the texture table with a run-time index. glslang sizes an unsized array that no code indexes

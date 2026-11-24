@@ -480,4 +480,239 @@ TEST_CASE("[PathTracer] A view reports its history and why it last restarted") {
 	CHECK_EQ(view->resets, 2u);
 }
 
+// GodotNext: path_tracer_denoise (#168). Denoiser settings, scheduling, buffer preparation and OIDN seam.
+TEST_CASE("[PathTracer] Denoiser setting validation, Viewport wiring and history invariance") {
+	CHECK_EQ(int(RenderingServerTypes::PATH_TRACING_DEFAULT_DENOISER), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+	CHECK_EQ(RenderingServerTypes::path_tracing_validate_denoiser(-1), RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF);
+	CHECK_EQ(RenderingServerTypes::path_tracing_validate_denoiser(0), RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF);
+	CHECK_EQ(RenderingServerTypes::path_tracing_validate_denoiser(1), RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN);
+	CHECK_EQ(RenderingServerTypes::path_tracing_validate_denoiser(2), RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN);
+	CHECK_EQ(RenderingServerTypes::path_tracing_validate_denoiser(3), RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF);
+	CHECK_EQ(RenderingServerTypes::path_tracing_validate_denoiser(99), RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF);
+
+	CHECK_EQ(int(Viewport::PATH_TRACING_DENOISER_OFF), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+	CHECK_EQ(int(Viewport::PATH_TRACING_DENOISER_BUILTIN), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+	CHECK_EQ(int(Viewport::PATH_TRACING_DENOISER_OIDN), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN));
+	CHECK_EQ(int(Viewport::PATH_TRACING_DENOISER_MAX), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_MAX));
+
+	// Changing the denoiser or requesting an on-demand denoise does not change the settings hash (never resets history).
+	PathTracerSettings base;
+	base.denoiser = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+	const uint64_t h_off = path_tracer_hash_settings(base, PATH_TRACER_BACKEND_HIT_GROUPS);
+	base.denoiser = RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN;
+	CHECK_EQ(path_tracer_hash_settings(base, PATH_TRACER_BACKEND_HIT_GROUPS), h_off);
+	base.denoiser = RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN;
+	base.denoise_requested = true;
+	CHECK_EQ(path_tracer_hash_settings(base, PATH_TRACER_BACKEND_HIT_GROUPS), h_off);
+
+	// Effective settings validate the denoiser enum too.
+	PathTracerSettings bad;
+	bad.denoiser = RSE::ViewportPathTracingDenoiser(99);
+	CHECK_EQ(path_tracer_effective_settings(bad, RSE::VIEWPORT_DEBUG_DRAW_DISABLED).denoiser, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF);
+
+	for (int i = 0; i < PATH_TRACER_DENOISE_STATUS_MAX; i++) {
+		CHECK_NE(String(path_tracer_denoise_status_name(PathTracerDenoiseStatus(i))), String("UNKNOWN"));
+	}
+	for (int i = 0; i < RSE::VIEWPORT_PATH_TRACING_DENOISER_MAX; i++) {
+		CHECK_NE(String(path_tracer_denoiser_name(RSE::ViewportPathTracingDenoiser(i))), String("UNKNOWN"));
+	}
+
+	// JNLM parameter validation sanitizes NaN, negative and out-of-range values.
+	PathTracerDenoiseParams invalid_params;
+	invalid_params.spatial_bandwidth = std::numeric_limits<float>::quiet_NaN();
+	invalid_params.light_bandwidth = -1.0f;
+	invalid_params.albedo_bandwidth = 0.0f;
+	invalid_params.normal_bandwidth = 100.0f;
+	invalid_params.filter_strength = std::numeric_limits<float>::infinity();
+	invalid_params.half_search_window = 99;
+	const PathTracerDenoiseParams valid = path_tracer_validate_denoise_params(invalid_params);
+	CHECK_EQ(valid.spatial_bandwidth, 5.0f);
+	CHECK_EQ(valid.light_bandwidth, 0.1f);
+	CHECK_EQ(valid.albedo_bandwidth, 0.2f);
+	CHECK_EQ(valid.normal_bandwidth, 4.0f);
+	CHECK_EQ(valid.filter_strength, 10.0f);
+	CHECK_EQ(valid.half_search_window, PATH_TRACER_DENOISE_MAX_HALF_SEARCH);
+	invalid_params.half_search_window = 0;
+	CHECK_EQ(path_tracer_validate_denoise_params(invalid_params).half_search_window, 1);
+}
+
+TEST_CASE("[SceneTree][PathTracer] Viewport.path_tracing_denoiser and request_path_tracing_denoise reach RenderingServer") {
+	SubViewport *vp = memnew(SubViewport);
+	CHECK_EQ(vp->get_path_tracing_denoiser(), Viewport::PATH_TRACING_DENOISER_BUILTIN);
+
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	Dictionary info = rs->viewport_get_path_tracing_info(vp->get_viewport_rid());
+	CHECK_EQ(int(info["denoiser_setting"]), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+
+	vp->set_path_tracing_denoiser(Viewport::PATH_TRACING_DENOISER_OFF);
+	CHECK_EQ(vp->get_path_tracing_denoiser(), Viewport::PATH_TRACING_DENOISER_OFF);
+	CHECK_EQ(int(vp->get_path_tracing_info()["denoiser_setting"]), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+
+	vp->set_path_tracing_denoiser(Viewport::PATH_TRACING_DENOISER_OIDN);
+	CHECK_EQ(vp->get_path_tracing_denoiser(), Viewport::PATH_TRACING_DENOISER_OIDN);
+	CHECK_EQ(int(rs->viewport_get_path_tracing_info(vp->get_viewport_rid())["denoiser_setting"]), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN));
+
+	rs->viewport_set_path_tracing_denoiser(vp->get_viewport_rid(), RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN);
+	CHECK_EQ(int(rs->viewport_get_path_tracing_info(vp->get_viewport_rid())["denoiser_setting"]), int(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+
+	// On-demand trigger accepts calls safely without crashing.
+	vp->request_path_tracing_denoise();
+	rs->viewport_request_path_tracing_denoise(vp->get_viewport_rid());
+
+	memdelete(vp);
+}
+
+TEST_CASE("[PathTracer] Denoise scheduling runs once at convergence or on demand") {
+	// Off or zero samples never runs.
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF, 64, 64, false, false, 0, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF, 64, 64, true, false, 0, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 0, 64, true, false, 0, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+
+	// Accumulating without on-demand request does not run.
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 16, 64, false, false, 0, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+	// Accumulating with on-demand request runs once for that sample count.
+	CHECK(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 16, 64, true, false, 0, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 16, 64, true, true, 16, RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+	// A new sample (17) with a new on-demand request runs again.
+	CHECK(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 17, 64, true, true, 16, RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+
+	// Reaching target (convergence) runs once, then skips subsequent idle frames.
+	CHECK(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 64, 64, false, false, 0, RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF));
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, 64, 64, false, true, 64, RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+
+	// Switching mode while converged triggers one denoise with the new mode.
+	CHECK(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN, 64, 64, false, true, 64, RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN));
+	CHECK_FALSE(path_tracer_should_denoise(RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN, 64, 64, false, true, 64, RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN));
+}
+
+TEST_CASE("[PathTracer] OIDN buffer preparation and RGBA repacking normalize guides and sanitize non-finite values") {
+	// 2x1 image: pixel 0 is a valid surface hit (4 samples); pixel 1 is sky miss with NaN radiance.
+	const float accum[8] = {
+		4.0f, 8.0f, -2.0f, 4.0f,
+		std::numeric_limits<float>::quiet_NaN(), 2.0f, std::numeric_limits<float>::infinity(), 2.0f,
+	};
+	const float albedo[8] = {
+		3.0f, 6.0f, 1.0f, 4.0f,
+		0.0f, 0.0f, 0.0f, 0.0f,
+	};
+	const float normal[8] = {
+		0.0f, 6.0f, 8.0f, 4.0f,
+		0.0f, 0.0f, 0.0f, 0.0f,
+	};
+
+	LocalVector<float> color_rgb;
+	LocalVector<float> albedo_rgb;
+	LocalVector<float> normal_rgb;
+	REQUIRE(path_tracer_prepare_oidn_buffers(2, 1, accum, albedo, normal, color_rgb, albedo_rgb, normal_rgb));
+	REQUIRE_EQ(color_rgb.size(), 6u);
+	REQUIRE_EQ(albedo_rgb.size(), 6u);
+	REQUIRE_EQ(normal_rgb.size(), 6u);
+
+	// Pixel 0: mean radiance (1, 2, 0 clamped), albedo (0.75, 1.0 clamped, 0.25), unit normal (0, 0.6, 0.8).
+	CHECK(Math::is_equal_approx(color_rgb[0], 1.0f));
+	CHECK(Math::is_equal_approx(color_rgb[1], 2.0f));
+	CHECK_EQ(color_rgb[2], 0.0f);
+	CHECK(Math::is_equal_approx(albedo_rgb[0], 0.75f));
+	CHECK(Math::is_equal_approx(albedo_rgb[1], 1.0f));
+	CHECK(Math::is_equal_approx(albedo_rgb[2], 0.25f));
+	CHECK(Math::is_equal_approx(normal_rgb[0], 0.0f));
+	CHECK(Math::is_equal_approx(normal_rgb[1], 0.6f));
+	CHECK(Math::is_equal_approx(normal_rgb[2], 0.8f));
+
+	// Pixel 1: NaN/Inf sanitized to 0, sky normal stays 0.
+	CHECK_EQ(color_rgb[3], 0.0f);
+	CHECK(Math::is_equal_approx(color_rgb[4], 1.0f));
+	CHECK_EQ(color_rgb[5], 0.0f);
+	CHECK_EQ(albedo_rgb[3], 0.0f);
+	CHECK_EQ(normal_rgb[3], 0.0f);
+	CHECK_EQ(normal_rgb[4], 0.0f);
+	CHECK_EQ(normal_rgb[5], 0.0f);
+
+	// Repack RGB32F -> RGBA32F with alpha = 1.0 and non-finite sanitization.
+	const float rgb_out[6] = {
+		0.5f, -1.0f, std::numeric_limits<float>::quiet_NaN(),
+		2.0f, 3.0f, std::numeric_limits<float>::infinity(),
+	};
+	Vector<uint8_t> rgba_bytes;
+	path_tracer_pack_denoised_rgba(2, 1, rgb_out, rgba_bytes);
+	REQUIRE_EQ(rgba_bytes.size(), 32);
+	const float *rgba = reinterpret_cast<const float *>(rgba_bytes.ptr());
+	CHECK(Math::is_equal_approx(rgba[0], 0.5f));
+	CHECK_EQ(rgba[1], 0.0f);
+	CHECK_EQ(rgba[2], 0.0f);
+	CHECK_EQ(rgba[3], 1.0f);
+	CHECK(Math::is_equal_approx(rgba[4], 2.0f));
+	CHECK(Math::is_equal_approx(rgba[5], 3.0f));
+	CHECK_EQ(rgba[6], 0.0f);
+	CHECK_EQ(rgba[7], 1.0f);
+}
+
+static Error _test_oidn_stub(const PathTracerOIDNInput &p_input, String &r_error) {
+	if (p_input.width == 0 || p_input.height == 0 || p_input.color == nullptr || p_input.output == nullptr) {
+		r_error = "invalid";
+		return ERR_INVALID_PARAMETER;
+	}
+	const uint32_t n = p_input.width * p_input.height * 3u;
+	for (uint32_t i = 0; i < n; i++) {
+		p_input.output[i] = p_input.color[i] * 0.5f;
+	}
+	return OK;
+}
+
+TEST_CASE("[PathTracer] OIDN backend hook registration, dispatch and view info reporting") {
+	// Save any pre-existing backend (e.g. when built with module_oidn_enabled=yes).
+	const bool had_backend = PathTracer::is_oidn_available();
+	const String original_name = String(PathTracer::get_oidn_backend_name());
+	if (!had_backend) {
+		CHECK_EQ(original_name, String("none"));
+		PathTracerOIDNInput dummy;
+		String err;
+		CHECK_EQ(PathTracer::run_oidn_denoise(dummy, err), ERR_UNAVAILABLE);
+		CHECK_FALSE(err.is_empty());
+
+		static const PathTracerOIDNBackend test_backend = { "test_stub", &_test_oidn_stub };
+		PathTracer::register_oidn_backend(&test_backend);
+		CHECK(PathTracer::is_oidn_available());
+		CHECK_EQ(String(PathTracer::get_oidn_backend_name()), String("test_stub"));
+
+		const float in_rgb[3] = { 2.0f, 4.0f, 6.0f };
+		float out_rgb[3] = {};
+		dummy.width = 1;
+		dummy.height = 1;
+		dummy.color = in_rgb;
+		dummy.output = out_rgb;
+		err = String();
+		CHECK_EQ(PathTracer::run_oidn_denoise(dummy, err), OK);
+		CHECK(Math::is_equal_approx(out_rgb[0], 1.0f));
+		CHECK(Math::is_equal_approx(out_rgb[1], 2.0f));
+		CHECK(Math::is_equal_approx(out_rgb[2], 3.0f));
+
+		PathTracer::unregister_oidn_backend(&test_backend);
+		CHECK_FALSE(PathTracer::is_oidn_available());
+		CHECK_EQ(String(PathTracer::get_oidn_backend_name()), String("none"));
+	}
+
+	// PathTracerView::fill_info reports denoiser fields cleanly.
+	Ref<PathTracerView> view;
+	view.instantiate();
+	view->samples = 32;
+	view->settings.denoiser = RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN;
+	view->denoised_valid = true;
+	view->denoised_samples = 32;
+	view->denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN;
+	view->denoise_status = PATH_TRACER_DENOISE_STATUS_FALLBACK_BUILTIN;
+	view->denoise_runs = 3;
+	Dictionary info;
+	view->fill_info(info);
+	CHECK_EQ(String(info["denoiser"]), String("OIDN"));
+	CHECK_EQ(String(info["denoise_status"]), String("FALLBACK_BUILTIN"));
+	CHECK_EQ(String(info["denoise_backend"]), String("BUILTIN"));
+	CHECK(bool(info["denoised"]));
+	CHECK_EQ(int(info["denoised_samples"]), 32);
+	CHECK_EQ(int(info["denoise_runs"]), 3);
+	CHECK_EQ(bool(info["oidn_available"]), had_backend);
+	CHECK_EQ(String(info["oidn_backend"]), original_name);
+}
+
 } // namespace TestPathTracer

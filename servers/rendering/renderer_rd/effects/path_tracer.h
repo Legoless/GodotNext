@@ -96,10 +96,66 @@ struct PathTracerSettings {
 	int samples = RenderingServerTypes::PATH_TRACING_DEFAULT_SAMPLES;
 	int max_bounces = RenderingServerTypes::PATH_TRACING_DEFAULT_MAX_BOUNCES;
 	float firefly_clamp = 0.0f;
+	// GodotNext: path_tracer_denoise (#168). Off, built-in screen-space JNLM, or optional OIDN module.
+	RSE::ViewportPathTracingDenoiser denoiser = RenderingServerTypes::PATH_TRACING_DEFAULT_DENOISER;
+	bool denoise_requested = false;
 	// debug/path_tracer_reference_match: trace as the D16 reference does (the INLINE backend with the D16 table
 	// materials, pixel centers, no culling), so the product's history can be compared with the reference's.
 	bool reference_match = false;
 };
+
+// GodotNext: path_tracer_denoise (#168). Denoiser status reported in get_path_tracing_info().
+enum PathTracerDenoiseStatus {
+	PATH_TRACER_DENOISE_STATUS_OFF,
+	PATH_TRACER_DENOISE_STATUS_PENDING, // Denoiser is enabled, accumulating; runs on convergence or on demand.
+	PATH_TRACER_DENOISE_STATUS_DENOISED, // Denoised image is current and composited by the requested backend.
+	PATH_TRACER_DENOISE_STATUS_FALLBACK_BUILTIN, // OIDN was requested, unavailable or failed; fell back to built-in JNLM.
+	PATH_TRACER_DENOISE_STATUS_MAX,
+};
+const char *path_tracer_denoise_status_name(PathTracerDenoiseStatus p_status);
+const char *path_tracer_denoiser_name(RSE::ViewportPathTracingDenoiser p_denoiser);
+
+// Parameters of the built-in screen-space JNLM denoiser (adapted from LightmapperRD::_denoise).
+static constexpr int PATH_TRACER_DENOISE_MAX_HALF_SEARCH = 5;
+struct PathTracerDenoiseParams {
+	float spatial_bandwidth = 5.0f;
+	float light_bandwidth = 0.1f;
+	float albedo_bandwidth = 0.2f;
+	float normal_bandwidth = 0.1f;
+	float filter_strength = 10.0f;
+	int half_search_window = 5;
+};
+PathTracerDenoiseParams path_tracer_validate_denoise_params(const PathTracerDenoiseParams &p_params);
+
+// Pure scheduling rule: returns true when denoising should run on this frame (at convergence or on demand,
+// whenever the current sample count or requested denoiser mode has not yet been denoised).
+bool path_tracer_should_denoise(RSE::ViewportPathTracingDenoiser p_denoiser, uint32_t p_samples, uint32_t p_target, bool p_on_demand, bool p_denoised_valid, uint32_t p_denoised_samples, RSE::ViewportPathTracingDenoiser p_denoised_requested);
+
+// Optional OIDN denoiser seam registered by modules/oidn at MODULE_INITIALIZATION_LEVEL_SERVERS (§19).
+// Inert (null) in default MIT builds where modules/oidn is disabled.
+struct PathTracerOIDNInput {
+	uint32_t width = 0;
+	uint32_t height = 0;
+	// Tightly packed RGB32F buffers (width * height * 3 floats): linear HDR radiance, [0, 1] first-hit albedo
+	// (optional), [-1, 1] first-hit unit normal (optional), and output denoised RGB32F radiance.
+	const float *color = nullptr;
+	const float *albedo = nullptr;
+	const float *normal = nullptr;
+	float *output = nullptr;
+	bool hdr = true;
+	bool srgb = false;
+	bool clean_aux = true;
+};
+
+struct PathTracerOIDNBackend {
+	const char *name = nullptr; // "oidn" or "mock".
+	Error (*denoise)(const PathTracerOIDNInput &p_input, String &r_error) = nullptr;
+};
+
+// Device-free RGBA32F accumulation/guide resolution into tightly packed RGB32F OIDN buffers, and repacking
+// of denoised RGB32F back into RGBA32F bytes (alpha = 1.0, non-finite/negative values sanitized to 0.0).
+bool path_tracer_prepare_oidn_buffers(uint32_t p_width, uint32_t p_height, const float *p_accum_rgba, const float *p_albedo_rgba, const float *p_normal_rgba, LocalVector<float> &r_color_rgb, LocalVector<float> &r_albedo_rgb, LocalVector<float> &r_normal_rgb);
+void path_tracer_pack_denoised_rgba(uint32_t p_width, uint32_t p_height, const float *p_rgb, Vector<uint8_t> &r_rgba_bytes);
 
 // The settings a viewport traces with: its own, or on while its debug draw is VIEWPORT_DEBUG_DRAW_PATH_TRACER.
 PathTracerSettings path_tracer_effective_settings(const PathTracerSettings &p_settings, RSE::ViewportDebugDraw p_debug_draw);
@@ -261,6 +317,10 @@ class PathTracerView : public RenderBufferCustomDataRD {
 
 public:
 	RID accumulation; // RGBA32F: the radiance sum and the sample count.
+	// GodotNext: path_tracer_denoise (#168). First-hit guides and denoised linear radiance (RGBA32F, alpha = 1).
+	RID guide_albedo; // RGBA32F: first-hit albedo sum and hit count.
+	RID guide_normal; // RGBA32F: first-hit world normal sum and hit count.
+	RID denoised; // RGBA32F: denoised linear mean radiance, allocated on demand when denoising runs.
 	Size2i size;
 	uint32_t samples = 0;
 	uint32_t target = 0;
@@ -278,12 +338,25 @@ public:
 	uint32_t textured_materials = 0;
 	PathTracerDeviceSupport device_support = PATH_TRACER_DEVICE_SUPPORTED;
 	PathTracerSettings settings;
+	// GodotNext: path_tracer_denoise (#168). Per-view denoising state.
+	bool denoised_valid = false;
+	bool pending_denoise_request = false;
+	uint32_t denoised_samples = 0;
+	RSE::ViewportPathTracingDenoiser denoised_requested = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+	RSE::ViewportPathTracingDenoiser denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+	PathTracerDenoiseStatus denoise_status = PATH_TRACER_DENOISE_STATUS_OFF;
+	uint64_t denoise_runs = 0;
 	// debug/path_tracer_readback: the raw history after the last traced frame, its mean luminance and how many
 	// of its values are not finite.
 	PackedByteArray read_accumulation;
 	float read_mean = 0.0f;
 	uint32_t read_nonfinite = 0;
 	uint64_t read_hash = 0;
+	// GodotNext: path_tracer_denoise (#168). Denoised output readback when debug/path_tracer_readback is on.
+	PackedByteArray read_denoised;
+	float read_denoised_mean = 0.0f;
+	uint32_t read_denoised_nonfinite = 0;
+	uint64_t read_denoised_hash = 0;
 
 	void clear_history();
 	void fill_info(Dictionary &r_info) const;
@@ -304,13 +377,26 @@ class PathTracer {
 	uint32_t material_capacity = 0;
 	uint32_t light_capacity = 0;
 	bool logged_compile_failure = false;
+	bool logged_denoise_compile_failure = false;
+	bool logged_oidn_fallback = false;
 
 	bool _ensure_shader();
+	bool _ensure_denoise_shader();
 	void _upload_tables(const PathTracerTables &p_tables);
 	void _trace_inline(PathTracerView *p_view, NextGIRTScene *p_rt_scene);
+	void _update_denoise(PathTracerView *p_view);
+	bool _denoise_builtin(PathTracerView *p_view);
+	bool _denoise_oidn(PathTracerView *p_view);
 	void _readback(PathTracerView *p_view);
 
 public:
+	// GodotNext: path_tracer_denoise (#168). Optional OIDN backend seam (modules/oidn).
+	static void register_oidn_backend(const PathTracerOIDNBackend *p_backend);
+	static void unregister_oidn_backend(const PathTracerOIDNBackend *p_backend);
+	static bool is_oidn_available();
+	static const char *get_oidn_backend_name();
+	static Error run_oidn_denoise(const PathTracerOIDNInput &p_input, String &r_error);
+	static Vector<String> get_denoise_shader_variant_defines();
 	// The D16 reference's tables (NextGIReference, debug/reference_mode): the fed instances' parts that enter the
 	// TLAS, walked as #27 and #263 walk them, so the reference images stay what the harness captured.
 	static void build_reference_tables(const RenderDataRD *p_render_data, PathTracerTables &r_tables);

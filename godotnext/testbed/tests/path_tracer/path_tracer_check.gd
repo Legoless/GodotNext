@@ -100,6 +100,7 @@ var _camera_name := "CaptureCam"
 var _smoke := false
 var _expect_black := false
 var _nextgeo_rt := ""
+var _denoiser_arg := ""
 var _room: Node3D
 var _camera: Camera3D
 var _environment: Environment
@@ -120,6 +121,8 @@ func _ready() -> void:
 			_expect_black = true
 		elif argument.begins_with("--nextgeo-rt="):
 			_nextgeo_rt = argument.get_slice("=", 1).to_lower()
+		elif argument.begins_with("--denoiser="):
+			_denoiser_arg = argument.get_slice("=", 1).to_lower()
 	if _nextgeo_rt == "native":
 		ProjectSettings.set_setting(SETTING_NEXTGEO_RT, 1)
 	_run.call_deferred()
@@ -153,6 +156,12 @@ func _run() -> void:
 	# The scenes keep NextGI off in their environments; the harness turns it on the same way.
 	_environment.nextgi_enabled = true
 	var viewport := get_viewport()
+	if _denoiser_arg == "off":
+		viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_OFF
+	elif _denoiser_arg == "builtin":
+		viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_BUILTIN
+	elif _denoiser_arg == "oidn":
+		viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_OIDN
 	viewport.path_tracing_samples = 4096
 	viewport.path_tracing_enabled = true
 	_result["scene"] = _scene_path
@@ -167,6 +176,7 @@ func _run() -> void:
 		await _check_deformation()
 		await _check_target()
 		await _check_low_processor()
+		await _check_denoiser()
 		await _check_cull()
 		await _check_projection()
 		await _check_hit_materials()
@@ -964,19 +974,38 @@ func _report_reference() -> void:
 
 
 func _check_smoke() -> void:
-	# The smoke render: the history fills to SMOKE_SAMPLES, finite and not black.
+	# The smoke render: the history fills to SMOKE_SAMPLES, finite and not black (and denoised when denoiser is on).
 	get_viewport().path_tracing_samples = SMOKE_SAMPLES
 	var mean := await _frame_mean(SMOKE_SAMPLES)
 	var info := _info()
 	var tier := RenderingServer.nextgi_get_tier_info()
 	var nextgeo_rt := String(tier.get("nextgeo_ray_tracing_mode", ""))
-	_result["smoke"] = {"samples": int(info.get("samples", 0)), "status": String(info.get("status", "")), "mean": mean, "nonfinite": int(info.get("nonfinite", -1)), "resets": int(info.get("resets", 0)), "expect_black": _expect_black, "nextgeo_ray_tracing_mode": nextgeo_rt}
+	_result["smoke"] = {
+		"samples": int(info.get("samples", 0)),
+		"status": String(info.get("status", "")),
+		"mean": mean,
+		"nonfinite": int(info.get("nonfinite", -1)),
+		"resets": int(info.get("resets", 0)),
+		"denoiser": String(info.get("denoiser", "")),
+		"denoise_status": String(info.get("denoise_status", "")),
+		"denoise_backend": String(info.get("denoise_backend", "")),
+		"denoised": bool(info.get("denoised", false)),
+		"denoised_mean": float(info.get("denoised_mean", -1.0)),
+		"denoised_nonfinite": int(info.get("denoised_nonfinite", -1)),
+		"expect_black": _expect_black,
+		"nextgeo_ray_tracing_mode": nextgeo_rt,
+	}
 	# What the native mode put in the TLAS (#156's tier info keys), reported as they are.
 	for key in tier:
 		if String(key).begins_with("rt_native_"):
 			_result["smoke"][key] = tier[key]
 	if int(info.get("nonfinite", -1)) != 0:
 		_fail("smoke: the history holds %d non-finite values" % int(info.get("nonfinite", -1)))
+	if get_viewport().path_tracing_denoiser != Viewport.PATH_TRACING_DENOISER_OFF:
+		if not bool(info.get("denoised", false)):
+			_fail("smoke: denoiser did not run on convergence (status %s)" % String(info.get("denoise_status", "")))
+		elif int(info.get("denoised_nonfinite", -1)) != 0:
+			_fail("smoke: denoised image holds %d non-finite values" % int(info.get("denoised_nonfinite", -1)))
 	if _expect_black:
 		# Radiance is never negative, so a zero mean is an all-zero history.
 		if mean != 0.0:
@@ -987,6 +1016,175 @@ func _check_smoke() -> void:
 		_fail("smoke: NextGI reports NextGeo ray tracing mode %s, expected %s" % [nextgeo_rt, _nextgeo_rt])
 	if int(info.get("samples", 0)) < SMOKE_SAMPLES - 1:
 		_fail("smoke: %d samples, expected %d" % [int(info.get("samples", 0)), SMOKE_SAMPLES])
+
+
+# Mean high-frequency Laplacian energy in tone-mapped perceptual space (c*e / (1 + c*e)).
+func _spatial_noise_metric(p_rgba: PackedFloat32Array, p_width: int, p_height: int, p_exposure: float) -> float:
+	if p_width < 4 or p_height < 4 or p_rgba.size() < p_width * p_height * 4:
+		return -1.0
+	var lum := PackedFloat32Array()
+	lum.resize(p_width * p_height)
+	var exp_val := maxf(p_exposure, 1e-6)
+	for i in p_width * p_height:
+		var o := i * 4
+		var w := p_rgba[o + 3]
+		var mean := 0.0
+		if w > 0.0:
+			var r := maxf(p_rgba[o + 0] / w, 0.0) * exp_val
+			var g := maxf(p_rgba[o + 1] / w, 0.0) * exp_val
+			var b := maxf(p_rgba[o + 2] / w, 0.0) * exp_val
+			r = r / (1.0 + r)
+			g = g / (1.0 + g)
+			b = b / (1.0 + b)
+			mean = (r + g + b) / 3.0
+		lum[i] = mean
+	var sum := 0.0
+	var count := 0
+	for y in range(1, p_height - 1):
+		var row := y * p_width
+		for x in range(1, p_width - 1):
+			var idx := row + x
+			var avg := 0.25 * (lum[idx - 1] + lum[idx + 1] + lum[idx - p_width] + lum[idx + p_width])
+			sum += absf(lum[idx] - avg)
+			count += 1
+	return sum / float(maxi(count, 1))
+
+
+func _check_denoiser() -> void:
+	# Path tracer denoising (#168): built-in screen-space JNLM runs on convergence or on demand, preserves
+	# history across mode toggles, reduces noise vs noisy accumulation, and OIDN falls back cleanly when disabled.
+	var viewport := get_viewport()
+	viewport.path_tracing_max_bounces = 32
+	viewport.path_tracing_firefly_clamp = 0.0
+	viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_BUILTIN
+	viewport.path_tracing_samples = 64
+	_camera.position += Vector3(0.0, 0.0, 0.001)
+	await _frames(6)
+
+	# 1. While accumulating: PENDING, not yet denoised.
+	var pending := _info()
+	var runs_before := int(pending.get("denoise_runs", 0))
+	if String(pending.get("denoise_status", "")) != "PENDING" or bool(pending.get("denoised", false)):
+		_fail("denoiser pending: status %s, denoised %s at %d/%d samples" % [String(pending.get("denoise_status", "")), str(pending.get("denoised", false)), int(pending.get("samples", 0)), int(pending.get("target_samples", 0))])
+
+	# 2. On-demand denoise mid-accumulation: runs for one frame, valid & finite.
+	ProjectSettings.set_setting(SETTING_READBACK, true)
+	viewport.request_path_tracing_denoise()
+	await _frame()
+	var on_demand := _info()
+	ProjectSettings.set_setting(SETTING_READBACK, false)
+	if not bool(on_demand.get("denoised", false)) or String(on_demand.get("denoise_status", "")) != "DENOISED":
+		_fail("denoiser on-demand: status %s, denoised %s" % [String(on_demand.get("denoise_status", "")), str(on_demand.get("denoised", false))])
+	elif int(on_demand.get("denoise_runs", 0)) != runs_before + 1:
+		_fail("denoiser on-demand: runs %d, expected %d" % [int(on_demand.get("denoise_runs", 0)), runs_before + 1])
+	elif int(on_demand.get("denoised_nonfinite", -1)) != 0:
+		_fail("denoiser on-demand: %d non-finite values" % int(on_demand.get("denoised_nonfinite", -1)))
+
+	# Next accumulating frame returns to PENDING without extra denoise runs.
+	await _frame()
+	var after_demand := _info()
+	if String(after_demand.get("denoise_status", "")) != "PENDING" or bool(after_demand.get("denoised", false)):
+		_fail("denoiser after on-demand: status %s, denoised %s" % [String(after_demand.get("denoise_status", "")), str(after_demand.get("denoised", false))])
+
+	# 3. Converge at 32 samples: automatic one-shot denoise, noise reduction & mean preservation.
+	var denoise_target := 32
+	viewport.path_tracing_samples = denoise_target
+	_camera.position -= Vector3(0.0, 0.0, 0.001)
+	await _frames(2)
+	var frames := 0
+	while int(_info().get("samples", 0)) < denoise_target - 1 and frames < MAX_WAIT_FRAMES:
+		await _frame()
+		frames += 1
+	ProjectSettings.set_setting(SETTING_READBACK, true)
+	await _frame()
+	var converged := _info()
+	ProjectSettings.set_setting(SETTING_READBACK, false)
+
+	var width := int(converged.get("width", 0))
+	var height := int(converged.get("height", 0))
+	var exposure := float(converged.get("exposure", 1.0))
+	var raw_mean := float(converged.get("mean", -1.0))
+	var den_mean := float(converged.get("denoised_mean", -1.0))
+	var raw_bytes: PackedByteArray = converged.get("accumulation", PackedByteArray())
+	var den_bytes: PackedByteArray = converged.get("denoised_image", PackedByteArray())
+	var raw_noise := _spatial_noise_metric(raw_bytes.to_float32_array(), width, height, exposure)
+	var den_noise := _spatial_noise_metric(den_bytes.to_float32_array(), width, height, exposure)
+	var noise_ratio := den_noise / raw_noise if raw_noise > 0.0 else -1.0
+
+	# Idle converged frames must not re-run the denoiser.
+	var runs_at_converge := int(converged.get("denoise_runs", 0))
+	await _frames(5)
+	var after_idle := _info()
+	var runs_after_idle := int(after_idle.get("denoise_runs", 0))
+
+	# 4. Mode toggles while converged preserve the history (0 resets).
+	var resets_before_toggle := int(after_idle.get("resets", 0))
+	viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_OFF
+	await _frames(2)
+	var toggled_off := _info()
+	viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_BUILTIN
+	await _frames(2)
+	var toggled_builtin := _info()
+
+	# 5. OIDN mode: uses OIDN if compiled in, else falls back cleanly to BUILTIN.
+	viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_OIDN
+	ProjectSettings.set_setting(SETTING_READBACK, true)
+	await _frames(2)
+	var oidn_info := _info()
+	ProjectSettings.set_setting(SETTING_READBACK, false)
+
+	var oidn_available := bool(oidn_info.get("oidn_available", false))
+	var row := {
+		"samples": int(converged.get("samples", 0)),
+		"status": String(converged.get("status", "")),
+		"denoise_status": String(converged.get("denoise_status", "")),
+		"denoise_backend": String(converged.get("denoise_backend", "")),
+		"denoised": bool(converged.get("denoised", false)),
+		"raw_mean": raw_mean,
+		"denoised_mean": den_mean,
+		"denoised_nonfinite": int(converged.get("denoised_nonfinite", -1)),
+		"raw_noise": raw_noise,
+		"denoised_noise": den_noise,
+		"noise_ratio": noise_ratio,
+		"runs_at_converge": runs_at_converge,
+		"runs_after_idle": runs_after_idle,
+		"toggle_resets": int(oidn_info.get("resets", 0)) - resets_before_toggle,
+		"oidn_available": oidn_available,
+		"oidn_backend": String(oidn_info.get("oidn_backend", "")),
+		"oidn_status": String(oidn_info.get("denoise_status", "")),
+		"oidn_active_backend": String(oidn_info.get("denoise_backend", "")),
+		"oidn_nonfinite": int(oidn_info.get("denoised_nonfinite", -1)),
+	}
+	_result["denoiser"] = row
+
+	if row.status != "CONVERGED" or not row.denoised or row.denoise_status != "DENOISED" or row.denoise_backend != "BUILTIN":
+		_fail("denoiser converge: status=%s denoised=%s denoise_status=%s backend=%s" % [row.status, str(row.denoised), row.denoise_status, row.denoise_backend])
+	if row.denoised_nonfinite != 0:
+		_fail("denoiser converge: %d non-finite values" % row.denoised_nonfinite)
+	if not (raw_mean > 0.0 and den_mean > 0.0 and absf(den_mean - raw_mean) / raw_mean <= 0.15):
+		_fail("denoiser mean drift: raw %.4f, denoised %.4f" % [raw_mean, den_mean])
+	if not (noise_ratio > 0.0 and noise_ratio < 0.70):
+		_fail("denoiser noise reduction: ratio %.4f (raw %.5f, denoised %.5f), expected < 0.70" % [noise_ratio, raw_noise, den_noise])
+	if runs_after_idle != runs_at_converge:
+		_fail("denoiser re-ran on idle converged frames (%d -> %d)" % [runs_at_converge, runs_after_idle])
+	if bool(toggled_off.get("denoised", true)) or String(toggled_off.get("denoise_status", "")) != "OFF":
+		_fail("denoiser toggle off: denoised=%s status=%s" % [str(toggled_off.get("denoised", true)), String(toggled_off.get("denoise_status", ""))])
+	if not bool(toggled_builtin.get("denoised", false)) or String(toggled_builtin.get("denoise_status", "")) != "DENOISED":
+		_fail("denoiser toggle builtin: denoised=%s status=%s" % [str(toggled_builtin.get("denoised", false)), String(toggled_builtin.get("denoise_status", ""))])
+	if row.toggle_resets != 0:
+		_fail("denoiser toggles restarted the history %d times" % row.toggle_resets)
+	if row.oidn_nonfinite != 0 or not bool(oidn_info.get("denoised", false)):
+		_fail("denoiser OIDN: denoised=%s nonfinite=%d" % [str(oidn_info.get("denoised", false)), row.oidn_nonfinite])
+	if oidn_available:
+		if row.oidn_status != "DENOISED" or row.oidn_active_backend != "OIDN":
+			_fail("denoiser OIDN enabled: status=%s backend=%s, expected DENOISED/OIDN" % [row.oidn_status, row.oidn_active_backend])
+	else:
+		if row.oidn_status != "FALLBACK_BUILTIN" or row.oidn_active_backend != "BUILTIN":
+			_fail("denoiser OIDN fallback: status=%s backend=%s, expected FALLBACK_BUILTIN/BUILTIN" % [row.oidn_status, row.oidn_active_backend])
+
+	viewport.path_tracing_denoiser = Viewport.PATH_TRACING_DENOISER_BUILTIN
+	viewport.path_tracing_samples = 4096
+	await _frames(2)
 
 
 func _check_reference_match() -> void:

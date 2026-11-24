@@ -51,3 +51,18 @@ How it was used: when a material has a non-zero specular weight, the kernel samp
 | Copied files | None |
 
 How it was used: `Viewport.path_tracing_samples` and `path_tracing_max_bounces` follow the meaning of Samples Per Pixel and Max Bounces (the defaults, 2048 and 32, are the issue's). `path_tracing_firefly_clamp` follows Max Path Intensity: the largest exposed radiance one path sample adds; 0 turns it off here. The history restarts on the changes the page lists (camera moves, material changes, objects moved or added) and on light and setting changes. Emissive surfaces light the scene through hit emission. NextGeo meshes are traced through their RT fallback by default, as the page states for Nanite meshes, and through the native sets in the Experimental mode. The page does not cover backface culling; the cull rule follows plan v3.4.3 (one-sided materials are culled, two-sided ones are not).
+
+### Intel OpenImageDenoise C API documentation
+
+| Field | Value |
+|---|---|
+| What | Public Intel OpenImageDenoise C API function and filter parameter names (`oidnNewDevice`, `oidnNewFilter("RT")`, `oidnNewBuffer`, `oidnSetFilterImage`, `hdr`/`srgb`/`cleanAux`) |
+| Upstream | https://www.openimagedenoise.org/documentation.html |
+| Version | OpenImageDenoise 2.x (with 1.x `oidnSetSharedFilterImage` fallback) |
+| License | Apache-2.0 upstream library; no OIDN headers, source or binaries are committed to this repository (§19). |
+| Read on | 2026-11-23, for issue #168 |
+| Consulted by | The #168 implementer |
+| Used in | `modules/oidn/oidn_denoiser_real.cpp` |
+| Copied files | None |
+
+How it was used: `modules/oidn` is disabled by default and compiles `oidn_denoiser_real.cpp` only when a developer enables `module_oidn_enabled=yes oidn_backend=oidn oidn_sdk_path=<external SDK>`. Official builds and CI use either the default build (OIDN disabled) or `oidn_backend=mock`. The built-in screen-space JNLM denoiser (`servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl`) is adapted from Godot's existing `modules/lightmapper_rd/lm_compute.glsl` (`MODE_DENOISE`, MIT).

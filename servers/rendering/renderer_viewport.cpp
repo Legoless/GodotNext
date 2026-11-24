@@ -671,9 +671,10 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 	}
 
 	float screen_mesh_lod_threshold = p_viewport->mesh_lod_threshold / float(p_viewport->size.width);
-	// GodotNext: path_tracer (#167). The view's effective path tracing settings, read by RendererRD::PathTracer.
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168). The view's effective path tracing settings, read by RendererRD::PathTracer.
 	if (p_viewport->render_buffers.is_valid()) {
-		p_viewport->render_buffers->set_path_tracing(viewport_path_tracing_active(p_viewport->path_tracing_enabled, p_viewport->debug_draw), p_viewport->path_tracing_samples, p_viewport->path_tracing_max_bounces, p_viewport->path_tracing_firefly_clamp);
+		p_viewport->render_buffers->set_path_tracing(viewport_path_tracing_active(p_viewport->path_tracing_enabled, p_viewport->debug_draw), p_viewport->path_tracing_samples, p_viewport->path_tracing_max_bounces, p_viewport->path_tracing_firefly_clamp, p_viewport->path_tracing_denoiser, p_viewport->path_tracing_denoise_requested);
+		p_viewport->path_tracing_denoise_requested = false;
 	}
 	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
 
@@ -1970,6 +1971,20 @@ void RendererViewport::viewport_set_path_tracing_firefly_clamp(RID p_viewport, f
 	viewport->path_tracing_firefly_clamp = RenderingServerTypes::path_tracing_validate_firefly_clamp(p_firefly_clamp);
 }
 
+// GodotNext: path_tracer_denoise (#168)
+void RendererViewport::viewport_set_path_tracing_denoiser(RID p_viewport, RSE::ViewportPathTracingDenoiser p_denoiser) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	ERR_FAIL_INDEX(p_denoiser, RSE::VIEWPORT_PATH_TRACING_DENOISER_MAX);
+	viewport->path_tracing_denoiser = p_denoiser;
+}
+
+void RendererViewport::viewport_request_path_tracing_denoise(RID p_viewport) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->path_tracing_denoise_requested = true;
+}
+
 Dictionary RendererViewport::viewport_get_path_tracing_info(RID p_viewport) const {
 	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL_V(viewport, Dictionary());
@@ -1981,6 +1996,7 @@ Dictionary RendererViewport::viewport_get_path_tracing_info(RID p_viewport) cons
 	info["samples_setting"] = viewport->path_tracing_samples;
 	info["max_bounces_setting"] = viewport->path_tracing_max_bounces;
 	info["firefly_clamp_setting"] = viewport->path_tracing_firefly_clamp;
+	info["denoiser_setting"] = int(viewport->path_tracing_denoiser);
 	return info;
 }
 

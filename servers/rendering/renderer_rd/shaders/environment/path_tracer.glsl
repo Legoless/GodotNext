@@ -102,6 +102,10 @@ layout(set = 0, binding = 11, std430) readonly buffer PathTracerParams {
 }
 ref_params;
 
+// GodotNext: path_tracer_denoise (#168). First-hit albedo and normal guides accumulated alongside radiance.
+layout(rgba32f, set = 0, binding = 12) restrict uniform image2D guide_albedo;
+layout(rgba32f, set = 0, binding = 13) restrict uniform image2D guide_normal;
+
 #define PATH_TRACER_TABLE(s) materials.data[s]
 
 #include "nextgi_reference_pt_inc.glsl"
@@ -112,9 +116,17 @@ void main() {
 	if (pixel.x >= ref_params.dispatch.x || pixel.y >= ref_params.dispatch.y) {
 		return;
 	}
-	vec3 radiance = path_tracer_sample_pixel(pixel);
-	vec4 previous = ref_params.exposure_clear.y > 0.5 ? vec4(0.0) : imageLoad(accumulation, ivec2(pixel));
+	vec3 first_albedo;
+	vec3 first_normal;
+	float first_hit;
+	vec3 radiance = path_tracer_sample_pixel(pixel, first_albedo, first_normal, first_hit);
+	bool clear = ref_params.exposure_clear.y > 0.5;
+	vec4 previous = clear ? vec4(0.0) : imageLoad(accumulation, ivec2(pixel));
 	imageStore(accumulation, ivec2(pixel), vec4(previous.rgb + radiance, previous.a + 1.0));
+	vec4 prev_albedo = clear ? vec4(0.0) : imageLoad(guide_albedo, ivec2(pixel));
+	imageStore(guide_albedo, ivec2(pixel), vec4(prev_albedo.rgb + first_albedo, prev_albedo.a + first_hit));
+	vec4 prev_normal = clear ? vec4(0.0) : imageLoad(guide_normal, ivec2(pixel));
+	imageStore(guide_normal, ivec2(pixel), vec4(prev_normal.rgb + first_normal, prev_normal.a + first_hit));
 }
 
 #endif

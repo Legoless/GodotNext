@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Reject NVIDIA SDK files in the repository (plan §19, GU-6).
+"""Reject external developer-supplied SDK files in the repository (plan §19, GU-6, #168).
 
-The official GodotNext builds stay MIT and DLSS-free; developers compile DLSS
-in with their own NVIDIA SDK. This guard keeps every SDK header, library,
-runtime DLL/SO, sample and `sl_nvperf` file out of the tree.
+The official GodotNext builds stay MIT and external-SDK-free; developers compile
+optional integrations (NVIDIA DLSS/NGX, Intel OpenImageDenoise) against their
+own SDK outside the checkout. This guard keeps every SDK header, library,
+runtime DLL/SO/dylib, sample and `sl_nvperf` file out of the tree.
 
     python3 misc/scripts/check_proprietary_sdk_files.py
     python3 misc/scripts/check_proprietary_sdk_files.py --root /tmp/planted
@@ -22,6 +23,7 @@ import sys
 from pathlib import Path
 
 PATTERNS = (
+    # NVIDIA DLSS / NGX / Streamline (plan §19, GU-6)
     "nvsdk_ngx*.h",
     "nvsdk_ngx*.lib",
     "libnvsdk_ngx.a",
@@ -29,6 +31,16 @@ PATTERNS = (
     "nvngx_*.dll",
     "libnvidia-ngx*.so*",
     "sl_nvperf.*",
+    # Intel OpenImageDenoise SDK (plan §19, §21.0.6, #168)
+    "oidn.h",
+    "oidn.hpp",
+    "openimagedenoise*.dll",
+    "openimagedenoise*.lib",
+    "libopenimagedenoise*.so*",
+    "libopenimagedenoise*.dylib",
+    "libopenimagedenoise*.a",
+    "oidndenoise",
+    "oidndenoise.exe",
 )
 
 
@@ -72,7 +84,7 @@ def main(argv: list[str]) -> int:
         print(f"proprietary SDK file: {path} (matches {pattern})", file=sys.stderr)
     if hits:
         print(
-            f"check_proprietary_sdk_files: {len(hits)} hit(s); NVIDIA SDK files must stay outside the repository (plan §19).",
+            f"check_proprietary_sdk_files: {len(hits)} hit(s); developer-supplied SDK files must stay outside the repository (plan §19).",
             file=sys.stderr,
         )
         return 1

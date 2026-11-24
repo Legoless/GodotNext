@@ -35,8 +35,9 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
-// GodotNext: path_tracer (#167)
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 #include "servers/rendering/renderer_rd/effects/path_tracer.h"
+#include "servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
@@ -64,6 +65,8 @@ struct NextGIBakeShaders::Instances {
 	NextgiSelftestShaderRD selftest;
 	// GodotNext: path_tracer (#167). The product path tracer's inline backend (ray query).
 	PathTracerShaderRD path_tracer;
+	// GodotNext: path_tracer_denoise (#168). The screen-space JNLM denoiser (plain compute, no ray query).
+	PathTracerDenoiseShaderRD path_tracer_denoise;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
@@ -91,6 +94,7 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->wrc_update_swrt, NextGIWRC::get_shader_variant_defines());
 	_add(instances->selftest, NextGI::get_selftest_variant_defines());
 	_add(instances->path_tracer, PathTracer::get_shader_variant_defines()); // GodotNext: path_tracer (#167)
+	_add(instances->path_tracer_denoise, PathTracer::get_denoise_shader_variant_defines()); // GodotNext: path_tracer_denoise (#168)
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {

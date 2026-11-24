@@ -68,11 +68,13 @@ public:
 		float dynres_max_scale = 1.0f;
 		float fsr_sharpness = 0.2f;
 		RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
-		// GodotNext: path_tracer (#167). Viewport.path_tracing_*.
+		// GodotNext: path_tracer (#167), path_tracer_denoise (#168). Viewport.path_tracing_*.
 		bool path_tracing_enabled = false;
 		int path_tracing_samples = RenderingServerTypes::PATH_TRACING_DEFAULT_SAMPLES;
 		int path_tracing_max_bounces = RenderingServerTypes::PATH_TRACING_DEFAULT_MAX_BOUNCES;
 		float path_tracing_firefly_clamp = 0.0f;
+		RSE::ViewportPathTracingDenoiser path_tracing_denoiser = RenderingServerTypes::PATH_TRACING_DEFAULT_DENOISER;
+		bool path_tracing_denoise_requested = false;
 		float texture_mipmap_bias = 0.0f;
 		RSE::ViewportAnisotropicFiltering anisotropic_filtering_level = RSE::VIEWPORT_ANISOTROPY_4X;
 		bool fsr_enabled = false;
@@ -300,11 +302,13 @@ public:
 	void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale);
 	void viewport_set_fsr_sharpness(RID p_viewport, float p_sharpness);
 	void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality);
-	// GodotNext: path_tracer (#167)
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 	void viewport_set_path_tracing_enabled(RID p_viewport, bool p_enabled);
 	void viewport_set_path_tracing_samples(RID p_viewport, int p_samples);
 	void viewport_set_path_tracing_max_bounces(RID p_viewport, int p_max_bounces);
 	void viewport_set_path_tracing_firefly_clamp(RID p_viewport, float p_firefly_clamp);
+	void viewport_set_path_tracing_denoiser(RID p_viewport, RSE::ViewportPathTracingDenoiser p_denoiser);
+	void viewport_request_path_tracing_denoise(RID p_viewport);
 	Dictionary viewport_get_path_tracing_info(RID p_viewport) const;
 	// Path traced: path_tracing_enabled, or the VIEWPORT_DEBUG_DRAW_PATH_TRACER debug draw.
 	static bool viewport_path_tracing_active(bool p_enabled, RSE::ViewportDebugDraw p_debug_draw) { return p_enabled || p_debug_draw == RSE::VIEWPORT_DEBUG_DRAW_PATH_TRACER; }

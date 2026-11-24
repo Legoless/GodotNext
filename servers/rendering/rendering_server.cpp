@@ -3148,11 +3148,13 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);
-	// GodotNext: path_tracer (#167)
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_enabled", "viewport", "enabled"), &RenderingServer::viewport_set_path_tracing_enabled);
 	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_samples", "viewport", "samples"), &RenderingServer::viewport_set_path_tracing_samples);
 	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_max_bounces", "viewport", "max_bounces"), &RenderingServer::viewport_set_path_tracing_max_bounces);
 	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_firefly_clamp", "viewport", "firefly_clamp"), &RenderingServer::viewport_set_path_tracing_firefly_clamp);
+	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_denoiser", "viewport", "denoiser"), &RenderingServer::viewport_set_path_tracing_denoiser);
+	ClassDB::bind_method(D_METHOD("viewport_request_path_tracing_denoise", "viewport"), &RenderingServer::viewport_request_path_tracing_denoise);
 	ClassDB::bind_method(D_METHOD("viewport_get_path_tracing_info", "viewport"), &RenderingServer::viewport_get_path_tracing_info);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);
 	ClassDB::bind_method(D_METHOD("viewport_set_anisotropic_filtering_level", "viewport", "anisotropic_filtering_level"), &RenderingServer::viewport_set_anisotropic_filtering_level);
@@ -3223,6 +3225,12 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_EPIC);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_MAX);
+
+	// GodotNext: path_tracer_denoise (#168).
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_PATH_TRACING_DENOISER_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_NONE);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED);
@@ -4341,6 +4349,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/path_tracer_readback", false);
 	// GodotNext: path_tracer (#167). Traces as the D16 reference does, to compare the two estimators.
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/path_tracer_reference_match", false);
+	// GodotNext: path_tracer_denoise (#168). Default path tracer denoiser (Off, Builtin JNLM, or optional OIDN module).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/path_tracing_denoiser", PROPERTY_HINT_ENUM, "Off,Builtin,OIDN"), RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN);
 
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);

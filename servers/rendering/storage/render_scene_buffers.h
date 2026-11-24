@@ -128,8 +128,9 @@ public:
 	virtual void set_anisotropic_filtering_level(RSE::ViewportAnisotropicFiltering p_anisotropic_filtering_level) = 0;
 	virtual void set_use_debanding(bool p_use_debanding) = 0;
 	virtual void set_temporal_history_reset() {}
-	// GodotNext: path_tracer (#167). The viewport's effective path tracing settings (Viewport.path_tracing_*, or on
-	// under VIEWPORT_DEBUG_DRAW_PATH_TRACER), set before each 3D render, and the path tracer's state of this view.
-	virtual void set_path_tracing(bool p_enabled, int p_samples, int p_max_bounces, float p_firefly_clamp) {}
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168). The viewport's effective path tracing settings
+	// (Viewport.path_tracing_*, or on under VIEWPORT_DEBUG_DRAW_PATH_TRACER), set before each 3D render, and the
+	// path tracer's state of this view.
+	virtual void set_path_tracing(bool p_enabled, int p_samples, int p_max_bounces, float p_firefly_clamp, RSE::ViewportPathTracingDenoiser p_denoiser = RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN, bool p_denoise_requested = false) {}
 	virtual Dictionary get_path_tracing_info() const { return Dictionary(); }
 };

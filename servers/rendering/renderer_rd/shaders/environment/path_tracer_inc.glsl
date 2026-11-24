@@ -156,7 +156,15 @@ void path_tracer_prepare_hit(PathTracerHit p_hit, vec3 p_dir, inout vec3 r_norma
 // One path from the camera. The bounce limit counts the segments after the first hit, so 63 is the D16 hard stop.
 // A camera ray that hits an instance without records (GPU-written instances, past the record count) sees it black
 // in the product, as a bounce ray ends there; the D16 reference sees the background.
-vec3 path_tracer_radiance(vec3 p_origin, vec3 p_dir, inout uint rng) {
+// GodotNext: path_tracer_denoise (#168). Also outputs the first hit's albedo and world normal guides (zero on miss).
+bool path_tracer_vec3_is_finite(vec3 p_v) {
+	return all(greaterThanEqual(p_v, vec3(-1e30))) && all(lessThanEqual(p_v, vec3(1e30)));
+}
+
+vec3 path_tracer_radiance(vec3 p_origin, vec3 p_dir, inout uint rng, out vec3 r_albedo, out vec3 r_normal, out float r_hit) {
+	r_albedo = vec3(0.0);
+	r_normal = vec3(0.0);
+	r_hit = 0.0;
 	PathTracerHit hit;
 	bool unrecorded;
 	if (!path_tracer_trace(p_origin, p_dir, 1.0e6, hit, unrecorded)) {
@@ -169,6 +177,15 @@ vec3 path_tracer_radiance(vec3 p_origin, vec3 p_dir, inout uint rng) {
 	vec3 position = hit.position;
 	uint material = hit.surface;
 	path_tracer_prepare_hit(hit, p_dir, normal);
+	vec3 first_albedo = NEXTGI_PT_MATERIAL(material).albedo_metal.rgb;
+	if (path_tracer_vec3_is_finite(first_albedo)) {
+		r_albedo = clamp(first_albedo, vec3(0.0), vec3(1.0));
+	}
+	float normal_len = length(normal);
+	if (path_tracer_vec3_is_finite(normal) && normal_len > 1e-6) {
+		r_normal = normal / normal_len;
+	}
+	r_hit = 1.0;
 	vec3 view = -p_dir;
 	vec3 accumulated = NEXTGI_PT_MATERIAL(material).emission_roughness.rgb;
 	accumulated += nextgi_pt_next_event(position, normal, view, material);
@@ -222,7 +239,7 @@ vec3 path_tracer_clamp(vec3 p_radiance) {
 // seed, so no two pixels share a stream within their samples; the D16 reference's (seed ^ pixel ^ sample, kept for
 // the reference match) give every aligned run of 2^k pixels the same streams over their first 2^k samples, which
 // shows as horizontal streaks in a progressive image. The sub-pixel position comes from its own hash.
-vec3 path_tracer_sample_pixel(uvec2 p_pixel) {
+vec3 path_tracer_sample_pixel(uvec2 p_pixel, out vec3 r_albedo, out vec3 r_normal, out float r_hit) {
 	uint index = p_pixel.y * ref_params.dispatch.x + p_pixel.x;
 	uint sample_index = ref_params.dispatch.z;
 	bool product = (ref_params.product.y & PATH_TRACER_FLAG_PRODUCT) != 0u;
@@ -250,12 +267,12 @@ vec3 path_tracer_sample_pixel(uvec2 p_pixel) {
 			origin = near_point;
 			direction = normalize(ref_params.cam_forward_aspect.xyz);
 		}
-		return path_tracer_clamp(path_tracer_radiance(origin, direction, rng));
+		return path_tracer_clamp(path_tracer_radiance(origin, direction, rng, r_albedo, r_normal, r_hit));
 	}
 	float tan_half = tan(ref_params.cam_origin_fov.w * 0.5);
 	float aspect = ref_params.cam_forward_aspect.w;
 	vec3 direction = normalize(ref_params.cam_right.xyz * (ndc.x * tan_half * aspect) + ref_params.cam_up.xyz * (ndc.y * tan_half) + ref_params.cam_forward_aspect.xyz);
-	return path_tracer_clamp(path_tracer_radiance(ref_params.cam_origin_fov.xyz, direction, rng));
+	return path_tracer_clamp(path_tracer_radiance(ref_params.cam_origin_fov.xyz, direction, rng, r_albedo, r_normal, r_hit));
 }
 
 #endif // PATH_TRACER_INC_GLSL

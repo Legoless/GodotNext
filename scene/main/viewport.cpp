@@ -5225,6 +5225,27 @@ float Viewport::get_path_tracing_firefly_clamp() const {
 	return path_tracing_firefly_clamp;
 }
 
+// GodotNext: path_tracer_denoise (#168)
+void Viewport::set_path_tracing_denoiser(PathTracingDenoiser p_denoiser) {
+	ERR_MAIN_THREAD_GUARD;
+	ERR_FAIL_INDEX(p_denoiser, PATH_TRACING_DENOISER_MAX);
+	if (path_tracing_denoiser == p_denoiser) {
+		return;
+	}
+	path_tracing_denoiser = p_denoiser;
+	RS::get_singleton()->viewport_set_path_tracing_denoiser(viewport, (RSE::ViewportPathTracingDenoiser)(int)p_denoiser);
+}
+
+Viewport::PathTracingDenoiser Viewport::get_path_tracing_denoiser() const {
+	ERR_READ_THREAD_GUARD_V(PATH_TRACING_DENOISER_BUILTIN);
+	return path_tracing_denoiser;
+}
+
+void Viewport::request_path_tracing_denoise() {
+	ERR_MAIN_THREAD_GUARD;
+	RS::get_singleton()->viewport_request_path_tracing_denoise(viewport);
+}
+
 Dictionary Viewport::get_path_tracing_info() const {
 	ERR_READ_THREAD_GUARD_V(Dictionary());
 	return RS::get_singleton()->viewport_get_path_tracing_info(viewport);
@@ -5469,7 +5490,7 @@ void Viewport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_tsr_quality", "tsr_quality"), &Viewport::set_tsr_quality);
 	ClassDB::bind_method(D_METHOD("get_tsr_quality"), &Viewport::get_tsr_quality);
 
-	// GodotNext: path_tracer (#167)
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 	ClassDB::bind_method(D_METHOD("set_path_tracing_enabled", "enabled"), &Viewport::set_path_tracing_enabled);
 	ClassDB::bind_method(D_METHOD("is_path_tracing_enabled"), &Viewport::is_path_tracing_enabled);
 	ClassDB::bind_method(D_METHOD("set_path_tracing_samples", "samples"), &Viewport::set_path_tracing_samples);
@@ -5478,6 +5499,9 @@ void Viewport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_path_tracing_max_bounces"), &Viewport::get_path_tracing_max_bounces);
 	ClassDB::bind_method(D_METHOD("set_path_tracing_firefly_clamp", "firefly_clamp"), &Viewport::set_path_tracing_firefly_clamp);
 	ClassDB::bind_method(D_METHOD("get_path_tracing_firefly_clamp"), &Viewport::get_path_tracing_firefly_clamp);
+	ClassDB::bind_method(D_METHOD("set_path_tracing_denoiser", "denoiser"), &Viewport::set_path_tracing_denoiser);
+	ClassDB::bind_method(D_METHOD("get_path_tracing_denoiser"), &Viewport::get_path_tracing_denoiser);
+	ClassDB::bind_method(D_METHOD("request_path_tracing_denoise"), &Viewport::request_path_tracing_denoise);
 	ClassDB::bind_method(D_METHOD("get_path_tracing_info"), &Viewport::get_path_tracing_info);
 
 	ClassDB::bind_method(D_METHOD("set_texture_mipmap_bias", "texture_mipmap_bias"), &Viewport::set_texture_mipmap_bias);
@@ -5530,12 +5554,13 @@ void Viewport::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "vrs_mode", PROPERTY_HINT_ENUM, "Disabled,Texture,XR"), "set_vrs_mode", "get_vrs_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "vrs_update_mode", PROPERTY_HINT_ENUM, "Disabled,Once,Always"), "set_vrs_update_mode", "get_vrs_update_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "vrs_texture", PROPERTY_HINT_RESOURCE_TYPE, Texture2D::get_class_static()), "set_vrs_texture", "get_vrs_texture");
-	// GodotNext: path_tracer (#167)
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 	ADD_GROUP("Path Tracing", "path_tracing_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "path_tracing_enabled"), "set_path_tracing_enabled", "is_path_tracing_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "path_tracing_samples", PROPERTY_HINT_RANGE, "1,1048576,1"), "set_path_tracing_samples", "get_path_tracing_samples");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "path_tracing_max_bounces", PROPERTY_HINT_RANGE, "0,63,1"), "set_path_tracing_max_bounces", "get_path_tracing_max_bounces");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "path_tracing_firefly_clamp", PROPERTY_HINT_RANGE, "0,65504,0.01"), "set_path_tracing_firefly_clamp", "get_path_tracing_firefly_clamp");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "path_tracing_denoiser", PROPERTY_HINT_ENUM, "Off,Builtin,OIDN"), "set_path_tracing_denoiser", "get_path_tracing_denoiser");
 #endif
 	ADD_GROUP("Canvas Items", "canvas_item_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "canvas_item_default_texture_filter", PROPERTY_HINT_ENUM, "Nearest,Linear,Linear Mipmap,Nearest Mipmap,Inherit"), "set_default_canvas_item_texture_filter", "get_default_canvas_item_texture_filter");
@@ -5604,6 +5629,12 @@ void Viewport::_bind_methods() {
 	BIND_ENUM_CONSTANT(TSR_QUALITY_EPIC);
 	BIND_ENUM_CONSTANT(TSR_QUALITY_CINEMATIC);
 	BIND_ENUM_CONSTANT(TSR_QUALITY_MAX);
+
+	// GodotNext: path_tracer_denoise (#168)
+	BIND_ENUM_CONSTANT(PATH_TRACING_DENOISER_OFF);
+	BIND_ENUM_CONSTANT(PATH_TRACING_DENOISER_BUILTIN);
+	BIND_ENUM_CONSTANT(PATH_TRACING_DENOISER_OIDN);
+	BIND_ENUM_CONSTANT(PATH_TRACING_DENOISER_MAX);
 
 	BIND_ENUM_CONSTANT(MSAA_DISABLED);
 	BIND_ENUM_CONSTANT(MSAA_2X);
@@ -5795,6 +5826,7 @@ Viewport::Viewport() {
 	set_scaling_3d_scale(GLOBAL_GET("rendering/scaling_3d/scale"));
 	set_fsr_sharpness((float)GLOBAL_GET("rendering/scaling_3d/fsr_sharpness"));
 	set_tsr_quality((Viewport::TSRQuality)(int)GLOBAL_GET("rendering/anti_aliasing/tsr/quality"));
+	set_path_tracing_denoiser((Viewport::PathTracingDenoiser)RenderingServerTypes::path_tracing_validate_denoiser((int)GLOBAL_GET("rendering/global_illumination/nextgi/path_tracing_denoiser")));
 	set_texture_mipmap_bias((float)GLOBAL_GET("rendering/textures/default_filters/texture_mipmap_bias"));
 	set_anisotropic_filtering_level((Viewport::AnisotropicFiltering)(int)GLOBAL_GET("rendering/textures/default_filters/anisotropic_filtering_level"));
 #endif // _3D_DISABLED

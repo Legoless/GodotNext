@@ -277,22 +277,23 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	// GodotNext: path_tracer (#167). The path tracer's inline backend is the eleventh.
-	REQUIRE(versions.size() == 11);
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168). The path tracer's inline backend is the eleventh
+	// and its screen-space denoiser is the twelfth (no ray query).
+	REQUIRE(versions.size() == 12);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	const char *expected[11] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
-		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD", "PathTracerShaderRD" };
-	for (int i = 0; i < 11; i++) {
+	const char *expected[12] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD", "PathTracerShaderRD", "PathTracerDenoiseShaderRD" };
+	for (int i = 0; i < 12; i++) {
 		CHECK_EQ(names[i], String(expected[i]));
 	}
-	// The hardware instances and the self-test need ray query; the software siblings bake everywhere (#261).
-	for (int i = 0; i < 11; i++) {
-		const bool software = i >= 5 && i <= 8;
-		CHECK_EQ(versions[i].first->requires_ray_query(), !software);
+	// The hardware instances and the self-test need ray query; the software siblings and the denoiser bake everywhere (#261, #168).
+	for (int i = 0; i < 12; i++) {
+		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11;
+		CHECK_EQ(versions[i].first->requires_ray_query(), !no_ray_query);
 	}
 
 	// Gather bakes every runtime variant, the far-field one included; the software sibling has the

@@ -102,6 +102,13 @@ jobs:
             bin: ./bin/godot.linuxbsd.template_debug.x86_64.mono
             artifact: true
 
+          - name: Editor w/ OIDN mock backend (target=editor, module_oidn_enabled=yes, oidn_backend=mock)
+            cache-name: linux-editor-oidn-mock
+            target: editor
+            scons-flags: module_oidn_enabled=yes oidn_backend=mock debug_symbols=no
+            bin: ./bin/godot.linuxbsd.editor.x86_64
+            free-space: true
+
           - name: Minimal template (target=template_release, everything disabled)
             cache-name: linux-template-minimal
             target: template_release

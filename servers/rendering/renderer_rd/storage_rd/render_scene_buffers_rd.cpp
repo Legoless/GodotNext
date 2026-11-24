@@ -448,12 +448,14 @@ void RenderSceneBuffersRD::set_anisotropic_filtering_level(RSE::ViewportAnisotro
 	update_samplers();
 }
 
-// GodotNext: path_tracer (#167)
-void RenderSceneBuffersRD::set_path_tracing(bool p_enabled, int p_samples, int p_max_bounces, float p_firefly_clamp) {
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
+void RenderSceneBuffersRD::set_path_tracing(bool p_enabled, int p_samples, int p_max_bounces, float p_firefly_clamp, RSE::ViewportPathTracingDenoiser p_denoiser, bool p_denoise_requested) {
 	path_tracing_enabled = p_enabled;
 	path_tracing_samples = p_samples;
 	path_tracing_max_bounces = p_max_bounces;
 	path_tracing_firefly_clamp = p_firefly_clamp;
+	path_tracing_denoiser = p_denoiser;
+	path_tracing_denoise_requested = path_tracing_denoise_requested || p_denoise_requested;
 }
 
 Dictionary RenderSceneBuffersRD::get_path_tracing_info() const {
@@ -463,6 +465,8 @@ Dictionary RenderSceneBuffersRD::get_path_tracing_info() const {
 		view->fill_info(info);
 	} else {
 		info["status"] = RendererRD::path_tracer_status_name(RendererRD::PATH_TRACER_STATUS_OFF);
+		info["oidn_available"] = RendererRD::PathTracer::is_oidn_available();
+		info["oidn_backend"] = String(RendererRD::PathTracer::get_oidn_backend_name());
 	}
 	return info;
 }

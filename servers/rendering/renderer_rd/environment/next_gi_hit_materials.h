@@ -137,10 +137,13 @@ enum {
 	NEXTGI_HIT_RAYGEN_PATH_TRACER = 1,
 };
 
-// GodotNext: path_tracer (#167). One path tracer sample per pixel through the hit pipeline: the view's RGBA32F
-// history, the params (PathTracerGPUParams) and the D16 light and material tables (path_tracer_hit.glsl).
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168). One path tracer sample per pixel through the hit
+// pipeline: the view's RGBA32F history, first-hit albedo and normal guides, the params (PathTracerGPUParams) and
+// the D16 light and material tables (path_tracer_hit.glsl).
 struct NextGIHitPathTrace {
 	RID accumulation;
+	RID guide_albedo;
+	RID guide_normal;
 	RID params;
 	RID lights;
 	RID materials;

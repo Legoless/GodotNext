@@ -280,6 +280,12 @@
 				[b]Note:[/b] This method doesn't propagate input events to embedded [Window]s or [SubViewport]s.
 			</description>
 		</method>
+		<method name="request_path_tracing_denoise">
+			<return type="void" />
+			<description>
+				Requests an on-demand path tracer denoise pass on the next drawn frame using the current accumulated history and first-hit albedo and normal guides, even before [member path_tracing_samples] is reached. Ignored when [member path_tracing_denoiser] is [constant PATH_TRACING_DENOISER_OFF]. Same as [method RenderingServer.viewport_request_path_tracing_denoise].
+			</description>
+		</method>
 		<method name="reset_temporal_history">
 			<return type="void" />
 			<description>
@@ -403,9 +409,12 @@
 		<member name="own_world_3d" type="bool" setter="set_use_own_world_3d" getter="is_using_own_world_3d" default="false">
 			If [code]true[/code], the viewport will use a unique copy of the [World3D] defined in [member world_3d].
 		</member>
+		<member name="path_tracing_denoiser" type="int" setter="set_path_tracing_denoiser" getter="get_path_tracing_denoiser" enum="Viewport.PathTracingDenoiser" default="1">
+			The denoiser applied to the path-traced image when accumulation finishes at [member path_tracing_samples] or when [method request_path_tracing_denoise] is called. Changing this property does not restart the accumulation history. Initialized from [member ProjectSettings.rendering/global_illumination/nextgi/path_tracing_denoiser].
+		</member>
 		<member name="path_tracing_enabled" type="bool" setter="set_path_tracing_enabled" getter="is_path_tracing_enabled" default="false">
-			If [code]true[/code], this viewport's 3D view is path traced progressively: each drawn frame adds one sample per pixel to a history at the viewport's output size until it holds [member path_tracing_samples] samples, and the history's mean replaces the rendered image before tonemapping. While it is on, the 3D view renders at the output size, without 3D scaling or TAA. The history restarts on the frame of any change to the camera, the instances, the lights, the materials, the environment's background or the path tracing settings. Needs NextGI on in the [Environment] and its hardware ray tracing tier; the viewport shows the normal image otherwise. [method get_path_tracing_info] reports the state.
-			[b]Note:[/b] Only supported when using the Forward+ rendering method. The scene is lit by its emissive surfaces and by up to 8 of the omni and spot lights that reach the view (spot lights without their cone), and a ray that leaves the scene sees the environment's background color. Directional lights, the sky, denoising, volumes and fog are not path traced yet. On macOS the path tracer is experimental.
+			If [code]true[/code], this viewport's 3D view is path traced progressively: each drawn frame adds one sample per pixel to a history at the viewport's output size until it holds [member path_tracing_samples] samples, and the history's mean (or denoised output per [member path_tracing_denoiser]) replaces the rendered image before tonemapping. While it is on, the 3D view renders at the output size, without 3D scaling or TAA. The history restarts on the frame of any change to the camera, the instances, the lights, the materials, the environment's background or the path tracing settings. Needs NextGI on in the [Environment] and its hardware ray tracing tier; the viewport shows the normal image otherwise. [method get_path_tracing_info] reports the state.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. The scene is lit by its emissive surfaces and by up to 8 of the omni and spot lights that reach the view (spot lights without their cone), and a ray that leaves the scene sees the environment's background color. Directional lights, the sky, volumes and fog are not path traced yet. On macOS the path tracer is experimental.
 		</member>
 		<member name="path_tracing_firefly_clamp" type="float" setter="set_path_tracing_firefly_clamp" getter="get_path_tracing_firefly_clamp" default="0.0">
 			The largest exposed radiance one path sample may add to a pixel, which removes fireflies at the cost of some energy. [code]0.0[/code] turns the clamp off. Changing it restarts the history.
@@ -636,6 +645,18 @@
 		</constant>
 		<constant name="TSR_QUALITY_MAX" value="5" enum="TSRQuality">
 			Represents the size of the [enum TSRQuality] enum.
+		</constant>
+		<constant name="PATH_TRACING_DENOISER_OFF" value="0" enum="PathTracingDenoiser">
+			Disables path tracer denoising; the raw accumulated radiance mean is shown.
+		</constant>
+		<constant name="PATH_TRACING_DENOISER_BUILTIN" value="1" enum="PathTracingDenoiser">
+			Denoises using the built-in screen-space joint non-local-means compute denoiser guided by first-hit albedo and normals.
+		</constant>
+		<constant name="PATH_TRACING_DENOISER_OIDN" value="2" enum="PathTracingDenoiser">
+			Denoises using the optional Intel OpenImageDenoise module when built against a developer-supplied SDK, falling back to [constant PATH_TRACING_DENOISER_BUILTIN] if unavailable.
+		</constant>
+		<constant name="PATH_TRACING_DENOISER_MAX" value="3" enum="PathTracingDenoiser">
+			Represents the size of the [enum PathTracingDenoiser] enum.
 		</constant>
 		<constant name="MSAA_DISABLED" value="0" enum="MSAA">
 			Multisample antialiasing mode disabled. This is the default value, and is also the fastest setting.

@@ -4364,7 +4364,7 @@
 			<return type="Dictionary" />
 			<param index="0" name="viewport" type="RID" />
 			<description>
-				Returns the state of the viewport's path tracer: [code]enabled[/code] and the settings it has ([code]samples_setting[/code], [code]max_bounces_setting[/code], [code]firefly_clamp_setting[/code]), and once it has rendered, [code]status[/code] ([code]OFF[/code], [code]ACTIVE[/code], [code]CONVERGED[/code], or why it cannot run: [code]NO_NEXTGI[/code], [code]NOT_HWRT[/code], [code]NO_TLAS[/code], [code]MULTIVIEW[/code], [code]REFERENCE_MODE[/code], [code]UNSUPPORTED_DEVICE[/code]), [code]backend[/code] ([code]HIT_GROUPS[/code] or [code]INLINE[/code]), [code]device_support[/code] ([code]SUPPORTED[/code], [code]EXPERIMENTAL[/code] on macOS, or why the device cannot path trace: [code]NO_RAY_QUERY[/code], [code]APPLE_FAMILY[/code] before Apple8), [code]samples[/code], [code]target_samples[/code], [code]width[/code], [code]height[/code], [code]resets[/code], [code]last_reset_reasons[/code], [code]reset_counts[/code] and [code]textured_materials[/code]. With [member ProjectSettings.rendering/global_illumination/nextgi/debug/path_tracer_readback] on, it also returns the history ([code]accumulation[/code]), its [code]mean[/code], [code]nonfinite[/code] and [code]hash[/code]. Equivalent to [method Viewport.get_path_tracing_info].
+				Returns the state of the viewport's path tracer: [code]enabled[/code] and the settings it has ([code]samples_setting[/code], [code]max_bounces_setting[/code], [code]firefly_clamp_setting[/code], [code]denoiser_setting[/code]), and once it has rendered, [code]status[/code] ([code]OFF[/code], [code]ACTIVE[/code], [code]CONVERGED[/code], or why it cannot run: [code]NO_NEXTGI[/code], [code]NOT_HWRT[/code], [code]NO_TLAS[/code], [code]MULTIVIEW[/code], [code]REFERENCE_MODE[/code], [code]UNSUPPORTED_DEVICE[/code]), [code]backend[/code] ([code]HIT_GROUPS[/code] or [code]INLINE[/code]), [code]device_support[/code] ([code]SUPPORTED[/code], [code]EXPERIMENTAL[/code] on macOS, or why the device cannot path trace: [code]NO_RAY_QUERY[/code], [code]APPLE_FAMILY[/code] before Apple8), [code]samples[/code], [code]target_samples[/code], [code]width[/code], [code]height[/code], [code]resets[/code], [code]last_reset_reasons[/code], [code]reset_counts[/code], [code]textured_materials[/code], and denoiser state ([code]denoiser[/code], [code]denoise_status[/code], [code]denoise_backend[/code], [code]denoised[/code], [code]denoised_samples[/code], [code]denoise_runs[/code], [code]oidn_available[/code], [code]oidn_backend[/code]). With [member ProjectSettings.rendering/global_illumination/nextgi/debug/path_tracer_readback] on, it also returns the history ([code]accumulation[/code]), its [code]mean[/code], [code]nonfinite[/code] and [code]hash[/code], plus [code]denoised_image[/code], [code]denoised_mean[/code], [code]denoised_nonfinite[/code] and [code]denoised_hash[/code] when a denoised image is current. Equivalent to [method Viewport.get_path_tracing_info].
 			</description>
 		</method>
 		<method name="viewport_get_render_info">
@@ -4424,6 +4424,13 @@
 			<param index="1" name="canvas" type="RID" />
 			<description>
 				Detaches a viewport from a canvas.
+			</description>
+		</method>
+		<method name="viewport_request_path_tracing_denoise">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				Requests an on-demand denoise pass for the viewport's current path-traced accumulation on the next drawn frame when [method viewport_set_path_tracing_denoiser] is not [constant VIEWPORT_PATH_TRACING_DENOISER_OFF]. Equivalent to [method Viewport.request_path_tracing_denoise].
 			</description>
 		</method>
 		<method name="viewport_reset_temporal_history">
@@ -4597,6 +4604,14 @@
 			<param index="1" name="parent_viewport" type="RID" />
 			<description>
 				Sets the viewport's parent to the viewport specified by the [param parent_viewport] RID.
+			</description>
+		</method>
+		<method name="viewport_set_path_tracing_denoiser">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="denoiser" type="int" enum="RenderingServer.ViewportPathTracingDenoiser" />
+			<description>
+				Sets the denoiser used when the viewport's path tracer finishes accumulating or when [method viewport_request_path_tracing_denoise] is called. Changing the denoiser does not restart the accumulation history. Equivalent to [member Viewport.path_tracing_denoiser].
 			</description>
 		</method>
 		<method name="viewport_set_path_tracing_enabled">
@@ -5794,6 +5809,18 @@
 		</constant>
 		<constant name="VIEWPORT_TSR_QUALITY_MAX" value="5" enum="ViewportTSRQuality">
 			Represents the size of the [enum ViewportTSRQuality] enum.
+		</constant>
+		<constant name="VIEWPORT_PATH_TRACING_DENOISER_OFF" value="0" enum="ViewportPathTracingDenoiser">
+			Disables path tracer denoising; the raw accumulated radiance mean is composited directly.
+		</constant>
+		<constant name="VIEWPORT_PATH_TRACING_DENOISER_BUILTIN" value="1" enum="ViewportPathTracingDenoiser">
+			Uses the built-in screen-space joint non-local-means compute denoiser guided by first-hit albedo and normals.
+		</constant>
+		<constant name="VIEWPORT_PATH_TRACING_DENOISER_OIDN" value="2" enum="ViewportPathTracingDenoiser">
+			Uses the optional Intel OpenImageDenoise module when compiled against a developer-supplied SDK, falling back to [constant VIEWPORT_PATH_TRACING_DENOISER_BUILTIN] if unavailable.
+		</constant>
+		<constant name="VIEWPORT_PATH_TRACING_DENOISER_MAX" value="3" enum="ViewportPathTracingDenoiser">
+			Represents the size of the [enum ViewportPathTracingDenoiser] enum.
 		</constant>
 		<constant name="VIEWPORT_SCALING_3D_REASON_NONE" value="0" enum="ViewportScaling3DReason">
 			The requested mode is active.

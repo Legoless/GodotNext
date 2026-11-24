@@ -31,11 +31,13 @@
 #include "path_tracer.h"
 
 #include "core/config/project_settings.h"
+#include "core/os/mutex.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
+#include "servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/path_tracer.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -58,8 +60,172 @@ PathTracerSettings path_tracer_effective_settings(const PathTracerSettings &p_se
 	settings.samples = RenderingServerTypes::path_tracing_validate_samples(p_settings.samples);
 	settings.max_bounces = RenderingServerTypes::path_tracing_validate_max_bounces(p_settings.max_bounces);
 	settings.firefly_clamp = RenderingServerTypes::path_tracing_validate_firefly_clamp(p_settings.firefly_clamp);
+	settings.denoiser = RenderingServerTypes::path_tracing_validate_denoiser(int(p_settings.denoiser));
+	settings.denoise_requested = p_settings.denoise_requested;
 	settings.reference_match = p_settings.reference_match;
 	return settings;
+}
+
+const char *path_tracer_denoise_status_name(PathTracerDenoiseStatus p_status) {
+	switch (p_status) {
+		case PATH_TRACER_DENOISE_STATUS_OFF:
+			return "OFF";
+		case PATH_TRACER_DENOISE_STATUS_PENDING:
+			return "PENDING";
+		case PATH_TRACER_DENOISE_STATUS_DENOISED:
+			return "DENOISED";
+		case PATH_TRACER_DENOISE_STATUS_FALLBACK_BUILTIN:
+			return "FALLBACK_BUILTIN";
+		case PATH_TRACER_DENOISE_STATUS_MAX:
+			break;
+	}
+	return "UNKNOWN";
+}
+
+const char *path_tracer_denoiser_name(RSE::ViewportPathTracingDenoiser p_denoiser) {
+	switch (p_denoiser) {
+		case RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF:
+			return "OFF";
+		case RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN:
+			return "BUILTIN";
+		case RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN:
+			return "OIDN";
+		case RSE::VIEWPORT_PATH_TRACING_DENOISER_MAX:
+			break;
+	}
+	return "UNKNOWN";
+}
+
+static float _path_tracer_positive_finite(float p_value, float p_default, float p_min, float p_max) {
+	if (!Math::is_finite(p_value) || p_value <= 0.0f) {
+		return p_default;
+	}
+	return CLAMP(p_value, p_min, p_max);
+}
+
+PathTracerDenoiseParams path_tracer_validate_denoise_params(const PathTracerDenoiseParams &p_params) {
+	PathTracerDenoiseParams valid;
+	valid.spatial_bandwidth = _path_tracer_positive_finite(p_params.spatial_bandwidth, 5.0f, 0.25f, 32.0f);
+	valid.light_bandwidth = _path_tracer_positive_finite(p_params.light_bandwidth, 0.1f, 0.001f, 4.0f);
+	valid.albedo_bandwidth = _path_tracer_positive_finite(p_params.albedo_bandwidth, 0.2f, 0.01f, 4.0f);
+	valid.normal_bandwidth = _path_tracer_positive_finite(p_params.normal_bandwidth, 0.1f, 0.01f, 4.0f);
+	valid.filter_strength = _path_tracer_positive_finite(p_params.filter_strength, 10.0f, 0.1f, 64.0f);
+	valid.half_search_window = CLAMP(p_params.half_search_window, 1, PATH_TRACER_DENOISE_MAX_HALF_SEARCH);
+	return valid;
+}
+
+bool path_tracer_should_denoise(RSE::ViewportPathTracingDenoiser p_denoiser, uint32_t p_samples, uint32_t p_target, bool p_on_demand, bool p_denoised_valid, uint32_t p_denoised_samples, RSE::ViewportPathTracingDenoiser p_denoised_requested) {
+	if (p_denoiser == RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF || p_samples == 0) {
+		return false;
+	}
+	if (!p_on_demand && p_samples < p_target) {
+		return false;
+	}
+	if (p_denoised_valid && p_denoised_samples == p_samples && p_denoised_requested == p_denoiser) {
+		return false;
+	}
+	return true;
+}
+
+static float _path_tracer_sanitize_component(float p_value) {
+	if (!Math::is_finite(p_value) || p_value < 0.0f) {
+		return 0.0f;
+	}
+	return p_value;
+}
+
+bool path_tracer_prepare_oidn_buffers(uint32_t p_width, uint32_t p_height, const float *p_accum_rgba, const float *p_albedo_rgba, const float *p_normal_rgba, LocalVector<float> &r_color_rgb, LocalVector<float> &r_albedo_rgb, LocalVector<float> &r_normal_rgb) {
+	if (p_width == 0 || p_height == 0 || p_accum_rgba == nullptr) {
+		return false;
+	}
+	const uint64_t pixel_count = uint64_t(p_width) * uint64_t(p_height);
+	if (pixel_count > (UINT32_MAX / 3u)) {
+		return false;
+	}
+	const uint32_t rgb_floats = uint32_t(pixel_count * 3u);
+	r_color_rgb.resize(rgb_floats);
+	const bool has_albedo = p_albedo_rgba != nullptr;
+	const bool has_normal = p_normal_rgba != nullptr;
+	if (has_albedo) {
+		r_albedo_rgb.resize(rgb_floats);
+	} else {
+		r_albedo_rgb.clear();
+	}
+	if (has_normal) {
+		r_normal_rgb.resize(rgb_floats);
+	} else {
+		r_normal_rgb.clear();
+	}
+	for (uint64_t i = 0; i < pixel_count; i++) {
+		const uint64_t s = i * 4u;
+		const uint64_t d = i * 3u;
+		const float weight = p_accum_rgba[s + 3u];
+		if (Math::is_finite(weight) && weight > 0.0f) {
+			const float inv_w = 1.0f / weight;
+			r_color_rgb[d + 0u] = _path_tracer_sanitize_component(p_accum_rgba[s + 0u] * inv_w);
+			r_color_rgb[d + 1u] = _path_tracer_sanitize_component(p_accum_rgba[s + 1u] * inv_w);
+			r_color_rgb[d + 2u] = _path_tracer_sanitize_component(p_accum_rgba[s + 2u] * inv_w);
+		} else {
+			r_color_rgb[d + 0u] = 0.0f;
+			r_color_rgb[d + 1u] = 0.0f;
+			r_color_rgb[d + 2u] = 0.0f;
+		}
+		if (has_albedo) {
+			const float aw = p_albedo_rgba[s + 3u];
+			if (Math::is_finite(aw) && aw > 1e-6f) {
+				const float inv_a = 1.0f / aw;
+				r_albedo_rgb[d + 0u] = CLAMP(_path_tracer_sanitize_component(p_albedo_rgba[s + 0u] * inv_a), 0.0f, 1.0f);
+				r_albedo_rgb[d + 1u] = CLAMP(_path_tracer_sanitize_component(p_albedo_rgba[s + 1u] * inv_a), 0.0f, 1.0f);
+				r_albedo_rgb[d + 2u] = CLAMP(_path_tracer_sanitize_component(p_albedo_rgba[s + 2u] * inv_a), 0.0f, 1.0f);
+			} else {
+				r_albedo_rgb[d + 0u] = 0.0f;
+				r_albedo_rgb[d + 1u] = 0.0f;
+				r_albedo_rgb[d + 2u] = 0.0f;
+			}
+		}
+		if (has_normal) {
+			const float nw = p_normal_rgba[s + 3u];
+			const float nx = p_normal_rgba[s + 0u];
+			const float ny = p_normal_rgba[s + 1u];
+			const float nz = p_normal_rgba[s + 2u];
+			if (Math::is_finite(nw) && nw > 1e-6f && Math::is_finite(nx) && Math::is_finite(ny) && Math::is_finite(nz)) {
+				const float len_sq = nx * nx + ny * ny + nz * nz;
+				if (len_sq > 1e-12f && Math::is_finite(len_sq)) {
+					const float inv_len = 1.0f / Math::sqrt(len_sq);
+					r_normal_rgb[d + 0u] = nx * inv_len;
+					r_normal_rgb[d + 1u] = ny * inv_len;
+					r_normal_rgb[d + 2u] = nz * inv_len;
+				} else {
+					r_normal_rgb[d + 0u] = 0.0f;
+					r_normal_rgb[d + 1u] = 0.0f;
+					r_normal_rgb[d + 2u] = 0.0f;
+				}
+			} else {
+				r_normal_rgb[d + 0u] = 0.0f;
+				r_normal_rgb[d + 1u] = 0.0f;
+				r_normal_rgb[d + 2u] = 0.0f;
+			}
+		}
+	}
+	return true;
+}
+
+void path_tracer_pack_denoised_rgba(uint32_t p_width, uint32_t p_height, const float *p_rgb, Vector<uint8_t> &r_rgba_bytes) {
+	const uint64_t pixel_count = uint64_t(p_width) * uint64_t(p_height);
+	if (pixel_count == 0 || p_rgb == nullptr) {
+		r_rgba_bytes.clear();
+		return;
+	}
+	r_rgba_bytes.resize(int64_t(pixel_count * 16u));
+	float *dst = reinterpret_cast<float *>(r_rgba_bytes.ptrw());
+	for (uint64_t i = 0; i < pixel_count; i++) {
+		const uint64_t s = i * 3u;
+		const uint64_t d = i * 4u;
+		dst[d + 0u] = _path_tracer_sanitize_component(p_rgb[s + 0u]);
+		dst[d + 1u] = _path_tracer_sanitize_component(p_rgb[s + 1u]);
+		dst[d + 2u] = _path_tracer_sanitize_component(p_rgb[s + 2u]);
+		dst[d + 3u] = 1.0f;
+	}
 }
 
 const char *path_tracer_status_name(PathTracerStatus p_status) {
@@ -298,13 +464,28 @@ PathTracerGPURays path_tracer_rays(const Transform3D &p_camera, const Projection
 
 void PathTracerView::clear_history() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd != nullptr && accumulation.is_valid()) {
-		rd->free_rid(accumulation);
+	if (rd != nullptr) {
+		const RID textures[4] = { accumulation, guide_albedo, guide_normal, denoised };
+		for (const RID &tex : textures) {
+			if (tex.is_valid()) {
+				rd->free_rid(tex);
+			}
+		}
 	}
 	accumulation = RID();
+	guide_albedo = RID();
+	guide_normal = RID();
+	denoised = RID();
 	size = Size2i();
 	samples = 0;
 	has_state = false;
+	denoised_valid = false;
+	pending_denoise_request = false;
+	denoised_samples = 0;
+	denoised_requested = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+	denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+	denoise_status = PATH_TRACER_DENOISE_STATUS_OFF;
+	read_denoised.clear();
 }
 
 void PathTracerView::configure(RenderSceneBuffersRD *p_render_buffers) {
@@ -337,6 +518,16 @@ void PathTracerView::fill_info(Dictionary &r_info) const {
 	r_info["textured_materials"] = int64_t(textured_materials);
 	r_info["reference_match"] = settings.reference_match;
 	r_info["device_support"] = path_tracer_device_support_name(device_support);
+	// GodotNext: path_tracer_denoise (#168).
+	const bool denoised_active = settings.denoiser != RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF && denoised_valid && denoised_samples == samples && samples > 0;
+	r_info["denoiser"] = path_tracer_denoiser_name(settings.denoiser);
+	r_info["denoise_status"] = path_tracer_denoise_status_name(denoise_status);
+	r_info["denoise_backend"] = path_tracer_denoiser_name(denoise_backend);
+	r_info["denoised"] = denoised_active;
+	r_info["denoised_samples"] = int64_t(denoised_samples);
+	r_info["denoise_runs"] = int64_t(denoise_runs);
+	r_info["oidn_available"] = PathTracer::is_oidn_available();
+	r_info["oidn_backend"] = String(PathTracer::get_oidn_backend_name());
 	PackedStringArray last;
 	Dictionary counts;
 	for (uint32_t i = 0; i < PATH_TRACER_RESET_REASON_COUNT; i++) {
@@ -352,6 +543,12 @@ void PathTracerView::fill_info(Dictionary &r_info) const {
 		r_info["mean"] = read_mean;
 		r_info["nonfinite"] = int64_t(read_nonfinite);
 		r_info["hash"] = String::num_uint64(read_hash, 16);
+	}
+	if (!read_denoised.is_empty()) {
+		r_info["denoised_image"] = read_denoised;
+		r_info["denoised_mean"] = read_denoised_mean;
+		r_info["denoised_nonfinite"] = int64_t(read_denoised_nonfinite);
+		r_info["denoised_hash"] = String::num_uint64(read_denoised_hash, 16);
 	}
 }
 
@@ -625,7 +822,65 @@ struct PathTracerCompositePush {
 	float pad = 0.0f;
 };
 
+// GodotNext: path_tracer_denoise (#168). Push constants matching path_tracer_denoise.glsl.
+struct PathTracerDenoisePush {
+	uint32_t width = 0;
+	uint32_t height = 0;
+	float exposure = 1.0f;
+	float spatial_bandwidth = 5.0f;
+	float light_bandwidth = 0.1f;
+	float albedo_bandwidth = 0.2f;
+	float normal_bandwidth = 0.1f;
+	float filter_strength = 10.0f;
+	int32_t half_search_window = 5;
+	uint32_t pad0 = 0;
+	uint32_t pad1 = 0;
+	uint32_t pad2 = 0;
+};
+static_assert(sizeof(PathTracerDenoisePush) == 48, "Denoise push constants must match path_tracer_denoise.glsl.");
+
+Mutex g_oidn_backend_mutex;
+const PathTracerOIDNBackend *g_oidn_backend = nullptr;
+
 } // namespace
+
+void PathTracer::register_oidn_backend(const PathTracerOIDNBackend *p_backend) {
+	MutexLock lock(g_oidn_backend_mutex);
+	g_oidn_backend = p_backend;
+}
+
+void PathTracer::unregister_oidn_backend(const PathTracerOIDNBackend *p_backend) {
+	MutexLock lock(g_oidn_backend_mutex);
+	if (g_oidn_backend == p_backend) {
+		g_oidn_backend = nullptr;
+	}
+}
+
+bool PathTracer::is_oidn_available() {
+	MutexLock lock(g_oidn_backend_mutex);
+	return g_oidn_backend != nullptr && g_oidn_backend->denoise != nullptr;
+}
+
+const char *PathTracer::get_oidn_backend_name() {
+	MutexLock lock(g_oidn_backend_mutex);
+	if (g_oidn_backend != nullptr && g_oidn_backend->denoise != nullptr && g_oidn_backend->name != nullptr) {
+		return g_oidn_backend->name;
+	}
+	return "none";
+}
+
+Error PathTracer::run_oidn_denoise(const PathTracerOIDNInput &p_input, String &r_error) {
+	const PathTracerOIDNBackend *backend = nullptr;
+	{
+		MutexLock lock(g_oidn_backend_mutex);
+		backend = g_oidn_backend;
+	}
+	if (backend == nullptr || backend->denoise == nullptr) {
+		r_error = "OIDN denoiser module is not enabled in this build.";
+		return ERR_UNAVAILABLE;
+	}
+	return backend->denoise(p_input, r_error);
+}
 
 struct PathTracer::ShaderState {
 	PathTracerShaderRD shader;
@@ -633,6 +888,10 @@ struct PathTracer::ShaderState {
 	RID accumulate;
 	RID composite;
 	RID params_buffer;
+	// GodotNext: path_tracer_denoise (#168). Plain compute shader (no ray query).
+	PathTracerDenoiseShaderRD denoise_shader;
+	RID denoise_version;
+	RID denoise_pipeline;
 };
 
 Vector<String> PathTracer::get_shader_variant_defines() {
@@ -640,6 +899,41 @@ Vector<String> PathTracer::get_shader_variant_defines() {
 	defines.push_back("");
 	defines.push_back("#define MODE_COMPOSITE\n");
 	return defines;
+}
+
+Vector<String> PathTracer::get_denoise_shader_variant_defines() {
+	Vector<String> defines;
+	defines.push_back("");
+	return defines;
+}
+
+bool PathTracer::_ensure_denoise_shader() {
+	if (shader == nullptr) {
+		return false;
+	}
+	if (shader->denoise_version.is_valid() && shader->denoise_pipeline.is_valid()) {
+		return true;
+	}
+	if (logged_denoise_compile_failure) {
+		return false;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	shader->denoise_shader.initialize(get_denoise_shader_variant_defines());
+	shader->denoise_version = shader->denoise_shader.version_create(false);
+	if (shader->denoise_version.is_valid()) {
+		shader->denoise_pipeline = rd->compute_pipeline_create(shader->denoise_shader.version_get_shader(shader->denoise_version, 0));
+	}
+	if (!shader->denoise_version.is_valid() || !shader->denoise_pipeline.is_valid()) {
+		if (shader->denoise_version.is_valid()) {
+			shader->denoise_shader.version_free(shader->denoise_version);
+			shader->denoise_version = RID();
+		}
+		shader->denoise_pipeline = RID();
+		logged_denoise_compile_failure = true;
+		ERR_FAIL_V_MSG(false, "The path tracer denoiser shader failed to compile.");
+	}
+	return true;
 }
 
 bool PathTracer::_ensure_shader() {
@@ -702,6 +996,7 @@ PathTracerSettings PathTracer::get_settings(const RenderSceneBuffersRD *p_render
 		settings.samples = RenderingServerTypes::path_tracing_validate_samples(p_render_buffers->get_path_tracing_samples());
 		settings.max_bounces = RenderingServerTypes::path_tracing_validate_max_bounces(p_render_buffers->get_path_tracing_max_bounces());
 		settings.firefly_clamp = RenderingServerTypes::path_tracing_validate_firefly_clamp(p_render_buffers->get_path_tracing_firefly_clamp());
+		settings.denoiser = RenderingServerTypes::path_tracing_validate_denoiser(int(p_render_buffers->get_path_tracing_denoiser()));
 	}
 	return settings;
 }
@@ -793,6 +1088,7 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 	}
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	PathTracerSettings settings = get_settings(rb.ptr());
+	settings.denoise_requested = rb->consume_path_tracing_denoise_requested();
 	settings.reference_match = bool(GLOBAL_GET_CACHED(bool, "rendering/global_illumination/nextgi/debug/path_tracer_reference_match"));
 	if (!settings.enabled) {
 		PathTracerView *idle = get_view(rb.ptr(), false);
@@ -879,22 +1175,35 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 	}
 
 	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
-	const uint32_t reasons = path_tracer_reset_reasons(view->has_state && view->accumulation.is_valid(), view->state, state);
+	const uint32_t reasons = path_tracer_reset_reasons(view->has_state && view->accumulation.is_valid() && view->guide_albedo.is_valid() && view->guide_normal.is_valid(), view->state, state);
 	if (reasons != 0) {
-		if (!view->accumulation.is_valid() || view->size != size) {
-			if (view->accumulation.is_valid()) {
-				rd->free_rid(view->accumulation);
+		if (!view->accumulation.is_valid() || !view->guide_albedo.is_valid() || !view->guide_normal.is_valid() || view->size != size) {
+			const RID old_textures[4] = { view->accumulation, view->guide_albedo, view->guide_normal, view->denoised };
+			for (const RID &tex : old_textures) {
+				if (tex.is_valid()) {
+					rd->free_rid(tex);
+				}
 			}
+			view->denoised = RID();
 			RD::TextureFormat format;
 			format.width = size.x;
 			format.height = size.y;
 			format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
 			format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 			view->accumulation = rd->texture_create(format, RD::TextureView());
+			view->guide_albedo = rd->texture_create(format, RD::TextureView());
+			view->guide_normal = rd->texture_create(format, RD::TextureView());
 			view->size = size;
 		}
 		rd->texture_clear(view->accumulation, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->texture_clear(view->guide_albedo, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->texture_clear(view->guide_normal, Color(0, 0, 0, 0), 0, 1, 0, 1);
 		view->samples = 0;
+		view->denoised_valid = false;
+		view->denoised_samples = 0;
+		view->denoised_requested = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+		view->denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+		view->denoise_status = settings.denoiser == RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF ? PATH_TRACER_DENOISE_STATUS_OFF : PATH_TRACER_DENOISE_STATUS_PENDING;
 		view->resets++;
 		view->last_reset_reasons = reasons;
 		view->last_reset_frame = frame;
@@ -904,10 +1213,13 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 			}
 		}
 	}
+	if (settings.denoise_requested) {
+		view->pending_denoise_request = true;
+	}
 	view->state = state;
 	view->has_state = true;
 	view->backend = backend;
-	if (!view->accumulation.is_valid()) {
+	if (!view->accumulation.is_valid() || !view->guide_albedo.is_valid() || !view->guide_normal.is_valid()) {
 		return;
 	}
 	if (!p_rt_scene->is_tlas_traceable()) {
@@ -918,8 +1230,10 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 		return;
 	}
 	if (path_tracer_samples_this_frame(view->samples, view->target) == 0) {
-		// Converged: no more frames are asked for.
+		// Converged: no more frames are asked for, but honor denoiser toggles or on-demand denoise requests.
 		view->status = PATH_TRACER_STATUS_CONVERGED;
+		_update_denoise(view);
+		_readback(view);
 		return;
 	}
 
@@ -954,6 +1268,8 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 	if (backend == PATH_TRACER_BACKEND_HIT_GROUPS) {
 		NextGIHitPathTrace trace;
 		trace.accumulation = view->accumulation;
+		trace.guide_albedo = view->guide_albedo;
+		trace.guide_normal = view->guide_normal;
 		trace.params = shader->params_buffer;
 		trace.lights = light_buffer;
 		trace.materials = material_buffer;
@@ -972,6 +1288,7 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 	view->frames_traced++;
 	view->last_traced_frame = frame;
 	view->status = view->samples >= view->target ? PATH_TRACER_STATUS_CONVERGED : PATH_TRACER_STATUS_ACTIVE;
+	_update_denoise(view);
 	// While it accumulates, the view asks for the next frame, also where frames are drawn only on changes (the
 	// editor's Path Tracer display mode, low-processor mode).
 	if (view->status == PATH_TRACER_STATUS_ACTIVE) {
@@ -980,9 +1297,217 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 	_readback(view);
 }
 
+static void _path_tracer_summarize_rgba32f(const Vector<uint8_t> &p_data, int64_t p_pixels, float &r_mean, uint32_t &r_nonfinite, uint64_t &r_hash) {
+	const float *texels = reinterpret_cast<const float *>(p_data.ptr());
+	double sum = 0.0;
+	int64_t counted = 0;
+	uint32_t nonfinite = 0;
+	for (int64_t i = 0; i < p_pixels * 4; i++) {
+		if (!Math::is_finite(texels[i])) {
+			nonfinite++;
+		}
+	}
+	for (int64_t i = 0; i < p_pixels; i++) {
+		const float weight = texels[i * 4 + 3];
+		if (Math::is_finite(weight) && weight > 0.0f) {
+			const float r = texels[i * 4 + 0];
+			const float g = texels[i * 4 + 1];
+			const float b = texels[i * 4 + 2];
+			if (Math::is_finite(r) && Math::is_finite(g) && Math::is_finite(b)) {
+				sum += double(r + g + b) / (3.0 * double(weight));
+				counted++;
+			}
+		}
+	}
+	r_mean = counted > 0 ? float(sum / double(counted)) : 0.0f;
+	r_nonfinite = nonfinite;
+	r_hash = path_tracer_hash_bytes(PATH_TRACER_HASH_BASIS, p_data.ptr(), p_data.size());
+}
+
+void PathTracer::_update_denoise(PathTracerView *p_view) {
+	if (p_view == nullptr) {
+		return;
+	}
+	const RSE::ViewportPathTracingDenoiser requested = p_view->settings.denoiser;
+	if (requested == RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF) {
+		p_view->denoised_valid = false;
+		p_view->pending_denoise_request = false;
+		p_view->denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+		p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_OFF;
+		return;
+	}
+	const bool should_run = path_tracer_should_denoise(requested, p_view->samples, p_view->target, p_view->pending_denoise_request, p_view->denoised_valid, p_view->denoised_samples, p_view->denoised_requested);
+	if (!should_run) {
+		if (!(p_view->denoised_valid && p_view->denoised_samples == p_view->samples && p_view->denoised_requested == requested)) {
+			p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_PENDING;
+		}
+		return;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL(rd);
+	if (!p_view->denoised.is_valid()) {
+		RD::TextureFormat format;
+		format.width = p_view->size.x;
+		format.height = p_view->size.y;
+		format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+		format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		p_view->denoised = rd->texture_create(format, RD::TextureView());
+	}
+	if (!p_view->denoised.is_valid()) {
+		p_view->denoised_valid = false;
+		p_view->pending_denoise_request = false;
+		p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_PENDING;
+		return;
+	}
+
+	p_view->pending_denoise_request = false;
+	if (requested == RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN) {
+		if (_denoise_oidn(p_view)) {
+			p_view->denoised_valid = true;
+			p_view->denoised_samples = p_view->samples;
+			p_view->denoised_requested = requested;
+			p_view->denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_OIDN;
+			p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_DENOISED;
+			p_view->denoise_runs++;
+			return;
+		}
+		if (_denoise_builtin(p_view)) {
+			p_view->denoised_valid = true;
+			p_view->denoised_samples = p_view->samples;
+			p_view->denoised_requested = requested;
+			p_view->denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN;
+			p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_FALLBACK_BUILTIN;
+			p_view->denoise_runs++;
+			return;
+		}
+		p_view->denoised_valid = false;
+		p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_PENDING;
+		return;
+	}
+
+	if (_denoise_builtin(p_view)) {
+		p_view->denoised_valid = true;
+		p_view->denoised_samples = p_view->samples;
+		p_view->denoised_requested = requested;
+		p_view->denoise_backend = RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN;
+		p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_DENOISED;
+		p_view->denoise_runs++;
+	} else {
+		p_view->denoised_valid = false;
+		p_view->denoise_status = PATH_TRACER_DENOISE_STATUS_PENDING;
+	}
+}
+
+bool PathTracer::_denoise_builtin(PathTracerView *p_view) {
+	if (!_ensure_denoise_shader() || p_view == nullptr || !p_view->denoised.is_valid()) {
+		return false;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	RD::Uniform uniforms[4] = {
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 0, p_view->accumulation),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, p_view->guide_albedo),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_view->guide_normal),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, p_view->denoised),
+	};
+	const RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 4), shader->denoise_shader.version_get_shader(shader->denoise_version, 0), 0);
+	ERR_FAIL_COND_V(!uniform_set.is_valid(), false);
+
+	const PathTracerDenoiseParams params = path_tracer_validate_denoise_params(PathTracerDenoiseParams());
+	PathTracerDenoisePush push;
+	push.width = uint32_t(p_view->size.x);
+	push.height = uint32_t(p_view->size.y);
+	push.exposure = p_view->exposure > 0.0f ? p_view->exposure : 1.0f;
+	push.spatial_bandwidth = params.spatial_bandwidth;
+	push.light_bandwidth = params.light_bandwidth;
+	push.albedo_bandwidth = params.albedo_bandwidth;
+	push.normal_bandwidth = params.normal_bandwidth;
+	push.filter_strength = params.filter_strength;
+	push.half_search_window = params.half_search_window;
+
+	rd->draw_command_begin_label("Path Tracer Denoise (JNLM)");
+	const RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, shader->denoise_pipeline);
+	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+	rd->compute_list_set_push_constant(list, &push, sizeof(push));
+	rd->compute_list_dispatch(list, (p_view->size.x + 7) / 8, (p_view->size.y + 7) / 8, 1);
+	rd->compute_list_end();
+	rd->draw_command_end_label();
+	rd->free_rid(uniform_set);
+	return true;
+}
+
+bool PathTracer::_denoise_oidn(PathTracerView *p_view) {
+	if (p_view == nullptr || !p_view->denoised.is_valid() || p_view->size.x <= 0 || p_view->size.y <= 0) {
+		return false;
+	}
+	if (!is_oidn_available()) {
+		if (!logged_oidn_fallback) {
+			WARN_PRINT("PathTracer: OIDN denoiser requested, but modules/oidn is not enabled in this build; falling back to the built-in screen-space denoiser.");
+			logged_oidn_fallback = true;
+		}
+		return false;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	const uint32_t width = uint32_t(p_view->size.x);
+	const uint32_t height = uint32_t(p_view->size.y);
+	const int64_t expected_bytes = int64_t(width) * int64_t(height) * 16;
+
+	const Vector<uint8_t> accum_bytes = rd->texture_get_data(p_view->accumulation, 0);
+	const Vector<uint8_t> albedo_bytes = rd->texture_get_data(p_view->guide_albedo, 0);
+	const Vector<uint8_t> normal_bytes = rd->texture_get_data(p_view->guide_normal, 0);
+	if (accum_bytes.size() < expected_bytes || albedo_bytes.size() < expected_bytes || normal_bytes.size() < expected_bytes) {
+		return false;
+	}
+
+	LocalVector<float> color_rgb;
+	LocalVector<float> albedo_rgb;
+	LocalVector<float> normal_rgb;
+	if (!path_tracer_prepare_oidn_buffers(
+				width, height,
+				reinterpret_cast<const float *>(accum_bytes.ptr()),
+				reinterpret_cast<const float *>(albedo_bytes.ptr()),
+				reinterpret_cast<const float *>(normal_bytes.ptr()),
+				color_rgb, albedo_rgb, normal_rgb)) {
+		return false;
+	}
+
+	LocalVector<float> output_rgb;
+	output_rgb.resize(color_rgb.size());
+	PathTracerOIDNInput input;
+	input.width = width;
+	input.height = height;
+	input.color = color_rgb.ptr();
+	input.albedo = albedo_rgb.ptr();
+	input.normal = normal_rgb.ptr();
+	input.output = output_rgb.ptr();
+	input.hdr = true;
+	input.srgb = false;
+	input.clean_aux = true;
+
+	String error_msg;
+	const Error err = run_oidn_denoise(input, error_msg);
+	if (err != OK) {
+		if (!logged_oidn_fallback) {
+			WARN_PRINT(vformat("PathTracer: OIDN denoiser failed (%s); falling back to the built-in screen-space denoiser.", error_msg));
+			logged_oidn_fallback = true;
+		}
+		return false;
+	}
+
+	Vector<uint8_t> rgba_bytes;
+	path_tracer_pack_denoised_rgba(width, height, output_rgb.ptr(), rgba_bytes);
+	if (rgba_bytes.size() < expected_bytes) {
+		return false;
+	}
+	return rd->texture_update(p_view->denoised, 0, rgba_bytes) == OK;
+}
+
 void PathTracer::_readback(PathTracerView *p_view) {
 	if (!bool(GLOBAL_GET_CACHED(bool, "rendering/global_illumination/nextgi/debug/path_tracer_readback"))) {
 		p_view->read_accumulation.clear();
+		p_view->read_denoised.clear();
 		return;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -990,28 +1515,23 @@ void PathTracer::_readback(PathTracerView *p_view) {
 	const int64_t pixels = int64_t(p_view->size.x) * int64_t(p_view->size.y);
 	if (data.size() < pixels * 16) {
 		p_view->read_accumulation.clear();
+		p_view->read_denoised.clear();
 		return;
 	}
 	p_view->read_accumulation = data;
-	const float *texels = reinterpret_cast<const float *>(data.ptr());
-	double sum = 0.0;
-	int64_t counted = 0;
-	uint32_t nonfinite = 0;
-	for (int64_t i = 0; i < pixels * 4; i++) {
-		if (!Math::is_finite(texels[i])) {
-			nonfinite++;
+	_path_tracer_summarize_rgba32f(data, pixels, p_view->read_mean, p_view->read_nonfinite, p_view->read_hash);
+
+	if (p_view->denoised_valid && p_view->denoised.is_valid() && p_view->denoised_samples == p_view->samples) {
+		const Vector<uint8_t> denoised_data = rd->texture_get_data(p_view->denoised, 0);
+		if (denoised_data.size() >= pixels * 16) {
+			p_view->read_denoised = denoised_data;
+			_path_tracer_summarize_rgba32f(denoised_data, pixels, p_view->read_denoised_mean, p_view->read_denoised_nonfinite, p_view->read_denoised_hash);
+		} else {
+			p_view->read_denoised.clear();
 		}
+	} else {
+		p_view->read_denoised.clear();
 	}
-	for (int64_t i = 0; i < pixels; i++) {
-		const float weight = texels[i * 4 + 3];
-		if (weight > 0.0f) {
-			sum += double(texels[i * 4] + texels[i * 4 + 1] + texels[i * 4 + 2]) / (3.0 * double(weight));
-			counted++;
-		}
-	}
-	p_view->read_mean = counted > 0 ? float(sum / double(counted)) : 0.0f;
-	p_view->read_nonfinite = nonfinite;
-	p_view->read_hash = path_tracer_hash_bytes(PATH_TRACER_HASH_BASIS, data.ptr(), data.size());
 }
 
 void PathTracer::_trace_inline(PathTracerView *p_view, NextGIRTScene *p_rt_scene) {
@@ -1028,7 +1548,7 @@ void PathTracer::_trace_inline(PathTracerView *p_view, NextGIRTScene *p_rt_scene
 	}
 	RID records = p_rt_scene->get_instance_record_buffer();
 	RID surfaces = p_rt_scene->get_surface_record_buffer();
-	RD::Uniform uniforms[11] = {
+	RD::Uniform uniforms[13] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_rt_scene->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, p_view->accumulation),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, material_buffer),
@@ -1040,8 +1560,10 @@ void PathTracer::_trace_inline(PathTracerView *p_view, NextGIRTScene *p_rt_scene
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, chunks[2]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, chunks[3]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, shader->params_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, p_view->guide_albedo),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, p_view->guide_normal),
 	};
-	const RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 11), shader->shader.version_get_shader(shader->version, 0), 0);
+	const RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 13), shader->shader.version_get_shader(shader->version, 0), 0);
 	ERR_FAIL_COND(!uniform_set.is_valid());
 	rd->draw_command_begin_label("Path Tracer");
 	const RD::ComputeListID list = rd->compute_list_begin();
@@ -1067,8 +1589,10 @@ void PathTracer::composite(RenderSceneBuffersRD *p_render_buffers, RID p_color) 
 	if (format.format != RD::DATA_FORMAT_R16G16B16A16_SFLOAT || int(format.width) != view->size.x || int(format.height) != view->size.y) {
 		return;
 	}
+	const bool use_denoised = view->settings.denoiser != RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF && view->denoised_valid && view->denoised.is_valid() && view->denoised_samples == view->samples;
+	const RID source = use_denoised ? view->denoised : view->accumulation;
 	RD::Uniform uniforms[2] = {
-		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, view->accumulation),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, source),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_color),
 	};
 	const RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 2), shader->shader.version_get_shader(shader->version, 1), 0);
@@ -1093,6 +1617,9 @@ void PathTracer::free() {
 	if (shader != nullptr) {
 		if (rd != nullptr && shader->params_buffer.is_valid()) {
 			rd->free_rid(shader->params_buffer);
+		}
+		if (shader->denoise_version.is_valid()) {
+			shader->denoise_shader.version_free(shader->denoise_version);
 		}
 		if (shader->version.is_valid()) {
 			shader->shader.version_free(shader->version);

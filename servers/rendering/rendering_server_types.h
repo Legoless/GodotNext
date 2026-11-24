@@ -274,6 +274,16 @@ inline float path_tracing_validate_firefly_clamp(double p_clamp) {
 	return float(MIN(p_clamp, double(PATH_TRACING_MAX_FIREFLY_CLAMP)));
 }
 
+// GodotNext: path_tracer_denoise (#168). Default path tracer denoiser and validation.
+static constexpr RSE::ViewportPathTracingDenoiser PATH_TRACING_DEFAULT_DENOISER = RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN;
+
+inline RSE::ViewportPathTracingDenoiser path_tracing_validate_denoiser(int p_denoiser) {
+	if (p_denoiser < 0 || p_denoiser >= RSE::VIEWPORT_PATH_TRACING_DENOISER_MAX) {
+		return RSE::VIEWPORT_PATH_TRACING_DENOISER_OFF;
+	}
+	return RSE::ViewportPathTracingDenoiser(p_denoiser);
+}
+
 /* RENDERING METHOD */
 
 struct RenderInfo {

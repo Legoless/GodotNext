@@ -559,4 +559,8 @@
 /modules/nextgeo/tests/                       @godotengine/rendering @godotengine/tests
 /modules/nextgeo/editor/                      @godotengine/rendering @godotengine/editor
 /modules/nextgeo/doc_classes/                 @godotengine/rendering @godotengine/documentation
+/modules/oidn/                                @godotengine/rendering
+/modules/oidn/**/*.py                         @godotengine/rendering @godotengine/buildsystem
+/modules/oidn/**/SCsub                        @godotengine/rendering @godotengine/buildsystem
+/modules/oidn/tests/                          @godotengine/rendering @godotengine/tests
 /tests/editor/                                 @godotengine/tests @godotengine/editor

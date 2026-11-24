@@ -121,6 +121,14 @@ public:
 		TSR_QUALITY_MAX
 	};
 
+	// GodotNext: path_tracer_denoise (#168)
+	enum PathTracingDenoiser {
+		PATH_TRACING_DENOISER_OFF,
+		PATH_TRACING_DENOISER_BUILTIN,
+		PATH_TRACING_DENOISER_OIDN,
+		PATH_TRACING_DENOISER_MAX
+	};
+
 	enum PositionalShadowAtlasQuadrantSubdiv {
 		SHADOW_ATLAS_QUADRANT_SUBDIV_DISABLED,
 		SHADOW_ATLAS_QUADRANT_SUBDIV_1,
@@ -385,11 +393,12 @@ private:
 	float scaling_3d_scale = 1.0;
 	float fsr_sharpness = 0.2f;
 	TSRQuality tsr_quality = TSR_QUALITY_EPIC;
-	// GodotNext: path_tracer (#167)
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 	bool path_tracing_enabled = false;
 	int path_tracing_samples = 2048; // RenderingServerTypes::PATH_TRACING_DEFAULT_SAMPLES.
 	int path_tracing_max_bounces = 32; // RenderingServerTypes::PATH_TRACING_DEFAULT_MAX_BOUNCES.
 	float path_tracing_firefly_clamp = 0.0f;
+	PathTracingDenoiser path_tracing_denoiser = PATH_TRACING_DENOISER_BUILTIN;
 	float texture_mipmap_bias = 0.0f;
 	AnisotropicFiltering anisotropic_filtering_level = ANISOTROPY_4X;
 	bool use_debanding = false;
@@ -681,7 +690,7 @@ public:
 	void set_tsr_quality(TSRQuality p_tsr_quality);
 	TSRQuality get_tsr_quality() const;
 
-	// GodotNext: path_tracer (#167)
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168)
 	void set_path_tracing_enabled(bool p_enabled);
 	bool is_path_tracing_enabled() const;
 	void set_path_tracing_samples(int p_samples);
@@ -690,6 +699,9 @@ public:
 	int get_path_tracing_max_bounces() const;
 	void set_path_tracing_firefly_clamp(float p_firefly_clamp);
 	float get_path_tracing_firefly_clamp() const;
+	void set_path_tracing_denoiser(PathTracingDenoiser p_denoiser);
+	PathTracingDenoiser get_path_tracing_denoiser() const;
+	void request_path_tracing_denoise();
 	Dictionary get_path_tracing_info() const;
 
 	void set_texture_mipmap_bias(float p_texture_mipmap_bias);
@@ -1044,6 +1056,7 @@ public:
 };
 VARIANT_ENUM_CAST(Viewport::Scaling3DMode);
 VARIANT_ENUM_CAST(Viewport::TSRQuality);
+VARIANT_ENUM_CAST(Viewport::PathTracingDenoiser);
 VARIANT_ENUM_CAST(SubViewport::UpdateMode);
 VARIANT_ENUM_CAST(Viewport::PositionalShadowAtlasQuadrantSubdiv);
 VARIANT_ENUM_CAST(Viewport::MSAA);

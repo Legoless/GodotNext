@@ -51,7 +51,15 @@ void main() {
 	if (pixel.x >= ref_params.dispatch.x || pixel.y >= ref_params.dispatch.y) {
 		return;
 	}
-	vec3 radiance = path_tracer_sample_pixel(pixel);
-	vec4 previous = ref_params.exposure_clear.y > 0.5 ? vec4(0.0) : imageLoad(hit_pt_accumulation, ivec2(pixel));
+	vec3 first_albedo;
+	vec3 first_normal;
+	float first_hit;
+	vec3 radiance = path_tracer_sample_pixel(pixel, first_albedo, first_normal, first_hit);
+	bool clear = ref_params.exposure_clear.y > 0.5;
+	vec4 previous = clear ? vec4(0.0) : imageLoad(hit_pt_accumulation, ivec2(pixel));
 	imageStore(hit_pt_accumulation, ivec2(pixel), vec4(previous.rgb + radiance, previous.a + 1.0));
+	vec4 prev_albedo = clear ? vec4(0.0) : imageLoad(hit_pt_guide_albedo, ivec2(pixel));
+	imageStore(hit_pt_guide_albedo, ivec2(pixel), vec4(prev_albedo.rgb + first_albedo, prev_albedo.a + first_hit));
+	vec4 prev_normal = clear ? vec4(0.0) : imageLoad(hit_pt_guide_normal, ivec2(pixel));
+	imageStore(hit_pt_guide_normal, ivec2(pixel), vec4(prev_normal.rgb + first_normal, prev_normal.a + first_hit));
 }

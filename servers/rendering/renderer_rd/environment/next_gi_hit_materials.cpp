@@ -1871,12 +1871,14 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, p_src->get_card_buffer()));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, job_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, counter_buffer));
-	// GodotNext: path_tracer (#167). The path tracer's bindings, which the check does not read.
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168). The path tracer's bindings, which the check does not read.
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 30, in.path_tracer_dummy_image));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 32, in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 33, in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, in.dummy_buffer)); // GodotNext: nextgi_shadow_policy (#145)
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, in.path_tracer_dummy_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 
 	struct PushConstant {
@@ -1988,6 +1990,9 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 33, p_trace.materials));
 	// GodotNext: nextgi_shadow_policy (#145). The shadow retrace's records, which the path tracer does not read.
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, in.dummy_buffer));
+	// GodotNext: path_tracer_denoise (#168). First-hit albedo and normal guides.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, p_trace.guide_albedo.is_valid() ? p_trace.guide_albedo : in.path_tracer_dummy_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, p_trace.guide_normal.is_valid() ? p_trace.guide_normal : in.path_tracer_dummy_image));
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2047,6 +2052,9 @@ bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_r
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31 + i, in.dummy_buffer));
 	}
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, p_records));
+	// GodotNext: path_tracer_denoise (#168). Stand-ins for the path tracer's guide images.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, in.path_tracer_dummy_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
