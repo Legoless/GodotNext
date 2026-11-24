@@ -41,6 +41,7 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/span.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_voxels.h"
 
 #include <thirdparty/meshoptimizer/meshoptimizer.h>
 
@@ -1045,11 +1046,157 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		r_output.cluster_skin.resize_initialized(total_clusters);
 	}
 
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10).
+	// Voxelize coarse cluster groups past the provisional LOD error threshold using their
+	// descendant source triangles so leaf canopies preserve volume and coverage at distance.
+	struct GroupVoxelBuild {
+		LocalVector<NextGeoVoxelBrick> bricks;
+		LocalVector<NextGeoVoxelData> voxels;
+		uint32_t bricks_bytes = 0u;
+		float voxel_size = 0.0f;
+		float group_error = 0.0f;
+	};
+	LocalVector<GroupVoxelBuild> built_voxels;
+	if (p_input.voxels && !order.is_empty()) {
+		// Compute mesh bounding sphere radius for scale-invariant provisional error threshold.
+		float mesh_min[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+		float mesh_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+		for (uint32_t v = 0; v < mesh.vertex_count; v++) {
+			for (uint32_t k = 0; k < 3; k++) {
+				const float p = mesh.positions[v * 3 + k];
+				mesh_min[k] = MIN(mesh_min[k], p);
+				mesh_max[k] = MAX(mesh_max[k], p);
+			}
+		}
+		const float mdx = mesh_max[0] - mesh_min[0];
+		const float mdy = mesh_max[1] - mesh_min[1];
+		const float mdz = mesh_max[2] - mesh_min[2];
+		const float mesh_radius = 0.5f * std::sqrt(mdx * mdx + mdy * mdy + mdz * mdz);
+		const float error_threshold = mesh_radius * RendererRD::NEXTGEO_VOXEL_PROVISIONAL_ERROR_RATIO;
+
+		built_voxels.resize(order.size());
+		auto vox_task = [&](uint32_t p_i) {
+			const uint32_t raw_group_idx = order[p_i].group;
+			const BuildGroup &group = groups[raw_group_idx];
+			float members_own_error = 0.0f;
+			uint32_t group_cluster_payload = 0u;
+			for (uint32_t member : group.members) {
+				members_own_error = MAX(members_own_error, clusters[member].own_error);
+				group_cluster_payload += _cluster_bytes(clusters[member], mesh.stride, mesh.skin_influences);
+			}
+			// Derive each group's voxel size from its own LOD error (members_own_error) rather than
+			// its parent's error: when own_error passes at <= 1 px, each voxel projects to <= 1 px
+			// and each 4^3 brick projects to <= 4 px (strictly within the provisional 8 px threshold).
+			const float effective_error = group.terminal
+					? MAX(members_own_error, group.lod[3] * RendererRD::NEXTGEO_VOXEL_TERMINAL_ERROR_FRACTION)
+					: members_own_error;
+			if (!(group.depth > 0u || group.terminal) || !(effective_error >= error_threshold)) {
+				return;
+			}
+
+			// Gather all descendant source clusters (refined < 0) reachable from this group.
+			LocalVector<uint8_t> visited_groups;
+			visited_groups.resize_initialized(groups.size());
+			LocalVector<uint32_t> stack;
+			stack.push_back(raw_group_idx);
+			visited_groups[raw_group_idx] = 1u;
+
+			LocalVector<uint32_t> source_clusters;
+			while (!stack.is_empty()) {
+				const uint32_t g_id = stack[stack.size() - 1];
+				stack.resize(stack.size() - 1);
+				for (uint32_t member : groups[g_id].members) {
+					const int32_t ref_g = clusters[member].refined;
+					if (ref_g < 0) {
+						source_clusters.push_back(member);
+					} else if (uint32_t(ref_g) < groups.size() && !visited_groups[ref_g]) {
+						visited_groups[ref_g] = 1u;
+						stack.push_back(uint32_t(ref_g));
+					}
+				}
+			}
+			if (source_clusters.is_empty()) {
+				return;
+			}
+
+			LocalVector<NextGeoVoxelTriInput> tris;
+			float gmin[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+			float gmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+			for (uint32_t c_idx : source_clusters) {
+				const BuildCluster &cl = clusters[c_idx];
+				const uint32_t ic = cl.indices.size();
+				for (uint32_t t = 0; t + 2 < ic; t += 3) {
+					NextGeoVoxelTriInput tri;
+					tri.surface_id = cl.surface_id;
+					for (int c = 0; c < 3; c++) {
+						const uint32_t mv = cl.indices[t + c];
+						const float *vd = &mesh.vertex_data[mv * mesh.stride];
+						tri.p[c] = Vector3(vd[NEXTGEO_VERTEX_OFFSET_POSITION], vd[NEXTGEO_VERTEX_OFFSET_POSITION + 1], vd[NEXTGEO_VERTEX_OFFSET_POSITION + 2]);
+						tri.n[c] = Vector3(vd[NEXTGEO_VERTEX_OFFSET_NORMAL], vd[NEXTGEO_VERTEX_OFFSET_NORMAL + 1], vd[NEXTGEO_VERTEX_OFFSET_NORMAL + 2]);
+						tri.uv[c] = Vector2(vd[NEXTGEO_VERTEX_OFFSET_UV0], vd[NEXTGEO_VERTEX_OFFSET_UV0 + 1]);
+						for (int k = 0; k < 3; k++) {
+							gmin[k] = MIN(gmin[k], float(tri.p[c][k]));
+							gmax[k] = MAX(gmax[k], float(tri.p[c][k]));
+						}
+					}
+					tris.push_back(tri);
+				}
+			}
+			if (tris.is_empty()) {
+				return;
+			}
+
+			const float gex = MAX(gmax[0] - gmin[0], MAX(gmax[1] - gmin[1], gmax[2] - gmin[2]));
+			const float min_vs = MAX(gex / 32.0f, 1.0e-4f);
+			const float max_vs = MAX(gex / 4.0f, min_vs);
+			float voxel_size = CLAMP(effective_error * RendererRD::NEXTGEO_VOXEL_ERROR_TO_SIZE_SCALE, min_vs, max_vs);
+
+			// Keep this group's voxel bricks strictly inside the remaining page budget.
+			const uint32_t cluster_page_used = nextgeo_page_bytes(group_cluster_payload);
+			const uint32_t max_section_bytes = (p_input.page_size > cluster_page_used + 64u) ? MIN<uint32_t>(p_input.page_size - cluster_page_used - 32u, p_input.page_size / 2u) : 0u;
+			if (max_section_bytes < 64u) {
+				return;
+			}
+
+			GroupVoxelBuild &out_v = built_voxels[p_i];
+			for (int attempt = 0; attempt < 6; attempt++) {
+				nextgeo_voxelize_triangles(tris, voxel_size, out_v.bricks, out_v.voxels);
+				const uint32_t bbytes = nextgeo_voxel_bricks_bytes(out_v.bricks.ptr(), out_v.bricks.size());
+				if (!out_v.bricks.is_empty() && nextgeo_voxel_page_section_max_bytes(1u, bbytes) <= max_section_bytes) {
+					out_v.bricks_bytes = bbytes;
+					out_v.voxel_size = voxel_size;
+					out_v.group_error = effective_error;
+					return;
+				}
+				voxel_size *= 1.5f;
+			}
+			out_v.bricks.clear();
+			out_v.voxels.clear();
+			out_v.bricks_bytes = 0u;
+		};
+		_run_tasks(order.size(), p_input.use_threads, vox_task, "NextGeo DAG voxelize");
+
+		bool any_voxels = false;
+		for (uint32_t i = 0; i < built_voxels.size(); i++) {
+			if (!built_voxels[i].bricks.is_empty()) {
+				any_voxels = true;
+				break;
+			}
+		}
+		if (any_voxels) {
+			r_output.group_voxels.resize_initialized(order.size());
+		} else {
+			built_voxels.clear();
+		}
+	}
+
 	uint32_t local_vertices[NEXTGEO_MAX_CLUSTER_VERTICES];
 	uint8_t local_triangles[NEXTGEO_MAX_CLUSTER_TRIANGLES * 3];
 	uint32_t cluster_cursor = 0;
 	bool in_root_pages = true;
 	uint32_t page_payload = 0;
+	uint32_t page_voxel_bricks_bytes = 0;
+	uint32_t page_group_count = 0;
 	for (uint32_t i = 0; i < order.size(); i++) {
 		const BuildGroup &group = groups[order[i].group];
 
@@ -1057,7 +1204,9 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		for (uint32_t member : group.members) {
 			group_payload += _cluster_bytes(clusters[member], mesh.stride, mesh.skin_influences);
 		}
-		ERR_FAIL_COND_V(nextgeo_page_bytes(group_payload) > p_input.page_size, ERR_BUG);
+		const uint32_t group_vox_bytes = !built_voxels.is_empty() ? built_voxels[i].bricks_bytes : 0u;
+		const uint32_t solo_vox_section = nextgeo_voxel_page_section_max_bytes(1u, group_vox_bytes);
+		ERR_FAIL_COND_V(nextgeo_page_bytes(group_payload + solo_vox_section) > p_input.page_size, ERR_BUG);
 
 		// Open a new page when the group does not fit, or when the root pages end.
 		const bool leaving_roots = in_root_pages && !group.terminal;
@@ -1065,20 +1214,45 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 			r_output.root_page_count = r_output.pages.size();
 			in_root_pages = false;
 		}
-		const bool payload_overflows = page_payload > UINT32_MAX - group_payload;
-		if (r_output.pages.is_empty() || leaving_roots || payload_overflows || nextgeo_page_bytes(page_payload + group_payload) > p_input.page_size) {
+		const uint32_t next_vox_bricks = page_voxel_bricks_bytes + group_vox_bytes;
+		const uint32_t next_vox_section = nextgeo_voxel_page_section_max_bytes(page_group_count + 1u, next_vox_bricks);
+		const bool payload_overflows = page_payload > UINT32_MAX - group_payload || (page_payload + group_payload) > UINT32_MAX - next_vox_section;
+		if (r_output.pages.is_empty() || leaving_roots || payload_overflows || nextgeo_page_bytes(page_payload + group_payload + next_vox_section) > p_input.page_size) {
 			NextGeoPage page = {};
 			page.group_offset = i;
 			page.cluster_offset = cluster_cursor;
 			r_output.pages.push_back(page);
 			page_payload = 0;
+			page_voxel_bricks_bytes = 0;
+			page_group_count = 0;
 		}
 		const uint32_t page_id = r_output.pages.size() - 1;
 		NextGeoPage &page = r_output.pages[page_id];
 		page.group_count++;
 		page.cluster_count += group.members.size();
 		page_payload += group_payload;
-		page.byte_size = nextgeo_page_bytes(page_payload);
+		page_voxel_bricks_bytes += group_vox_bytes;
+		page_group_count++;
+		const uint32_t cur_vox_section = nextgeo_voxel_page_section_max_bytes(page_group_count, page_voxel_bricks_bytes);
+		page.byte_size = nextgeo_page_bytes(page_payload + cur_vox_section);
+
+		if (!r_output.group_voxels.is_empty() && !built_voxels[i].bricks.is_empty()) {
+			const GroupVoxelBuild &gv = built_voxels[i];
+			NextGeoGroupVoxels &out_gv = r_output.group_voxels[i];
+			out_gv.brick_offset = r_output.voxel_bricks.size();
+			out_gv.brick_count = gv.bricks.size();
+			out_gv.voxel_size = gv.voxel_size;
+			out_gv.group_error = gv.group_error;
+			const uint32_t voxel_base = r_output.voxel_data.size();
+			for (uint32_t b = 0; b < gv.bricks.size(); b++) {
+				NextGeoVoxelBrick brick = gv.bricks[b];
+				brick.voxel_offset += voxel_base;
+				r_output.voxel_bricks.push_back(brick);
+			}
+			for (uint32_t v = 0; v < gv.voxels.size(); v++) {
+				r_output.voxel_data.push_back(gv.voxels[v]);
+			}
+		}
 
 		NextGeoGroup &out_group = r_output.groups[i];
 		out_group.cluster_offset = cluster_cursor;

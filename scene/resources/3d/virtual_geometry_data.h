@@ -74,6 +74,8 @@ private:
 	int64_t page_count = 0;
 	int64_t page_size = 0;
 	int skin_influences = 0; // 0 (unskinned), 4 or 8. The skinning data is in the `.ngm` pages.
+	// GodotNext: nextgeo_voxels (#165). Total sparse 4^3 voxel bricks stored across `.ngm` pages (0 when off).
+	int64_t voxel_brick_count = 0;
 	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10). Optional Nanite Assembly payload.
 	Ref<VirtualGeometryAssembly> assembly;
 	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10). Optional procedural wind skeleton.
@@ -178,6 +180,10 @@ public:
 
 	void set_skin_influences(int p_influences);
 	int get_skin_influences() const;
+
+	// GodotNext: nextgeo_voxels (#165).
+	void set_voxel_brick_count(int64_t p_count);
+	int64_t get_voxel_brick_count() const;
 
 	// GodotNext: nextgeo_foliage_instancing (#151). Optional Nanite Assembly (<= 2 levels).
 	void set_assembly(const Ref<VirtualGeometryAssembly> &p_assembly);

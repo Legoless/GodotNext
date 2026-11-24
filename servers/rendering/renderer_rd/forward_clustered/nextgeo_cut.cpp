@@ -104,7 +104,8 @@ struct CutCounters {
 	uint32_t vertex_offset_distance_fixed[2];
 	uint32_t vertex_offset_clamped;
 	uint32_t sink; // #277 D3D12 GBV atomic return sink.
-	uint32_t pad_end[2];
+	// GodotNext: nextgeo_voxels (#165). Visible voxel bricks per phase (words 46..47).
+	uint32_t voxel_bricks[2];
 };
 static_assert(sizeof(CutCounters) == 192, "CutCounters must match NextGeoCountersData (192 bytes).");
 static_assert(offsetof(CutCounters, raster_sw) == 31 * sizeof(uint32_t), "sw_raster.glsl reads raster_sw at word 31.");
@@ -112,6 +113,7 @@ static_assert(offsetof(CutCounters, raster_hw) == 33 * sizeof(uint32_t), "visibi
 static_assert(offsetof(CutCounters, raster_sw_writes) == 35 * sizeof(uint32_t), "sw_raster.glsl adds raster_sw_writes at word 35.");
 static_assert(offsetof(CutCounters, vertex_offset_clamped) == 44 * sizeof(uint32_t), "raster_material_inc.glsl adds vertex_offset_clamped at word 44.");
 static_assert(offsetof(CutCounters, sink) == 45 * sizeof(uint32_t), "raster_material_inc.glsl writes sink at word 45.");
+static_assert(offsetof(CutCounters, voxel_bricks) == 46 * sizeof(uint32_t), "voxel_raster.glsl reads voxel_bricks at word 46.");
 static_assert(offsetof(RendererRD::NextGeoVSMCounters, hw_clusters) == 13 * sizeof(uint32_t), "VSM mesh task copies hw_clusters from word 13.");
 
 struct RasterParams {
@@ -131,8 +133,13 @@ struct RasterParams {
 	uint32_t size[2];
 	uint32_t raster_region;
 	uint32_t patch_capacity; // GodotNext: nextgeo_tessellation (#163)
+	// GodotNext: nextgeo_voxels (#165). Read by visibility_export.glsl.
+	uint32_t voxel_brick_capacity;
+	uint32_t pad_v0;
+	uint32_t pad_v1;
+	uint32_t pad_v2;
 };
-static_assert(sizeof(RasterParams) == 368, "RasterParams must stay 368 bytes.");
+static_assert(sizeof(RasterParams) == 384, "RasterParams must stay 384 bytes.");
 
 // GodotNext: nextgeo_sw_raster (#162), nextgeo_mesh_raster (#154). Words of raster_args
 // (raster_features_inc.glsl): per phase and bin a software dispatch (0: x, y, 1, 0), a hardware VS
@@ -190,6 +197,12 @@ uint32_t s_tessellation_dicing_dispatches = 0;
 float s_tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
 uint32_t s_tess_gpu_stats[RendererRD::NEXTGEO_TESS_STATS_WORDS] = {};
 bool s_tess_have_gpu_stats = false;
+// GodotNext: nextgeo_voxels (#165). Voxel debug stats exposed via virtual_geometry_get_debug_stats().
+bool s_voxels_enabled = false;
+bool s_voxels_buffers_allocated = false;
+uint32_t s_voxel_raster_dispatches = 0;
+uint32_t s_voxel_bricks_phase1 = 0;
+uint32_t s_voxel_bricks_phase2 = 0;
 
 Mutex s_page_req_registry_mutex;
 HashMap<uint64_t, NextGeoCut *> s_page_req_registry;
@@ -981,6 +994,34 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		_draw_raster_bins(p_phase, p_list_base, p_raster, p_counters, p_internal_size);
 	}
 
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10). Software-only compute splat of
+	// visible sparse 4^3 voxel bricks into vis64 before export (0 dispatches when off).
+	if (voxels_active && voxel_pipelines[storage].is_valid() && voxel_bricks.is_valid() && voxel_raster_args.is_valid()) {
+		const RID vshader = voxel_shader.version_get_shader(voxel_version, storage);
+		LocalVector<RD::Uniform> vox_u;
+		vox_u.push_back(u_records);
+		vox_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, page_buf));
+		vox_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, voxel_bricks));
+		vox_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, raster_params));
+		vox_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, bucket_buf));
+		vox_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_counters));
+		vox_u.push_back(RD::Uniform(vis64_type, 6, p_raster.vis64));
+		const RID vset = uniform_set_cache->get_cache_vec(vshader, 0, vox_u);
+		if (vset.is_valid()) {
+			const uint32_t phase_cap = RendererRD::NEXTGEO_VOXEL_BRICK_CAPACITY / 2u;
+			const uint32_t voxel_list_base = p_phase == 0u ? 0u : phase_cap;
+			const uint32_t vflags = p_stats ? 2u : 0u;
+			const uint32_t vpush[8] = { voxel_list_base, p_phase, vflags, phase_cap, uint32_t(size.x), uint32_t(size.y), 0u, 0u };
+			RD::ComputeListID vlist = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(vlist, voxel_pipelines[storage]);
+			rd->compute_list_bind_uniform_set(vlist, vset, 0);
+			rd->compute_list_set_push_constant(vlist, vpush, sizeof(vpush));
+			rd->compute_list_dispatch_indirect(vlist, voxel_raster_args, p_phase * 4u * sizeof(uint32_t));
+			rd->compute_list_end();
+			voxel_dispatches_last_frame++;
+		}
+	}
+
 	// Export: depth, the R32 visibility ID, the instance ID and velocity.
 	{
 		const bool with_velocity = p_raster.velocity.is_valid();
@@ -1008,6 +1049,8 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, wind_params_buf));
 			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, wind_meshes_buf));
 		}
+		// GodotNext: nextgeo_voxels (#165). Set 0 binding 14 (skipping 12..13 reserved for #152).
+		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, (voxels_active && voxel_bricks.is_valid()) ? voxel_bricks : dummy_page_buf));
 		RID set = uniform_set_cache->get_cache_vec(shader, 0, export_u);
 		if (!pipeline.is_valid() || !set.is_valid()) {
 			return false;
@@ -1517,6 +1560,85 @@ void NextGeoCut::_free_tessellation_resources() {
 	memset(tess_last_gpu_stats, 0, sizeof(tess_last_gpu_stats));
 }
 
+// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10). Lazy main-view voxel buffers and
+// SW splat pipelines; 0 buffers are allocated while rendering/nextgeo/experimental/voxels is false.
+bool NextGeoCut::_ensure_voxels(RenderingDevice *p_rd) {
+	if (voxels_ready) {
+		return true;
+	}
+	if (p_rd == nullptr || !hybrid_ready) {
+		return false;
+	}
+	const bool image_int64 = p_rd->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
+	const bool buffer_int64 = p_rd->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
+#ifdef REAL_T_IS_DOUBLE
+	const String base_defines = "\n#define REAL_T_IS_DOUBLE\n";
+#else
+	const String base_defines = "";
+#endif
+	if (voxel_shader.get_variant_count() == 0) {
+		voxel_shader.initialize(Vector<String>({
+				base_defines,
+				base_defines + "\n#define VIS64_BUFFER\n",
+		}));
+	}
+	for (int storage = 0; storage < 2; storage++) {
+		voxel_shader.set_variant_enabled(storage, storage == 0 ? image_int64 : buffer_int64);
+	}
+	if (voxel_version.is_null()) {
+		voxel_version = voxel_shader.version_create();
+	}
+	if (voxel_bricks.is_null()) {
+		voxel_bricks = _storage(RendererRD::NEXTGEO_VOXEL_BRICK_CAPACITY * sizeof(RendererRD::NextGeoVisibleVoxelBrick));
+	}
+	if (voxel_raster_args.is_null()) {
+		voxel_raster_args = p_rd->storage_buffer_create(8u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	}
+	bool any_pipe = false;
+	if (voxel_version.is_valid()) {
+		for (int storage = 0; storage < 2; storage++) {
+			const bool supported = storage == 0 ? image_int64 : buffer_int64;
+			if (!supported) {
+				continue;
+			}
+			const RID sh = voxel_shader.version_get_shader(voxel_version, storage);
+			if (sh.is_valid()) {
+				voxel_pipelines[storage] = p_rd->compute_pipeline_create(sh);
+				if (voxel_pipelines[storage].is_valid()) {
+					any_pipe = true;
+				}
+			}
+		}
+	}
+	voxels_ready = any_pipe && voxel_bricks.is_valid() && voxel_raster_args.is_valid();
+	if (!voxels_ready) {
+		_free_voxel_resources();
+	}
+	return voxels_ready;
+}
+
+void NextGeoCut::_free_voxel_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	for (int storage = 0; storage < 2; storage++) {
+		voxel_pipelines[storage] = RID();
+	}
+	if (voxel_version.is_valid()) {
+		voxel_shader.version_free(voxel_version);
+		voxel_version = RID();
+	}
+	if (rd != nullptr) {
+		for (RID *buf : { &voxel_bricks, &voxel_raster_args }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+	}
+	voxels_ready = false;
+	voxels_active = false;
+	voxel_dispatches_last_frame = 0;
+}
+
 void NextGeoCut::_readback_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot) {
 	NextGeoCut *self = nullptr;
 	{
@@ -1837,6 +1959,9 @@ void NextGeoCut::_set_raster_bin_uniforms(LocalVector<RD::Uniform> &r_uniforms) 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, raster_bins_active ? raster_bin_table_buffer : dummy_page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, raster_bins_active ? raster_bin_append : dummy_page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, raster_bins_active ? raster_bin_state : dummy_page_buf));
+	// GodotNext: nextgeo_voxels (#165). Bindings 29..30 (skipping 27..28 reserved for #152).
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, (voxels_active && voxel_bricks.is_valid()) ? voxel_bricks : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, (voxels_active && voxel_raster_args.is_valid()) ? voxel_raster_args : dummy_page_buf));
 }
 
 void NextGeoCut::_harvest_shadow_timestamps() {
@@ -2029,6 +2154,10 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 	// GodotNext: nextgeo_vertex_offset (#164). WPO distance-demoted clusters and clamped vertex count.
 	info["vertex_offset_distance_fixed_clusters"] = int64_t(stats->vertex_offset_distance_fixed[0]) + int64_t(stats->vertex_offset_distance_fixed[1]);
 	info["vertex_offset_clamped"] = int64_t(stats->vertex_offset_clamped);
+	// GodotNext: nextgeo_voxels (#165). Visible sparse 4^3 voxel bricks emitted per phase.
+	info["voxel_bricks_phase1"] = int64_t(stats->voxel_bricks[0]);
+	info["voxel_bricks_phase2"] = int64_t(stats->voxel_bricks[1]);
+	info["voxel_bricks"] = int64_t(stats->voxel_bricks[0]) + int64_t(stats->voxel_bricks[1]);
 	info["hiz_tested"] = int64_t(stats->pad[0]);
 	info["hiz_hit"] = int64_t(stats->pad[1]);
 	info["hiz_behind"] = int64_t(stats->cut_lo);
@@ -2068,6 +2197,12 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 		info["tessellation_hw_stream_overflow"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[4] : 0u);
 		info["tessellation_coarsened_tris"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[5] : 0u);
 		info["tessellation_diced_clusters"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[6] : 0u);
+		// GodotNext: nextgeo_voxels (#165).
+		s_voxel_bricks_phase1 = stats->voxel_bricks[0];
+		s_voxel_bricks_phase2 = stats->voxel_bricks[1];
+		info["voxels_enabled"] = s_voxels_enabled;
+		info["voxels_buffers_allocated"] = s_voxels_buffers_allocated;
+		info["voxel_raster_dispatches"] = int64_t(s_voxel_raster_dispatches);
 		s_last_stats = info.duplicate();
 	}
 	stats_ring_info[p_ring_slot].clear();
@@ -2407,6 +2542,19 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			rd->buffer_clear(tess_state, 0, sizeof(RendererRD::NextGeoTessState));
 		}
 	}
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10). Feature-off invariant: when
+	// experimental/voxels is false, allocate 0 voxel buffers and run 0 voxel dispatches.
+	const bool voxels_setting = p_raster != nullptr && p_raster->voxels_enabled;
+	if (!voxels_setting && p_is_main_view && voxels_ready) {
+		_free_voxel_resources();
+	}
+	voxels_active = false;
+	if (p_is_main_view) {
+		voxel_dispatches_last_frame = 0;
+	}
+	if (hybrid && p_is_main_view && voxels_setting && _ensure_voxels(rd) && voxel_pipelines[vis64_storage_idx].is_valid()) {
+		voxels_active = true;
+	}
 	if (p_is_main_view) {
 		MutexLock lock(s_stats_mutex);
 		s_programmable_bins = raster_bins_active ? p_raster->raster_bin_programs.size() : 0u;
@@ -2417,6 +2565,13 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			s_tessellation_dicing_dispatches = 0;
 			s_tess_have_gpu_stats = false;
 			memset(s_tess_gpu_stats, 0, sizeof(s_tess_gpu_stats));
+		}
+		s_voxels_enabled = voxels_setting;
+		s_voxels_buffers_allocated = voxels_ready;
+		if (!voxels_active) {
+			s_voxel_raster_dispatches = 0;
+			s_voxel_bricks_phase1 = 0;
+			s_voxel_bricks_phase2 = 0;
 		}
 	}
 
@@ -2441,6 +2596,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		rp.size[1] = uint32_t(MAX(p_internal_size.y, 1));
 		rp.raster_region = PHASE2_CLUSTER_BASE;
 		rp.patch_capacity = tess_effective_patch_capacity;
+		rp.voxel_brick_capacity = voxels_active ? RendererRD::NEXTGEO_VOXEL_BRICK_CAPACITY : 0u;
 		rd->buffer_update(raster_params, 0, sizeof(RasterParams), &rp);
 		_clear_visibility_targets(p_raster->visibility, p_raster->instance_id, p_internal_size);
 		if (hybrid) {
@@ -2459,6 +2615,10 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			rd->buffer_update(raster_args, 0, sizeof(args_init), args_init);
 			const uint32_t counts_init[4] = { 0u, 0u, 0u, 0u };
 			rd->buffer_update(raster_counts, 0, sizeof(counts_init), counts_init);
+			if (voxels_active && voxel_raster_args.is_valid()) {
+				const uint32_t voxel_args_init[8] = { 0u, 0u, 1u, 0u, 0u, 0u, 1u, 0u };
+				rd->buffer_update(voxel_raster_args, 0, sizeof(voxel_args_init), voxel_args_init);
+			}
 		}
 	}
 
@@ -2541,6 +2701,13 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 					}
 				}
 			}
+		}
+		// GodotNext: nextgeo_voxels (#165). Provisional brick screen threshold V px and visible-brick capacity.
+		if (voxels_active) {
+			cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_VOXELS;
+			const float vthresh = RendererRD::NEXTGEO_VOXEL_PROVISIONAL_SCREEN_THRESHOLD_PX;
+			memcpy(&cut.raster_bin_tess_mask[2], &vthresh, sizeof(uint32_t));
+			cut.raster_bin_tess_mask[3] = RendererRD::NEXTGEO_VOXEL_BRICK_CAPACITY;
 		}
 	}
 	rd->buffer_update(params, 0, sizeof(CutParams), &cut);
@@ -2795,6 +2962,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		{
 			MutexLock lock(s_stats_mutex);
 			s_tessellation_dicing_dispatches = tess_dispatches_last_frame;
+			s_voxel_raster_dispatches = voxel_dispatches_last_frame;
 		}
 		if (capture_stats) {
 			LocalVector<RD::Uniform> uniforms;
@@ -3580,6 +3748,64 @@ void NextGeoCut::_free_vsm_tessellation_resources() {
 	memset(vsm_tess_last_gpu_stats, 0, sizeof(vsm_tess_last_gpu_stats));
 }
 
+// GodotNext: nextgeo_voxels (#165). Lazy VSM voxel buffers and depth-only SW splat pipeline (0 allocated when off).
+bool NextGeoCut::_ensure_vsm_voxels(RenderingDevice *p_rd) {
+	if (vsm_voxels_ready) {
+		return true;
+	}
+	if (p_rd == nullptr || !p_rd->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT)) {
+		return false;
+	}
+#ifdef REAL_T_IS_DOUBLE
+	const String base_defines = "\n#define REAL_T_IS_DOUBLE\n";
+#else
+	const String base_defines = "";
+#endif
+	const String vsm_defines = RendererVirtualShadowMapStorage::get_glsl_defines();
+	if (vsm_voxel_shader.get_variant_count() == 0) {
+		vsm_voxel_shader.initialize(Vector<String>({ base_defines + vsm_defines }));
+	}
+	if (vsm_voxel_version.is_null()) {
+		vsm_voxel_version = vsm_voxel_shader.version_create();
+	}
+	if (vsm_voxel_version.is_valid() && vsm_voxel_pipeline.is_null()) {
+		const RID sh = vsm_voxel_shader.version_get_shader(vsm_voxel_version, 0);
+		if (sh.is_valid()) {
+			vsm_voxel_pipeline = p_rd->compute_pipeline_create(sh);
+		}
+	}
+	if (vsm_voxel_bricks.is_null()) {
+		vsm_voxel_bricks = _storage(RendererRD::NEXTGEO_VSM_VOXEL_BRICK_CAPACITY * 4u * sizeof(uint32_t));
+	}
+	if (vsm_voxel_args.is_null()) {
+		vsm_voxel_args = p_rd->storage_buffer_create(4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	}
+	vsm_voxels_ready = vsm_voxel_pipeline.is_valid() && vsm_voxel_bricks.is_valid() && vsm_voxel_args.is_valid();
+	if (!vsm_voxels_ready) {
+		_free_vsm_voxel_resources();
+	}
+	return vsm_voxels_ready;
+}
+
+void NextGeoCut::_free_vsm_voxel_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	vsm_voxel_pipeline = RID();
+	if (vsm_voxel_version.is_valid()) {
+		vsm_voxel_shader.version_free(vsm_voxel_version);
+		vsm_voxel_version = RID();
+	}
+	if (rd != nullptr) {
+		for (RID *buf : { &vsm_voxel_bricks, &vsm_voxel_args }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+	}
+	vsm_voxels_ready = false;
+	vsm_voxel_dispatches_last_frame = 0;
+}
+
 void NextGeoCut::_readback_vsm_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot) {
 	NextGeoCut *self = nullptr;
 	{
@@ -4145,6 +4371,13 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 	}
 	const bool vsm_tess_active = vsm_has_tess_bin && _ensure_vsm_tessellation(rd);
 	vsm_tess_dispatches_last_frame = 0;
+	// GodotNext: nextgeo_voxels (#165). Allocate VSM voxel buffers only when experimental/voxels is enabled.
+	const bool vsm_voxels_requested = p_inputs.voxels_enabled;
+	if (!vsm_voxels_requested && vsm_voxels_ready) {
+		_free_vsm_voxel_resources();
+	}
+	const bool vsm_voxels_active = vsm_voxels_requested && _ensure_vsm_voxels(rd);
+	vsm_voxel_dispatches_last_frame = 0;
 
 	rd->draw_command_begin_label("VSM NextGeo Cull and Raster");
 
@@ -4161,7 +4394,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		vp.node_capacity = RendererRD::NEXTGEO_VSM_NODE_CAPACITY;
 		vp.group_capacity = RendererRD::NEXTGEO_VSM_GROUP_CAPACITY;
 		vp.cluster_capacity = RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY;
-		vp.cull_flags = cull_flags | (chain_tess ? RendererRD::NEXTGEO_VSM_CULL_FLAG_TESSELLATION : 0u);
+		vp.cull_flags = cull_flags | (chain_tess ? RendererRD::NEXTGEO_VSM_CULL_FLAG_TESSELLATION : 0u) | (vsm_voxels_active ? RendererRD::NEXTGEO_VSM_CULL_FLAG_VOXELS : 0u);
 		vp.chain_index = chain;
 		vp.bucket_table_words = use_bins ? p_inputs.raster_bin_table_words : 0u;
 		vp.max_texel_error = p_inputs.max_texel_error;
@@ -4174,10 +4407,15 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		vp.camera_position[3] = 1.0f;
 		if (use_bins) {
 			for (const NextGeoVSMBinProgram &prog : p_inputs.raster_bin_programs) {
-				if (prog.bin < 68u) {
+				if (prog.bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT) {
 					vp.bin_features[prog.bin] = prog.features;
 				}
 			}
+		}
+		if (vsm_voxels_active) {
+			const float vthresh = RendererRD::NEXTGEO_VOXEL_PROVISIONAL_SCREEN_THRESHOLD_PX;
+			memcpy(&vp.bin_features[65], &vthresh, sizeof(uint32_t));
+			vp.bin_features[66] = RendererRD::NEXTGEO_VSM_VOXEL_BRICK_CAPACITY;
 		}
 		rd->buffer_update(vsm_params_buffer, 0, sizeof(vp), &vp);
 		rd->buffer_clear(vsm_counters[chain], 0, sizeof(RendererRD::NextGeoVSMCounters));
@@ -4190,6 +4428,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		rd->buffer_update(vsm_group_args, 0, sizeof(group_init), group_init);
 		rd->buffer_update(vsm_raster_args, 0, sizeof(raster_args_init), raster_args_init);
 		rd->buffer_update(vsm_raster_counts, 0, sizeof(raster_counts_init), raster_counts_init);
+		if (vsm_voxels_active && vsm_voxel_args.is_valid()) {
+			const uint32_t vsm_voxel_args_init[4] = { 0u, 0u, 1u, 0u };
+			rd->buffer_update(vsm_voxel_args, 0, sizeof(vsm_voxel_args_init), vsm_voxel_args_init);
+		}
 		if (use_bins) {
 			rd->buffer_clear(vsm_bin_state, 0, RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t));
 			rd->buffer_clear(vsm_bin_args, 0, RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t));
@@ -4288,6 +4530,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, spline_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, wind_params_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, wind_meshes_buf));
+			// GodotNext: nextgeo_voxels (#165). Bindings 29..30 (skipping 27..28 reserved for #152).
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, (vsm_voxels_active && vsm_voxel_bricks.is_valid()) ? vsm_voxel_bricks : dummy_page_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, (vsm_voxels_active && vsm_voxel_args.is_valid()) ? vsm_voxel_args : dummy_page_buf));
 			const RID set = uniform_set_cache->get_cache_vec(leaf_sh, 0, u);
 			if (set.is_null()) {
 				continue;
@@ -4399,6 +4644,33 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 				local_raster_indirect_dispatches += 2u * p_inputs.raster_bin_programs.size();
 			}
 		}
+
+		// 8. GodotNext: nextgeo_voxels (#165). Depth-only SW voxel brick splat into dirty VSM pages.
+		if (vsm_voxels_active && vsm_voxel_pipeline.is_valid() && vsm_voxel_bricks.is_valid() && vsm_voxel_args.is_valid()) {
+			const RID vox_sh = vsm_voxel_shader.version_get_shader(vsm_voxel_version, 0);
+			LocalVector<RD::Uniform> vu;
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, records_buf));
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, page_buf));
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, vsm_voxel_bricks));
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, p_inputs.map_data_buffer));
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, p_inputs.dirty_buffer));
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, p_inputs.pool_texture));
+			vu.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, vsm_counters[chain]));
+			const RID vset = uniform_set_cache->get_cache_vec(vox_sh, 0, vu);
+			if (vset.is_valid()) {
+				const uint32_t vpush[4] = { RendererRD::NEXTGEO_VSM_VOXEL_BRICK_CAPACITY, p_inputs.count_sw_writes ? 1u : 0u, 0u, 0u };
+				RD::ComputeListID vlist = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(vlist, vsm_voxel_pipeline);
+				rd->compute_list_bind_uniform_set(vlist, vset, 0);
+				rd->compute_list_set_push_constant(vlist, vpush, sizeof(vpush));
+				rd->compute_list_dispatch_indirect(vlist, vsm_voxel_args, 0u);
+				rd->compute_list_end();
+				vsm_voxel_dispatches_last_frame++;
+				if (chain == 1u) {
+					local_raster_indirect_dispatches++;
+				}
+			}
+		}
 	}
 
 	// Build 1-level 8x8 max-depth Hi-Z per cached dirty page after both non-Nanite and Nanite raster.
@@ -4442,6 +4714,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 		stats["tessellation_directional_hw_patches"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[0][3] : 0u);
 		stats["tessellation_local_hw_patches"] = int64_t(vsm_tess_have_gpu_stats ? vsm_tess_last_gpu_stats[1][3] : 0u);
 		stats["tessellation_dicing_overflow"] = int64_t(vsm_tess_have_gpu_stats ? (vsm_tess_last_gpu_stats[0][1] + vsm_tess_last_gpu_stats[1][1]) : 0u);
+		// GodotNext: nextgeo_voxels (#165).
+		stats["voxels_enabled"] = p_inputs.voxels_enabled;
+		stats["voxels_buffers_allocated"] = vsm_voxels_ready;
+		stats["vsm_voxel_dispatches"] = int64_t(vsm_voxel_dispatches_last_frame);
 		stats["gpu_counters_valid"] = vsm_have_gpu_counters;
 		if (vsm_have_gpu_counters) {
 			const RendererRD::NextGeoVSMCounters &dc = vsm_last_gpu_counters[0];
@@ -4469,6 +4745,11 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			stats["distance_fixed_clusters"] = int64_t(dc.distance_fixed_clusters + lc.distance_fixed_clusters);
 			stats["vertex_offset_distance_fixed_clusters"] = int64_t(dc.vertex_offset_distance_fixed + lc.vertex_offset_distance_fixed);
 			stats["vertex_offset_clamped"] = int64_t(dc.vertex_offset_clamped + lc.vertex_offset_clamped);
+			// GodotNext: nextgeo_voxels (#165).
+			stats["vsm_voxel_bricks"] = int64_t(dc.voxel_bricks + lc.voxel_bricks);
+			stats["vsm_directional_voxel_bricks"] = int64_t(dc.voxel_bricks);
+			stats["vsm_local_voxel_bricks"] = int64_t(lc.voxel_bricks);
+			stats["vsm_voxel_writes"] = int64_t(dc.voxel_writes + lc.voxel_writes);
 		}
 		*r_stats = stats;
 	}
@@ -4477,6 +4758,7 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 
 void NextGeoCut::_free_vsm_resources() {
 	_free_vsm_tessellation_resources();
+	_free_vsm_voxel_resources();
 	RenderingDevice *rd = RD::get_singleton();
 	for (int ring = 0; ring < 3; ring++) {
 		vsm_counters_ring_pending[ring] = false;
@@ -4565,6 +4847,7 @@ void NextGeoCut::free_resources() {
 	}
 	_free_vsm_resources();
 	_free_tessellation_resources();
+	_free_voxel_resources();
 	_release_hiz();
 	for (int variant = 0; variant < 4; variant++) {
 		raster_pipelines[variant].clear();
@@ -4700,6 +4983,11 @@ void NextGeoCut::free_resources() {
 		s_tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
 		s_tess_have_gpu_stats = false;
 		memset(s_tess_gpu_stats, 0, sizeof(s_tess_gpu_stats));
+		s_voxels_enabled = false;
+		s_voxels_buffers_allocated = false;
+		s_voxel_raster_dispatches = 0;
+		s_voxel_bricks_phase1 = 0;
+		s_voxel_bricks_phase2 = 0;
 	}
 	initialized = false;
 }
@@ -4749,5 +5037,12 @@ Dictionary NextGeoCut::get_last_stats() {
 	stats["tessellation_hw_stream_overflow"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[4] : 0u);
 	stats["tessellation_coarsened_tris"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[5] : 0u);
 	stats["tessellation_diced_clusters"] = int64_t(s_tess_have_gpu_stats ? s_tess_gpu_stats[6] : 0u);
+	// GodotNext: nextgeo_voxels (#165).
+	stats["voxels_enabled"] = s_voxels_enabled;
+	stats["voxels_buffers_allocated"] = s_voxels_buffers_allocated;
+	stats["voxel_raster_dispatches"] = int64_t(s_voxel_raster_dispatches);
+	stats["voxel_bricks_phase1"] = int64_t(s_voxel_bricks_phase1);
+	stats["voxel_bricks_phase2"] = int64_t(s_voxel_bricks_phase2);
+	stats["voxel_bricks"] = int64_t(s_voxel_bricks_phase1) + int64_t(s_voxel_bricks_phase2);
 	return stats;
 }

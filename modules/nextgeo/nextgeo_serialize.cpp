@@ -237,6 +237,27 @@ uint64_t page_skin_bytes(const NextGeoBuildOutput &p_output, const NextGeoPage &
 	return bytes;
 }
 
+// GodotNext: nextgeo_voxels (#165). Total brick payload bytes and brick count across all groups in `p_page`.
+void page_voxel_totals(const NextGeoBuildOutput &p_output, const NextGeoPage &p_page, uint32_t &r_brick_count, uint64_t &r_bricks_bytes) {
+	r_brick_count = 0u;
+	r_bricks_bytes = 0ull;
+	if (p_output.group_voxels.size() != p_output.groups.size()) {
+		return;
+	}
+	for (uint32_t g = 0; g < p_page.group_count; g++) {
+		const uint32_t group_idx = p_page.group_offset + g;
+		if (group_idx >= p_output.group_voxels.size()) {
+			continue;
+		}
+		const NextGeoGroupVoxels &gv = p_output.group_voxels[group_idx];
+		if (gv.brick_count == 0u || uint64_t(gv.brick_offset) + gv.brick_count > p_output.voxel_bricks.size()) {
+			continue;
+		}
+		r_brick_count += gv.brick_count;
+		r_bricks_bytes += nextgeo_voxel_bricks_bytes(p_output.voxel_bricks.ptr() + gv.brick_offset, gv.brick_count);
+	}
+}
+
 } // namespace
 
 Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint8_t>> &r_pages) {
@@ -263,7 +284,15 @@ Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint
 		}
 
 		const uint64_t skin_bytes = p_output.skin_influences == 0 ? 0 : page_skin_bytes(p_output, page);
-		const uint64_t payload = 16ull + uint64_t(page.cluster_count) * 80ull + uint64_t(vertex_count) * layout.stride * 4ull + uint64_t(triangle_count) * 3ull + skin_bytes;
+		const uint64_t base_payload = 16ull + uint64_t(page.cluster_count) * 80ull + uint64_t(vertex_count) * layout.stride * 4ull + uint64_t(triangle_count) * 3ull + skin_bytes;
+		uint32_t page_brick_count = 0u;
+		uint64_t page_bricks_bytes = 0ull;
+		page_voxel_totals(p_output, page, page_brick_count, page_bricks_bytes);
+		const uint64_t voxel_pad = page_brick_count > 0u ? ((4ull - (base_payload & 3ull)) & 3ull) : 0ull;
+		const uint64_t voxel_section_bytes = page_brick_count > 0u
+				? (voxel_pad + 16ull + uint64_t(page.group_count) * 16ull + page_bricks_bytes + 8ull)
+				: 0ull;
+		const uint64_t payload = base_payload + voxel_section_bytes;
 		ByteWriter writer;
 		writer.reserve(payload);
 		writer.u32(page.cluster_count);
@@ -329,6 +358,63 @@ Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint
 			}
 		}
 
+		// GodotNext: nextgeo_voxels (#165). Optional trailing sparse-brick voxel section.
+		if (page_brick_count > 0u) {
+			for (uint64_t p = 0; p < voxel_pad; p++) {
+				writer.u8(0);
+			}
+			// Header (16 bytes = 4 words).
+			writer.u32(NGM_VOXEL_SECTION_MAGIC);
+			writer.u32(page.group_offset);
+			writer.u32(page.group_count);
+			writer.u32(page_brick_count);
+
+			// Group voxel directory (page.group_count * 16 bytes).
+			uint32_t rel_word_cursor = 4u + page.group_count * 4u;
+			for (uint32_t g = 0; g < page.group_count; g++) {
+				const NextGeoGroupVoxels &gv = p_output.group_voxels[page.group_offset + g];
+				if (gv.brick_count == 0u) {
+					writer.u32(0u);
+					writer.u32(0u);
+					writer.f32(0.0f);
+					writer.f32(0.0f);
+				} else {
+					writer.u32(rel_word_cursor);
+					writer.u32(gv.brick_count);
+					writer.f32(gv.voxel_size);
+					writer.f32(gv.group_error);
+					const uint32_t bbytes = nextgeo_voxel_bricks_bytes(p_output.voxel_bricks.ptr() + gv.brick_offset, gv.brick_count);
+					rel_word_cursor += bbytes >> 2u;
+				}
+			}
+
+			// Packed sparse 4^3 bricks (32-byte header + occupied_count * 8 bytes each).
+			for (uint32_t g = 0; g < page.group_count; g++) {
+				const NextGeoGroupVoxels &gv = p_output.group_voxels[page.group_offset + g];
+				for (uint32_t b = 0; b < gv.brick_count; b++) {
+					const NextGeoVoxelBrick &brick = p_output.voxel_bricks[gv.brick_offset + b];
+					const uint32_t occ = brick.meta & 0xFFu;
+					writer.f32(brick.origin[0]);
+					writer.f32(brick.origin[1]);
+					writer.f32(brick.origin[2]);
+					writer.f32(brick.voxel_size);
+					writer.u32(brick.occ_lo);
+					writer.u32(brick.occ_hi);
+					writer.u32(brick.meta);
+					writer.f32(brick.uv_footprint);
+					for (uint32_t v = 0; v < occ; v++) {
+						const NextGeoVoxelData &vd = p_output.voxel_data[brick.voxel_offset + v];
+						writer.u32(vd.uv_half2);
+						writer.u32(vd.word1);
+					}
+				}
+			}
+
+			// 8-byte self-describing trailer.
+			writer.u32(uint32_t(voxel_section_bytes));
+			writer.u32(NGM_VOXEL_SECTION_MAGIC);
+		}
+
 		if (writer.error != OK || writer.cursor != payload) {
 			r_pages.clear();
 			return writer.error != OK ? writer.error : ERR_BUG;
@@ -347,7 +433,7 @@ Error nextgeo_fill_ngm_header(const NextGeoBuildOutput &p_output, const Vector<V
 		return ERR_INVALID_DATA;
 	}
 	r_header.version = NGM_VERSION;
-	r_header.flags = p_output.skin_influences == 0 ? 0 : NGM_FLAG_SKINNED;
+	r_header.flags = (p_output.skin_influences == 0 ? 0u : NGM_FLAG_SKINNED) | (p_output.voxel_bricks.is_empty() ? 0u : NGM_FLAG_VOXELS);
 	r_header.skin_influences = p_output.skin_influences;
 	r_header.page_size = p_output.page_size;
 	r_header.page_count = uint32_t(p_pages.size());
@@ -583,5 +669,6 @@ Error nextgeo_fill_vgd(const NextGeoBuildInput &p_input, const NextGeoBuildOutpu
 	p_data->set_page_count(p_pages.size());
 	p_data->set_page_size(p_output.page_size);
 	p_data->set_skin_influences(int(p_output.skin_influences));
+	p_data->set_voxel_brick_count(int64_t(p_output.voxel_bricks.size()));
 	return OK;
 }

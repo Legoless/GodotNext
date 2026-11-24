@@ -426,9 +426,10 @@ bool NextGeoDebug::draw_debug_view(RSE::ViewportDebugDraw p_mode, RID p_visibili
 	const RID dag_buf = (using_nextgeo && vms->get_dag_buffer().is_valid()) ? vms->get_dag_buffer() : dummy_buffer;
 	const RID residency_buf = (using_nextgeo && vms->get_residency_buffer().is_valid()) ? vms->get_residency_buffer() : dummy_buffer;
 	const RID patches_buf = (using_nextgeo && last_scene_params.diced_patches_buf.is_valid()) ? last_scene_params.diced_patches_buf : dummy_buffer;
+	const RID voxels_buf = (using_nextgeo && last_scene_params.voxel_bricks_buf.is_valid()) ? last_scene_params.voxel_bricks_buf : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
-	uniforms.reserve(14);
+	uniforms.reserve(15);
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, vis_tex })));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_depth_tex })));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, fb_tex })));
@@ -443,6 +444,7 @@ bool NextGeoDebug::draw_debug_view(RSE::ViewportDebugDraw p_mode, RID p_visibili
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, debug_params_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, active_hist_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, patches_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, voxels_buf));
 
 	RID shader = debug_shader.version_get_shader(debug_version, 0);
 	RID set = uniform_set_cache->get_cache_vec(shader, 0, uniforms);

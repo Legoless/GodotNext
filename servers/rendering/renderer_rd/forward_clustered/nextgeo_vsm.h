@@ -83,6 +83,7 @@ enum NextGeoVSMCullFlags : uint32_t {
 	NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK = 1u << 2, // Step 6 hook (#212): route moving/WPO instances to layer 1.
 	NEXTGEO_VSM_CULL_FLAG_COUNT_SW_WRITES = 1u << 3, // Accumulate SW texel writes for telemetry.
 	NEXTGEO_VSM_CULL_FLAG_TESSELLATION = 1u << 4, // GodotNext: nextgeo_tessellation (#163): dice displaced clusters on this chain.
+	NEXTGEO_VSM_CULL_FLAG_VOXELS = 1u << 5, // GodotNext: nextgeo_voxels (#165): swap coarse voxelized groups for sparse 4^3 bricks.
 };
 
 enum NextGeoVSMMapMetaFlags : uint32_t {
@@ -150,7 +151,10 @@ struct NextGeoVSMCounters {
 	// GodotNext: nextgeo_vertex_offset (#164). WPO clusters demoted to FIXED past vertex_offset_disable_distance and clamped vertices.
 	uint32_t vertex_offset_distance_fixed = 0u; // 27
 	uint32_t vertex_offset_clamped = 0u; // 28
-	uint32_t pad1[3] = {}; // 29..31
+	// GodotNext: nextgeo_voxels (#165). Voxel brick-page pairs emitted and SW texels written.
+	uint32_t voxel_bricks = 0u; // 29
+	uint32_t voxel_writes = 0u; // 30
+	uint32_t pad1 = 0u; // 31
 };
 static_assert(sizeof(NextGeoVSMCounters) == 128, "NextGeoVSMCounters must match GLSL layout (128 bytes).");
 static_assert(offsetof(NextGeoVSMCounters, cluster_count) == 11 * sizeof(uint32_t), "cluster_count word index must stay 11.");
@@ -160,12 +164,16 @@ static_assert(offsetof(NextGeoVSMCounters, sink) == 21 * sizeof(uint32_t), "sink
 static_assert(offsetof(NextGeoVSMCounters, hiz_pages_built) == 22 * sizeof(uint32_t), "hiz_pages_built word index must stay 22.");
 static_assert(offsetof(NextGeoVSMCounters, vertex_offset_distance_fixed) == 27 * sizeof(uint32_t), "vertex_offset_distance_fixed word index must stay 27.");
 static_assert(offsetof(NextGeoVSMCounters, vertex_offset_clamped) == 28 * sizeof(uint32_t), "vertex_offset_clamped word index must stay 28.");
+static_assert(offsetof(NextGeoVSMCounters, voxel_bricks) == 29 * sizeof(uint32_t), "voxel_bricks word index must stay 29.");
+static_assert(offsetof(NextGeoVSMCounters, voxel_writes) == 30 * sizeof(uint32_t), "voxel_writes word index must stay 30.");
 
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_CLUSTER_COUNT = 11u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_SW_CLUSTERS = 12u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_SW_WRITES = 20u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_SINK = 21u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_HIZ_PAGES_BUILT = 22u;
+static constexpr uint32_t NEXTGEO_VSM_COUNTER_VOXEL_BRICKS = 29u;
+static constexpr uint32_t NEXTGEO_VSM_COUNTER_VOXEL_WRITES = 30u;
 
 // Clamps the provisional SW/HW edge threshold to the software setup's full-precision extent.
 inline float nextgeo_vsm_sw_switch_texels(float p_setting_texels) {

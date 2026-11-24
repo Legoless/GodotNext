@@ -127,6 +127,8 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	bool vsm_last_tess_directional = true;
 	bool vsm_last_tess_local = false;
 	float vsm_last_tess_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
+	// GodotNext: nextgeo_voxels (#165). Invalidate cached VSM pages when experimental/voxels toggles.
+	bool vsm_last_voxels_enabled = false;
 	bool _nextgeo_view_runs_hybrid_raster();
 
 	enum {

@@ -46,6 +46,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 // GodotNext: nextgeo_tessellation (#163).
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_tessellation.h"
+// GodotNext: nextgeo_voxels (#165).
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_voxels.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_vsm.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
@@ -60,11 +62,15 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
 // GodotNext: nextgeo_mesh_raster (#154).
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster_mesh.glsl.gen.h"
+// GodotNext: nextgeo_voxels (#165).
+#include "servers/rendering/renderer_rd/shaders/nextgeo/voxel_raster.glsl.gen.h"
 // GodotNext: vsm_nanite (#217).
 #include "servers/rendering/renderer_rd/shaders/vsm_raster_nextgeo.glsl.gen.h"
 // GodotNext: nextgeo_mesh_raster (#154).
 #include "servers/rendering/renderer_rd/shaders/vsm_raster_nextgeo_mesh.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_raster_sw.glsl.gen.h"
+// GodotNext: nextgeo_voxels (#165).
+#include "servers/rendering/renderer_rd/shaders/vsm_raster_voxel.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
 
@@ -156,6 +162,8 @@ struct NextGeoVSMInputs {
 	bool tessellation_local = false;
 	float tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
 	uint32_t tessellation_debug_max_patches = 0u;
+	// GodotNext: nextgeo_voxels (#165). Experimental Nanite Voxels VSM depth-only splat.
+	bool voxels_enabled = false;
 	LocalVector<RendererRD::NextGeoVSMMapMeta> map_meta;
 	const uint32_t *raster_bin_table = nullptr;
 	uint32_t raster_bin_table_words = 0;
@@ -206,6 +214,8 @@ struct NextGeoRasterInputs {
 	bool tessellation_enabled = false;
 	float tessellation_dicing_rate = RendererRD::NEXTGEO_TESS_DEFAULT_DICING_RATE;
 	uint32_t tessellation_debug_max_patches = 0u;
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10). Experimental sparse-brick voxel LOD.
+	bool voxels_enabled = false;
 };
 
 // GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
@@ -258,6 +268,8 @@ public:
 	RID get_clusters_buffer() const { return clusters; }
 	// GodotNext: nextgeo_tessellation (#163). Invalid when experimental/tessellation is off (zero buffers allocated).
 	RID get_diced_patches_buffer() const { return tess_active ? tess_diced_patches : RID(); }
+	// GodotNext: nextgeo_voxels (#165). Invalid when experimental/voxels is off (zero buffers allocated).
+	RID get_voxel_bricks_buffer() const { return voxels_active ? voxel_bricks : RID(); }
 	static void set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote);
 	// GodotNext: nextgeo_shading_bins (#158). The shading path of the last main view's Stage A/B (keys
 	// shading_*), merged into the stats.
@@ -299,6 +311,11 @@ private:
 	static void _readback_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
 	bool _ensure_vsm_tessellation(RenderingDevice *p_rd);
 	void _free_vsm_tessellation_resources();
+	// GodotNext: nextgeo_voxels (#165). Lazy main-view and VSM voxel buffers/pipelines (0 allocated when off).
+	bool _ensure_voxels(RenderingDevice *p_rd);
+	void _free_voxel_resources();
+	bool _ensure_vsm_voxels(RenderingDevice *p_rd);
+	void _free_vsm_voxel_resources();
 	void _request_vsm_tess_stats(uint32_t p_ring_slot);
 	void _publish_vsm_tess_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
 	static void _readback_vsm_tess_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
@@ -559,4 +576,22 @@ private:
 	bool vsm_tess_stats_ring_pending[3] = { false, false, false };
 	uint32_t vsm_tess_last_gpu_stats[RendererRD::NEXTGEO_VSM_CHAIN_COUNT][RendererRD::NEXTGEO_TESS_STATS_WORDS] = {};
 	bool vsm_tess_have_gpu_stats = false;
+
+	// GodotNext: nextgeo_voxels (#165). Lazily allocated ONLY when experimental/voxels == true.
+	bool voxels_ready = false;
+	bool voxels_active = false;
+	uint32_t voxel_dispatches_last_frame = 0;
+	VoxelRasterShaderRD voxel_shader;
+	RID voxel_version;
+	RID voxel_pipelines[2]; // Image, buffer.
+	RID voxel_bricks;
+	RID voxel_raster_args;
+
+	bool vsm_voxels_ready = false;
+	uint32_t vsm_voxel_dispatches_last_frame = 0;
+	VsmRasterVoxelShaderRD vsm_voxel_shader;
+	RID vsm_voxel_version;
+	RID vsm_voxel_pipeline;
+	RID vsm_voxel_bricks;
+	RID vsm_voxel_args;
 };

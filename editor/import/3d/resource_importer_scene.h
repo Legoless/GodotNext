@@ -240,6 +240,8 @@ class ResourceImporterScene : public ResourceImporter {
 	bool _ngm_skinned = false;
 	// GodotNext: nextgeo_foliage_instancing (#151)
 	bool _ngm_preserve_area = false;
+	// GodotNext: nextgeo_voxels (#165)
+	bool _ngm_voxels = false;
 	bool _ngm_assembly = false;
 	// GodotNext: nextgeo_foliage_wind (#152)
 	bool _ngm_wind = false;

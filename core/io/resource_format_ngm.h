@@ -101,7 +101,10 @@ static constexpr uint32_t NGM_PAGE_ALIGN = 16;
 static constexpr uint32_t NGM_FLAG_MESHOPT = 1u << 0;
 // Pages carry the skinning section, and `skin_influences` is 4 or 8 (issue #159).
 static constexpr uint32_t NGM_FLAG_SKINNED = 1u << 1;
-static constexpr uint32_t NGM_KNOWN_FLAGS = NGM_FLAG_MESHOPT | NGM_FLAG_SKINNED;
+// GodotNext: nextgeo_voxels (#165). Pages may carry an optional trailing sparse-brick voxel section.
+static constexpr uint32_t NGM_FLAG_VOXELS = 1u << 2;
+static constexpr uint32_t NGM_KNOWN_FLAGS = NGM_FLAG_MESHOPT | NGM_FLAG_SKINNED | NGM_FLAG_VOXELS;
+static constexpr uint32_t NGM_VOXEL_SECTION_MAGIC = 0x5856474Eu; // 'NGVX'
 // Provisional until G4 measures 64 KiB against 128 KiB (plan §18.2, §22.10). Not a format limit:
 // the header stores whatever budget the build used.
 static constexpr uint32_t NGM_PROVISIONAL_PAGE_SIZE = 64 * 1024;
@@ -140,6 +143,12 @@ bool ngm_page_has_max_edges(const uint8_t *p_page, uint64_t p_size);
 // triangles (+infinity for a cluster whose ranges leave the page). p_stride is the vertex stride in
 // floats. False, with the payload unchanged, when its header does not fit it.
 bool ngm_page_fill_max_edges(uint8_t *p_page, uint64_t p_size, uint32_t p_stride);
+// GodotNext: nextgeo_voxels (#165). Detects and validates the optional trailing sparse-brick voxel
+// section inside an `.ngm` page payload. When present, sets `r_header_offset` (4-byte aligned byte
+// offset of the voxel section header from page start) and `r_total_bytes` (bytes from the end of
+// the skinning section to `p_size`, including 0..3 alignment pad bytes and the 8-byte trailer).
+// Returns false with zeroed outputs for plain pages without voxel data.
+bool ngm_page_voxel_section(const uint8_t *p_page, uint64_t p_size, uint32_t &r_header_offset, uint32_t &r_total_bytes);
 
 struct NGMPage {
 	Vector<uint8_t> bytes;

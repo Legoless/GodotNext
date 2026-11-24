@@ -158,6 +158,8 @@ struct VirtualGeometryDesc {
 	PackedInt32Array rt_proxy_clusters;
 	// GodotNext: nextgeo_skinned_runtime (#160). Bone influences per vertex (0 = unskinned, 4 or 8).
 	uint32_t skin_influences = 0;
+	// GodotNext: nextgeo_voxels (#165). Total sparse 4^3 voxel bricks stored across `.ngm` pages (0 when absent).
+	uint32_t voxel_brick_count = 0;
 	// GodotNext: nextgeo_foliage_instancing (#151, plan §21.4 contract N10).
 	// Optional Nanite Assembly payload (<= 2 hierarchy levels: root -> direct parts,
 	// and root -> child assemblies -> sub-parts).

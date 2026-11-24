@@ -310,6 +310,9 @@ public:
 		// and rasterize through fixed or per-part programmable bins in both visibility and VSM passes.
 		{ RASTER_FEATURE_ASSEMBLY, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "ASSEMBLY" },
 		{ RASTER_FEATURE_ASSEMBLY, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_ASSEMBLY" },
+		// GodotNext: nextgeo_voxels (#165, plan §21.4 N10). Sparse 4^3 voxel bricks SW-splat into vis64 and VSM pool.
+		{ RASTER_FEATURE_VOXEL, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "VOXEL" },
+		{ RASTER_FEATURE_VOXEL, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_VOXEL" },
 	};
 	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
 
@@ -558,6 +561,9 @@ public:
 		bool assembly_part_refs_held = false;
 		uint32_t assembly_leaf_count = 0;
 		LocalVector<RID> assembly_unique_part_meshes;
+		// GodotNext: nextgeo_voxels (#165). True when the mesh's `.ngm` pages carry sparse 4^3 voxel bricks.
+		bool has_voxels = false;
+		uint32_t voxel_brick_count = 0;
 	};
 
 	RendererVirtualMeshStorage();

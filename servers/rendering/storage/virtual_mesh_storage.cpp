@@ -649,12 +649,14 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		}
 	}
 
-	// Resolve vertex layout, page count, page slot size, and skin influences from VGD / .ngm header.
+	// Resolve vertex layout, page count, page slot size, skin influences, and voxel flag from VGD / .ngm header.
 	info.vertex_layout = p_desc.vertex_layout;
 	info.skin_influences = p_desc.skin_influences;
+	info.voxel_brick_count = p_desc.voxel_brick_count;
+	info.has_voxels = p_desc.voxel_brick_count > 0u;
 	uint32_t ngm_page_count = p_desc.page_count;
 	uint32_t ngm_page_size = p_desc.page_size;
-	if ((ngm_page_count == 0 || info.vertex_layout == 0 || ngm_page_size == 0 || info.skin_influences == 0) && !p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
+	if ((ngm_page_count == 0 || info.vertex_layout == 0 || ngm_page_size == 0 || info.skin_influences == 0 || !info.has_voxels) && !p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
 		Ref<NGMFile> ngm;
 		ngm.instantiate();
 		if (ngm->open(p_desc.ngm_path) == OK) {
@@ -671,20 +673,28 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 			if (info.skin_influences == 0 && (hdr.flags & NGM_FLAG_SKINNED) != 0u) {
 				info.skin_influences = hdr.skin_influences;
 			}
+			if ((hdr.flags & NGM_FLAG_VOXELS) != 0u) {
+				info.has_voxels = true;
+			}
 		}
 	}
-	if (info.skin_influences == 0) {
+	if (info.skin_influences == 0 || !info.has_voxels) {
 		for (int p = 0; p < p_desc.root_pages.size(); p++) {
 			const Vector<uint8_t> &raw = p_desc.root_pages[p];
-			if (raw.size() >= 20) {
+			uint32_t voxel_hdr_off = 0u;
+			uint32_t voxel_total_bytes = 0u;
+			if (ngm_page_voxel_section(raw.ptr(), uint64_t(raw.size()), voxel_hdr_off, voxel_total_bytes)) {
+				info.has_voxels = true;
+			}
+			const uint64_t base_end = uint64_t(raw.size()) - uint64_t(voxel_total_bytes);
+			if (info.skin_influences == 0 && base_end >= 20ull) {
 				uint32_t header[4] = {};
 				memcpy(header, raw.ptr(), sizeof(header));
-				if (header[3] >= 4u && uint64_t(header[3]) <= uint64_t(raw.size()) - 16ull) {
-					const uint32_t skin_start = uint32_t(raw.size()) - header[3];
+				if (header[3] >= 4u && uint64_t(header[3]) <= base_end - 16ull) {
+					const uint32_t skin_start = uint32_t(base_end) - header[3];
 					const uint8_t inf = raw[int(skin_start + 1u)];
 					if (inf == 4u || inf == 8u) {
 						info.skin_influences = inf;
-						break;
 					}
 				}
 			}
@@ -2588,11 +2598,17 @@ bool RendererVirtualMeshStorage::_install_page_in_slot(MeshInfo &r_info, uint32_
 	const uint32_t page_vertices = header[1];
 	const uint32_t page_triangles = header[2];
 	const uint32_t skin_bytes = header[3];
+	// GodotNext: nextgeo_voxels (#165). Strip optional trailing sparse-brick voxel section before
+	// computing vertex_bytes so existing non-voxel pages and voxelized pages both validate cleanly.
+	uint32_t voxel_hdr_off = 0u;
+	uint32_t voxel_total_bytes = 0u;
+	const bool has_voxel_section = ngm_page_voxel_section(p_raw.ptr(), uint64_t(p_raw.size()), voxel_hdr_off, voxel_total_bytes);
+	const uint64_t base_end = uint64_t(p_raw.size()) - uint64_t(voxel_total_bytes);
 	const uint64_t fixed_bytes = 16ull + uint64_t(page_clusters) * 80ull + uint64_t(page_triangles) * 3ull + uint64_t(skin_bytes);
-	if (fixed_bytes > uint64_t(p_raw.size())) {
+	if (fixed_bytes > base_end) {
 		return false;
 	}
-	const uint64_t vertex_bytes = uint64_t(p_raw.size()) - fixed_bytes;
+	const uint64_t vertex_bytes = base_end - fixed_bytes;
 	uint32_t stride = r_info.layout_stride;
 	if (stride == 0) {
 		if (page_vertices > 0 && (vertex_bytes % (uint64_t(page_vertices) * 4ull)) == 0) {
@@ -2619,14 +2635,22 @@ bool RendererVirtualMeshStorage::_install_page_in_slot(MeshInfo &r_info, uint32_
 	}
 
 	const uint32_t page_global = p_slot * slot_page_size;
-	// GodotNext: nextgeo_sw_raster (#162). A v1 page gets each cluster's max_edge, which .ngm v2 stores,
-	// computed from its own vertices, so the triangle-size switch reads the same record field.
+	// GodotNext: nextgeo_sw_raster (#162) & nextgeo_voxels (#165).
+	// Patch v1 pages with max_edge, and set GPU page header word 3 to the page-relative word offset
+	// of the optional voxel section (0 when absent; GPU skinning uses cluster_skin_offsets, not hdr[3]).
 	Vector<uint8_t> patched_page;
 	if (!ngm_page_has_max_edges(p_raw.ptr(), uint64_t(p_raw.size()))) {
 		patched_page = p_raw;
 		if (!ngm_page_fill_max_edges(patched_page.ptrw(), uint64_t(patched_page.size()), stride)) {
 			patched_page.clear();
 		}
+	}
+	const uint32_t gpu_voxel_rel_word = has_voxel_section ? (voxel_hdr_off >> 2u) : 0u;
+	if (gpu_voxel_rel_word != skin_bytes) {
+		if (patched_page.is_empty()) {
+			patched_page = p_raw;
+		}
+		memcpy(patched_page.ptrw() + 12, &gpu_voxel_rel_word, sizeof(uint32_t));
 	}
 	const Vector<uint8_t> &uploaded_page = patched_page.is_empty() ? p_raw : patched_page;
 	_upload_pages(page_global, uploaded_page.ptr(), uint32_t(uploaded_page.size()));

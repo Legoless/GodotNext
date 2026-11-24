@@ -32,6 +32,7 @@ void main() {
 #include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 #include "tessellation_inc.glsl"
+#include "voxel_inc.glsl"
 // clang-format on
 
 layout(location = 0) out uint visibility_out;
@@ -66,6 +67,10 @@ layout(set = 0, binding = 2, std430) buffer restrict readonly RasterParams {
 	uvec2 size;
 	uint raster_region;
 	uint patch_capacity; // GodotNext: nextgeo_tessellation (#163)
+	uint voxel_brick_capacity; // GodotNext: nextgeo_voxels (#165)
+	uint pad_v0;
+	uint pad_v1;
+	uint pad_v2;
 }
 raster;
 
@@ -141,6 +146,12 @@ nextgeo_wind_meshes;
 // clang-format on
 #endif
 
+// GodotNext: nextgeo_voxels (#165). Visible sparse 4^3 voxel brick records (binding 14 avoids 12..13 reserved for #152).
+layout(set = 0, binding = 14, std430) buffer restrict readonly NextGeoVisibleVoxelBricks {
+	uvec4 data[];
+}
+visible_voxel_bricks;
+
 void main() {
 	ivec2 pixel = ivec2(gl_FragCoord.xy);
 #ifdef VIS64_BUFFER
@@ -155,23 +166,36 @@ void main() {
 	if (depth_bits == 0u) {
 		discard;
 	}
-	uint cluster_slot = vis_cluster;
-	if (nextgeo_vis_is_patch(vis_cluster)) {
-		uint patch_idx = nextgeo_vis_patch_index(vis_cluster);
-		if (patch_idx >= raster.patch_capacity) {
+	bool is_voxel = nextgeo_vis_is_voxel(vis_cluster);
+	uvec2 entry = uvec2(0xFFFFFFFFu, 0u);
+	if (is_voxel) {
+		uint brick_idx = nextgeo_vis_voxel_brick_index(vis_cluster);
+		if (brick_idx >= raster.voxel_brick_capacity) {
 			discard;
 		}
-		cluster_slot = diced_patches.data[patch_idx].cluster_slot;
-	} else if (!nextgeo_vis_is_normal(vis_cluster)) {
-		discard;
-	}
-	if (cluster_slot >= raster.visible_capacity) {
-		discard;
+		entry.x = visible_voxel_bricks.data[brick_idx].x;
+		if (entry.x == 0xFFFFFFFFu) {
+			discard;
+		}
+	} else {
+		uint cluster_slot = vis_cluster;
+		if (nextgeo_vis_is_patch(vis_cluster)) {
+			uint patch_idx = nextgeo_vis_patch_index(vis_cluster);
+			if (patch_idx >= raster.patch_capacity) {
+				discard;
+			}
+			cluster_slot = diced_patches.data[patch_idx].cluster_slot;
+		} else if (!nextgeo_vis_is_normal(vis_cluster)) {
+			discard;
+		}
+		if (cluster_slot >= raster.visible_capacity) {
+			discard;
+		}
+		entry = visible_clusters.data[cluster_slot];
 	}
 	float depth = uintBitsToFloat(depth_bits);
 	gl_FragDepth = depth;
 	visibility_out = vis_id;
-	uvec2 entry = visible_clusters.data[cluster_slot];
 	instance_id_out = entry.x;
 
 #ifdef WITH_VELOCITY

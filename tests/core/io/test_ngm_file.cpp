@@ -254,7 +254,7 @@ TEST_CASE("[NextGeo][NGM] Corrupt, truncated and version-mismatched files") {
 	}
 
 	Vector<uint8_t> unknown_flag = original;
-	store_u32(unknown_flag, 12, 4); // Bit 1 is NGM_FLAG_SKINNED (#159); bit 2 stays unknown.
+	store_u32(unknown_flag, 12, 8); // Bit 1 is NGM_FLAG_SKINNED (#159), bit 2 is NGM_FLAG_VOXELS (#165); bit 3 stays unknown.
 	{
 		Ref<NGMFile> file;
 		file.instantiate();

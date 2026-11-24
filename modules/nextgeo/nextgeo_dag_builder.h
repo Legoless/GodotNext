@@ -31,6 +31,7 @@
 #pragma once
 
 #include "nextgeo_bvh.h"
+#include "nextgeo_voxelizer.h"
 
 #include "core/error/error_list.h"
 #include "core/math/color.h"
@@ -154,6 +155,10 @@ struct NextGeoBuildInput {
 	// After simplifying a cluster group, scale its triangles about their centroids so the
 	// group's surface area matches the source group's area, clamped at 1.5x.
 	bool preserve_area = false;
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10).
+	// Voxelize coarse cluster groups past the provisional LOD error threshold into sparse 4^3
+	// bricks packed into each group's `.ngm` page payload.
+	bool voxels = false;
 };
 
 struct NextGeoBuildOutput {
@@ -183,6 +188,11 @@ struct NextGeoBuildOutput {
 	LocalVector<float> skin_bounds; // Per cluster bone: bind-space AABB (min xyz, max xyz) of its vertices with weight > 0.
 	LocalVector<uint8_t> skin_indices; // Per output vertex, `skin_influences` cluster-local bone indices.
 	LocalVector<uint16_t> skin_weights; // Per output vertex, `skin_influences` unorm16 weights.
+
+	// GodotNext: nextgeo_voxels (#165). Sparse 4^3 voxel bricks per coarse group (empty when `voxels` is false).
+	LocalVector<NextGeoGroupVoxels> group_voxels; // Parallel to `groups` when voxels were built.
+	LocalVector<NextGeoVoxelBrick> voxel_bricks;
+	LocalVector<NextGeoVoxelData> voxel_data;
 };
 
 // The raw `.ngm` page header (cluster count, vertex count, triangle count, reserved) and the

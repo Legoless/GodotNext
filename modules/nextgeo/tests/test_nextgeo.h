@@ -34,14 +34,19 @@
 #include "../nextgeo_cut.h"
 #include "../nextgeo_dag_builder.h"
 #include "../nextgeo_import.h"
+#include "../nextgeo_serialize.h"
+#include "../nextgeo_voxelizer.h"
 
+#include "core/io/resource_format_ngm.h"
 #include "core/math/math_funcs.h"
 #include "core/math/random_pcg.h"
 #include "core/math/transform_3d.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "scene/resources/3d/importer_mesh.h"
 #include "scene/resources/3d/virtual_geometry_data.h"
 #include "scene/resources/3d/virtual_geometry_wind.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_voxels.h"
 #include "tests/test_macros.h"
 
 #include <cfloat>
@@ -372,6 +377,7 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 		}
 		uint32_t bytes = 0;
 		uint32_t clusters = 0;
+		uint32_t voxel_bricks_bytes = 0;
 		for (uint32_t g = page.group_offset; g < page.group_offset + page.group_count && g < group_count; g++) {
 			const NextGeoGroup &group = p_dag.groups[g];
 			if (group.page_id != p || (g == page.group_offset && group.cluster_offset != page.cluster_offset)) {
@@ -385,8 +391,12 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 			for (uint32_t i = group.cluster_offset; i < group.cluster_offset + group.cluster_count; i++) {
 				bytes += cluster_page_bytes(p_dag, i);
 			}
+			if (g < p_dag.group_voxels.size() && p_dag.group_voxels[g].brick_count > 0u) {
+				voxel_bricks_bytes += nextgeo_voxel_bricks_bytes(p_dag.voxel_bricks.ptr() + p_dag.group_voxels[g].brick_offset, p_dag.group_voxels[g].brick_count);
+			}
 		}
-		if (nextgeo_page_bytes(bytes) != page.byte_size || clusters != page.cluster_count) {
+		const uint32_t expected_page_bytes = nextgeo_page_bytes(bytes + nextgeo_voxel_page_section_max_bytes(page.group_count, voxel_bricks_bytes));
+		if (expected_page_bytes != page.byte_size || clusters != page.cluster_count) {
 			bad_pages++;
 		}
 		next_group = page.group_offset + page.group_count;
@@ -1432,7 +1442,7 @@ TEST_CASE("[NextGeo][FoliageWind] Offline import wind skeleton generation and #1
 
 		Ref<VirtualGeometryData> vgd;
 		Vector<Vector<uint8_t>> pages;
-		REQUIRE(nextgeo_import_build(imp.ptr(), eligible, false, true, PackedVector3Array(), PackedInt32Array(), vgd, pages) == OK);
+		REQUIRE(nextgeo_import_build(imp.ptr(), eligible, false, true, PackedVector3Array(), PackedInt32Array(), false, vgd, pages) == OK);
 		REQUIRE(vgd.is_valid());
 		CHECK(vgd->get_skin_influences() == VirtualGeometryWind::SKIN_INFLUENCES);
 		Ref<VirtualGeometryWind> wind = vgd->get_wind();
@@ -1536,7 +1546,7 @@ TEST_CASE("[NextGeo][FoliageWind] Offline import wind skeleton generation and #1
 
 		Ref<VirtualGeometryData> vgd;
 		Vector<Vector<uint8_t>> pages;
-		REQUIRE(nextgeo_import_build(imp.ptr(), eligible, false, true, skel_rest, skel_parents, vgd, pages) == OK);
+		REQUIRE(nextgeo_import_build(imp.ptr(), eligible, false, true, skel_rest, skel_parents, false, vgd, pages) == OK);
 		REQUIRE(vgd.is_valid());
 		CHECK(vgd->get_skin_influences() == VirtualGeometryWind::SKIN_INFLUENCES);
 		Ref<VirtualGeometryWind> wind = vgd->get_wind();
@@ -1545,6 +1555,327 @@ TEST_CASE("[NextGeo][FoliageWind] Offline import wind skeleton generation and #1
 		CHECK(wind->get_bone_count() >= 2);
 		CHECK(wind->get_max_sway() > 0.0f);
 	}
+}
+
+TEST_CASE("[NextGeo][Voxels] Analytic primitive voxelization coverage error <= 5% and attribute fidelity (#165)") {
+	auto add_quad = [](LocalVector<NextGeoVoxelTriInput> &r_tris, const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, const Vector3 &p_d, const Vector3 &p_n, const Vector2 &p_uva, const Vector2 &p_uvb, const Vector2 &p_uvc, const Vector2 &p_uvd, uint16_t p_surf) {
+		NextGeoVoxelTriInput t0;
+		t0.p[0] = p_a;
+		t0.p[1] = p_b;
+		t0.p[2] = p_c;
+		t0.n[0] = p_n;
+		t0.n[1] = p_n;
+		t0.n[2] = p_n;
+		t0.uv[0] = p_uva;
+		t0.uv[1] = p_uvb;
+		t0.uv[2] = p_uvc;
+		t0.surface_id = p_surf;
+		r_tris.push_back(t0);
+
+		NextGeoVoxelTriInput t1;
+		t1.p[0] = p_a;
+		t1.p[1] = p_c;
+		t1.p[2] = p_d;
+		t1.n[0] = p_n;
+		t1.n[1] = p_n;
+		t1.n[2] = p_n;
+		t1.uv[0] = p_uva;
+		t1.uv[1] = p_uvc;
+		t1.uv[2] = p_uvd;
+		t1.surface_id = p_surf;
+		r_tris.push_back(t1);
+	};
+
+	// 1. Analytic fractional quad [0, 0.875] x {0.5} x [0, 0.875] at voxel_size = 0.25 (exact area = 0.765625).
+	{
+		LocalVector<NextGeoVoxelTriInput> tris;
+		const float L = 0.875f;
+		add_quad(tris, Vector3(0.0f, 0.5f, 0.0f), Vector3(L, 0.5f, 0.0f), Vector3(L, 0.5f, L), Vector3(0.0f, 0.5f, L), Vector3(0.0f, 1.0f, 0.0f), Vector2(0.0f, 0.0f), Vector2(1.0f, 0.0f), Vector2(1.0f, 1.0f), Vector2(0.0f, 1.0f), 2u);
+
+		LocalVector<NextGeoVoxelBrick> bricks;
+		LocalVector<NextGeoVoxelData> voxels;
+		const float vs = 0.25f;
+		nextgeo_voxelize_triangles(tris, vs, bricks, voxels);
+		REQUIRE_EQ(bricks.size(), 1u);
+		REQUIRE_EQ(voxels.size(), 16u);
+		double cov_area = 0.0;
+		for (uint32_t i = 0; i < voxels.size(); i++) {
+			const uint8_t cov = RendererRD::nextgeo_voxel_unpack_coverage(voxels[i].word1);
+			const uint8_t surf = RendererRD::nextgeo_voxel_unpack_surface_id(voxels[i].word1);
+			const Vector3 n = RendererRD::nextgeo_voxel_decode_oct16(RendererRD::nextgeo_voxel_unpack_oct16(voxels[i].word1));
+			CHECK_EQ(surf, uint8_t(2u));
+			CHECK_GT(n.dot(Vector3(0.0f, 1.0f, 0.0f)), 0.995f);
+			cov_area += (double(cov) / 255.0) * double(vs * vs);
+		}
+		const double exact_area = double(L) * double(L);
+		const double rel_err = std::abs(cov_area - exact_area) / exact_area;
+		CHECK_LE(rel_err, 0.05);
+	}
+
+	// 2. Analytic unit disk (radius = 1.0 in XZ plane, exact area = pi) at voxel_size = 0.0625.
+	{
+		LocalVector<NextGeoVoxelTriInput> tris;
+		const int segs = 128;
+		for (int i = 0; i < segs; i++) {
+			const double a0 = (double(i) / double(segs)) * Math::TAU;
+			const double a1 = (double(i + 1) / double(segs)) * Math::TAU;
+			NextGeoVoxelTriInput t;
+			t.p[0] = Vector3(0.0f, 0.0f, 0.0f);
+			t.p[1] = Vector3(float(std::cos(a0)), 0.0f, float(std::sin(a0)));
+			t.p[2] = Vector3(float(std::cos(a1)), 0.0f, float(std::sin(a1)));
+			t.n[0] = t.n[1] = t.n[2] = Vector3(0.0f, 1.0f, 0.0f);
+			t.uv[0] = Vector2(0.5f, 0.5f);
+			t.uv[1] = Vector2(0.5f + 0.5f * t.p[1].x, 0.5f + 0.5f * t.p[1].z);
+			t.uv[2] = Vector2(0.5f + 0.5f * t.p[2].x, 0.5f + 0.5f * t.p[2].z);
+			t.surface_id = 0u;
+			tris.push_back(t);
+		}
+		LocalVector<NextGeoVoxelBrick> bricks;
+		LocalVector<NextGeoVoxelData> voxels;
+		const float vs = 0.0625f;
+		nextgeo_voxelize_triangles(tris, vs, bricks, voxels);
+		REQUIRE_GT(bricks.size(), 0u);
+		double cov_area = 0.0;
+		for (uint32_t i = 0; i < voxels.size(); i++) {
+			cov_area += (double(RendererRD::nextgeo_voxel_unpack_coverage(voxels[i].word1)) / 255.0) * double(vs * vs);
+		}
+		const double rel_err = std::abs(cov_area - Math::PI) / Math::PI;
+		CHECK_LE(rel_err, 0.05);
+	}
+
+	// 3. Analytic unit box [0, 1]^3 at voxel_size = 0.25: only the 56 boundary voxels are occupied (8 hollow interior cells empty),
+	//    every boundary voxel has full coverage, and orthographic silhouette area matches 1.0 (0% error <= 5%).
+	{
+		LocalVector<NextGeoVoxelTriInput> tris;
+		add_quad(tris, Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, 1, 1), Vector3(0, 1, 1), Vector3(0, 0, 1), Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1), 0u);
+		add_quad(tris, Vector3(1, 0, 0), Vector3(0, 0, 0), Vector3(0, 1, 0), Vector3(1, 1, 0), Vector3(0, 0, -1), Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1), 0u);
+		add_quad(tris, Vector3(1, 0, 1), Vector3(1, 0, 0), Vector3(1, 1, 0), Vector3(1, 1, 1), Vector3(1, 0, 0), Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1), 0u);
+		add_quad(tris, Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 1), Vector3(0, 1, 0), Vector3(-1, 0, 0), Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1), 0u);
+		add_quad(tris, Vector3(0, 1, 1), Vector3(1, 1, 1), Vector3(1, 1, 0), Vector3(0, 1, 0), Vector3(0, 1, 0), Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1), 0u);
+		add_quad(tris, Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1), Vector3(0, -1, 0), Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1), 0u);
+
+		LocalVector<NextGeoVoxelBrick> bricks;
+		LocalVector<NextGeoVoxelData> voxels;
+		const float vs = 0.25f;
+		nextgeo_voxelize_triangles(tris, vs, bricks, voxels);
+		REQUIRE_EQ(bricks.size(), 1u);
+		CHECK_EQ(voxels.size(), 56u);
+		// Interior cells (1..2, 1..2, 1..2) must remain unoccupied.
+		for (uint32_t z = 1u; z <= 2u; z++) {
+			for (uint32_t y = 1u; y <= 2u; y++) {
+				for (uint32_t x = 1u; x <= 2u; x++) {
+					CHECK_FALSE(RendererRD::nextgeo_voxel_is_occupied(bricks[0].occ_lo, bricks[0].occ_hi, x + y * 4u + z * 16u));
+				}
+			}
+		}
+		// Projected XY silhouette area of the voxel brick must match 1.0 within <= 5%.
+		double col_trans[4][4];
+		for (int y = 0; y < 4; y++) {
+			for (int x = 0; x < 4; x++) {
+				col_trans[y][x] = 1.0;
+			}
+		}
+		for (uint32_t v = 0; v < 64u; v++) {
+			if (!RendererRD::nextgeo_voxel_is_occupied(bricks[0].occ_lo, bricks[0].occ_hi, v)) {
+				continue;
+			}
+			const uint32_t rank = RendererRD::nextgeo_voxel_rank(bricks[0].occ_lo, bricks[0].occ_hi, v);
+			const double cov = double(RendererRD::nextgeo_voxel_unpack_coverage(voxels[bricks[0].voxel_offset + rank].word1)) / 255.0;
+			col_trans[(v >> 2u) & 3u][v & 3u] *= (1.0 - cov);
+		}
+		double sil_area = 0.0;
+		for (int y = 0; y < 4; y++) {
+			for (int x = 0; x < 4; x++) {
+				sil_area += (1.0 - col_trans[y][x]) * double(vs * vs);
+			}
+		}
+		CHECK_LE(std::abs(sil_area - 1.0), 0.05);
+	}
+
+	// 4. Analytic unit sphere (radius = 1.0, exact projected silhouette = pi) at voxel_size = 0.0625.
+	{
+		LocalVector<NextGeoVoxelTriInput> tris;
+		const int rings = 24;
+		const int segs = 48;
+		auto sp = [&](int r, int s) -> Vector3 {
+			const double phi = (double(r) / double(rings)) * Math::PI;
+			const double theta = (double(s) / double(segs)) * Math::TAU;
+			return Vector3(float(std::sin(phi) * std::cos(theta)), float(std::cos(phi)), float(std::sin(phi) * std::sin(theta)));
+		};
+		for (int r = 0; r < rings; r++) {
+			for (int s = 0; s < segs; s++) {
+				const Vector3 p00 = sp(r, s);
+				const Vector3 p10 = sp(r, s + 1);
+				const Vector3 p01 = sp(r + 1, s);
+				const Vector3 p11 = sp(r + 1, s + 1);
+				if (r > 0) {
+					NextGeoVoxelTriInput t;
+					t.p[0] = p00;
+					t.p[1] = p01;
+					t.p[2] = p10;
+					t.n[0] = p00;
+					t.n[1] = p01;
+					t.n[2] = p10;
+					t.uv[0] = Vector2(float(s) / segs, float(r) / rings);
+					t.uv[1] = Vector2(float(s) / segs, float(r + 1) / rings);
+					t.uv[2] = Vector2(float(s + 1) / segs, float(r) / rings);
+					t.surface_id = 0u;
+					tris.push_back(t);
+				}
+				if (r + 1 < rings) {
+					NextGeoVoxelTriInput t;
+					t.p[0] = p10;
+					t.p[1] = p01;
+					t.p[2] = p11;
+					t.n[0] = p10;
+					t.n[1] = p01;
+					t.n[2] = p11;
+					t.uv[0] = Vector2(float(s + 1) / segs, float(r) / rings);
+					t.uv[1] = Vector2(float(s) / segs, float(r + 1) / rings);
+					t.uv[2] = Vector2(float(s + 1) / segs, float(r + 1) / rings);
+					t.surface_id = 0u;
+					tris.push_back(t);
+				}
+			}
+		}
+		LocalVector<NextGeoVoxelBrick> bricks;
+		LocalVector<NextGeoVoxelData> voxels;
+		const float vs = 0.0625f;
+		nextgeo_voxelize_triangles(tris, vs, bricks, voxels);
+		REQUIRE_GT(bricks.size(), 0u);
+		HashMap<int64_t, double> xy_trans;
+		for (uint32_t b = 0; b < bricks.size(); b++) {
+			const NextGeoVoxelBrick &br = bricks[b];
+			const int32_t bx0 = int32_t(std::lround((double(br.origin[0]) + 1.0) / double(vs)));
+			const int32_t by0 = int32_t(std::lround((double(br.origin[1]) + 1.0) / double(vs)));
+			for (uint32_t v = 0; v < 64u; v++) {
+				if (!RendererRD::nextgeo_voxel_is_occupied(br.occ_lo, br.occ_hi, v)) {
+					continue;
+				}
+				const uint32_t rank = RendererRD::nextgeo_voxel_rank(br.occ_lo, br.occ_hi, v);
+				const double cov = double(RendererRD::nextgeo_voxel_unpack_coverage(voxels[br.voxel_offset + rank].word1)) / 255.0;
+				const int32_t gx = bx0 + int32_t(v & 3u);
+				const int32_t gy = by0 + int32_t((v >> 2u) & 3u);
+				const int64_t col_key = (int64_t(gx) << 32) | uint32_t(gy);
+				double *tp = xy_trans.getptr(col_key);
+				if (tp == nullptr) {
+					xy_trans[col_key] = 1.0 - cov;
+				} else {
+					*tp *= (1.0 - cov);
+				}
+			}
+		}
+		double sil_area = 0.0;
+		for (const KeyValue<int64_t, double> &E : xy_trans) {
+			sil_area += (1.0 - E.value) * double(vs * vs);
+		}
+		const double rel_err = std::abs(sil_area - Math::PI) / Math::PI;
+		CHECK_LE(rel_err, 0.05);
+	}
+}
+
+TEST_CASE("[NextGeo][Voxels] Offline DAG voxelization, .ngm page payload round-trip, and backward compatibility (#165)") {
+	// Multi-leaf foliage canopy large enough to produce multiple hierarchy levels & coarse groups.
+	NextGeoSurfaceInput foliage;
+	RandomPCG rng(TEST_SEED + 165);
+	for (uint32_t l = 0; l < 240; l++) {
+		const float cx = float(rng.randd() * 3.0 - 1.5);
+		const float cy = float(rng.randd() * 3.0 - 1.5);
+		const float cz = float(rng.randd() * 3.0 - 1.5);
+		const float half = 0.12f;
+		const uint32_t base_v = foliage.positions.size();
+		for (int iy = 0; iy <= 2; iy++) {
+			for (int ix = 0; ix <= 2; ix++) {
+				const float u = float(ix) * 0.5f;
+				const float v = float(iy) * 0.5f;
+				foliage.positions.push_back(Vector3(cx + (u - 0.5f) * 2.0f * half, cy + (v - 0.5f) * 2.0f * half, cz));
+				foliage.normals.push_back(Vector3(0.0f, 0.0f, 1.0f));
+				foliage.tangents.push_back(1.0f);
+				foliage.tangents.push_back(0.0f);
+				foliage.tangents.push_back(0.0f);
+				foliage.tangents.push_back(1.0f);
+				foliage.uv0.push_back(Vector2(u, v));
+			}
+		}
+		for (int iy = 0; iy < 2; iy++) {
+			for (int ix = 0; ix < 2; ix++) {
+				const uint32_t v00 = base_v + iy * 3 + ix;
+				foliage.indices.push_back(v00);
+				foliage.indices.push_back(v00 + 1);
+				foliage.indices.push_back(v00 + 4);
+				foliage.indices.push_back(v00);
+				foliage.indices.push_back(v00 + 4);
+				foliage.indices.push_back(v00 + 3);
+			}
+		}
+	}
+
+	NextGeoBuildInput in_plain;
+	in_plain.surfaces.push_back(foliage);
+	in_plain.page_size = TEST_PAGE_SIZE;
+	in_plain.voxels = false;
+	NextGeoBuildOutput dag_plain;
+	REQUIRE(nextgeo_build_dag(in_plain, dag_plain) == OK);
+	CHECK_EQ(dag_plain.voxel_bricks.size(), 0u);
+	CHECK_EQ(dag_plain.voxel_data.size(), 0u);
+
+	Vector<PackedByteArray> plain_pages;
+	nextgeo_write_pages(dag_plain, plain_pages);
+	REQUIRE_EQ(plain_pages.size(), int(dag_plain.pages.size()));
+	for (int p = 0; p < plain_pages.size(); p++) {
+		uint32_t vox_off = 0u;
+		uint32_t vox_bytes = 0u;
+		CHECK_FALSE(ngm_page_voxel_section(plain_pages[p].ptr(), plain_pages[p].size(), vox_off, vox_bytes));
+	}
+	NGMHeader hdr_plain;
+	CHECK_EQ(nextgeo_fill_ngm_header(dag_plain, plain_pages, hdr_plain), OK);
+	CHECK_EQ(hdr_plain.flags & NGM_FLAG_VOXELS, 0u);
+
+	NextGeoBuildInput in_vox = in_plain;
+	in_vox.voxels = true;
+	NextGeoBuildOutput dag_vox_a;
+	NextGeoBuildOutput dag_vox_b;
+	REQUIRE(nextgeo_build_dag(in_vox, dag_vox_a) == OK);
+	REQUIRE(nextgeo_build_dag(in_vox, dag_vox_b) == OK);
+	CHECK_GT(dag_vox_a.voxel_bricks.size(), 0u);
+	CHECK_GT(dag_vox_a.voxel_data.size(), 0u);
+	CHECK_EQ(dag_vox_a.voxel_bricks.size(), dag_vox_b.voxel_bricks.size());
+	CHECK_EQ(dag_vox_a.voxel_data.size(), dag_vox_b.voxel_data.size());
+	check_dag_invariants(in_vox, dag_vox_a);
+
+	Vector<PackedByteArray> vox_pages_a;
+	Vector<PackedByteArray> vox_pages_b;
+	nextgeo_write_pages(dag_vox_a, vox_pages_a);
+	nextgeo_write_pages(dag_vox_b, vox_pages_b);
+	REQUIRE_EQ(vox_pages_a.size(), vox_pages_b.size());
+
+	NGMHeader hdr_vox;
+	CHECK_EQ(nextgeo_fill_ngm_header(dag_vox_a, vox_pages_a, hdr_vox), OK);
+	CHECK_NE(hdr_vox.flags & NGM_FLAG_VOXELS, 0u);
+
+	uint32_t pages_with_voxels = 0u;
+	uint32_t parsed_bricks = 0u;
+	for (int p = 0; p < vox_pages_a.size(); p++) {
+		CHECK_EQ(vox_pages_a[p], vox_pages_b[p]); // Deterministic byte-identical pages.
+		CHECK_LE(uint32_t(vox_pages_a[p].size()), TEST_PAGE_SIZE); // Fits inside #78 page budget.
+		uint32_t vox_off = 0u;
+		uint32_t vox_bytes = 0u;
+		if (ngm_page_voxel_section(vox_pages_a[p].ptr(), vox_pages_a[p].size(), vox_off, vox_bytes)) {
+			pages_with_voxels++;
+			const uint8_t *sec = vox_pages_a[p].ptr() + vox_off;
+			uint32_t magic = 0, first_g = 0, g_count = 0, b_count = 0;
+			memcpy(&magic, sec + 0, 4);
+			memcpy(&first_g, sec + 4, 4);
+			memcpy(&g_count, sec + 8, 4);
+			memcpy(&b_count, sec + 12, 4);
+			CHECK_EQ(magic, NGM_VOXEL_SECTION_MAGIC);
+			CHECK_GT(g_count, 0u);
+			CHECK_GT(b_count, 0u);
+			parsed_bricks += b_count;
+		}
+	}
+	CHECK_GT(pages_with_voxels, 0u);
+	CHECK_EQ(parsed_bricks, dag_vox_a.voxel_bricks.size());
 }
 
 } // namespace TestNextGeo

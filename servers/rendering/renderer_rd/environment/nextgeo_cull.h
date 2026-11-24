@@ -56,6 +56,8 @@ enum NextGeoCutFlags : uint32_t {
 	NEXTGEO_CUT_FLAG_PROGRAMMABLE_BINS = 1u << 6,
 	// GodotNext: nextgeo_tessellation (#163). Route displaced bins into runtime tessellation dicing.
 	NEXTGEO_CUT_FLAG_TESSELLATION = 1u << 7,
+	// GodotNext: nextgeo_voxels (#165). Swap coarse voxelized groups for sparse 4^3 bricks below V px.
+	NEXTGEO_CUT_FLAG_VOXELS = 1u << 8,
 };
 
 // Projected error in pixels for a mesh-space sphere (plan §7.3 step 3).

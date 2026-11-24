@@ -49,5 +49,6 @@ class VirtualGeometryData;
 // When `p_wind` is true (#152), builds a procedural VirtualGeometryWind skeleton
 // (1 trunk + <= 8 branches) either from `p_wind_bone_rest_positions`/`p_wind_bone_parents`
 // or from bind-pose geometry, populates #159 4-influence skinning weights, and attaches
-// the wind resource to `r_vgd`.
-Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+// the wind resource to `r_vgd`. When `p_voxels` is true (#165), voxelizes coarse groups
+// into sparse 4^3 bricks stored in each group's `.ngm` page payload.
+Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, bool p_voxels, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);

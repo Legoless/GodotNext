@@ -23,6 +23,7 @@
 #include "nextgeo_records_inc.glsl"
 #include "shading_bins_inc.glsl"
 #include "tessellation_inc.glsl"
+#include "voxel_inc.glsl"
 // clang-format on
 
 #if defined(MODE_CLEAR) || defined(MODE_PREFIX)
@@ -95,6 +96,17 @@ layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoDicedPatch
 }
 diced_patches;
 
+// GodotNext: nextgeo_voxels (#165). Page arena (for per-voxel surface_id) and visible voxel bricks (dummy buffers when off).
+layout(set = 0, binding = 11, std430) buffer restrict readonly Pages {
+	uint data[];
+}
+pages;
+
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoVisibleVoxelBricks {
+	uvec4 data[];
+}
+visible_voxel_bricks;
+
 #if defined(MODE_COUNT) || defined(MODE_SCATTER)
 // The pixel's shading bin, or NEXTGEO_SHADING_BIN_NONE. The visibility-ID decode of resolve_classify.glsl.
 uint pixel_bin(ivec2 p_px) {
@@ -109,6 +121,33 @@ uint pixel_bin(ivec2 p_px) {
 		return NEXTGEO_SHADING_BIN_NONE;
 	}
 	uint vis_cluster = vis_id >> 7u;
+	if (nextgeo_vis_is_voxel(vis_cluster)) {
+		uint brick_idx = nextgeo_vis_voxel_brick_index(vis_cluster);
+		uint voxel_idx = vis_id & 0x3Fu;
+		uvec4 brick_entry = visible_voxel_bricks.data[brick_idx];
+		NextGeoInstanceRecord record = records.data[brick_entry.x];
+		if ((record.flags & NEXTGEO_RECORD_VALID) == 0u) {
+			return NEXTGEO_SHADING_BIN_NONE;
+		}
+		uint brick_word = brick_entry.y;
+		uint occ_lo = pages.data[brick_word + 4u];
+		uint occ_hi = pages.data[brick_word + 5u];
+		if (!nextgeo_voxel_is_occupied(occ_lo, occ_hi, voxel_idx)) {
+			return NEXTGEO_SHADING_BIN_NONE;
+		}
+		uint rank = nextgeo_voxel_rank(occ_lo, occ_hi, voxel_idx);
+		uint w1 = pages.data[brick_word + NEXTGEO_VOXEL_BRICK_HEADER_WORDS + rank * NEXTGEO_VOXEL_DATA_WORDS + 1u];
+		uint surface_id = (w1 >> 24u) & 0xFFu;
+		if (surface_id >= 32u || (record.surface_mask & (1u << surface_id)) == 0u) {
+			return NEXTGEO_SHADING_BIN_NONE;
+		}
+		uint bucket = bucket_table.data[record.bucket_base + surface_id] & NEXTGEO_BUCKET_ID_MASK;
+		if (bucket >= params.bin_count) {
+			return NEXTGEO_SHADING_BIN_NONE;
+		}
+		uint bin = bucket_bins.data[bucket];
+		return bin < params.bin_count ? bin : NEXTGEO_SHADING_BIN_NONE;
+	}
 	if (nextgeo_vis_is_patch(vis_cluster)) {
 		vis_cluster = diced_patches.data[nextgeo_vis_patch_index(vis_cluster)].cluster_slot;
 	} else if (!nextgeo_vis_is_normal(vis_cluster)) {

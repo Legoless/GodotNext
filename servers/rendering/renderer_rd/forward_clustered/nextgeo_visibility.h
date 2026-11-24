@@ -63,12 +63,17 @@ static constexpr uint32_t NEXTGEO_VIS_PATCH_INDEX_MASK = 0x003FFFFFu;
 static constexpr uint32_t NEXTGEO_VIS_PATCH_MAX_COUNT = NEXTGEO_VIS_PATCH_INDEX_MASK + 1u; // 4,194,304
 static constexpr uint32_t NEXTGEO_VIS_VOXEL_BASE = 0x01C00000u;
 static constexpr uint32_t NEXTGEO_VIS_VOXEL_MASK = 0x01C00000u;
+static constexpr uint32_t NEXTGEO_VIS_VOXEL_INDEX_MASK = 0x003FFFFFu;
+// Keep cluster 0x01FFFFFFu unused so background sentinel 0xFFFFFFFFu is unreachable.
+static constexpr uint32_t NEXTGEO_VIS_VOXEL_MAX_COUNT = 0x003FFFFFu; // 4,194,303
+static constexpr uint32_t NEXTGEO_VIS_VOXEL_ELEMENT_MASK = 0x3Fu; // 6-bit voxel index (0..63)
 
 static_assert(NEXTGEO_VIS_NORMAL_MAX + 1u == NEXTGEO_VIS_PATCH_BASE, "Normal cluster range must end strictly before NEXTGEO_VIS_PATCH_BASE.");
 static_assert((NEXTGEO_VIS_PATCH_BASE & NEXTGEO_VIS_PATCH_MASK) == NEXTGEO_VIS_PATCH_BASE, "Patch base must match patch mask.");
 static_assert((NEXTGEO_VIS_VOXEL_BASE & NEXTGEO_VIS_VOXEL_MASK) == NEXTGEO_VIS_VOXEL_BASE, "Voxel base must match voxel mask.");
 static_assert((NEXTGEO_VIS_PATCH_BASE + NEXTGEO_VIS_PATCH_MAX_COUNT) == NEXTGEO_VIS_VOXEL_BASE, "Patch range must be contiguous and disjoint from voxel range.");
 static_assert((NEXTGEO_VIS_PATCH_BASE & NEXTGEO_VIS_VOXEL_MASK) != NEXTGEO_VIS_VOXEL_BASE, "Patch range must not collide with voxel range.");
+static_assert((NEXTGEO_VIS_VOXEL_BASE + NEXTGEO_VIS_VOXEL_MAX_COUNT) == NEXTGEO_VISIBILITY_MAX_CLUSTERS, "Voxel max count must stop strictly before 0x01FFFFFFu.");
 
 struct NextGeoDrawIndirectCommand {
 	uint32_t vertex_count = NEXTGEO_RASTER_VERTEX_COUNT;
@@ -127,6 +132,21 @@ inline uint32_t nextgeo_pack_patch_visibility_id(uint32_t p_patch_index, uint32_
 
 inline uint32_t nextgeo_unpack_patch_index(uint32_t p_vis_cluster) {
 	return p_vis_cluster & NEXTGEO_VIS_PATCH_INDEX_MASK;
+}
+
+inline uint32_t nextgeo_pack_voxel_visibility_id(uint32_t p_brick_index, uint32_t p_voxel_index) {
+	if (p_brick_index >= NEXTGEO_VIS_VOXEL_MAX_COUNT || p_voxel_index >= 64u) {
+		return NEXTGEO_VISIBILITY_BACKGROUND;
+	}
+	return ((NEXTGEO_VIS_VOXEL_BASE | (p_brick_index & NEXTGEO_VIS_VOXEL_INDEX_MASK)) << NEXTGEO_VISIBILITY_TRIANGLE_BITS) | (p_voxel_index & NEXTGEO_VIS_VOXEL_ELEMENT_MASK);
+}
+
+inline uint32_t nextgeo_unpack_voxel_brick_index(uint32_t p_vis_cluster) {
+	return p_vis_cluster & NEXTGEO_VIS_VOXEL_INDEX_MASK;
+}
+
+inline uint32_t nextgeo_unpack_voxel_index(uint32_t p_visibility_id) {
+	return p_visibility_id & NEXTGEO_VIS_VOXEL_ELEMENT_MASK;
 }
 
 // NextGI always writes prepass velocity (for its own temporal passes); NextGeo

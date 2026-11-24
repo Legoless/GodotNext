@@ -145,11 +145,12 @@ TEST_CASE("[NextGeo][RasterBins] Only a raster program moves a surface out of th
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_ASSEMBLY, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_FIXED));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_ASSEMBLY | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_ASSEMBLY | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
-	// Features later issues add have no entry yet: the surface keeps its legacy route.
-	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_VOXEL) }) {
-		CHECK_EQ(VMS::resolve_raster_bin(feature, VMS::RASTER_PASS_VISIBILITY), -1);
-		CHECK_EQ(VMS::resolve_raster_bin(feature | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), -1);
-	}
+	// GodotNext: nextgeo_voxels (#165). VOXEL resolves to FIXED in both visibility and VSM,
+	// and composes with programmable features like MASKED.
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_VOXEL, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_FIXED));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_VOXEL, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_FIXED));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_VOXEL | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_VOXEL | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	CHECK_EQ(VMS::resolve_raster_bin(1u << 20u, VMS::RASTER_PASS_VISIBILITY), -1);
 	// Each visibility entry has a VSM entry with the same bin kind.
 	for (uint32_t i = 0; i < VMS::RASTER_BIN_TABLE_SIZE; i++) {

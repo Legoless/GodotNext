@@ -2437,6 +2437,8 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 		desc.rt_proxy_clusters = virtual_geometry->get_rt_proxy_clusters();
 		// GodotNext: nextgeo_skinned_runtime (#160)
 		desc.skin_influences = uint32_t(MAX(virtual_geometry->get_skin_influences(), 0));
+		// GodotNext: nextgeo_voxels (#165)
+		desc.voxel_brick_count = uint32_t(MAX(virtual_geometry->get_voxel_brick_count(), int64_t(0)));
 		// GodotNext: nextgeo_foliage_instancing (#151). Mirror Nanite Assembly hierarchy (<= 2 levels).
 		Ref<VirtualGeometryAssembly> asm_res = virtual_geometry->get_assembly();
 		if (asm_res.is_valid()) {

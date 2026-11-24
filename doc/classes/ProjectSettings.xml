@@ -3678,6 +3678,9 @@
 		<member name="rendering/nextgeo/experimental/tessellation" type="bool" setter="" getter="" default="false" experimental="Experimental Nanite runtime displacement tessellation">
 			Enable experimental runtime displacement tessellation for NextGeo virtual geometry. Displaced materials (spatial shaders with a [code]displacement()[/code] function or [BaseMaterial3D] with [constant BaseMaterial3D.HEIGHTMAP_MODE_DISPLACEMENT] and positive [member Material.displacement_magnitude]) are diced at [member rendering/nextgeo/tessellation/dicing_rate] pixels per edge with crack-free canonical edge factors, rasterized into the 64-bit visibility buffer via software rasterization and a bounded hardware stream, and resolved deterministically during shading. When disabled, zero dicing buffers are allocated and zero dicing passes run.
 		</member>
+		<member name="rendering/nextgeo/experimental/voxels" type="bool" setter="" getter="" default="false" experimental="Nanite Voxels are experimental and off by default.">
+			Enable experimental sparse-brick voxel LODs for distant virtual geometry built with [member ResourceImporterScene.virtual_geometry/voxels] or [member ResourceImporterOBJ.virtual_geometry/voxels]. When enabled, eligible distant cluster groups whose sparse 4x4x4 voxel bricks project below the provisional screen-size threshold swap to voxel bricks, software-splat into the 64-bit visibility buffer and dirty virtual shadow map pages, and resolve through shading bins. When disabled, zero voxel raster buffers are allocated and zero voxel dispatches run.
+		</member>
 		<member name="rendering/nextgeo/hiz_debug" type="bool" setter="" getter="" default="false">
 			Read the previous and current Hi-Z chains back with the cut debug stats and report their center depth. It is a debug-only readback and stalls the GPU.
 		</member>

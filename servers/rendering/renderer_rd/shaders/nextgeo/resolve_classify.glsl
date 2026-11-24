@@ -12,6 +12,7 @@
 // clang-format off
 #include "nextgeo_records_inc.glsl"
 #include "tessellation_inc.glsl"
+#include "voxel_inc.glsl"
 // clang-format on
 
 #ifdef INIT_INDIRECT
@@ -70,6 +71,17 @@ layout(set = 0, binding = 8, std430) buffer restrict readonly NextGeoDicedPatche
 }
 diced_patches;
 
+// GodotNext: nextgeo_voxels (#165). Page arena (for per-voxel surface_id) and visible voxel bricks (dummy buffers when off).
+layout(set = 0, binding = 9, std430) buffer restrict readonly Pages {
+	uint data[];
+}
+pages;
+
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoVisibleVoxelBricks {
+	uvec4 data[];
+}
+visible_voxel_bricks;
+
 #ifdef INIT_INDIRECT
 void main() {
 	uint slot = gl_GlobalInvocationID.x;
@@ -91,26 +103,49 @@ void main() {
 		uint vis_id = texelFetch(visibility_tex, px, 0).r;
 		if (vis_id != 0xFFFFFFFFu) {
 			uint vis_cluster = vis_id >> 7u;
-			bool valid_vis = true;
-			if (nextgeo_vis_is_patch(vis_cluster)) {
-				vis_cluster = diced_patches.data[nextgeo_vis_patch_index(vis_cluster)].cluster_slot;
-			} else if (!nextgeo_vis_is_normal(vis_cluster)) {
-				valid_vis = false;
-			}
-			if (valid_vis) {
-				uvec2 entry = visible_clusters.data[vis_cluster];
-				NextGeoInstanceRecord record = records.data[entry.x];
+			if (nextgeo_vis_is_voxel(vis_cluster)) {
+				uint brick_idx = nextgeo_vis_voxel_brick_index(vis_cluster);
+				uint voxel_idx = vis_id & 0x3Fu;
+				uvec4 brick_entry = visible_voxel_bricks.data[brick_idx];
+				NextGeoInstanceRecord record = records.data[brick_entry.x];
 				if ((record.flags & NEXTGEO_RECORD_VALID) != 0u) {
-					NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
-					if (mesh.page_count > 0u && entry.y >= mesh.cluster_offset) {
-						uint local_cluster = entry.y - mesh.cluster_offset;
-						if (local_cluster < mesh.cluster_count) {
-							uvec4 desc = cluster_table.data[mesh.page_table_offset + local_cluster];
-							uint surface_id = desc.w & 0xFFFFu;
-							if (surface_id < 32u && (record.surface_mask & (1u << surface_id)) != 0u) {
-								uint candidate = bucket_table.data[record.bucket_base + surface_id] & NEXTGEO_BUCKET_ID_MASK;
-								if (candidate < push_params.bucket_count) {
-									my_bucket = candidate;
+					uint brick_word = brick_entry.y;
+					uint occ_lo = pages.data[brick_word + 4u];
+					uint occ_hi = pages.data[brick_word + 5u];
+					if (nextgeo_voxel_is_occupied(occ_lo, occ_hi, voxel_idx)) {
+						uint rank = nextgeo_voxel_rank(occ_lo, occ_hi, voxel_idx);
+						uint w1 = pages.data[brick_word + NEXTGEO_VOXEL_BRICK_HEADER_WORDS + rank * NEXTGEO_VOXEL_DATA_WORDS + 1u];
+						uint surface_id = (w1 >> 24u) & 0xFFu;
+						if (surface_id < 32u && (record.surface_mask & (1u << surface_id)) != 0u) {
+							uint candidate = bucket_table.data[record.bucket_base + surface_id] & NEXTGEO_BUCKET_ID_MASK;
+							if (candidate < push_params.bucket_count) {
+								my_bucket = candidate;
+							}
+						}
+					}
+				}
+			} else {
+				bool valid_vis = true;
+				if (nextgeo_vis_is_patch(vis_cluster)) {
+					vis_cluster = diced_patches.data[nextgeo_vis_patch_index(vis_cluster)].cluster_slot;
+				} else if (!nextgeo_vis_is_normal(vis_cluster)) {
+					valid_vis = false;
+				}
+				if (valid_vis) {
+					uvec2 entry = visible_clusters.data[vis_cluster];
+					NextGeoInstanceRecord record = records.data[entry.x];
+					if ((record.flags & NEXTGEO_RECORD_VALID) != 0u) {
+						NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+						if (mesh.page_count > 0u && entry.y >= mesh.cluster_offset) {
+							uint local_cluster = entry.y - mesh.cluster_offset;
+							if (local_cluster < mesh.cluster_count) {
+								uvec4 desc = cluster_table.data[mesh.page_table_offset + local_cluster];
+								uint surface_id = desc.w & 0xFFFFu;
+								if (surface_id < 32u && (record.surface_mask & (1u << surface_id)) != 0u) {
+									uint candidate = bucket_table.data[record.bucket_base + surface_id] & NEXTGEO_BUCKET_ID_MASK;
+									if (candidate < push_params.bucket_count) {
+										my_bucket = candidate;
+									}
 								}
 							}
 						}

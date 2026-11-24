@@ -60,6 +60,8 @@ struct NextGeoDebugSceneParams {
 	uint32_t bucket_table_words = 0;
 	// GodotNext: nextgeo_tessellation (#163). Diced patch records (invalid when tessellation is off).
 	RID diced_patches_buf;
+	// GodotNext: nextgeo_voxels (#165). Visible voxel brick records (invalid when voxels are off).
+	RID voxel_bricks_buf;
 };
 
 // GodotNext: nextgeo_exclusive_dispatch (#79, plan §9, §12, §13.4 Q5 & Q14).

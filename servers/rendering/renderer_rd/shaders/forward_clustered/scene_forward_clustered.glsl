@@ -4374,417 +4374,562 @@ void main() {
 
 	uint _ng_vis_cluster = _ng_vis_id >> 7u;
 	uint _ng_tri_idx = _ng_vis_id & 0x7Fu;
-	// GodotNext: nextgeo_tessellation (#163). Decode reserved 25-bit visibility cluster partition:
-	// normal clusters [0..0x017FFFFF], diced patches [0x01800000..0x01BFFFFF], voxels [0x01C00000..0x01FFFFFF].
+	// GodotNext: nextgeo_tessellation (#163) & nextgeo_voxels (#165). Decode reserved 25-bit visibility
+	// cluster partition: normal [0..0x017FFFFF], diced patches [0x01800000..0x01BFFFFF], voxels [0x01C00000..0x01FFFFFF].
+	bool _ng_is_voxel = nextgeo_vis_is_voxel(_ng_vis_cluster);
 	bool _ng_is_patch = nextgeo_vis_is_patch(_ng_vis_cluster);
-	uint _ng_cluster_slot = _ng_vis_cluster;
-	uint _ng_src_tri_idx = _ng_tri_idx;
-	NextGeoDicedPatchRecord _ng_patch;
-	if (_ng_is_patch) {
-		_ng_patch = nextgeo_diced_patches.data[nextgeo_vis_patch_index(_ng_vis_cluster)];
-		if (_ng_tri_idx >= (_ng_patch.tri_and_sub >> 16u)) {
+	vec3 _ng_bary = vec3(1.0, 0.0, 0.0);
+	vec3 _ng_dbary_dx = vec3(0.0);
+	vec3 _ng_dbary_dy = vec3(0.0);
+
+	if (_ng_is_voxel) {
+		uint _ng_brick_idx = nextgeo_vis_voxel_brick_index(_ng_vis_cluster);
+		uint _ng_voxel_idx = _ng_vis_id & 0x3Fu;
+		uvec4 _ng_brick_entry = nextgeo_visible_voxel_bricks.data[_ng_brick_idx];
+		NextGeoInstanceRecord _ng_record = nextgeo_records.data[_ng_brick_entry.x];
+		if ((_ng_record.flags & NEXTGEO_RECORD_VALID) == 0u) {
 			NEXTGEO_RESOLVE_DISCARD;
 		}
-		_ng_cluster_slot = _ng_patch.cluster_slot;
-		_ng_src_tri_idx = _ng_patch.tri_and_sub & 0xFFu;
-	} else if (!nextgeo_vis_is_normal(_ng_vis_cluster)) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-	uvec2 _ng_entry = nextgeo_visible_clusters.data[_ng_cluster_slot];
-	NextGeoInstanceRecord _ng_record = nextgeo_records.data[_ng_entry.x];
-	if ((_ng_record.flags & NEXTGEO_RECORD_VALID) == 0u) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-
-	NextGeoMeshRecord _ng_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
-	if (_ng_mesh.page_count == 0u || _ng_entry.y < _ng_mesh.cluster_offset) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-	uint _ng_local_cluster = _ng_entry.y - _ng_mesh.cluster_offset;
-	if (_ng_local_cluster >= _ng_mesh.cluster_count) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-
-	uvec4 _ng_desc = nextgeo_cluster_table.data[_ng_mesh.page_table_offset + _ng_local_cluster];
-	uint _ng_surface_id = _ng_desc.w & 0xFFFFu;
-	if (_ng_surface_id >= 32u || (_ng_record.surface_mask & (1u << _ng_surface_id)) == 0u) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-
-	uint _ng_bucket_entry = nextgeo_bucket_table.data[_ng_record.bucket_base + _ng_surface_id];
-	if ((_ng_bucket_entry & NEXTGEO_BUCKET_ID_MASK) != resolve_push.bucket_id) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-
-	uint _ng_stride = _ng_desc.z & 0xFFu;
-	uint _ng_vert_count = (_ng_desc.z >> 8u) & 0xFFu;
-	uint _ng_tri_count = (_ng_desc.z >> 16u) & 0xFFu;
-	uint _ng_layout = (_ng_desc.z >> 24u) & 0xFFu;
-	if (_ng_src_tri_idx >= _ng_tri_count || _ng_stride < 3u || _ng_vert_count == 0u) {
-		NEXTGEO_RESOLVE_DISCARD;
-	}
-	if (_ng_layout == 0u) {
-		if (_ng_stride == 3u) {
-			_ng_layout = 0x01u;
-		} else if (_ng_stride == 5u) {
-			_ng_layout = 0x09u;
-		} else if (_ng_stride == 6u) {
-			_ng_layout = 0x03u;
-		} else if (_ng_stride == 7u) {
-			_ng_layout = 0x21u;
-		} else if (_ng_stride == 8u) {
-			_ng_layout = 0x0Bu;
-		} else if (_ng_stride == 10u) {
-			_ng_layout = 0x07u;
-		} else if (_ng_stride == 12u) {
-			_ng_layout = 0x0Fu;
-		} else if (_ng_stride == 14u) {
-			_ng_layout = 0x1Fu;
-		} else if (_ng_stride == 16u) {
-			_ng_layout = 0x2Fu;
-		} else if (_ng_stride >= 18u) {
-			_ng_layout = 0x3Fu;
-		}
-	}
-
-	_ng_record_index = _ng_entry.x;
-	NextGeoInstanceAttributes _ng_attr = nextgeo_instance_attrs.data[_ng_entry.x];
-	instance_index_interp = _ng_record.bucket_base >> 5u;
-	_ng_instance_id = int(_ng_attr.meta.y);
-	_ng_instance_color = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_COLOR) != 0u) ? _ng_attr.color : vec4(1.0);
-	_ng_instance_custom = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM) != 0u) ? _ng_attr.custom_data : vec4(0.0);
-	_ng_non_uniform_scale = (_ng_record.flags & NEXTGEO_RECORD_NON_UNIFORM_SCALE) != 0u;
-	// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Past
-	// programmable_raster_distance or vertex_offset_disable_distance, clusters were demoted to FIXED;
-	// skip masked discards or WPO in resolve so distant surfaces stay consistent with raster.
-	_ng_skip_masked_discard = false;
-	_ng_skip_vertex_offset = false;
-	float _ng_wpo_disable_dist = uintBitsToFloat(_ng_record.page_table_offset);
-	if (_ng_record.prev_world_aabb_min.w > 0.0 || _ng_wpo_disable_dist > 0.0) {
-		vec3 _ng_cam_pos = vec3(
-				scene_data_block.data.inv_view_matrix[0].w,
-				scene_data_block.data.inv_view_matrix[1].w,
-				scene_data_block.data.inv_view_matrix[2].w);
-		vec3 _ng_closest = clamp(_ng_cam_pos, _ng_record.world_aabb_min.xyz, _ng_record.world_aabb_max.xyz);
-		float _ng_dist = length(_ng_cam_pos - _ng_closest);
-		if (_ng_record.prev_world_aabb_min.w > 0.0 && _ng_dist > _ng_record.prev_world_aabb_min.w) {
-			_ng_skip_masked_discard = true;
-		}
-		if (_ng_wpo_disable_dist > 0.0 && _ng_dist > _ng_wpo_disable_dist) {
-			_ng_skip_vertex_offset = true;
-		}
-	}
-	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
-	_ng_model_xform = _ng_cur_xform;
-#ifdef MOTION_VECTORS
-	mat3x4 _ng_prev_xform = mat3x4(_ng_record.prev_transform[0], _ng_record.prev_transform[1], _ng_record.prev_transform[2]);
-	vec4 _ng_prev_clip_c[3];
-#endif
-	vec4 _ng_clip_c[3];
-	vec3 _ng_vtx_c[3];
-	vec3 _ng_nrm_c[3];
-	vec3 _ng_tan_c[3];
-	vec3 _ng_bin_c[3];
-	vec2 _ng_uv_c[3];
-	vec2 _ng_uv2_c[3];
-	vec4 _ng_col_c[3];
-	bool _ng_is_skinned = (_ng_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
-	bool _ng_is_wind = !_ng_is_skinned && nextgeo_wind_mesh_active(_ng_record.virtual_mesh);
-	uint _ng_cluster_table_idx = _ng_mesh.page_table_offset + _ng_local_cluster;
-
-	vec3 _ng_s_pos[3];
-	vec3 _ng_s_nrm[3];
-	vec3 _ng_s_tan[3];
-	vec3 _ng_s_bin[3];
-	vec2 _ng_s_uv[3];
-	vec2 _ng_s_uv2[3];
-	vec4 _ng_s_col[3];
-	uint _ng_s_vidx[3];
-	float _ng_s_tan_sign[3];
-
-	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
-		uint _ng_idx_byte = _ng_desc.y + _ng_src_tri_idx * 3u + _ng_corner;
-		uint _ng_v_idx = (nextgeo_pages.data[_ng_idx_byte >> 2u] >> ((_ng_idx_byte & 3u) * 8u)) & 0xFFu;
-		if (_ng_v_idx >= _ng_vert_count) {
+		uint _ng_brick_word = _ng_brick_entry.y;
+		uint _ng_occ_lo = nextgeo_pages.data[_ng_brick_word + 4u];
+		uint _ng_occ_hi = nextgeo_pages.data[_ng_brick_word + 5u];
+		if (!nextgeo_voxel_is_occupied(_ng_occ_lo, _ng_occ_hi, _ng_voxel_idx)) {
 			NEXTGEO_RESOLVE_DISCARD;
 		}
-		_ng_s_vidx[_ng_corner] = _ng_v_idx;
-		uint _ng_w = _ng_desc.x + _ng_v_idx * _ng_stride;
-
-		vec3 _ng_c_pos = vec3(
-				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
-				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
-				uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
-		_ng_w += 3u;
-
-		vec3 _ng_c_nrm = vec3(0.0, 0.0, 1.0);
-		if ((_ng_layout & 0x02u) != 0u) {
-			_ng_c_nrm = vec3(
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
-			_ng_w += 3u;
+		uint _ng_rank = nextgeo_voxel_rank(_ng_occ_lo, _ng_occ_hi, _ng_voxel_idx);
+		uint _ng_vword = _ng_brick_word + NEXTGEO_VOXEL_BRICK_HEADER_WORDS + _ng_rank * NEXTGEO_VOXEL_DATA_WORDS;
+		uint _ng_w0 = nextgeo_pages.data[_ng_vword + 0u];
+		uint _ng_w1 = nextgeo_pages.data[_ng_vword + 1u];
+		uint _ng_surface_id = (_ng_w1 >> 24u) & 0xFFu;
+		if (_ng_surface_id >= 32u || (_ng_record.surface_mask & (1u << _ng_surface_id)) == 0u) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
+		uint _ng_bucket_entry = nextgeo_bucket_table.data[_ng_record.bucket_base + _ng_surface_id];
+		if ((_ng_bucket_entry & NEXTGEO_BUCKET_ID_MASK) != resolve_push.bucket_id) {
+			NEXTGEO_RESOLVE_DISCARD;
 		}
 
-		vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
-		vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
-		float _ng_tan_sign = 1.0;
-		if ((_ng_layout & 0x04u) != 0u) {
-			vec4 _ng_tan4 = vec4(
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
-			_ng_w += 4u;
-			_ng_c_tan = _ng_tan4.xyz;
-			_ng_tan_sign = _ng_tan4.w;
-			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
-		}
+		vec3 _ng_origin = vec3(
+				uintBitsToFloat(nextgeo_pages.data[_ng_brick_word + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_brick_word + 1u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_brick_word + 2u]));
+		float _ng_voxel_size = uintBitsToFloat(nextgeo_pages.data[_ng_brick_word + 3u]);
+		float _ng_uv_footprint = uintBitsToFloat(nextgeo_pages.data[_ng_brick_word + 7u]);
+		uvec3 _ng_vc = nextgeo_voxel_coord(_ng_voxel_idx);
+		vec3 _ng_vox_pos = _ng_origin + (vec3(_ng_vc) + 0.5) * _ng_voxel_size;
+		vec3 _ng_vox_nrm = nextgeo_voxel_decode_oct16(_ng_w1 & 0xFFFFu);
+		vec3 _ng_vox_tan;
+		vec3 _ng_vox_bin;
+		nextgeo_voxel_tangent_basis(_ng_vox_nrm, _ng_vox_tan, _ng_vox_bin);
+		vec2 _ng_vox_uv = unpackHalf2x16(_ng_w0);
 
-		vec2 _ng_c_uv = vec2(0.0);
-		if ((_ng_layout & 0x08u) != 0u) {
-			_ng_c_uv = vec2(
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
-			_ng_w += 2u;
-		}
+		_ng_record_index = _ng_brick_entry.x;
+		NextGeoInstanceAttributes _ng_attr = nextgeo_instance_attrs.data[_ng_brick_entry.x];
+		instance_index_interp = _ng_record.bucket_base >> 5u;
+		_ng_instance_id = int(_ng_attr.meta.y);
+		_ng_instance_color = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_COLOR) != 0u) ? _ng_attr.color : vec4(1.0);
+		_ng_instance_custom = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM) != 0u) ? _ng_attr.custom_data : vec4(0.0);
+		_ng_non_uniform_scale = (_ng_record.flags & NEXTGEO_RECORD_NON_UNIFORM_SCALE) != 0u;
+		// Coverage was stochastically evaluated during SW splat; skip masked discard and WPO at voxel distance.
+		_ng_skip_masked_discard = true;
+		_ng_skip_vertex_offset = true;
 
-		vec2 _ng_c_uv2 = vec2(0.0);
-		if ((_ng_layout & 0x10u) != 0u) {
-			_ng_c_uv2 = vec2(
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
-			_ng_w += 2u;
-		}
-
-		vec4 _ng_c_col = vec4(1.0);
-		if ((_ng_layout & 0x20u) != 0u) {
-			_ng_c_col = vec4(
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
-					uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
-			_ng_w += 4u;
-		}
-
-		_ng_s_pos[_ng_corner] = _ng_c_pos;
-		_ng_s_nrm[_ng_corner] = _ng_c_nrm;
-		_ng_s_tan[_ng_corner] = _ng_c_tan;
-		_ng_s_bin[_ng_corner] = _ng_c_bin;
-		_ng_s_uv[_ng_corner] = _ng_c_uv;
-		_ng_s_uv2[_ng_corner] = _ng_c_uv2;
-		_ng_s_col[_ng_corner] = _ng_c_col;
-		_ng_s_tan_sign[_ng_corner] = _ng_tan_sign;
-	}
-
-	NextGeoTessVertexCoord _ng_mcoords[3];
-	uint _ng_n_in = 1u;
-	if (_ng_is_patch) {
-		uint _ng_f0 = _ng_patch.packed_factors & 0xFFu;
-		uint _ng_f1 = (_ng_patch.packed_factors >> 8u) & 0xFFu;
-		uint _ng_f2 = (_ng_patch.packed_factors >> 16u) & 0xFFu;
-		_ng_n_in = nextgeo_tess_interior_factor(_ng_f0, _ng_f1, _ng_f2);
-		nextgeo_tess_micro_tri_coords(_ng_f0, _ng_f1, _ng_f2, _ng_patch.micro_tri_base + _ng_tri_idx, _ng_mcoords[0], _ng_mcoords[1], _ng_mcoords[2]);
-	}
-
-	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
-		vec3 _ng_c_pos = _ng_s_pos[_ng_corner];
-		vec3 _ng_c_prev_pos = _ng_c_pos;
-		vec3 _ng_c_nrm = _ng_s_nrm[_ng_corner];
-		vec3 _ng_c_tan = _ng_s_tan[_ng_corner];
-		vec3 _ng_c_bin = _ng_s_bin[_ng_corner];
-		vec2 _ng_c_uv = _ng_s_uv[_ng_corner];
-		vec2 _ng_c_uv2 = _ng_s_uv2[_ng_corner];
-		vec4 _ng_c_col = _ng_s_col[_ng_corner];
-		uint _ng_v_idx = _ng_s_vidx[_ng_corner];
-		float _ng_tan_sign = _ng_s_tan_sign[_ng_corner];
-
-		if (_ng_is_patch) {
-			vec3 _ng_p_ddx;
-			vec3 _ng_p_ddy;
-			vec3 _ng_n_ddx;
-			vec3 _ng_n_ddy;
-			vec2 _ng_u_ddx;
-			vec2 _ng_u_ddy;
-			vec2 _ng_u2_ddx;
-			vec2 _ng_u2_ddy;
-			vec4 _ng_c_ddx;
-			vec4 _ng_c_ddy;
-			nextgeo_tess_eval_vertex_attribs(
-					_ng_s_pos, _ng_s_nrm, _ng_s_tan, _ng_s_bin, _ng_s_uv, _ng_s_uv2, _ng_s_col,
-					_ng_mcoords[_ng_corner], _ng_n_in,
-					_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin, _ng_c_uv, _ng_c_uv2, _ng_c_col,
-					_ng_p_ddx, _ng_p_ddy, _ng_n_ddx, _ng_n_ddy, _ng_u_ddx, _ng_u_ddy, _ng_u2_ddx, _ng_u2_ddy, _ng_c_ddx, _ng_c_ddy);
-			_ng_c_nrm = _ng_safe_normalize(_ng_c_nrm, vec3(0.0, 0.0, 1.0));
-			_ng_c_tan = _ng_safe_normalize(_ng_c_tan, vec3(1.0, 0.0, 0.0));
-			_ng_c_bin = _ng_safe_normalize(_ng_c_bin, vec3(0.0, 1.0, 0.0));
-			_ng_c_prev_pos = _ng_c_pos;
-			if (_ng_patch.disp_magnitude > 0.0) {
-				float _ng_disp_val = _ng_eval_displacement(
-						_ng_c_pos, _ng_c_nrm, _ng_c_uv, _ng_c_uv2, _ng_c_col, vec4(0.0),
-						_ng_p_ddx, _ng_p_ddy, _ng_n_ddx, _ng_n_ddy, _ng_u_ddx, _ng_u_ddy, _ng_u2_ddx, _ng_u2_ddy, _ng_c_ddx, _ng_c_ddy,
-						scene_data_block.data);
-				if (!isnan(_ng_disp_val) && !isinf(_ng_disp_val)) {
-					_ng_c_pos += _ng_c_nrm * ((_ng_disp_val - _ng_patch.disp_center) * _ng_patch.disp_magnitude);
-				}
-#ifdef MOTION_VECTORS
-				float _ng_prev_disp_val = _ng_eval_displacement(
-						_ng_c_prev_pos, _ng_c_nrm, _ng_c_uv, _ng_c_uv2, _ng_c_col, vec4(0.0),
-						_ng_p_ddx, _ng_p_ddy, _ng_n_ddx, _ng_n_ddy, _ng_u_ddx, _ng_u_ddy, _ng_u2_ddx, _ng_u2_ddy, _ng_c_ddx, _ng_c_ddy,
-						scene_data_block.prev_data);
-				if (!isnan(_ng_prev_disp_val) && !isinf(_ng_prev_disp_val)) {
-					_ng_c_prev_pos += _ng_c_nrm * ((_ng_prev_disp_val - _ng_patch.disp_center) * _ng_patch.disp_magnitude);
-				}
-#endif
-			}
-			_ng_v_idx = _ng_mcoords[_ng_corner].kind < 3u ? _ng_s_vidx[_ng_mcoords[_ng_corner].kind] : _ng_s_vidx[0];
-		}
-
-		_ng_vertex_id = int(_ng_v_idx);
-		uv_attrib = _ng_c_uv;
-		uv2_attrib = _ng_c_uv2;
-		color_attrib = _ng_c_col;
+		mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+		_ng_model_xform = _ng_cur_xform;
+		_ng_vertex_id = int(_ng_voxel_idx);
+		uv_attrib = _ng_vox_uv;
+		uv2_attrib = vec2(0.0);
+		color_attrib = vec4(1.0);
 
 #ifdef MOTION_VECTORS
+		vec4 _ng_vox_prev_clip = vec4(0.0, 0.0, 0.0, 1.0);
 		if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_WRITE_VELOCITY) != 0u && (resolve_push.flags & NEXTGEO_RESOLVE_FLAG_RESET_VELOCITY) == 0u) {
-			vec3 _ng_p_pos = _ng_c_prev_pos;
-			vec3 _ng_p_nrm = _ng_c_nrm;
-			vec3 _ng_p_tan = _ng_c_tan;
-			vec3 _ng_p_bin = _ng_c_bin;
-			if (_ng_is_skinned && !_ng_is_patch) {
-				nextgeo_skin_vertex(_ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, true);
-				if ((_ng_layout & 0x04u) != 0u) {
-					_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
-				}
-			} else if (_ng_is_wind && !_ng_is_patch) {
-				nextgeo_wind_vertex(_ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_record.virtual_mesh, _ng_record.prev_transform, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, true);
-				if ((_ng_layout & 0x04u) != 0u) {
-					_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
-				}
-			}
-			if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u && !_ng_is_patch) {
-				spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].previous, _ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_p_bin);
-			}
+			mat3x4 _ng_prev_xform = mat3x4(_ng_record.prev_transform[0], _ng_record.prev_transform[1], _ng_record.prev_transform[2]);
 			_ng_resolve_vertex_corner(
-					_ng_p_pos,
-					_ng_p_nrm,
-					_ng_p_tan,
-					_ng_p_bin,
+					_ng_vox_pos,
+					_ng_vox_nrm,
+					_ng_vox_tan,
+					_ng_vox_bin,
 					instance_index_interp,
 					scene_data_block.prev_data,
 					_ng_prev_xform,
 #ifdef USE_DOUBLE_PRECISION
 					_ng_record.prev_model_precision.xyz,
 #endif
-					_ng_prev_clip_c[_ng_corner]);
-		} else {
-			_ng_prev_clip_c[_ng_corner] = vec4(0.0, 0.0, 0.0, 1.0);
+					_ng_vox_prev_clip);
 		}
 #endif
-
-		if (_ng_is_skinned && !_ng_is_patch) {
-			nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
-			if ((_ng_layout & 0x04u) != 0u) {
-				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
-			}
-		} else if (_ng_is_wind && !_ng_is_patch) {
-			nextgeo_wind_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_record.virtual_mesh, _ng_record.transform, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
-			if ((_ng_layout & 0x04u) != 0u) {
-				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
-			}
-		}
-		if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u && !_ng_is_patch) {
-			spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, _ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin);
-		}
+		vec4 _ng_vox_clip = vec4(0.0, 0.0, 0.0, 1.0);
 		_ng_resolve_vertex_corner(
-				_ng_c_pos,
-				_ng_c_nrm,
-				_ng_c_tan,
-				_ng_c_bin,
+				_ng_vox_pos,
+				_ng_vox_nrm,
+				_ng_vox_tan,
+				_ng_vox_bin,
 				instance_index_interp,
 				scene_data_block.data,
 				_ng_cur_xform,
 #ifdef USE_DOUBLE_PRECISION
 				_ng_record.model_precision.xyz,
 #endif
-				_ng_clip_c[_ng_corner]);
+				_ng_vox_clip);
 
-		_ng_vtx_c[_ng_corner] = vertex_interp;
-		_ng_nrm_c[_ng_corner] = normal_interp;
-		_ng_tan_c[_ng_corner] = tangent_interp;
-		_ng_bin_c[_ng_corner] = binormal_interp;
-		_ng_uv_c[_ng_corner] = uv_interp;
-		_ng_uv2_c[_ng_corner] = uv2_interp;
-		_ng_col_c[_ng_corner] = color_interp;
+		// Populate corner 0 for any shader-generated user varyings (interpolated with bary = (1, 0, 0)).
+		uint _ng_corner = 0u;
 		{
 #CODE : RESOLVE_VERTEX_STORE
 		}
-	}
 
-	// GodotNext: nextgeo_masked_two_sided (#153). Homogeneous 2D clip-space barycentrics and
-	// screen-space winding matching raster_material_inc.glsl so near-plane-clipped triangles
-	// (with corner w <= 0) never divide by corner w or flip _ng_front_facing.
-	mat3 _ng_m = mat3(_ng_clip_c[0].xyw, _ng_clip_c[1].xyw, _ng_clip_c[2].xyw);
-	vec3 _ng_u0 = cross(_ng_m[1], _ng_m[2]);
-	vec3 _ng_u1 = cross(_ng_m[2], _ng_m[0]);
-	vec3 _ng_u2 = cross(_ng_m[0], _ng_m[1]);
-	float _ng_det = dot(_ng_m[0], _ng_u0);
-	_ng_front_facing = (_ng_det > 0.0);
+		float _ng_inv_w = abs(_ng_vox_clip.w) > 1e-6 ? (1.0 / _ng_vox_clip.w) : 1.0;
+		_ng_front_facing = true;
+		_ng_fragcoord = vec4(NEXTGEO_FRAG_COORD.xy, _ng_vox_clip.z * _ng_inv_w, _ng_inv_w);
+		_ng_fragcoord_ddx = vec4(1.0, 0.0, 0.0, 0.0);
+		_ng_fragcoord_ddy = vec4(0.0, 1.0, 0.0, 0.0);
 
-	float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
-	vec2 _ng_pixel_size = scene_data_block.data.screen_pixel_size;
-	vec3 _ng_p = vec3(NEXTGEO_FRAG_COORD.xy * _ng_pixel_size * 2.0 - 1.0, 1.0);
-	vec3 _ng_q = vec3(dot(_ng_u0, _ng_p), dot(_ng_u1, _ng_p), dot(_ng_u2, _ng_p)) * _ng_inv_det;
-	float _ng_inv_w_sum = _ng_q.x + _ng_q.y + _ng_q.z;
-	float _ng_w_interp = abs(_ng_inv_w_sum) > 1e-20 ? (1.0 / _ng_inv_w_sum) : 1.0;
-	vec3 _ng_bary = abs(_ng_inv_w_sum) > 1e-20 ? (_ng_q * _ng_w_interp) : vec3(1.0, 0.0, 0.0);
+		// Analytic derivatives derived from the projected voxel footprint.
+		SceneData scene_data = scene_data_block.data;
+		float _ng_z_view = max(-vertex_interp.z, 1e-4);
+		vec2 _ng_view_per_px = vec2(
+				2.0 * scene_data.screen_pixel_size.x / max(abs(projection_matrix[0][0]), 1e-6),
+				2.0 * scene_data.screen_pixel_size.y / max(abs(projection_matrix[1][1]), 1e-6));
+		if (abs(projection_matrix[2][3]) > 1e-4) {
+			_ng_view_per_px *= _ng_z_view;
+		}
+		float _ng_voxel_world = max(_ng_voxel_size * max(abs(_ng_record.world_aabb_min.w), 1e-6), 1e-6);
+		float _ng_footprint_world = max(_ng_voxel_world, max(_ng_view_per_px.x, _ng_view_per_px.y));
+		float _ng_uv_deriv = max(_ng_uv_footprint, 1.0 / 256.0) * (_ng_footprint_world / _ng_voxel_world);
 
-	vec3 _ng_dq_dx = vec3(_ng_u0.x, _ng_u1.x, _ng_u2.x) * (_ng_inv_det * 2.0 * _ng_pixel_size.x);
-	vec3 _ng_dq_dy = vec3(_ng_u0.y, _ng_u1.y, _ng_u2.y) * (_ng_inv_det * 2.0 * _ng_pixel_size.y);
-	vec3 _ng_dbary_dx = (_ng_dq_dx - _ng_bary * (_ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z)) * _ng_w_interp;
-	vec3 _ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
+		vertex_interp_ddx = vec3(_ng_view_per_px.x, 0.0, 0.0);
+		vertex_interp_ddy = vec3(0.0, -_ng_view_per_px.y, 0.0);
+		normal_interp_ddx = vec3(0.0);
+		normal_interp_ddy = vec3(0.0);
+		tangent_interp_ddx = vec3(0.0);
+		tangent_interp_ddy = vec3(0.0);
+		binormal_interp_ddx = vec3(0.0);
+		binormal_interp_ddy = vec3(0.0);
+		uv_interp_ddx = vec2(_ng_uv_deriv, 0.0);
+		uv_interp_ddy = vec2(0.0, _ng_uv_deriv);
+		uv2_interp_ddx = vec2(0.0);
+		uv2_interp_ddy = vec2(0.0);
+		color_interp_ddx = vec4(0.0);
+		color_interp_ddy = vec4(0.0);
 
-	vec3 _ng_z_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z);
-	_ng_fragcoord = vec4(NEXTGEO_FRAG_COORD.xy, dot(_ng_q, _ng_z_c), _ng_inv_w_sum);
-	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dq_dx, _ng_z_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
-	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dq_dy, _ng_z_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
+		vec3 _ng_view_init = -_ng_safe_normalize(vertex_interp, vec3(0.0, 0.0, -1.0));
+		view_ddx = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddx);
+		view_ddy = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddy);
+#ifdef MOTION_VECTORS
+		screen_position = _ng_vox_clip;
+		prev_screen_position = _ng_vox_prev_clip;
+#endif
+	} else {
+		uint _ng_cluster_slot = _ng_vis_cluster;
+		uint _ng_src_tri_idx = _ng_tri_idx;
+		NextGeoDicedPatchRecord _ng_patch;
+		if (_ng_is_patch) {
+			_ng_patch = nextgeo_diced_patches.data[nextgeo_vis_patch_index(_ng_vis_cluster)];
+			if (_ng_tri_idx >= (_ng_patch.tri_and_sub >> 16u)) {
+				NEXTGEO_RESOLVE_DISCARD;
+			}
+			_ng_cluster_slot = _ng_patch.cluster_slot;
+			_ng_src_tri_idx = _ng_patch.tri_and_sub & 0xFFu;
+		} else if (!nextgeo_vis_is_normal(_ng_vis_cluster)) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
+		uvec2 _ng_entry = nextgeo_visible_clusters.data[_ng_cluster_slot];
+		NextGeoInstanceRecord _ng_record = nextgeo_records.data[_ng_entry.x];
+		if ((_ng_record.flags & NEXTGEO_RECORD_VALID) == 0u) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
 
-	vertex_interp = _ng_vtx_c[0] * _ng_bary.x + _ng_vtx_c[1] * _ng_bary.y + _ng_vtx_c[2] * _ng_bary.z;
-	vertex_interp_ddx = _ng_vtx_c[0] * _ng_dbary_dx.x + _ng_vtx_c[1] * _ng_dbary_dx.y + _ng_vtx_c[2] * _ng_dbary_dx.z;
-	vertex_interp_ddy = _ng_vtx_c[0] * _ng_dbary_dy.x + _ng_vtx_c[1] * _ng_dbary_dy.y + _ng_vtx_c[2] * _ng_dbary_dy.z;
+		NextGeoMeshRecord _ng_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
+		if (_ng_mesh.page_count == 0u || _ng_entry.y < _ng_mesh.cluster_offset) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
+		uint _ng_local_cluster = _ng_entry.y - _ng_mesh.cluster_offset;
+		if (_ng_local_cluster >= _ng_mesh.cluster_count) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
 
-	normal_interp = _ng_nrm_c[0] * _ng_bary.x + _ng_nrm_c[1] * _ng_bary.y + _ng_nrm_c[2] * _ng_bary.z;
-	normal_interp_ddx = _ng_nrm_c[0] * _ng_dbary_dx.x + _ng_nrm_c[1] * _ng_dbary_dx.y + _ng_nrm_c[2] * _ng_dbary_dx.z;
-	normal_interp_ddy = _ng_nrm_c[0] * _ng_dbary_dy.x + _ng_nrm_c[1] * _ng_dbary_dy.y + _ng_nrm_c[2] * _ng_dbary_dy.z;
+		uvec4 _ng_desc = nextgeo_cluster_table.data[_ng_mesh.page_table_offset + _ng_local_cluster];
+		uint _ng_surface_id = _ng_desc.w & 0xFFFFu;
+		if (_ng_surface_id >= 32u || (_ng_record.surface_mask & (1u << _ng_surface_id)) == 0u) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
 
-	tangent_interp = _ng_tan_c[0] * _ng_bary.x + _ng_tan_c[1] * _ng_bary.y + _ng_tan_c[2] * _ng_bary.z;
-	tangent_interp_ddx = _ng_tan_c[0] * _ng_dbary_dx.x + _ng_tan_c[1] * _ng_dbary_dx.y + _ng_tan_c[2] * _ng_dbary_dx.z;
-	tangent_interp_ddy = _ng_tan_c[0] * _ng_dbary_dy.x + _ng_tan_c[1] * _ng_dbary_dy.y + _ng_tan_c[2] * _ng_dbary_dy.z;
+		uint _ng_bucket_entry = nextgeo_bucket_table.data[_ng_record.bucket_base + _ng_surface_id];
+		if ((_ng_bucket_entry & NEXTGEO_BUCKET_ID_MASK) != resolve_push.bucket_id) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
 
-	binormal_interp = _ng_bin_c[0] * _ng_bary.x + _ng_bin_c[1] * _ng_bary.y + _ng_bin_c[2] * _ng_bary.z;
-	binormal_interp_ddx = _ng_bin_c[0] * _ng_dbary_dx.x + _ng_bin_c[1] * _ng_dbary_dx.y + _ng_bin_c[2] * _ng_dbary_dx.z;
-	binormal_interp_ddy = _ng_bin_c[0] * _ng_dbary_dy.x + _ng_bin_c[1] * _ng_dbary_dy.y + _ng_bin_c[2] * _ng_dbary_dy.z;
+		uint _ng_stride = _ng_desc.z & 0xFFu;
+		uint _ng_vert_count = (_ng_desc.z >> 8u) & 0xFFu;
+		uint _ng_tri_count = (_ng_desc.z >> 16u) & 0xFFu;
+		uint _ng_layout = (_ng_desc.z >> 24u) & 0xFFu;
+		if (_ng_src_tri_idx >= _ng_tri_count || _ng_stride < 3u || _ng_vert_count == 0u) {
+			NEXTGEO_RESOLVE_DISCARD;
+		}
+		if (_ng_layout == 0u) {
+			if (_ng_stride == 3u) {
+				_ng_layout = 0x01u;
+			} else if (_ng_stride == 5u) {
+				_ng_layout = 0x09u;
+			} else if (_ng_stride == 6u) {
+				_ng_layout = 0x03u;
+			} else if (_ng_stride == 7u) {
+				_ng_layout = 0x21u;
+			} else if (_ng_stride == 8u) {
+				_ng_layout = 0x0Bu;
+			} else if (_ng_stride == 10u) {
+				_ng_layout = 0x07u;
+			} else if (_ng_stride == 12u) {
+				_ng_layout = 0x0Fu;
+			} else if (_ng_stride == 14u) {
+				_ng_layout = 0x1Fu;
+			} else if (_ng_stride == 16u) {
+				_ng_layout = 0x2Fu;
+			} else if (_ng_stride >= 18u) {
+				_ng_layout = 0x3Fu;
+			}
+		}
 
-	uv_interp = _ng_uv_c[0] * _ng_bary.x + _ng_uv_c[1] * _ng_bary.y + _ng_uv_c[2] * _ng_bary.z;
-	uv_interp_ddx = _ng_uv_c[0] * _ng_dbary_dx.x + _ng_uv_c[1] * _ng_dbary_dx.y + _ng_uv_c[2] * _ng_dbary_dx.z;
-	uv_interp_ddy = _ng_uv_c[0] * _ng_dbary_dy.x + _ng_uv_c[1] * _ng_dbary_dy.y + _ng_uv_c[2] * _ng_dbary_dy.z;
+		_ng_record_index = _ng_entry.x;
+		NextGeoInstanceAttributes _ng_attr = nextgeo_instance_attrs.data[_ng_entry.x];
+		instance_index_interp = _ng_record.bucket_base >> 5u;
+		_ng_instance_id = int(_ng_attr.meta.y);
+		_ng_instance_color = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_COLOR) != 0u) ? _ng_attr.color : vec4(1.0);
+		_ng_instance_custom = ((_ng_record.flags & NEXTGEO_RECORD_HAS_INSTANCE_CUSTOM) != 0u) ? _ng_attr.custom_data : vec4(0.0);
+		_ng_non_uniform_scale = (_ng_record.flags & NEXTGEO_RECORD_NON_UNIFORM_SCALE) != 0u;
+		// GodotNext: nextgeo_masked_two_sided (#153), nextgeo_vertex_offset (#164). Past
+		// programmable_raster_distance or vertex_offset_disable_distance, clusters were demoted to FIXED;
+		// skip masked discards or WPO in resolve so distant surfaces stay consistent with raster.
+		_ng_skip_masked_discard = false;
+		_ng_skip_vertex_offset = false;
+		float _ng_wpo_disable_dist = uintBitsToFloat(_ng_record.page_table_offset);
+		if (_ng_record.prev_world_aabb_min.w > 0.0 || _ng_wpo_disable_dist > 0.0) {
+			vec3 _ng_cam_pos = vec3(
+					scene_data_block.data.inv_view_matrix[0].w,
+					scene_data_block.data.inv_view_matrix[1].w,
+					scene_data_block.data.inv_view_matrix[2].w);
+			vec3 _ng_closest = clamp(_ng_cam_pos, _ng_record.world_aabb_min.xyz, _ng_record.world_aabb_max.xyz);
+			float _ng_dist = length(_ng_cam_pos - _ng_closest);
+			if (_ng_record.prev_world_aabb_min.w > 0.0 && _ng_dist > _ng_record.prev_world_aabb_min.w) {
+				_ng_skip_masked_discard = true;
+			}
+			if (_ng_wpo_disable_dist > 0.0 && _ng_dist > _ng_wpo_disable_dist) {
+				_ng_skip_vertex_offset = true;
+			}
+		}
+		mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+		_ng_model_xform = _ng_cur_xform;
+#ifdef MOTION_VECTORS
+		mat3x4 _ng_prev_xform = mat3x4(_ng_record.prev_transform[0], _ng_record.prev_transform[1], _ng_record.prev_transform[2]);
+		vec4 _ng_prev_clip_c[3];
+#endif
+		vec4 _ng_clip_c[3];
+		vec3 _ng_vtx_c[3];
+		vec3 _ng_nrm_c[3];
+		vec3 _ng_tan_c[3];
+		vec3 _ng_bin_c[3];
+		vec2 _ng_uv_c[3];
+		vec2 _ng_uv2_c[3];
+		vec4 _ng_col_c[3];
+		bool _ng_is_skinned = (_ng_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+		bool _ng_is_wind = !_ng_is_skinned && nextgeo_wind_mesh_active(_ng_record.virtual_mesh);
+		uint _ng_cluster_table_idx = _ng_mesh.page_table_offset + _ng_local_cluster;
 
-	uv2_interp = _ng_uv2_c[0] * _ng_bary.x + _ng_uv2_c[1] * _ng_bary.y + _ng_uv2_c[2] * _ng_bary.z;
-	uv2_interp_ddx = _ng_uv2_c[0] * _ng_dbary_dx.x + _ng_uv2_c[1] * _ng_dbary_dx.y + _ng_uv2_c[2] * _ng_dbary_dx.z;
-	uv2_interp_ddy = _ng_uv2_c[0] * _ng_dbary_dy.x + _ng_uv2_c[1] * _ng_dbary_dy.y + _ng_uv2_c[2] * _ng_dbary_dy.z;
+		vec3 _ng_s_pos[3];
+		vec3 _ng_s_nrm[3];
+		vec3 _ng_s_tan[3];
+		vec3 _ng_s_bin[3];
+		vec2 _ng_s_uv[3];
+		vec2 _ng_s_uv2[3];
+		vec4 _ng_s_col[3];
+		uint _ng_s_vidx[3];
+		float _ng_s_tan_sign[3];
 
-	color_interp = _ng_col_c[0] * _ng_bary.x + _ng_col_c[1] * _ng_bary.y + _ng_col_c[2] * _ng_bary.z;
-	color_interp_ddx = _ng_col_c[0] * _ng_dbary_dx.x + _ng_col_c[1] * _ng_dbary_dx.y + _ng_col_c[2] * _ng_dbary_dx.z;
-	color_interp_ddy = _ng_col_c[0] * _ng_dbary_dy.x + _ng_col_c[1] * _ng_dbary_dy.y + _ng_col_c[2] * _ng_dbary_dy.z;
+		for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
+			uint _ng_idx_byte = _ng_desc.y + _ng_src_tri_idx * 3u + _ng_corner;
+			uint _ng_v_idx = (nextgeo_pages.data[_ng_idx_byte >> 2u] >> ((_ng_idx_byte & 3u) * 8u)) & 0xFFu;
+			if (_ng_v_idx >= _ng_vert_count) {
+				NEXTGEO_RESOLVE_DISCARD;
+			}
+			_ng_s_vidx[_ng_corner] = _ng_v_idx;
+			uint _ng_w = _ng_desc.x + _ng_v_idx * _ng_stride;
 
-	vec3 _ng_view_init = -_ng_safe_normalize(vertex_interp, vec3(0.0, 0.0, -1.0));
-	view_ddx = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddx);
-	view_ddy = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddy);
+			vec3 _ng_c_pos = vec3(
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
+			_ng_w += 3u;
+
+			vec3 _ng_c_nrm = vec3(0.0, 0.0, 1.0);
+			if ((_ng_layout & 0x02u) != 0u) {
+				_ng_c_nrm = vec3(
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
+				_ng_w += 3u;
+			}
+
+			vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
+			vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
+			float _ng_tan_sign = 1.0;
+			if ((_ng_layout & 0x04u) != 0u) {
+				vec4 _ng_tan4 = vec4(
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
+				_ng_w += 4u;
+				_ng_c_tan = _ng_tan4.xyz;
+				_ng_tan_sign = _ng_tan4.w;
+				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+			}
+
+			vec2 _ng_c_uv = vec2(0.0);
+			if ((_ng_layout & 0x08u) != 0u) {
+				_ng_c_uv = vec2(
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
+				_ng_w += 2u;
+			}
+
+			vec2 _ng_c_uv2 = vec2(0.0);
+			if ((_ng_layout & 0x10u) != 0u) {
+				_ng_c_uv2 = vec2(
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
+				_ng_w += 2u;
+			}
+
+			vec4 _ng_c_col = vec4(1.0);
+			if ((_ng_layout & 0x20u) != 0u) {
+				_ng_c_col = vec4(
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
+						uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
+				_ng_w += 4u;
+			}
+
+			_ng_s_pos[_ng_corner] = _ng_c_pos;
+			_ng_s_nrm[_ng_corner] = _ng_c_nrm;
+			_ng_s_tan[_ng_corner] = _ng_c_tan;
+			_ng_s_bin[_ng_corner] = _ng_c_bin;
+			_ng_s_uv[_ng_corner] = _ng_c_uv;
+			_ng_s_uv2[_ng_corner] = _ng_c_uv2;
+			_ng_s_col[_ng_corner] = _ng_c_col;
+			_ng_s_tan_sign[_ng_corner] = _ng_tan_sign;
+		}
+
+		NextGeoTessVertexCoord _ng_mcoords[3];
+		uint _ng_n_in = 1u;
+		if (_ng_is_patch) {
+			uint _ng_f0 = _ng_patch.packed_factors & 0xFFu;
+			uint _ng_f1 = (_ng_patch.packed_factors >> 8u) & 0xFFu;
+			uint _ng_f2 = (_ng_patch.packed_factors >> 16u) & 0xFFu;
+			_ng_n_in = nextgeo_tess_interior_factor(_ng_f0, _ng_f1, _ng_f2);
+			nextgeo_tess_micro_tri_coords(_ng_f0, _ng_f1, _ng_f2, _ng_patch.micro_tri_base + _ng_tri_idx, _ng_mcoords[0], _ng_mcoords[1], _ng_mcoords[2]);
+		}
+
+		for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
+			vec3 _ng_c_pos = _ng_s_pos[_ng_corner];
+			vec3 _ng_c_prev_pos = _ng_c_pos;
+			vec3 _ng_c_nrm = _ng_s_nrm[_ng_corner];
+			vec3 _ng_c_tan = _ng_s_tan[_ng_corner];
+			vec3 _ng_c_bin = _ng_s_bin[_ng_corner];
+			vec2 _ng_c_uv = _ng_s_uv[_ng_corner];
+			vec2 _ng_c_uv2 = _ng_s_uv2[_ng_corner];
+			vec4 _ng_c_col = _ng_s_col[_ng_corner];
+			uint _ng_v_idx = _ng_s_vidx[_ng_corner];
+			float _ng_tan_sign = _ng_s_tan_sign[_ng_corner];
+
+			if (_ng_is_patch) {
+				vec3 _ng_p_ddx;
+				vec3 _ng_p_ddy;
+				vec3 _ng_n_ddx;
+				vec3 _ng_n_ddy;
+				vec2 _ng_u_ddx;
+				vec2 _ng_u_ddy;
+				vec2 _ng_u2_ddx;
+				vec2 _ng_u2_ddy;
+				vec4 _ng_c_ddx;
+				vec4 _ng_c_ddy;
+				nextgeo_tess_eval_vertex_attribs(
+						_ng_s_pos, _ng_s_nrm, _ng_s_tan, _ng_s_bin, _ng_s_uv, _ng_s_uv2, _ng_s_col,
+						_ng_mcoords[_ng_corner], _ng_n_in,
+						_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin, _ng_c_uv, _ng_c_uv2, _ng_c_col,
+						_ng_p_ddx, _ng_p_ddy, _ng_n_ddx, _ng_n_ddy, _ng_u_ddx, _ng_u_ddy, _ng_u2_ddx, _ng_u2_ddy, _ng_c_ddx, _ng_c_ddy);
+				_ng_c_nrm = _ng_safe_normalize(_ng_c_nrm, vec3(0.0, 0.0, 1.0));
+				_ng_c_tan = _ng_safe_normalize(_ng_c_tan, vec3(1.0, 0.0, 0.0));
+				_ng_c_bin = _ng_safe_normalize(_ng_c_bin, vec3(0.0, 1.0, 0.0));
+				_ng_c_prev_pos = _ng_c_pos;
+				if (_ng_patch.disp_magnitude > 0.0) {
+					float _ng_disp_val = _ng_eval_displacement(
+							_ng_c_pos, _ng_c_nrm, _ng_c_uv, _ng_c_uv2, _ng_c_col, vec4(0.0),
+							_ng_p_ddx, _ng_p_ddy, _ng_n_ddx, _ng_n_ddy, _ng_u_ddx, _ng_u_ddy, _ng_u2_ddx, _ng_u2_ddy, _ng_c_ddx, _ng_c_ddy,
+							scene_data_block.data);
+					if (!isnan(_ng_disp_val) && !isinf(_ng_disp_val)) {
+						_ng_c_pos += _ng_c_nrm * ((_ng_disp_val - _ng_patch.disp_center) * _ng_patch.disp_magnitude);
+					}
+#ifdef MOTION_VECTORS
+					float _ng_prev_disp_val = _ng_eval_displacement(
+							_ng_c_prev_pos, _ng_c_nrm, _ng_c_uv, _ng_c_uv2, _ng_c_col, vec4(0.0),
+							_ng_p_ddx, _ng_p_ddy, _ng_n_ddx, _ng_n_ddy, _ng_u_ddx, _ng_u_ddy, _ng_u2_ddx, _ng_u2_ddy, _ng_c_ddx, _ng_c_ddy,
+							scene_data_block.prev_data);
+					if (!isnan(_ng_prev_disp_val) && !isinf(_ng_prev_disp_val)) {
+						_ng_c_prev_pos += _ng_c_nrm * ((_ng_prev_disp_val - _ng_patch.disp_center) * _ng_patch.disp_magnitude);
+					}
+#endif
+				}
+				_ng_v_idx = _ng_mcoords[_ng_corner].kind < 3u ? _ng_s_vidx[_ng_mcoords[_ng_corner].kind] : _ng_s_vidx[0];
+			}
+
+			_ng_vertex_id = int(_ng_v_idx);
+			uv_attrib = _ng_c_uv;
+			uv2_attrib = _ng_c_uv2;
+			color_attrib = _ng_c_col;
 
 #ifdef MOTION_VECTORS
-	screen_position = _ng_clip_c[0] * _ng_bary.x + _ng_clip_c[1] * _ng_bary.y + _ng_clip_c[2] * _ng_bary.z;
-	prev_screen_position = _ng_prev_clip_c[0] * _ng_bary.x + _ng_prev_clip_c[1] * _ng_bary.y + _ng_prev_clip_c[2] * _ng_bary.z;
+			if ((resolve_push.flags & NEXTGEO_RESOLVE_FLAG_WRITE_VELOCITY) != 0u && (resolve_push.flags & NEXTGEO_RESOLVE_FLAG_RESET_VELOCITY) == 0u) {
+				vec3 _ng_p_pos = _ng_c_prev_pos;
+				vec3 _ng_p_nrm = _ng_c_nrm;
+				vec3 _ng_p_tan = _ng_c_tan;
+				vec3 _ng_p_bin = _ng_c_bin;
+				if (_ng_is_skinned && !_ng_is_patch) {
+					nextgeo_skin_vertex(_ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, true);
+					if ((_ng_layout & 0x04u) != 0u) {
+						_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+					}
+				} else if (_ng_is_wind && !_ng_is_patch) {
+					nextgeo_wind_vertex(_ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_record.virtual_mesh, _ng_record.prev_transform, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, true);
+					if ((_ng_layout & 0x04u) != 0u) {
+						_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+					}
+				}
+				if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u && !_ng_is_patch) {
+					spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].previous, _ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_p_bin);
+				}
+				_ng_resolve_vertex_corner(
+						_ng_p_pos,
+						_ng_p_nrm,
+						_ng_p_tan,
+						_ng_p_bin,
+						instance_index_interp,
+						scene_data_block.prev_data,
+						_ng_prev_xform,
+#ifdef USE_DOUBLE_PRECISION
+						_ng_record.prev_model_precision.xyz,
 #endif
+						_ng_prev_clip_c[_ng_corner]);
+			} else {
+				_ng_prev_clip_c[_ng_corner] = vec4(0.0, 0.0, 0.0, 1.0);
+			}
+#endif
+
+			if (_ng_is_skinned && !_ng_is_patch) {
+				nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
+				if ((_ng_layout & 0x04u) != 0u) {
+					_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+				}
+			} else if (_ng_is_wind && !_ng_is_patch) {
+				nextgeo_wind_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_record.virtual_mesh, _ng_record.transform, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
+				if ((_ng_layout & 0x04u) != 0u) {
+					_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+				}
+			}
+			if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u && !_ng_is_patch) {
+				spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, _ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin);
+			}
+			_ng_resolve_vertex_corner(
+					_ng_c_pos,
+					_ng_c_nrm,
+					_ng_c_tan,
+					_ng_c_bin,
+					instance_index_interp,
+					scene_data_block.data,
+					_ng_cur_xform,
+#ifdef USE_DOUBLE_PRECISION
+					_ng_record.model_precision.xyz,
+#endif
+					_ng_clip_c[_ng_corner]);
+
+			_ng_vtx_c[_ng_corner] = vertex_interp;
+			_ng_nrm_c[_ng_corner] = normal_interp;
+			_ng_tan_c[_ng_corner] = tangent_interp;
+			_ng_bin_c[_ng_corner] = binormal_interp;
+			_ng_uv_c[_ng_corner] = uv_interp;
+			_ng_uv2_c[_ng_corner] = uv2_interp;
+			_ng_col_c[_ng_corner] = color_interp;
+			{
+#CODE : RESOLVE_VERTEX_STORE
+			}
+		}
+
+		// GodotNext: nextgeo_masked_two_sided (#153). Homogeneous 2D clip-space barycentrics and
+		// screen-space winding matching raster_material_inc.glsl so near-plane-clipped triangles
+		// (with corner w <= 0) never divide by corner w or flip _ng_front_facing.
+		mat3 _ng_m = mat3(_ng_clip_c[0].xyw, _ng_clip_c[1].xyw, _ng_clip_c[2].xyw);
+		vec3 _ng_u0 = cross(_ng_m[1], _ng_m[2]);
+		vec3 _ng_u1 = cross(_ng_m[2], _ng_m[0]);
+		vec3 _ng_u2 = cross(_ng_m[0], _ng_m[1]);
+		float _ng_det = dot(_ng_m[0], _ng_u0);
+		_ng_front_facing = (_ng_det > 0.0);
+
+		float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
+		vec2 _ng_pixel_size = scene_data_block.data.screen_pixel_size;
+		vec3 _ng_p = vec3(NEXTGEO_FRAG_COORD.xy * _ng_pixel_size * 2.0 - 1.0, 1.0);
+		vec3 _ng_q = vec3(dot(_ng_u0, _ng_p), dot(_ng_u1, _ng_p), dot(_ng_u2, _ng_p)) * _ng_inv_det;
+		float _ng_inv_w_sum = _ng_q.x + _ng_q.y + _ng_q.z;
+		float _ng_w_interp = abs(_ng_inv_w_sum) > 1e-20 ? (1.0 / _ng_inv_w_sum) : 1.0;
+		_ng_bary = abs(_ng_inv_w_sum) > 1e-20 ? (_ng_q * _ng_w_interp) : vec3(1.0, 0.0, 0.0);
+
+		vec3 _ng_dq_dx = vec3(_ng_u0.x, _ng_u1.x, _ng_u2.x) * (_ng_inv_det * 2.0 * _ng_pixel_size.x);
+		vec3 _ng_dq_dy = vec3(_ng_u0.y, _ng_u1.y, _ng_u2.y) * (_ng_inv_det * 2.0 * _ng_pixel_size.y);
+		_ng_dbary_dx = (_ng_dq_dx - _ng_bary * (_ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z)) * _ng_w_interp;
+		_ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
+
+		vec3 _ng_z_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z);
+		_ng_fragcoord = vec4(NEXTGEO_FRAG_COORD.xy, dot(_ng_q, _ng_z_c), _ng_inv_w_sum);
+		_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dq_dx, _ng_z_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
+		_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dq_dy, _ng_z_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
+
+		vertex_interp = _ng_vtx_c[0] * _ng_bary.x + _ng_vtx_c[1] * _ng_bary.y + _ng_vtx_c[2] * _ng_bary.z;
+		vertex_interp_ddx = _ng_vtx_c[0] * _ng_dbary_dx.x + _ng_vtx_c[1] * _ng_dbary_dx.y + _ng_vtx_c[2] * _ng_dbary_dx.z;
+		vertex_interp_ddy = _ng_vtx_c[0] * _ng_dbary_dy.x + _ng_vtx_c[1] * _ng_dbary_dy.y + _ng_vtx_c[2] * _ng_dbary_dy.z;
+
+		normal_interp = _ng_nrm_c[0] * _ng_bary.x + _ng_nrm_c[1] * _ng_bary.y + _ng_nrm_c[2] * _ng_bary.z;
+		normal_interp_ddx = _ng_nrm_c[0] * _ng_dbary_dx.x + _ng_nrm_c[1] * _ng_dbary_dx.y + _ng_nrm_c[2] * _ng_dbary_dx.z;
+		normal_interp_ddy = _ng_nrm_c[0] * _ng_dbary_dy.x + _ng_nrm_c[1] * _ng_dbary_dy.y + _ng_nrm_c[2] * _ng_dbary_dy.z;
+
+		tangent_interp = _ng_tan_c[0] * _ng_bary.x + _ng_tan_c[1] * _ng_bary.y + _ng_tan_c[2] * _ng_bary.z;
+		tangent_interp_ddx = _ng_tan_c[0] * _ng_dbary_dx.x + _ng_tan_c[1] * _ng_dbary_dx.y + _ng_tan_c[2] * _ng_dbary_dx.z;
+		tangent_interp_ddy = _ng_tan_c[0] * _ng_dbary_dy.x + _ng_tan_c[1] * _ng_dbary_dy.y + _ng_tan_c[2] * _ng_dbary_dy.z;
+
+		binormal_interp = _ng_bin_c[0] * _ng_bary.x + _ng_bin_c[1] * _ng_bary.y + _ng_bin_c[2] * _ng_bary.z;
+		binormal_interp_ddx = _ng_bin_c[0] * _ng_dbary_dx.x + _ng_bin_c[1] * _ng_dbary_dx.y + _ng_bin_c[2] * _ng_dbary_dx.z;
+		binormal_interp_ddy = _ng_bin_c[0] * _ng_dbary_dy.x + _ng_bin_c[1] * _ng_dbary_dy.y + _ng_bin_c[2] * _ng_dbary_dy.z;
+
+		uv_interp = _ng_uv_c[0] * _ng_bary.x + _ng_uv_c[1] * _ng_bary.y + _ng_uv_c[2] * _ng_bary.z;
+		uv_interp_ddx = _ng_uv_c[0] * _ng_dbary_dx.x + _ng_uv_c[1] * _ng_dbary_dx.y + _ng_uv_c[2] * _ng_dbary_dx.z;
+		uv_interp_ddy = _ng_uv_c[0] * _ng_dbary_dy.x + _ng_uv_c[1] * _ng_dbary_dy.y + _ng_uv_c[2] * _ng_dbary_dy.z;
+
+		uv2_interp = _ng_uv2_c[0] * _ng_bary.x + _ng_uv2_c[1] * _ng_bary.y + _ng_uv2_c[2] * _ng_bary.z;
+		uv2_interp_ddx = _ng_uv2_c[0] * _ng_dbary_dx.x + _ng_uv2_c[1] * _ng_dbary_dx.y + _ng_uv2_c[2] * _ng_dbary_dx.z;
+		uv2_interp_ddy = _ng_uv2_c[0] * _ng_dbary_dy.x + _ng_uv2_c[1] * _ng_dbary_dy.y + _ng_uv2_c[2] * _ng_dbary_dy.z;
+
+		color_interp = _ng_col_c[0] * _ng_bary.x + _ng_col_c[1] * _ng_bary.y + _ng_col_c[2] * _ng_bary.z;
+		color_interp_ddx = _ng_col_c[0] * _ng_dbary_dx.x + _ng_col_c[1] * _ng_dbary_dx.y + _ng_col_c[2] * _ng_dbary_dx.z;
+		color_interp_ddy = _ng_col_c[0] * _ng_dbary_dy.x + _ng_col_c[1] * _ng_dbary_dy.y + _ng_col_c[2] * _ng_dbary_dy.z;
+
+		vec3 _ng_view_init = -_ng_safe_normalize(vertex_interp, vec3(0.0, 0.0, -1.0));
+		view_ddx = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddx);
+		view_ddy = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddy);
+
+#ifdef MOTION_VECTORS
+		screen_position = _ng_clip_c[0] * _ng_bary.x + _ng_clip_c[1] * _ng_bary.y + _ng_clip_c[2] * _ng_bary.z;
+		prev_screen_position = _ng_prev_clip_c[0] * _ng_bary.x + _ng_prev_clip_c[1] * _ng_bary.y + _ng_prev_clip_c[2] * _ng_bary.z;
+#endif
+	}
 
 	{
 #CODE : RESOLVE_INTERPOLATE

@@ -3722,17 +3722,19 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
 	RENDER_TIMESTAMP("VSM Page Marking");
 
-	// GodotNext: nextgeo_tessellation (#163). Invalidate cached VSM pages whenever VSM tessellation settings change.
+	// GodotNext: nextgeo_tessellation (#163), nextgeo_voxels (#165). Invalidate cached VSM pages whenever VSM tessellation or voxel settings change.
 	{
 		const bool tess_on = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
 		const bool tess_dir = bool(_vsm_setting("tessellation_directional", true));
 		const bool tess_loc = bool(_vsm_setting("tessellation_local", false));
 		const float tess_rate = RendererRD::nextgeo_tessellation_clamp_dicing_rate(float(GLOBAL_GET("rendering/nextgeo/tessellation/dicing_rate")));
-		if (tess_on != vsm_last_tessellation_enabled || tess_dir != vsm_last_tess_directional || tess_loc != vsm_last_tess_local || (tess_on && tess_rate != vsm_last_tess_dicing_rate)) {
+		const bool voxels_on = bool(GLOBAL_GET("rendering/nextgeo/experimental/voxels"));
+		if (tess_on != vsm_last_tessellation_enabled || tess_dir != vsm_last_tess_directional || tess_loc != vsm_last_tess_local || (tess_on && tess_rate != vsm_last_tess_dicing_rate) || voxels_on != vsm_last_voxels_enabled) {
 			vsm_last_tessellation_enabled = tess_on;
 			vsm_last_tess_directional = tess_dir;
 			vsm_last_tess_local = tess_loc;
 			vsm_last_tess_dicing_rate = tess_rate;
+			vsm_last_voxels_enabled = voxels_on;
 			vsm->invalidate_all_maps(RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC);
 			nextgeo_cut.invalidate_vsm_hiz();
 		}
@@ -5310,6 +5312,8 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 	inputs.tessellation_local = vsm_tess_master && bool(_vsm_setting("tessellation_local", false));
 	inputs.tessellation_dicing_rate = float(GLOBAL_GET("rendering/nextgeo/tessellation/dicing_rate"));
 	inputs.tessellation_debug_max_patches = uint32_t(MAX(int(GLOBAL_GET("rendering/nextgeo/tessellation/debug_max_patches")), 0));
+	// GodotNext: nextgeo_voxels (#165). VSM depth-only voxel brick splat (gated by experimental/voxels).
+	inputs.voxels_enabled = bool(GLOBAL_GET("rendering/nextgeo/experimental/voxels"));
 
 	// Build per-map metadata (shadow_caster_mask, reverse_cull, active) so one directional chain and
 	// one local chain cull every active VSM light cleanly without per-light CPU loops.
@@ -7374,6 +7378,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					raster_inputs.tessellation_enabled = bool(GLOBAL_GET("rendering/nextgeo/experimental/tessellation"));
 					raster_inputs.tessellation_dicing_rate = float(GLOBAL_GET("rendering/nextgeo/tessellation/dicing_rate"));
 					raster_inputs.tessellation_debug_max_patches = uint32_t(MAX(int(GLOBAL_GET("rendering/nextgeo/tessellation/debug_max_patches")), 0));
+					// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10). Experimental sparse-brick voxel LOD.
+					raster_inputs.voxels_enabled = bool(GLOBAL_GET("rendering/nextgeo/experimental/voxels"));
 					// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). This frame's programmable bins:
 					// each bin's raster target and material parameters, and the scene environment.
 					if (nextgeo_programmable_view_active && nextgeo_raster_bins_used != 0u && !nextgeo_raster_bin_table.is_empty()) {
@@ -7434,8 +7440,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 
 			nextgeo_drew = nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")), &raster_inputs, is_nextgeo_main_view);
-			// GodotNext: nextgeo_tessellation (#163). Bind diced patches buffer (invalid -> dummy when tessellation is off).
+			// GodotNext: nextgeo_tessellation (#163), nextgeo_voxels (#165). Bind diced patches & voxel brick buffers (invalid -> dummy when off).
 			nextgeo_resolve.set_diced_patches_buffer(nextgeo_cut.get_diced_patches_buffer());
+			nextgeo_resolve.set_voxel_bricks_buffer(nextgeo_cut.get_voxel_bricks_buffer());
 			if (nextgeo_drew && !visibility_only && nextgeo_resolve.get_bucket_count() > 0) {
 				RENDER_TIMESTAMP("NextGeo Resolve Classify");
 				RD::get_singleton()->draw_command_begin_label("NextGeo Resolve Classify");
@@ -8314,6 +8321,7 @@ void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_
 	scene_params.using_nextgeo = p_nextgeo_drew;
 	scene_params.visible_clusters_buf = nextgeo_cut.get_clusters_buffer();
 	scene_params.diced_patches_buf = nextgeo_cut.get_diced_patches_buffer();
+	scene_params.voxel_bricks_buf = nextgeo_cut.get_voxel_bricks_buffer();
 	scene_params.visible_capacity = NextGeoCut::CLUSTER_CAPACITY;
 	scene_params.bucket_table_buf = nextgeo_resolve.get_bucket_table_buffer();
 	scene_params.bucket_table_words = nextgeo_bucket_table.size();

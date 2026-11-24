@@ -32,6 +32,7 @@
 
 // GodotNext: nextgi_rt_arena
 #include "core/config/project_settings.h"
+#include "core/io/resource_format_ngm.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 // GodotNext: nextgi_hit_groups (#130)
@@ -1379,11 +1380,15 @@ static bool _nextgeo_unpack_root_pages_for_surface(const RenderingServerTypes::V
 		const uint32_t page_vertices = hdr[1];
 		const uint32_t page_triangles = hdr[2];
 		const uint32_t skin_bytes = hdr[3];
+		uint32_t voxel_hdr_off = 0u;
+		uint32_t voxel_total_bytes = 0u;
+		ngm_page_voxel_section(raw.ptr(), uint64_t(raw.size()), voxel_hdr_off, voxel_total_bytes);
+		const uint64_t base_end = uint64_t(raw.size()) - uint64_t(voxel_total_bytes);
 		const uint64_t fixed_bytes = 16ull + uint64_t(page_clusters) * 80ull + uint64_t(page_triangles) * 3ull + uint64_t(skin_bytes);
-		if (page_vertices == 0 || page_triangles == 0 || fixed_bytes > uint64_t(raw.size())) {
+		if (page_vertices == 0 || page_triangles == 0 || fixed_bytes > base_end) {
 			continue;
 		}
-		const uint64_t vertex_bytes = uint64_t(raw.size()) - fixed_bytes;
+		const uint64_t vertex_bytes = base_end - fixed_bytes;
 		if ((vertex_bytes % (uint64_t(page_vertices) * 4ull)) != 0ull) {
 			continue;
 		}

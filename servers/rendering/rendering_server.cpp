@@ -4434,6 +4434,9 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_foliage_wind (#152, plan §21.4 contract N10). EXPERIMENTAL procedural wind through
 	// Nanite skinning (1 trunk + <= 8 branch bones evaluated in shader with 0 bytes per-instance palette).
 	GLOBAL_DEF("rendering/nextgeo/experimental/foliage_wind", false);
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10, GN-7, GN-12, N6, MN3). EXPERIMENTAL Nanite Voxels
+	// sparse 4^3 brick LOD for distant foliage. Off by default with zero voxel buffers and zero dispatches.
+	GLOBAL_DEF("rendering/nextgeo/experimental/voxels", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

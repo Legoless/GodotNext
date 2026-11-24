@@ -21,6 +21,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #include "../spline_deform_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 #include "raster_features_inc.glsl"
+#include "voxel_inc.glsl"
 // clang-format on
 
 #if !defined(CUT_HASH) && !defined(VSM_SETUP)
@@ -113,6 +114,7 @@ const uint NEXTGEO_VSM_CULL_FLAG_HIZ = 1u << 0u;
 const uint NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 1u;
 const uint NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK = 1u << 2u;
 const uint NEXTGEO_VSM_CULL_FLAG_TESSELLATION = 1u << 4u; // #163: dice displaced clusters on this chain
+const uint NEXTGEO_VSM_CULL_FLAG_VOXELS = 1u << 5u; // #165: swap coarse voxelized groups for sparse 4^3 bricks
 const uint NEXTGEO_VSM_MAP_META_REVERSE_CULL = 1u << 0u;
 const uint NEXTGEO_VSM_MAP_META_ACTIVE = 1u << 1u;
 
@@ -182,7 +184,9 @@ layout(set = 0, binding = 5, std430) buffer restrict VSMCounters {
 	uint distance_fixed_clusters; // #153: pixel-programmable clusters demoted to FIXED past programmable_raster_distance
 	uint vertex_offset_distance_fixed; // #164: WPO clusters demoted to FIXED past vertex_offset_disable_distance
 	uint vertex_offset_clamped; // #164: vertices clamped to Material.vertex_offset_max
-	uint pad1[3];
+	uint voxel_bricks; // #165: visible VSM (voxel brick, page) pairs
+	uint voxel_writes; // #165: VSM voxel SW texel writes
+	uint pad1;
 }
 vsm_counters;
 
@@ -270,6 +274,18 @@ layout(set = 0, binding = 22, std430) buffer restrict RasterBinState {
 	uint data[];
 }
 raster_bin_state;
+
+// GodotNext: nextgeo_voxels (#165). Bindings 29..30 avoid 27..28 reserved for #152.
+layout(set = 0, binding = 29, std430) buffer restrict writeonly VSMVoxelBricksOut {
+	uvec4 data[];
+}
+vsm_voxel_bricks_out;
+
+// [0..3]: VSM voxel compute indirect dispatch args (x, y, 1, 0).
+layout(set = 0, binding = 30, std430) buffer restrict VSMVoxelArgs {
+	uint data[];
+}
+vsm_voxel_args;
 #else
 layout(set = 0, binding = 14, std430) buffer restrict writeonly VSMNodesOut {
 	uvec4 data[];
@@ -868,6 +884,99 @@ void main() {
 	float route_scale = vsm_instance_scale(record);
 	uint avail_mask = prog_enabled ? record.surface_mask : record.pad0;
 
+	// GodotNext: nextgeo_voxels (#165) x vsm_nanite (#217). Swap coarse voxelized groups for
+	// sparse 4^3 bricks when a brick projects <= V shadow texels and the group's error test passes.
+	bool vsm_voxels_on = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_VOXELS) != 0u &&
+			!is_skinned && (record.flags & NEXTGEO_RECORD_HAS_SPLINE) == 0u &&
+			page_slot != 0xFFFFFFFFu && slot_page_size >= 96u && avail_mask != 0u;
+	if (vsm_voxels_on) {
+		uint page_word_base = (page_slot * slot_page_size) >> 2u;
+		uint page_words = slot_page_size >> 2u;
+		uint voxel_rel_word = pages.data[page_word_base + 3u];
+		if (voxel_rel_word >= 4u && voxel_rel_word + 4u <= page_words) {
+			uint voxel_base = page_word_base + voxel_rel_word;
+			if (pages.data[voxel_base + 0u] == NEXTGEO_VOXEL_SECTION_MAGIC) {
+				uint first_g = pages.data[voxel_base + 1u];
+				uint page_g_count = pages.data[voxel_base + 2u];
+				if (group_idx >= first_g && (group_idx - first_g) < page_g_count &&
+						voxel_rel_word + 4u + (group_idx - first_g + 1u) * 4u <= page_words) {
+					uint dir_word = voxel_base + 4u + (group_idx - first_g) * 4u;
+					uint brick_rel_word = pages.data[dir_word + 0u];
+					uint brick_count = pages.data[dir_word + 1u];
+					float voxel_size = uintBitsToFloat(pages.data[dir_word + 2u]);
+					float vsm_voxel_thresh = uintBitsToFloat(vsm_params.bin_features[65]);
+					uint vsm_voxel_cap = vsm_params.bin_features[66];
+					if (brick_count > 0u && voxel_size > 0.0 && vsm_voxel_thresh > 0.0 && vsm_voxel_cap > 0u) {
+						float texel_size = md.texel_scale * float(1u << mip);
+						float brick_world = float(NEXTGEO_VOXEL_BRICK_DIM) * voxel_size * route_scale;
+						float brick_tx = 1e30;
+						if (texel_size > 0.0) {
+							if (md.kind == VSM_MAP_KIND_DIRECTIONAL) {
+								brick_tx = brick_world / texel_size;
+							} else {
+								vec3 c_w = vsm_instance_point(record, parent_lod.xyz);
+								float z_min = max(length(c_w - vsm_light_origin(md)) - parent_lod.w * route_scale, max(md.near_w, 1e-4));
+								brick_tx = brick_world / (texel_size * z_min);
+							}
+						}
+						if (brick_tx <= vsm_voxel_thresh) {
+							bool group_error_passes = true;
+							for (uint c = 0u; c < cluster_count; c++) {
+								uint gc = cluster_offset + c;
+								if (gc < mesh.cluster_offset) {
+									continue;
+								}
+								uint lc = gc - mesh.cluster_offset;
+								if (lc >= mesh.cluster_count) {
+									continue;
+								}
+								if (page_cluster_hdr > 0u && lc >= page_first_cluster && (lc - page_first_cluster) < page_cluster_hdr) {
+									uint rec_word = page_word_base + 4u + (lc - page_first_cluster) * 20u;
+									int refined_group = int(pages.data[rec_word + 15u]);
+									if (refined_group >= 0 && uint(refined_group) < group_count) {
+										vec4 own_lod = vec4(
+												uintBitsToFloat(pages.data[rec_word + 5u]),
+												uintBitsToFloat(pages.data[rec_word + 6u]),
+												uintBitsToFloat(pages.data[rec_word + 7u]),
+												uintBitsToFloat(pages.data[rec_word + 8u]));
+										float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
+										float child_err = vsm_projected_error_skinned(record, own_lod, own_error, 1.0, false, md, mip);
+										if (child_err > vsm_params.max_texel_error && vsm_mesh_group_refine_ok(mesh_idx, uint(refined_group))) {
+											group_error_passes = false;
+											break;
+										}
+									}
+								}
+							}
+							if (group_error_passes) {
+								uint layer = vsm_instance_layer(record, vsm_params.cull_flags, false);
+								uint req_dirty = layer != 0u ? VSM_ENTRY_DIRTY_DYNAMIC : VSM_ENTRY_DIRTY_STATIC;
+								if ((rec.w & req_dirty) != 0u) {
+									uint cursor = voxel_base + brick_rel_word;
+									for (uint b = 0u; b < brick_count; b++) {
+										uint meta = pages.data[cursor + 6u];
+										uint occ_count = meta & 0xFFu;
+										uint vslot = atomicAdd(vsm_counters.voxel_bricks, 1u);
+										if (vslot < vsm_voxel_cap) {
+											vsm_voxel_bricks_out.data[vslot] = uvec4(record_idx, cursor, dirty_idx, layer & 1u);
+											vsm_ng_sink(atomicMax(vsm_voxel_args.data[0], min(vslot + 1u, NEXTGEO_SW_DISPATCH_WIDTH)));
+											vsm_ng_sink(atomicMax(vsm_voxel_args.data[1], vslot / NEXTGEO_SW_DISPATCH_WIDTH + 1u));
+										} else {
+											vsm_ng_mark_overflow(rec);
+											break;
+										}
+										cursor += NEXTGEO_VOXEL_BRICK_HEADER_WORDS + occ_count * NEXTGEO_VOXEL_DATA_WORDS;
+									}
+								}
+								return;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
 		uint global_cluster = cluster_offset + cluster;
 		if (global_cluster < mesh.cluster_offset) {
@@ -1299,6 +1408,19 @@ raster_bin_state;
 
 const uint NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 6u;
 const uint NEXTGEO_CULL_FLAG_TESSELLATION = 1u << 7u;
+const uint NEXTGEO_CULL_FLAG_VOXELS = 1u << 8u;
+
+// GodotNext: nextgeo_voxels (#165). Bindings 29..30 avoid 27..28 reserved for #152.
+layout(set = 0, binding = 29, std430) buffer restrict writeonly VisibleVoxelBricks {
+	uvec4 data[];
+}
+visible_voxel_bricks;
+
+// [0..3]: phase 0 indirect dispatch (x, y, 1, 0); [4..7]: phase 1 indirect dispatch (x, y, 1, 0).
+layout(set = 0, binding = 30, std430) buffer restrict VoxelRasterArgs {
+	uint data[];
+}
+voxel_raster_args;
 #endif
 
 // GodotNext: spline_meshes (#161). Bound in BVH_LEVEL and CLUSTER_CULL (main and shadow) at binding 26.
@@ -1714,7 +1836,95 @@ void main() {
 	bool hybrid_raster = (cull.cull.w & NEXTGEO_CULL_FLAG_HYBRID_RASTER) != 0u;
 	float route_scale = hybrid_raster ? sw_raster_instance_scale(record) : 0.0;
 
-	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
+	// GodotNext: nextgeo_voxels (#165, plan §21.4 contract N10). Swap a voxelized group for its
+	// sparse 4^3 bricks when a brick projects <= V px and the group's error test passes.
+	bool voxels_swapped = false;
+	bool voxels_on = hybrid_raster && (cull.cull.w & NEXTGEO_CULL_FLAG_VOXELS) != 0u &&
+			!is_skinned && (record.flags & NEXTGEO_RECORD_HAS_SPLINE) == 0u &&
+			page_slot != 0xFFFFFFFFu && slot_page_size >= 96u && record.surface_mask != 0u;
+	if (voxels_on) {
+		uint page_word_base = (page_slot * slot_page_size) >> 2u;
+		uint page_words = slot_page_size >> 2u;
+		uint voxel_rel_word = pages.data[page_word_base + 3u];
+		if (voxel_rel_word >= 4u && voxel_rel_word + 4u <= page_words) {
+			uint voxel_base = page_word_base + voxel_rel_word;
+			if (pages.data[voxel_base + 0u] == NEXTGEO_VOXEL_SECTION_MAGIC) {
+				uint first_g = pages.data[voxel_base + 1u];
+				uint page_g_count = pages.data[voxel_base + 2u];
+				if (entry.y >= first_g && (entry.y - first_g) < page_g_count &&
+						voxel_rel_word + 4u + (entry.y - first_g + 1u) * 4u <= page_words) {
+					uint dir_word = voxel_base + 4u + (entry.y - first_g) * 4u;
+					uint brick_rel_word = pages.data[dir_word + 0u];
+					uint brick_count = pages.data[dir_word + 1u];
+					float voxel_size = uintBitsToFloat(pages.data[dir_word + 2u]);
+					float voxel_thresh_px = uintBitsToFloat(cull.raster_bin_tess_mask.z);
+					uint phase_cap = cull.raster_bin_tess_mask.w >> 1u;
+					if (brick_count > 0u && voxel_size > 0.0 && voxel_thresh_px > 0.0 && phase_cap > 0u) {
+						vec3 center_w = instance_point(record, parent_lod.xyz);
+						float brick_world = float(NEXTGEO_VOXEL_BRICK_DIM) * voxel_size * route_scale;
+						float brick_px = 1e30;
+						if (cull.raster_params.z != 0.0) {
+							brick_px = brick_world * cull.raster_params.y;
+						} else {
+							float z_min = dot(center_w - cull.camera.xyz, cull.raster_forward.xyz) - parent_lod.w * route_scale;
+							if (z_min > max(cull.raster_forward.w, 1e-4)) {
+								brick_px = brick_world * cull.raster_params.y / z_min;
+							}
+						}
+						if (brick_px <= voxel_thresh_px) {
+							bool group_error_passes = true;
+							for (uint c = 0u; c < cluster_count; c++) {
+								uint gc = cluster_offset + c;
+								if (page_cluster_hdr > 0u && gc >= mesh.cluster_offset) {
+									uint lc = gc - mesh.cluster_offset;
+									if (lc >= page_first_cluster && (lc - page_first_cluster) < page_cluster_hdr) {
+										uint rec_word = page_word_base + 4u + (lc - page_first_cluster) * 20u;
+										int refined_group = int(pages.data[rec_word + 15u]);
+										if (refined_group >= 0 && uint(refined_group) < group_count) {
+											vec4 own_lod = vec4(
+													uintBitsToFloat(pages.data[rec_word + 5u]),
+													uintBitsToFloat(pages.data[rec_word + 6u]),
+													uintBitsToFloat(pages.data[rec_word + 7u]),
+													uintBitsToFloat(pages.data[rec_word + 8u]));
+											float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
+											float child_px_err = projected_error_skinned(record, own_lod, own_error, 1.0, false);
+											if (child_px_err > cull.camera.w && mesh_group_refine_ok(mesh_idx, uint(refined_group))) {
+												group_error_passes = false;
+												break;
+											}
+										}
+									}
+								}
+							}
+							if (group_error_passes) {
+								uint phase_base = params.phase == 0u ? 0u : phase_cap;
+								uint arg_base = params.phase * 4u;
+								uint cursor = voxel_base + brick_rel_word;
+								for (uint b = 0u; b < brick_count; b++) {
+									uint meta = pages.data[cursor + 6u];
+									uint occ_count = meta & 0xFFu;
+									uint vslot = atomicAdd(counters.voxel_bricks[params.phase], 1u);
+									if (vslot < phase_cap) {
+										visible_voxel_bricks.data[phase_base + vslot] = uvec4(entry.x, cursor, entry.y, meta);
+										atomicMax(voxel_raster_args.data[arg_base + 0u], min(vslot + 1u, NEXTGEO_SW_DISPATCH_WIDTH));
+										atomicMax(voxel_raster_args.data[arg_base + 1u], vslot / NEXTGEO_SW_DISPATCH_WIDTH + 1u);
+									} else {
+										atomicAdd(counters.overflow, 1u);
+										break;
+									}
+									cursor += NEXTGEO_VOXEL_BRICK_HEADER_WORDS + occ_count * NEXTGEO_VOXEL_DATA_WORDS;
+								}
+								emitted_any = true;
+								voxels_swapped = true;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for (uint cluster = 0u; !voxels_swapped && cluster < cluster_count; cluster++) {
 		uint global_cluster = cluster_offset + cluster;
 		vec3 skin_lmin = vec3(0.0);
 		vec3 skin_lmax = vec3(0.0);

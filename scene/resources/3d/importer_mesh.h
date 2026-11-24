@@ -81,7 +81,7 @@ class ImporterMesh : public Resource {
 	Ref<ImporterMesh> shadow_mesh;
 
 	// GodotNext: nextgeo_import
-	friend Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+	friend Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, bool p_voxels, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
 	bool _surface_is_virtualized(int p_surface) const;
 	Ref<VirtualGeometryData> virtual_geometry;
 
@@ -128,7 +128,7 @@ public:
 	void generate_lods(float p_normal_merge_angle, Array p_skin_pose_transform_array);
 
 	// GodotNext: nextgeo_import
-	typedef Error (*BuildVirtualGeometryFunc)(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+	typedef Error (*BuildVirtualGeometryFunc)(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, bool p_voxels, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
 	static BuildVirtualGeometryFunc build_virtual_geometry_func;
 	// One int per surface. 0 = eligible. Any other value is a NextGeoFallback reason.
 	// GodotNext: nextgeo_skinned
@@ -137,8 +137,8 @@ public:
 	PackedInt32Array get_virtual_geometry_eligibility(bool p_skinned = false) const;
 	// Writes `p_ngm_path` and attaches VirtualGeometryData. A null hook, or a mesh with no
 	// eligible surface, returns OK and leaves virtual geometry unset.
-	Error build_virtual_geometry(const String &p_ngm_path, bool p_skinned = false, bool p_preserve_area = false, bool p_wind = false);
-	Error build_virtual_geometry_with_wind_skeleton(const String &p_ngm_path, bool p_skinned, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents);
+	Error build_virtual_geometry(const String &p_ngm_path, bool p_skinned = false, bool p_preserve_area = false, bool p_wind = false, bool p_voxels = false);
+	Error build_virtual_geometry_with_wind_skeleton(const String &p_ngm_path, bool p_skinned, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, bool p_voxels = false);
 	// OBJ `strip_authored_to_coarse` only. Scene import never calls this.
 	void strip_authored_surfaces_to_coarse();
 	Ref<VirtualGeometryData> get_virtual_geometry() const;

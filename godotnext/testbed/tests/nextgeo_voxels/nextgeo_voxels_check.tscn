@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/nextgeo_voxels/nextgeo_voxels_check.gd" id="1"]
+
+[node name="NextGeoVoxelsCheck" type="Node3D"]
+script = ExtResource("1")

@@ -266,6 +266,15 @@ int VirtualGeometryData::get_skin_influences() const {
 	return skin_influences;
 }
 
+void VirtualGeometryData::set_voxel_brick_count(int64_t p_count) {
+	voxel_brick_count = p_count;
+	emit_changed();
+}
+
+int64_t VirtualGeometryData::get_voxel_brick_count() const {
+	return voxel_brick_count;
+}
+
 void VirtualGeometryData::set_assembly(const Ref<VirtualGeometryAssembly> &p_assembly) {
 	if (assembly == p_assembly) {
 		return;
@@ -330,6 +339,7 @@ void VirtualGeometryData::reset_state() {
 	page_count = 0;
 	page_size = 0;
 	skin_influences = 0;
+	voxel_brick_count = 0;
 	assembly.unref();
 	wind.unref();
 	ngm_vertex_layout = 0;
@@ -389,6 +399,8 @@ void VirtualGeometryData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_page_size"), &VirtualGeometryData::get_page_size);
 	ClassDB::bind_method(D_METHOD("set_skin_influences", "influences"), &VirtualGeometryData::set_skin_influences);
 	ClassDB::bind_method(D_METHOD("get_skin_influences"), &VirtualGeometryData::get_skin_influences);
+	ClassDB::bind_method(D_METHOD("set_voxel_brick_count", "count"), &VirtualGeometryData::set_voxel_brick_count);
+	ClassDB::bind_method(D_METHOD("get_voxel_brick_count"), &VirtualGeometryData::get_voxel_brick_count);
 	ClassDB::bind_method(D_METHOD("set_assembly", "assembly"), &VirtualGeometryData::set_assembly);
 	ClassDB::bind_method(D_METHOD("get_assembly"), &VirtualGeometryData::get_assembly);
 	ClassDB::bind_method(D_METHOD("set_wind", "wind"), &VirtualGeometryData::set_wind);
@@ -420,6 +432,7 @@ void VirtualGeometryData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "page_count"), "set_page_count", "get_page_count");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "page_size"), "set_page_size", "get_page_size");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "skin_influences"), "set_skin_influences", "get_skin_influences");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "voxel_brick_count"), "set_voxel_brick_count", "get_voxel_brick_count");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "assembly", PROPERTY_HINT_RESOURCE_TYPE, "VirtualGeometryAssembly"), "set_assembly", "get_assembly");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "wind", PROPERTY_HINT_RESOURCE_TYPE, "VirtualGeometryWind"), "set_wind", "get_wind");
 }

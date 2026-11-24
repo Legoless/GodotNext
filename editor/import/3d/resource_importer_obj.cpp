@@ -225,7 +225,7 @@ static Error _parse_material_library(const String &p_path, HashMap<String, Ref<S
 // GodotNext: nextgeo_import
 // Trailing arguments default so EditorOBJImporter::import_scene keeps scene import in
 // charge of virtual geometry. ResourceImporterOBJ::import is the caller that sets them.
-static Error _parse_obj(const String &p_path, List<Ref<ImporterMesh>> &r_meshes, bool p_single_mesh, bool p_generate_tangents, bool p_generate_lods, bool p_generate_shadow_mesh, bool p_generate_lightmap_uv2, float p_generate_lightmap_uv2_texel_size, const PackedByteArray &p_src_lightmap_cache, Vector3 p_scale_mesh, Vector3 p_offset_mesh, bool p_disable_compression, Vector<Vector<uint8_t>> &r_lightmap_caches, List<String> *r_missing_deps, bool p_generate_virtual_geometry = false, int p_virtual_geometry_fallback_mode = 0, const String &p_ngm_base_path = String(), const String &p_source_path = String(), Array *r_ngm_entries = nullptr, bool p_virtual_geometry_preserve_area = false, bool p_virtual_geometry_wind = false) {
+static Error _parse_obj(const String &p_path, List<Ref<ImporterMesh>> &r_meshes, bool p_single_mesh, bool p_generate_tangents, bool p_generate_lods, bool p_generate_shadow_mesh, bool p_generate_lightmap_uv2, float p_generate_lightmap_uv2_texel_size, const PackedByteArray &p_src_lightmap_cache, Vector3 p_scale_mesh, Vector3 p_offset_mesh, bool p_disable_compression, Vector<Vector<uint8_t>> &r_lightmap_caches, List<String> *r_missing_deps, bool p_generate_virtual_geometry = false, int p_virtual_geometry_fallback_mode = 0, const String &p_ngm_base_path = String(), const String &p_source_path = String(), Array *r_ngm_entries = nullptr, bool p_virtual_geometry_preserve_area = false, bool p_virtual_geometry_wind = false, bool p_virtual_geometry_voxels = false) {
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, vformat("Couldn't open OBJ file '%s', it may not exist or not be readable.", p_path));
 
@@ -578,7 +578,7 @@ static Error _parse_obj(const String &p_path, List<Ref<ImporterMesh>> &r_meshes,
 		const String key = source + "::" + mesh->get_name();
 		const String ngm_path = (p_ngm_base_path.is_empty() ? p_path : p_ngm_base_path) + ".ngm";
 		const bool strip_authored = p_virtual_geometry_fallback_mode == 1; // strip_authored_to_coarse
-		ngm_build_mesh(mesh, ngm_path, key, strip_authored, *r_ngm_entries, false, p_virtual_geometry_preserve_area, p_virtual_geometry_wind);
+		ngm_build_mesh(mesh, ngm_path, key, strip_authored, *r_ngm_entries, false, p_virtual_geometry_preserve_area, p_virtual_geometry_wind, PackedVector3Array(), PackedInt32Array(), p_virtual_geometry_voxels);
 	}
 
 	if (p_generate_lods) {
@@ -679,6 +679,8 @@ void ResourceImporterOBJ::get_import_options(const String &p_path, List<ImportOp
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "virtual_geometry/preserve_area"), false));
 	// GodotNext: nextgeo_foliage_wind (#152)
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "virtual_geometry/wind"), false));
+	// GodotNext: nextgeo_voxels (#165)
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "virtual_geometry/voxels"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_shadow_mesh"), true));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_lightmap_uv2", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "generate_lightmap_uv2_texel_size", PROPERTY_HINT_RANGE, "0.001,100,0.001"), 0.2));
@@ -715,9 +717,10 @@ Error ResourceImporterOBJ::import(ResourceUID::ID p_source_id, const String &p_s
 	const int virtual_geometry_fallback_mode = p_options.has("virtual_geometry_fallback_mode") ? int(p_options["virtual_geometry_fallback_mode"]) : 0;
 	const bool preserve_area = p_options.has("virtual_geometry/preserve_area") && bool(p_options["virtual_geometry/preserve_area"]);
 	const bool wind = p_options.has("virtual_geometry/wind") && bool(p_options["virtual_geometry/wind"]);
+	const bool voxels = p_options.has("virtual_geometry/voxels") && bool(p_options["virtual_geometry/voxels"]);
 	Array ngm_entries;
 	const String ngm_source = ProjectSettings::get_singleton()->localize_path(p_source_file);
-	err = _parse_obj(p_source_file, meshes, true, p_options["generate_tangents"], p_options["generate_lods"], p_options["generate_shadow_mesh"], p_options["generate_lightmap_uv2"], p_options["generate_lightmap_uv2_texel_size"], src_lightmap_cache, p_options["scale_mesh"], p_options["offset_mesh"], p_options["force_disable_mesh_compression"], mesh_lightmap_caches, nullptr, generate_virtual_geometry, virtual_geometry_fallback_mode, p_save_path, ngm_source, &ngm_entries, preserve_area, wind);
+	err = _parse_obj(p_source_file, meshes, true, p_options["generate_tangents"], p_options["generate_lods"], p_options["generate_shadow_mesh"], p_options["generate_lightmap_uv2"], p_options["generate_lightmap_uv2_texel_size"], src_lightmap_cache, p_options["scale_mesh"], p_options["offset_mesh"], p_options["force_disable_mesh_compression"], mesh_lightmap_caches, nullptr, generate_virtual_geometry, virtual_geometry_fallback_mode, p_save_path, ngm_source, &ngm_entries, preserve_area, wind, voxels);
 
 	if (mesh_lightmap_caches.size()) {
 		Ref<FileAccess> f = FileAccess::open(p_source_file + ".unwrap_cache", FileAccess::WRITE);

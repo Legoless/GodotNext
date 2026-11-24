@@ -277,6 +277,78 @@ bool ngm_page_fill_max_edges(uint8_t *p_page, uint64_t p_size, uint32_t p_stride
 	return true;
 }
 
+bool ngm_page_voxel_section(const uint8_t *p_page, uint64_t p_size, uint32_t &r_header_offset, uint32_t &r_total_bytes) {
+	r_header_offset = 0u;
+	r_total_bytes = 0u;
+	// Minimum section: 16-byte page header + 16-byte voxel header + 8-byte trailer = 40 bytes.
+	if (p_page == nullptr || p_size < 40ull) {
+		return false;
+	}
+	const uint32_t tail_bytes = load_u32(p_page + p_size - 8ull);
+	const uint32_t tail_magic = load_u32(p_page + p_size - 4ull);
+	if (tail_magic != NGM_VOXEL_SECTION_MAGIC || tail_bytes < 24u || uint64_t(tail_bytes) > p_size - 16ull) {
+		return false;
+	}
+	const uint64_t base_end = p_size - uint64_t(tail_bytes);
+	const uint64_t hdr_off = (base_end + 3ull) & ~3ull;
+	if (hdr_off + 24ull > p_size || hdr_off > uint64_t(UINT32_MAX)) {
+		return false;
+	}
+	if (load_u32(p_page + hdr_off) != NGM_VOXEL_SECTION_MAGIC) {
+		return false;
+	}
+	const uint32_t group_count = load_u32(p_page + hdr_off + 8ull);
+	const uint32_t total_bricks = load_u32(p_page + hdr_off + 12ull);
+	const uint64_t dir_bytes = uint64_t(group_count) * 16ull;
+	const uint64_t brick_area_start = hdr_off + 16ull + dir_bytes;
+	const uint64_t trailer_start = p_size - 8ull;
+	if (brick_area_start > trailer_start) {
+		return false;
+	}
+	const uint64_t section_words = (trailer_start - hdr_off) >> 2u;
+	if (((trailer_start - hdr_off) & 3ull) != 0ull) {
+		return false;
+	}
+	uint64_t counted_bricks = 0ull;
+	for (uint32_t g = 0; g < group_count; g++) {
+		const uint8_t *dir = p_page + hdr_off + 16ull + uint64_t(g) * 16ull;
+		const uint32_t brick_rel_word = load_u32(dir + 0u);
+		const uint32_t brick_count = load_u32(dir + 4u);
+		if (brick_count == 0u) {
+			continue;
+		}
+		counted_bricks += brick_count;
+		if (counted_bricks > uint64_t(total_bricks)) {
+			return false;
+		}
+		uint64_t cursor = uint64_t(brick_rel_word);
+		const uint64_t min_rel_word = (16ull + dir_bytes) >> 2u;
+		if (cursor < min_rel_word || cursor >= section_words) {
+			return false;
+		}
+		for (uint32_t b = 0; b < brick_count; b++) {
+			if (cursor + 8ull > section_words) {
+				return false;
+			}
+			const uint32_t meta = load_u32(p_page + hdr_off + (cursor + 6ull) * 4ull);
+			const uint32_t occ_count = meta & 0xFFu;
+			if (occ_count == 0u || occ_count > 64u) {
+				return false;
+			}
+			cursor += 8ull + uint64_t(occ_count) * 2ull;
+			if (cursor > section_words) {
+				return false;
+			}
+		}
+	}
+	if (counted_bricks != uint64_t(total_bricks)) {
+		return false;
+	}
+	r_header_offset = uint32_t(hdr_off);
+	r_total_bytes = tail_bytes;
+	return true;
+}
+
 Error NGMWriter::write(const String &p_path, const NGMHeader &p_header, const Vector<NGMPage> &p_pages) {
 	ERR_FAIL_COND_V_MSG(p_path.is_empty(), ERR_INVALID_PARAMETER, "NGM: path is empty.");
 	ERR_FAIL_COND_V_MSG(p_header.version != NGM_VERSION, ERR_INVALID_PARAMETER, "NGM: writer only emits version 2.");

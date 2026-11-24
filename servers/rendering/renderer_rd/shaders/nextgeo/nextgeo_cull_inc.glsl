@@ -47,7 +47,7 @@ struct NextGeoCullParamsData {
 	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
 	vec4 raster_params; // #162/#163: x = T px, y = px scale, z = 1 for an orthographic view, w = tessellation dicing rate px
 	uvec4 raster_bin_demote_mask; // #153/#164: xy = pixel-programmable bins (1..64) demotable past programmable_raster_distance; zw = vertex-offset bins (1..64) demotable past vertex_offset_disable_distance
-	uvec4 raster_bin_tess_mask; // #163: xy = tessellated displaced bins (1..64) routed to runtime dicing worklist
+	uvec4 raster_bin_tess_mask; // #163/#165: xy = tessellated displaced bins (1..64); z = floatBitsToUint(voxel_threshold_px); w = voxel_brick_capacity
 };
 
 struct NextGeoCountersData {
@@ -75,7 +75,7 @@ struct NextGeoCountersData {
 	uint vertex_offset_distance_fixed[2]; // #164: WPO clusters demoted to FIXED past vertex_offset_disable_distance
 	uint vertex_offset_clamped; // #164: vertices clamped to Material.vertex_offset_max
 	uint sink; // #277: D3D12 GBV atomic return sink
-	uint pad_end[2];
+	uint voxel_bricks[2]; // #165: visible sparse 4^3 voxel bricks emitted per phase
 };
 
 #ifdef SHADOW_VIEW
@@ -90,11 +90,11 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly CullParams {
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
 	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins, bit 7 = tessellation #163)
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster, bit 6 = programmable raster bins, bit 7 = tessellation #163, bit 8 = voxels #165)
 	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
 	vec4 raster_params; // #162/#163: x = T px, y = px scale, z = 1 for an orthographic view, w = tessellation dicing rate px
 	uvec4 raster_bin_demote_mask; // #153/#164: xy = pixel-programmable bins (1..64) demotable past programmable_raster_distance; zw = vertex-offset bins (1..64) demotable past vertex_offset_disable_distance
-	uvec4 raster_bin_tess_mask; // #163: xy = tessellated displaced bins (1..64) routed to runtime dicing worklist
+	uvec4 raster_bin_tess_mask; // #163/#165: xy = tessellated displaced bins (1..64); z = floatBitsToUint(voxel_threshold_px); w = voxel_brick_capacity
 }
 cull;
 #endif
@@ -135,7 +135,7 @@ layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint vertex_offset_distance_fixed[2]; // #164: WPO clusters demoted to FIXED past vertex_offset_disable_distance
 	uint vertex_offset_clamped; // #164: vertices clamped to Material.vertex_offset_max
 	uint sink; // #277: D3D12 GBV atomic return sink
-	uint pad_end[2];
+	uint voxel_bricks[2]; // #165: visible sparse 4^3 voxel bricks emitted per phase
 }
 counters;
 #endif

@@ -222,6 +222,29 @@ and #43/#52 infrastructure. Copied files: none.
 
 No outside input. Procedural foliage wind through Nanite skinning (#152, plan §21.4 contract N10, GN-7, GN-12) — the `VirtualGeometryWind` resource (`scene/resources/3d/virtual_geometry_wind.{h,cpp}`) storing 1 trunk bone plus `<= 8` branch bones (`<= 9` total) with a conservative `max_sway` bound, offline generation from bind-pose geometry or imported glTF skeletons via the `virtual_geometry/wind` import option writing into `#159`'s `.ngm` cluster skinning blocks, `World3D` wind properties (`wind_direction`, `wind_strength`, `wind_gust_frequency`) and `RenderingServer::scenario_set_wind()`, compact per-mesh GPU wind descriptors (`WindMeshGPU`) plus per-scenario wind parameters (`WindParamsGPU`) behind `rendering/nextgeo/experimental/foliage_wind` (default `false`), in-shader procedural bone evaluation (`skinning_inc.glsl`, matching `nextgeo_skinning.h`'s CPU reference) using 0 bytes of per-instance skin palette arena memory across SW/HW-VS/HW-mesh/programmable raster bins, visibility export and Stage A/B resolve (current + previous-time velocity), conservative `max_sway` cull bounds inflation on CPU and GPU (`instance_cull.glsl`, `cluster_cull.glsl`, `CPU_cut_hash`), and VSM dynamic-layer routing (`CACHE_DYNAMIC_FOLIAGE_WIND`) — is an original implementation built directly on GodotNext's #159/#160 skinning format and shaders, #151 MultiMesh instancing, #154/#155/#162 rasterizers, and #212/#217 VSM x Nanite pipeline. Copied files: none.
 
+## Nanite Voxels (#165)
+
+No outside input. Experimental Nanite Voxels (#165, plan §21.4 contract N10, GN-7, GN-12, N6, MN3) —
+the `virtual_geometry/voxels` import option (default `false`) in `ResourceImporterScene`,
+`ResourceImporterOBJ`, and `ImporterMesh`, deterministic offline sparse `4^3` (64-voxel) brick
+voxelization via exact 6-plane Sutherland-Hodgman triangle-vs-AABB clipping (`modules/nextgeo/nextgeo_voxelizer.{h,cpp}`)
+storing per-voxel `(surface_id, fp16x2 mean UV, oct16 normal, 8-bit coverage)` plus 64-bit sparse
+occupancy masks inside each group's `.ngm` page payload with a backward-compatible self-describing
+trailer (`NGM_FLAG_VOXELS`, `NGM_VOXEL_SECTION_MAGIC`) so `#78` page streaming and residency stay
+unchanged, `rendering/nextgeo/experimental/voxels` (default `false`, zero voxel buffers allocated
+and zero voxel dispatches when off), group-to-brick swap in main and VSM `cluster_cull.glsl`,
+software-only compute splat (`voxel_raster.glsl` supporting both `u64image2D` and `VIS64_BUFFER`)
+clamped to `<= 2x2` px with frame-stable stochastic coverage hash and visibility IDs in the reserved
+25-bit partition `[0x01C00000, 0x01FFFFFF]` (`VIS_VOXEL_BASE`) plus 6-bit voxel index `0..63`,
+visibility export/classify/binning/debug and shading-bin decode (both compute shading bins and
+tile-quad fallback) to `(surface, UV, normal)` with voxel-footprint derivatives, and the VSM depth-only
+SW voxel splat (`vsm_raster_voxel.glsl`, `VOXEL` / `VSM_VOXEL` raster-bin table entries) while
+keeping existing RT proxies unchanged — is an original clean-room implementation built directly on
+GodotNext's #65, #76, #78, #80, #155, #158, #162, #163, and #217 infrastructure. Provisional
+parameters left for PQ measurement: `NEXTGEO_VOXEL_PROVISIONAL_ERROR_RATIO = 0.005`,
+`NEXTGEO_VOXEL_TERMINAL_ERROR_FRACTION = 0.04`, `NEXTGEO_VOXEL_ERROR_TO_SIZE_SCALE = 1.0`,
+and `NEXTGEO_VOXEL_PROVISIONAL_SCREEN_THRESHOLD_PX = 8.0`. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

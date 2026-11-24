@@ -30,6 +30,7 @@ void main() {
 // clang-format off
 #include "nextgeo_records_inc.glsl"
 #include "tessellation_inc.glsl"
+#include "voxel_inc.glsl"
 // clang-format on
 
 layout(location = 0) in vec2 uv_interp;
@@ -98,6 +99,12 @@ layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoDicedPatch
 	NextGeoDicedPatchRecord data[];
 }
 diced_patches;
+
+// GodotNext: nextgeo_voxels (#165). Visible sparse 4^3 voxel brick records (dummy buffer when off).
+layout(set = 0, binding = 14, std430) buffer restrict readonly NextGeoVisibleVoxelBricks {
+	uvec4 data[];
+}
+visible_voxel_bricks;
 
 layout(push_constant, std430) uniform PushParams {
 	vec2 internal_size;
@@ -301,9 +308,49 @@ void main() {
 		}
 	}
 
-	// Decode visible virtual cluster & triangle (supporting #163 diced patch IDs).
+	// Decode visible virtual cluster & triangle (supporting #163 diced patch IDs and #165 voxel bricks).
 	uint raw_vis_cluster = vis_id >> 7u;
 	uint raw_tri_idx = vis_id & 0x7Fu;
+	if (nextgeo_vis_is_voxel(raw_vis_cluster)) {
+		uint brick_idx = nextgeo_vis_voxel_brick_index(raw_vis_cluster);
+		uint voxel_idx = raw_tri_idx & 0x3Fu;
+		uvec4 brick_entry = visible_voxel_bricks.data[brick_idx];
+		if (brick_entry.x >= push_params.record_count) {
+			frag_color = (push_params.mode == MODE_CRACKS) ? vec4(0.45, 0.45, 0.45, 1.0) : vec4(0.05, 0.05, 0.05, 1.0);
+			return;
+		}
+		NextGeoInstanceRecord record = instances.data[brick_entry.x];
+		if (push_params.mode == MODE_FALLBACK) {
+			bool rt_excluded = (record.flags & NEXTGEO_RECORD_RT_FAR) != 0u || (record.tlas_instance_index == 0xFFFFFFFFu && record.blas_handle == 0xFFFFFFFFu);
+			vec3 vcol = rt_excluded ? vec3(0.14, 0.72, 0.62) : vec3(0.14, 0.82, 0.34);
+			frag_color = vec4(vcol, 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_VISIBILITY_ID) {
+			vec3 brick_col = hash_color(brick_entry.x * 0x9e3779b9u ^ (brick_entry.y + 0x27d4eb2du));
+			vec3 vox_col = hash_color((brick_idx << 6u) ^ voxel_idx);
+			frag_color = vec4(mix(brick_col, vox_col, 0.35), 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_RESIDENCY) {
+			frag_color = vec4(0.16, 0.85, 0.42, 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_CLUSTER_ERROR) {
+			frag_color = vec4(heat_ramp(0.15), 1.0);
+			return;
+		}
+		if (push_params.mode == MODE_TRIANGLE_SIZE) {
+			if (is_canonical_px) {
+				atomicAdd(histogram.bins[1], 1u);
+			}
+			frag_color = vec4(heat_ramp(1.0 - 1.0 / 15.0), 1.0);
+			return;
+		}
+		// MODE_CRACKS: voxel splats are always front-facing neutral gray.
+		frag_color = vec4(0.48, 0.48, 0.48, 1.0);
+		return;
+	}
 	bool is_patch = nextgeo_vis_is_patch(raw_vis_cluster);
 	uint vis_cluster = raw_vis_cluster;
 	uint tri_idx = raw_tri_idx;

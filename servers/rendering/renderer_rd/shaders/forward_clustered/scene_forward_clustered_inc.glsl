@@ -46,6 +46,7 @@
 #ifdef MODE_VISIBILITY_RESOLVE
 #include "../nextgeo/nextgeo_records_inc.glsl"
 #include "../nextgeo/tessellation_inc.glsl"
+#include "../nextgeo/voxel_inc.glsl"
 #endif
 
 // GodotNext: vsm_non_nanite (#218) / vsm_projection (#222). In every variant (the VSM_* defines reach them
@@ -1025,6 +1026,12 @@ layout(set = 2, binding = 21, std430) restrict readonly buffer NextGeoInstanceAt
 	NextGeoInstanceAttributes data[];
 }
 nextgeo_instance_attrs;
+
+// GodotNext: nextgeo_voxels (#165, plan §21.4 N10). Visible sparse 4^3 voxel bricks (binding 22).
+layout(set = 2, binding = 22, std430) restrict readonly buffer NextGeoVisibleVoxelBricks {
+	uvec4 data[];
+}
+nextgeo_visible_voxel_bricks;
 
 #else
 

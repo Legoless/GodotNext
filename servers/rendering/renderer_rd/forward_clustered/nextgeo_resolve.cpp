@@ -150,6 +150,7 @@ void NextGeoResolve::begin_frame() {
 	current_max_tiles = 0;
 	binned = false; // GodotNext: nextgeo_shading_bins (#158)
 	diced_patches_buffer = RID(); // GodotNext: nextgeo_tessellation (#163)
+	voxel_bricks_buffer = RID(); // GodotNext: nextgeo_voxels (#165)
 }
 
 uint32_t NextGeoResolve::register_bucket(SceneShaderForwardClustered::MaterialData *p_material, SceneShaderForwardClustered::ShaderData *p_shader, RID p_material_uniform_set, uint32_t p_material_feedback_index, SceneShaderForwardClustered::ShaderSpecialization p_specialization) {
@@ -358,6 +359,8 @@ bool NextGeoResolve::classify(RendererVirtualMeshStorage *p_storage, RID p_visib
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_buffer;
 	const RID bucket_buf = bucket_table_buffer.is_valid() ? bucket_table_buffer : dummy_buffer;
 	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
+	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_buffer;
+	const RID voxels_buf = voxel_bricks_buffer.is_valid() ? voxel_bricks_buffer : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_visibility_tex));
@@ -369,6 +372,8 @@ bool NextGeoResolve::classify(RendererVirtualMeshStorage *p_storage, RID p_visib
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, indirect_args_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tile_list_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, patches_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, page_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, voxels_buf));
 
 	ClassifyPush push;
 	push.viewport_width = width;
@@ -424,6 +429,7 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	const RID attr_buf = p_storage->get_instance_attributes_buffer().is_valid() ? p_storage->get_instance_attributes_buffer() : dummy_buffer;
 	const RID wind_params_buf = p_storage->get_wind_params_buffer().is_valid() ? p_storage->get_wind_params_buffer() : dummy_buffer;
 	const RID wind_meshes_buf = p_storage->get_wind_meshes_buffer().is_valid() ? p_storage->get_wind_meshes_buffer() : dummy_buffer;
+	const RID voxels_buf = voxel_bricks_buffer.is_valid() ? voxel_bricks_buffer : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, vis_tex));
@@ -444,6 +450,8 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, patches_buf));
 	// GodotNext: nextgeo_foliage_instancing (#151). Binding 21 holds per-record INSTANCE_COLOR/CUSTOM/ID.
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, attr_buf));
+	// GodotNext: nextgeo_voxels (#165). Binding 22 holds visible sparse 4^3 voxel brick records.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, voxels_buf));
 	// GodotNext: nextgeo_foliage_wind (#152). Bindings 24..25 hold wind params and per-mesh wind skeletons (22..23 reserved).
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, wind_params_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, wind_meshes_buf));
@@ -542,6 +550,8 @@ bool NextGeoResolve::bin(RendererVirtualMeshStorage *p_storage, RID p_visibility
 	const RID mesh_buf = p_storage->get_mesh_record_buffer().is_valid() ? p_storage->get_mesh_record_buffer() : dummy_buffer;
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_buffer;
 	const RID patches_buf = diced_patches_buffer.is_valid() ? diced_patches_buffer : dummy_buffer;
+	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_buffer;
+	const RID voxels_buf = voxel_bricks_buffer.is_valid() ? voxel_bricks_buffer : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_visibility_tex));
@@ -555,6 +565,8 @@ bool NextGeoResolve::bin(RendererVirtualMeshStorage *p_storage, RID p_visibility
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, shading_pixel_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bucket_table_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, patches_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, page_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, voxels_buf));
 
 	BinningPush push;
 	push.viewport_width = width;
@@ -622,6 +634,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	const RID attr_buf = p_storage->get_instance_attributes_buffer().is_valid() ? p_storage->get_instance_attributes_buffer() : dummy_buffer;
 	const RID wind_params_buf = p_storage->get_wind_params_buffer().is_valid() ? p_storage->get_wind_params_buffer() : dummy_buffer;
 	const RID wind_meshes_buf = p_storage->get_wind_meshes_buffer().is_valid() ? p_storage->get_wind_meshes_buffer() : dummy_buffer;
+	const RID voxels_buf = voxel_bricks_buffer.is_valid() ? voxel_bricks_buffer : dummy_buffer;
 
 	// The resolve set of the tile quads, with the pixel list at binding 7, the bin state and the images.
 	LocalVector<RD::Uniform> resolve_uniforms;
@@ -646,6 +659,7 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, cluster_skin_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, patches_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, attr_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, voxels_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, wind_params_buf));
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, wind_meshes_buf));
 
@@ -1061,6 +1075,7 @@ void NextGeoResolve::free_resources() {
 	dummy_buffer = RID();
 	dummy_vis_tex = RID();
 	diced_patches_buffer = RID();
+	voxel_bricks_buffer = RID();
 	classify_version = RID();
 	init_indirect_pipeline = RID();
 	classify_pipeline = RID();

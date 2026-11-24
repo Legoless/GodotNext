@@ -1684,11 +1684,11 @@ Ref<VirtualGeometryData> ImporterMesh::get_virtual_geometry() const {
 	return virtual_geometry;
 }
 
-Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path, bool p_skinned, bool p_preserve_area, bool p_wind) {
-	return build_virtual_geometry_with_wind_skeleton(p_ngm_path, p_skinned, p_preserve_area, p_wind, PackedVector3Array(), PackedInt32Array());
+Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path, bool p_skinned, bool p_preserve_area, bool p_wind, bool p_voxels) {
+	return build_virtual_geometry_with_wind_skeleton(p_ngm_path, p_skinned, p_preserve_area, p_wind, PackedVector3Array(), PackedInt32Array(), p_voxels);
 }
 
-Error ImporterMesh::build_virtual_geometry_with_wind_skeleton(const String &p_ngm_path, bool p_skinned, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents) {
+Error ImporterMesh::build_virtual_geometry_with_wind_skeleton(const String &p_ngm_path, bool p_skinned, bool p_preserve_area, bool p_wind, const PackedVector3Array &p_wind_bone_rest_positions, const PackedInt32Array &p_wind_bone_parents, bool p_voxels) {
 	mesh.unref();
 	virtual_geometry.unref();
 
@@ -1714,7 +1714,7 @@ Error ImporterMesh::build_virtual_geometry_with_wind_skeleton(const String &p_ng
 
 	Ref<VirtualGeometryData> built;
 	Vector<Vector<uint8_t>> pages;
-	const Error err = build_virtual_geometry_func(this, eligible, p_preserve_area, p_wind, p_wind_bone_rest_positions, p_wind_bone_parents, built, pages);
+	const Error err = build_virtual_geometry_func(this, eligible, p_preserve_area, p_wind, p_wind_bone_rest_positions, p_wind_bone_parents, p_voxels, built, pages);
 	if (err != OK) {
 		return err;
 	}
@@ -1727,8 +1727,8 @@ Error ImporterMesh::build_virtual_geometry_with_wind_skeleton(const String &p_ng
 
 	NGMHeader header;
 	header.version = NGM_VERSION;
-	// GodotNext: nextgeo_skinned
-	header.flags = built->get_skin_influences() == 0 ? 0 : NGM_FLAG_SKINNED;
+	// GodotNext: nextgeo_skinned / nextgeo_voxels (#165)
+	header.flags = (built->get_skin_influences() == 0 ? 0u : NGM_FLAG_SKINNED) | (built->get_voxel_brick_count() > 0 ? NGM_FLAG_VOXELS : 0u);
 	header.skin_influences = uint32_t(built->get_skin_influences());
 	header.page_size = uint32_t(built->get_page_size());
 	header.page_count = uint32_t(pages.size());
@@ -1837,9 +1837,8 @@ void ImporterMesh::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("generate_lods", "normal_merge_angle", "normal_split_angle", "bone_transform_array"), &ImporterMesh::_generate_lods_bind);
 	// GodotNext: nextgeo_import
 	// GodotNext: nextgeo_skinned
-	// GodotNext: nextgeo_foliage_instancing (#151)
-	// GodotNext: nextgeo_foliage_wind (#152)
-	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path", "skinned", "preserve_area", "wind"), &ImporterMesh::build_virtual_geometry, DEFVAL(false), DEFVAL(false), DEFVAL(false));
+	// GodotNext: nextgeo_foliage_instancing (#151), nextgeo_foliage_wind (#152), nextgeo_voxels (#165)
+	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path", "skinned", "preserve_area", "wind", "voxels"), &ImporterMesh::build_virtual_geometry, DEFVAL(false), DEFVAL(false), DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_mesh", "base_mesh"), &ImporterMesh::get_mesh, DEFVAL(Ref<ArrayMesh>()));
 	ClassDB::bind_static_method("ImporterMesh", D_METHOD("from_mesh", "mesh"), &ImporterMesh::from_mesh);
 	ClassDB::bind_method(D_METHOD("clear"), &ImporterMesh::clear);
