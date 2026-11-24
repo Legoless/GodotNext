@@ -70,6 +70,8 @@ TEST_FORCE_LINK(test_depth_offset)
 #endif
 #ifdef D3D12_ENABLED
 #include "drivers/d3d12/rendering_shader_container_d3d12.h"
+
+#include <windows.h>
 #endif
 
 using namespace RendererRD;
@@ -589,12 +591,9 @@ void fragment() {
 #endif
 #if defined(MODULE_GLSLANG_ENABLED) && defined(METAL_ENABLED)
 			if (v == 0) {
-				MetalDeviceProfile profile;
-				profile.platform = MetalDeviceProfile::Platform::macOS;
-				profile.gpu = MetalDeviceProfile::GPU::Apple9;
-				profile.features.msl_version = 30100;
-				profile.features.use_argument_buffers = true;
-				RenderingShaderContainerFormatMetal mtl_format(&profile, true);
+				const MetalDeviceProfile *profile = MetalDeviceProfile::get_profile(MetalDeviceProfile::Platform::macOS, MetalDeviceProfile::GPU::Apple9, os_version::MACOS_14_0);
+				REQUIRE(profile != nullptr);
+				RenderingShaderContainerFormatMetal mtl_format(profile, true);
 				String merr;
 				RDC::ShaderStageSPIRVData mvs;
 				mvs.shader_stage = RDC::SHADER_STAGE_VERTEX;
@@ -611,19 +610,25 @@ void fragment() {
 #endif
 #if defined(MODULE_GLSLANG_ENABLED) && defined(D3D12_ENABLED)
 			if (v == 0) {
-				RenderingShaderContainerFormatD3D12 d3d_format;
-				String derr;
-				RDC::ShaderStageSPIRVData dvs;
-				dvs.shader_stage = RDC::SHADER_STAGE_VERTEX;
-				dvs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_VERTEX, stage_src[RD::SHADER_STAGE_VERTEX], d3d_format.get_shader_language_version(), d3d_format.get_shader_spirv_version(RDC::SHADER_STAGE_VERTEX), &derr);
-				CHECK_MESSAGE(!dvs.spirv.is_empty(), derr);
-				RDC::ShaderStageSPIRVData dfs;
-				dfs.shader_stage = RDC::SHADER_STAGE_FRAGMENT;
-				dfs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, fs_src, d3d_format.get_shader_language_version(), d3d_format.get_shader_spirv_version(RDC::SHADER_STAGE_FRAGMENT), &derr);
-				CHECK_MESSAGE(!dfs.spirv.is_empty(), derr);
-				Ref<RenderingShaderContainer> dcontainer = d3d_format.create_container();
-				Vector<RDC::ShaderStageSPIRVData> dstages = { dvs, dfs };
-				CHECK(dcontainer->set_code_from_spirv("ForwardClusteredPDOD3D12", dstages));
+				HMODULE lib_d3d12 = LoadLibraryW(L"D3D12.dll");
+				REQUIRE(lib_d3d12 != nullptr);
+				{
+					RenderingShaderContainerFormatD3D12 d3d_format;
+					d3d_format.set_lib_d3d12(lib_d3d12);
+					String derr;
+					RDC::ShaderStageSPIRVData dvs;
+					dvs.shader_stage = RDC::SHADER_STAGE_VERTEX;
+					dvs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_VERTEX, stage_src[RD::SHADER_STAGE_VERTEX], d3d_format.get_shader_language_version(), d3d_format.get_shader_spirv_version(RDC::SHADER_STAGE_VERTEX), &derr);
+					CHECK_MESSAGE(!dvs.spirv.is_empty(), derr);
+					RDC::ShaderStageSPIRVData dfs;
+					dfs.shader_stage = RDC::SHADER_STAGE_FRAGMENT;
+					dfs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, fs_src, d3d_format.get_shader_language_version(), d3d_format.get_shader_spirv_version(RDC::SHADER_STAGE_FRAGMENT), &derr);
+					CHECK_MESSAGE(!dfs.spirv.is_empty(), derr);
+					Ref<RenderingShaderContainer> dcontainer = d3d_format.create_container();
+					Vector<RDC::ShaderStageSPIRVData> dstages = { dvs, dfs };
+					CHECK(dcontainer->set_code_from_spirv("ForwardClusteredPDOD3D12", dstages));
+				}
+				FreeLibrary(lib_d3d12);
 			}
 #endif
 		}
