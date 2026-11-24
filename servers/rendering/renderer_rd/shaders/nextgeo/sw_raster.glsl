@@ -132,6 +132,26 @@ layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSplines {
 }
 spline_deforms;
 
+// GodotNext: nextgeo_skinned_runtime (#160). Skeleton palette arena, per-record skin table, cluster skin offsets.
+layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+// clang-format off
+#include "skinning_inc.glsl"
+// clang-format on
+
 const uint NEXTGEO_COUNTER_RASTER_SW = 31u; // raster_sw[2]
 const uint NEXTGEO_COUNTER_RASTER_SW_WRITES = 35u;
 
@@ -224,12 +244,17 @@ void main() {
 	if (has_spline) {
 		spline_pose = spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current;
 	}
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	uint cluster_table_idx = mesh.page_table_offset + local_cluster;
 	for (uint v = gl_LocalInvocationIndex; v < vert_count; v += 64u) {
 		uint pos_word = desc.x + v * stride;
 		vec3 local_pos = vec3(
 				uintBitsToFloat(pages.data[pos_word + 0u]),
 				uintBitsToFloat(pages.data[pos_word + 1u]),
 				uintBitsToFloat(pages.data[pos_word + 2u]));
+		if (is_skinned) {
+			local_pos = nextgeo_skin_position(local_pos, entry.x, cluster_table_idx, v, vert_count, false);
+		}
 		if (has_spline) {
 			local_pos = spline_deform_position(spline_pose, local_pos);
 		}

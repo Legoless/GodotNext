@@ -129,6 +129,26 @@ layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoSplines {
 }
 spline_deforms;
 
+// GodotNext: nextgeo_skinned_runtime (#160). Skeleton palette arena, per-record skin table, cluster skin offsets.
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 0, binding = 14, std430) buffer restrict readonly NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+// clang-format off
+#include "nextgeo/skinning_inc.glsl"
+// clang-format on
+
 shared vec4 s_clip_pos[128];
 
 void main() {
@@ -181,6 +201,9 @@ void main() {
 				uintBitsToFloat(pages.data[pos_word + 0u]),
 				uintBitsToFloat(pages.data[pos_word + 1u]),
 				uintBitsToFloat(pages.data[pos_word + 2u]));
+		if ((record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u) {
+			local_pos = nextgeo_skin_position(local_pos, pair.x, mesh.page_table_offset + local_cluster, tid, vert_count, false);
+		}
 		if (has_spline) {
 			local_pos = spline_deform_position(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, local_pos);
 		}

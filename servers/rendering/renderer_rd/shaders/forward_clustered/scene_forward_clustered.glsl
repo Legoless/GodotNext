@@ -4450,6 +4450,8 @@ void main() {
 	vec2 _ng_uv_c[3];
 	vec2 _ng_uv2_c[3];
 	vec4 _ng_col_c[3];
+	bool _ng_is_skinned = (_ng_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	uint _ng_cluster_table_idx = _ng_mesh.page_table_offset + _ng_local_cluster;
 
 	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
 		uint _ng_idx_byte = _ng_desc.y + _ng_tri_idx * 3u + _ng_corner;
@@ -4476,6 +4478,7 @@ void main() {
 
 		vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
 		vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
+		float _ng_tan_sign = 1.0;
 		if ((_ng_layout & 0x04u) != 0u) {
 			vec4 _ng_tan4 = vec4(
 					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
@@ -4484,7 +4487,8 @@ void main() {
 					uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
 			_ng_w += 4u;
 			_ng_c_tan = _ng_tan4.xyz;
-			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan4.w, vec3(0.0, 1.0, 0.0));
+			_ng_tan_sign = _ng_tan4.w;
+			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
 		}
 
 		vec2 _ng_c_uv = vec2(0.0);
@@ -4524,6 +4528,12 @@ void main() {
 			vec3 _ng_p_nrm = _ng_c_nrm;
 			vec3 _ng_p_tan = _ng_c_tan;
 			vec3 _ng_p_bin = _ng_c_bin;
+			if (_ng_is_skinned) {
+				nextgeo_skin_vertex(_ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, true);
+				if ((_ng_layout & 0x04u) != 0u) {
+					_ng_p_bin = _ng_safe_normalize(cross(_ng_p_nrm, _ng_p_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+				}
+			}
 			if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
 				spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].previous, _ng_p_pos, _ng_p_nrm, _ng_p_tan, _ng_p_bin);
 			}
@@ -4544,6 +4554,12 @@ void main() {
 		}
 #endif
 
+		if (_ng_is_skinned) {
+			nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_entry.x, _ng_cluster_table_idx, _ng_v_idx, _ng_vert_count, false);
+			if ((_ng_layout & 0x04u) != 0u) {
+				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+			}
+		}
 		if ((_ng_record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
 			spline_deform_vertex_full(nextgeo_spline_deforms.data[_ng_record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, _ng_c_pos, _ng_c_nrm, _ng_c_tan, _ng_c_bin);
 		}

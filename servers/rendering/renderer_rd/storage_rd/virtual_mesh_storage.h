@@ -52,6 +52,13 @@ class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	// GodotNext: spline_meshes (#161). Compact spline deformation SSBO (lazy 1-entry default when unused).
 	mutable RID spline_buffer;
 	mutable uint32_t spline_buffer_capacity = 0;
+	// GodotNext: nextgeo_skinned_runtime (#160). Lazy GPU buffers (null until skinned virtual geometry is active).
+	RID skin_palette_buffer;
+	uint32_t skin_palette_bytes = 0;
+	RID skin_instance_buffer;
+	uint32_t skin_instance_bytes = 0;
+	RID cluster_skin_buffer;
+	uint32_t cluster_skin_bytes = 0;
 	uint32_t buffer_capacity = 0;
 	uint32_t mesh_buffer_capacity = 0;
 
@@ -73,6 +80,15 @@ protected:
 	void _reset_residency() override;
 	void _upload_splines(uint32_t p_first, uint32_t p_count) override;
 	void _reset_splines() override;
+	bool _resize_skin_palette(uint32_t p_bytes) override;
+	void _upload_skin_palette(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_skin_palette() override;
+	bool _resize_skin_instances(uint32_t p_bytes) override;
+	void _upload_skin_instances(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_skin_instances() override;
+	bool _resize_cluster_skin(uint32_t p_bytes) override;
+	void _upload_cluster_skin(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_cluster_skin() override;
 
 public:
 	VirtualMeshStorage();
@@ -83,6 +99,9 @@ public:
 	RID get_cluster_buffer() const override { return cluster_buffer; }
 	RID get_residency_buffer() const override { return residency_buffer; }
 	RID get_spline_buffer() const override;
+	RID get_skin_palette_buffer() const override { return skin_palette_buffer; }
+	RID get_skin_instance_buffer() const override { return skin_instance_buffer; }
+	RID get_cluster_skin_buffer() const override { return cluster_skin_buffer; }
 	RID get_record_buffer() const override { return record_buffer; }
 	RID get_mesh_record_buffer() const override { return mesh_record_buffer; }
 

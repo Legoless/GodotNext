@@ -57,6 +57,8 @@ struct NextGeoRasterFacts {
 	bool depth_offset = false; // DEPTH_OFFSET (#149)
 	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). True when Material.displacement_magnitude > 0.
 	bool displaced = false;
+	// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 N8). True on skinned virtual mesh instances.
+	bool skinned = false;
 	RSE::CullMode cull_mode = RSE::CULL_MODE_BACK;
 };
 
@@ -74,6 +76,10 @@ inline uint32_t nextgeo_raster_features(const NextGeoRasterFacts &p_facts) {
 	// GodotNext: nextgeo_displacement (#150).
 	if (p_facts.displaced) {
 		features |= RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED;
+	}
+	// GodotNext: nextgeo_skinned_runtime (#160).
+	if (p_facts.skinned) {
+		features |= RendererVirtualMeshStorage::RASTER_FEATURE_SKINNED;
 	}
 	if (p_facts.cull_mode != RSE::CULL_MODE_BACK) {
 		features |= RendererVirtualMeshStorage::RASTER_FEATURE_TWO_SIDED;

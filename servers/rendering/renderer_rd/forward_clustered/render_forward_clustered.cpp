@@ -10599,6 +10599,14 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		route_facts.baked_gridmap = clear_reason == RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_BAKED_GRIDMAP;
 	}
 	route_facts.skeleton = ginstance->data->skeleton.is_valid();
+	route_facts.blend_shapes = mesh_storage->mesh_get_blend_shape_count(p_mesh) > 0;
+	// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). Admit skinned virtual geometry
+	// when the mesh carries #159 cluster skinning data and a valid 3D skeleton is attached.
+	if (route_facts.mesh_has_virtual_geometry && route_facts.skeleton && RSG::virtual_mesh_storage != nullptr) {
+		route_facts.mesh_skinned_virtual_geometry = RSG::virtual_mesh_storage->mesh_is_skinned_virtual_geometry(p_mesh) &&
+				mesh_storage->skeleton_get_bone_count(ginstance->data->skeleton) > 0 &&
+				!mesh_storage->skeleton_is_2d(ginstance->data->skeleton);
+	}
 	route_facts.instance_uniforms = ginstance->shader_uniforms_offset >= 0;
 	route_facts.lightmapped = ginstance->lightmap_instance.is_valid();
 	route_facts.chain_blocked = p_chain_blocked;
@@ -10641,7 +10649,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	uint32_t raster_bin = 0;
 	if (route.virtual_geometry && admit_programmable) {
 		RendererVirtualMeshStorage::RasterBinKey bin_key;
-		bin_key.features = material_raster_features | (ginstance->spline_deform_active ? RendererVirtualMeshStorage::RASTER_FEATURE_SPLINE : 0u);
+		bin_key.features = material_raster_features | (ginstance->spline_deform_active ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_SPLINE) : 0u) | ((route_facts.skeleton && route_facts.mesh_skinned_virtual_geometry) ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_SKINNED) : 0u);
 		bin_key.shader_version = p_material->shader_data->version;
 		bin_key.material = p_material->get_self();
 		raster_bin = RSG::virtual_mesh_storage->raster_bin_acquire(bin_key);

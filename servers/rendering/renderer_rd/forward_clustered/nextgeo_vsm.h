@@ -202,7 +202,7 @@ inline uint32_t nextgeo_vsm_instance_layer(uint32_t p_record_flags, bool p_moved
 	if (mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_STATIC || mode == RendererVirtualMeshStorage::RECORD_VSM_CACHE_RIGID) {
 		return 0u;
 	}
-	const bool is_dynamic = ((p_record_flags & (RendererVirtualMeshStorage::RECORD_VSM_DYNAMIC | RendererVirtualMeshStorage::RECORD_RT_SKINNED)) != 0u) || p_moved_this_frame || p_dynamic_material;
+	const bool is_dynamic = ((p_record_flags & (RendererVirtualMeshStorage::RECORD_VSM_DYNAMIC | RendererVirtualMeshStorage::RECORD_RT_SKINNED | RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE)) != 0u) || p_moved_this_frame || p_dynamic_material;
 	return is_dynamic ? 1u : 0u;
 }
 

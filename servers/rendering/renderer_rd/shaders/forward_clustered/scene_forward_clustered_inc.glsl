@@ -977,6 +977,28 @@ layout(set = 2, binding = 16, std430) restrict readonly buffer NextGeoSplines {
 }
 nextgeo_spline_deforms;
 
+// GodotNext: nextgeo_skinned_runtime (#160). Bindings 17..19 hold skeleton palette arena,
+// per-record skin table, and per-cluster skin block offsets (9..15 = compute bins/velocity, 16 = splines).
+layout(set = 2, binding = 17, std430) restrict readonly buffer NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 2, binding = 18, std430) restrict readonly buffer NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 2, binding = 19, std430) restrict readonly buffer NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+#define NEXTGEO_SKIN_PAGES_DATA nextgeo_pages.data
+// clang-format off
+#include "../nextgeo/skinning_inc.glsl"
+// clang-format on
+
 #else
 
 layout(set = 2, binding = 0, std430) restrict readonly buffer Transforms {

@@ -756,9 +756,10 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface
 	if (!(nextgi_cpu_geometry_enabled || keep_cpu_for_sdf) || p_mesh->nextgi_skip_rt_arena) {
 		return;
 	}
-	// GodotNext: nextgeo_nextgi (#77). Surfaces covered by a VirtualGeometryData use the VGD RT
-	// proxy directly; skip the P1a surface-LOD decode and arena upload on those surfaces.
-	if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh_rid, p_surface_index)) {
+	// GodotNext: nextgeo_nextgi (#77) & nextgeo_skinned_runtime (#160). Static virtual surfaces use the
+	// VGD RT proxy directly; skinned virtual surfaces keep their bind-pose CPU copy and #59 posed RT slot.
+	if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh_rid, p_surface_index) &&
+			(p_surface_data.format & RSE::ARRAY_FORMAT_BONES) == 0) {
 		return;
 	}
 	// Triangles with float32 positions always keep a CPU copy: the static arena and SRC cards
@@ -1266,8 +1267,12 @@ void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
 				continue;
 			}
 			const bool is_virtual = RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, s);
-			// GodotNext: nextgi_hit_groups (#130). The stream goes with the surface's arena range.
-			_mesh_nextgi_hit_free_attributes(surface);
+			const bool keep_skinned_rt = is_virtual && (surface->format & RSE::ARRAY_FORMAT_BONES) != 0;
+			// GodotNext: nextgi_hit_groups (#130) & nextgeo_skinned_runtime (#160). Skinned virtual surfaces
+			// keep their #59 posed RT slots and hit attributes so RT-range BLAS refit continues to work.
+			if (!keep_skinned_rt) {
+				_mesh_nextgi_hit_free_attributes(surface);
+			}
 			if (surface->rt_chunk != UINT32_MAX) {
 				NextGIArenaAllocator::Allocation allocation;
 				allocation.chunk = surface->rt_chunk;
@@ -1278,12 +1283,12 @@ void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
 				surface->rt_allocation_size = 0;
 				surface->rt_eligible = false;
 			}
-			if (is_virtual) {
+			if (is_virtual && !keep_skinned_rt) {
 				surface->rt_eligible = false;
 				surface->rt_skinned = false;
 				surface->rt_cpu_positions.clear();
 				surface->rt_cpu_indices.clear();
-			} else {
+			} else if (!is_virtual) {
 				all_virtual = false;
 			}
 		}
@@ -1809,7 +1814,10 @@ void MeshStorage::mesh_nextgi_sync_vgd_proxy(RID p_mesh) {
 	const bool has_ray_query = nextgi_has_ray_query;
 	const bool has_vg = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 	const uint32_t live_instances = has_vg ? RSG::virtual_mesh_storage->mesh_get_live_instance_count(p_mesh) : 0u;
-	const bool want_proxy = nextgi_rt_enabled && nextgi_hwrt_tier_active && has_ray_query && has_vg && live_instances > 0;
+	// GodotNext: nextgeo_skinned_runtime (#160). Skinned virtual meshes enter the NextGI TLAS via #59
+	// per-instance posed RT slots rather than a static VGD RT proxy BLAS.
+	const bool is_skinned_vg = has_vg && (RSG::virtual_mesh_storage->mesh_is_skinned_virtual_geometry(p_mesh) || mesh_nextgi_rt_is_skinned(p_mesh));
+	const bool want_proxy = nextgi_rt_enabled && nextgi_hwrt_tier_active && has_ray_query && has_vg && !is_skinned_vg && live_instances > 0;
 	if (!want_proxy) {
 		const bool has_proxy_parts = (!mesh->nextgi_parts.is_empty() && mesh->nextgi_parts[0].is_proxy) || (!mesh->nextgi_shadow_parts.is_empty() && mesh->nextgi_shadow_parts[0].is_proxy);
 		if (mesh->nextgi_proxy_uploaded || (!has_vg && has_proxy_parts)) {
@@ -4154,11 +4162,16 @@ RID MeshStorage::skeleton_allocate() {
 	return skeleton_owner.allocate_rid();
 }
 void MeshStorage::skeleton_initialize(RID p_rid) {
-	skeleton_owner.initialize_rid(p_rid, Skeleton());
+	Skeleton skeleton;
+	skeleton.self = p_rid;
+	skeleton_owner.initialize_rid(p_rid, skeleton);
 }
 
 void MeshStorage::skeleton_free(RID p_rid) {
 	_update_dirty_skeletons();
+	if (RSG::virtual_mesh_storage != nullptr) {
+		RSG::virtual_mesh_storage->skeleton_free_notify(p_rid);
+	}
 	skeleton_allocate_data(p_rid, 0);
 	Skeleton *skeleton = skeleton_owner.get_or_null(p_rid);
 	skeleton->dependency.deleted_notify(p_rid);
@@ -4214,6 +4227,9 @@ void MeshStorage::skeleton_allocate_data(RID p_skeleton, int p_bones, bool p_2d_
 	}
 
 	skeleton->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_SKELETON_DATA);
+	if (RSG::virtual_mesh_storage != nullptr) {
+		RSG::virtual_mesh_storage->skeleton_data_changed(p_skeleton);
+	}
 }
 
 int MeshStorage::skeleton_get_bone_count(RID p_skeleton) const {
@@ -4221,6 +4237,24 @@ int MeshStorage::skeleton_get_bone_count(RID p_skeleton) const {
 	ERR_FAIL_NULL_V(skeleton, 0);
 
 	return skeleton->size;
+}
+
+bool MeshStorage::skeleton_is_2d(RID p_skeleton) const {
+	Skeleton *skeleton = skeleton_owner.get_or_null(p_skeleton);
+	if (skeleton == nullptr) {
+		return false;
+	}
+	return skeleton->use_2d;
+}
+
+const float *MeshStorage::skeleton_get_3d_data(RID p_skeleton, uint32_t &r_bone_count) const {
+	Skeleton *skeleton = skeleton_owner.get_or_null(p_skeleton);
+	if (skeleton == nullptr || skeleton->use_2d || skeleton->size <= 0 || skeleton->data.size() < uint32_t(skeleton->size) * 12u) {
+		r_bone_count = 0u;
+		return nullptr;
+	}
+	r_bone_count = uint32_t(skeleton->size);
+	return skeleton->data.ptr();
 }
 
 void MeshStorage::skeleton_bone_set_transform(RID p_skeleton, int p_bone, const Transform3D &p_transform) {
@@ -4329,6 +4363,11 @@ void MeshStorage::_update_dirty_skeletons() {
 		Skeleton *skeleton = skeleton_dirty_list;
 
 		if (skeleton->size) {
+			// GodotNext: nextgeo_skinned_runtime (#160). Snapshot previous-frame bone palette and upload
+			// the current pose into VirtualMeshStorage's palette arena before updating Godot's skeleton SSBO.
+			if (!skeleton->use_2d && RSG::virtual_mesh_storage != nullptr) {
+				RSG::virtual_mesh_storage->skeleton_update_palette(skeleton->self, skeleton->data.ptr(), uint32_t(skeleton->size));
+			}
 			RD::get_singleton()->buffer_update(skeleton->buffer, 0, skeleton->data.size() * sizeof(float), skeleton->data.ptr());
 		}
 

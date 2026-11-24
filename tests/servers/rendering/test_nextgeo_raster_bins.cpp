@@ -134,8 +134,13 @@ TEST_CASE("[NextGeo][RasterBins] Only a raster program moves a surface out of th
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SPLINE | VMS::RASTER_FEATURE_TWO_SIDED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_FIXED));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SPLINE | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SPLINE | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+	// Fixed-function skinned surfaces keep the FIXED bin (in-raster skinning runs in fixed and programmable bins alike).
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SKINNED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_FIXED));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SKINNED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_FIXED));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SKINNED | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_SKINNED | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	// Features later issues add have no entry yet: the surface keeps its legacy route.
-	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_SKINNED), uint32_t(VMS::RASTER_FEATURE_VOXEL), uint32_t(VMS::RASTER_FEATURE_ASSEMBLY) }) {
+	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_VOXEL), uint32_t(VMS::RASTER_FEATURE_ASSEMBLY) }) {
 		CHECK_EQ(VMS::resolve_raster_bin(feature, VMS::RASTER_PASS_VISIBILITY), -1);
 		CHECK_EQ(VMS::resolve_raster_bin(feature | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), -1);
 	}

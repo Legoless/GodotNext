@@ -67,9 +67,11 @@ const uint NEXTGEO_RECORD_VSM_CACHE_MODE_MASK = 3u << 12;
 const uint NEXTGEO_RECORD_VSM_DYNAMIC = 1u << 14;
 // GodotNext: nextgeo_vertex_offset (#164). Opt-in RT proxy vertex() evaluation and BLAS refit.
 const uint NEXTGEO_RECORD_RT_EVALUATE_VERTEX_OFFSET = 1u << 15;
-// GodotNext: spline_meshes (#161). Bit 16 marks an active spline record; bits 17..31 hold the 15-bit spline slot index.
-const uint NEXTGEO_RECORD_HAS_SPLINE = 1u << 16;
-const uint NEXTGEO_RECORD_SPLINE_INDEX_SHIFT = 17u;
+// GodotNext: nextgeo_skinned_runtime (#160). Instance has a valid #159 skinned virtual mesh + 3D skeleton palette entry.
+const uint NEXTGEO_RECORD_SKINNED_PALETTE = 1u << 16;
+// GodotNext: spline_meshes (#161). Bit 17 marks an active spline record; bits 18..31 hold the 14-bit spline slot index.
+const uint NEXTGEO_RECORD_HAS_SPLINE = 1u << 17;
+const uint NEXTGEO_RECORD_SPLINE_INDEX_SHIFT = 18u;
 
 // NextGeoInstanceRecord::gi_flags.
 const uint NEXTGEO_GI_MODE_MASK = 3u << 0;

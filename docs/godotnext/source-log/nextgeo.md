@@ -183,6 +183,20 @@ integration (Nanite and non-Nanite), and per-instance deformed NextGI RT proxy B
 implemented directly from GodotNext's plan (§21.4 contract N12, GN-8, GN-12, N8) and standard
 cubic Hermite spline mathematics. Copied files: none.
 
+## Skinned Nanite runtime (#160)
+
+No outside input. The skinned Nanite runtime (#160, plan §21.4 contract N8, GN-5, GN-12, N4) —
+contiguous skeleton palette arena with previous-frame snapshot copy (`VirtualMeshStorage` +
+`MeshStorage::_update_dirty_skeletons`), zero-bindless per-record skin side table (`SkinInstanceInfo`)
+and per-cluster skin-block offset table, Arvo bone-bound union AABB culling and max-bone-scale LOD
+error scaling across main, shadow, and VSM cluster cull, shared GPU linear-blend skinning
+(`servers/rendering/renderer_rd/shaders/nextgeo/skinning_inc.glsl`) across SW compute, HW vertex
+pulling, HW task/mesh, programmable raster bins, visibility resolve (current + previous pose
+velocity), and VSM dynamic-layer rasterization, plus off-screen RT-range `mesh_instance_check_for_update`
+scheduling for `#59` RT proxy BLAS refit — is an original implementation built directly on GodotNext's
+#159 offline skinned `.ngm` format, #162 hybrid raster, #154 mesh-shader HW raster, #155 programmable
+bins, #59 skinned RT actors, and #217/#212 VSM pipeline. Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

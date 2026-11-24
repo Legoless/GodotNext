@@ -77,11 +77,14 @@ public:
 		RECORD_VSM_DYNAMIC = 1u << 14,
 		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). Per-instance opt-in RT proxy WPO evaluation.
 		RECORD_RT_EVALUATE_VERTEX_OFFSET = 1u << 15,
-		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Bit 16 marks an active spline record;
-		// bits 17..31 store the 15-bit index into the compact spline deformation SSBO (up to 32,767).
-		RECORD_HAS_SPLINE = 1u << 16,
-		RECORD_SPLINE_INDEX_SHIFT = 17u,
-		RECORD_SPLINE_INDEX_MASK = 0xFFFE0000u,
+		// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). Skinned VGD instance with a
+		// valid 3D skeleton palette in the skin palette arena.
+		RECORD_SKINNED_PALETTE = 1u << 16,
+		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Bit 17 marks an active spline record;
+		// bits 18..31 store the 14-bit index into the compact spline deformation SSBO (up to 16,383).
+		RECORD_HAS_SPLINE = 1u << 17,
+		RECORD_SPLINE_INDEX_SHIFT = 18u,
+		RECORD_SPLINE_INDEX_MASK = 0xFFFC0000u,
 	};
 
 	// gi_flags.
@@ -207,6 +210,11 @@ public:
 		// runs at vertex fetch in both visibility and VSM fixed and programmable bins.
 		{ RASTER_FEATURE_SPLINE, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "SPLINE" },
 		{ RASTER_FEATURE_SPLINE, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_SPLINE" },
+		// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). Skinned surfaces skin in-raster
+		// on fixed-function (opaque) and programmable (masked/WPO/depth-offset/displaced) bins across
+		// visibility and VSM passes.
+		{ RASTER_FEATURE_SKINNED, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "SKINNED" },
+		{ RASTER_FEATURE_SKINNED, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_SKINNED" },
 	};
 	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
 
@@ -326,6 +334,22 @@ public:
 		uint32_t surface_and_page = 0; // bits 0..15 = surface_id, 16..31 = page_id.
 	};
 
+	// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). 16 B per-record side table
+	// entry (std430 uvec4) pointing into the GPU skeleton palette arena (3 x vec4 rows per bone).
+	struct SkinInstanceInfo {
+		uint32_t current_palette_offset = UINT32_MAX; // vec4 offset of bone 0 in current frame palette.
+		uint32_t prev_palette_offset = UINT32_MAX; // vec4 offset of bone 0 in previous frame palette.
+		uint32_t bone_count = 0; // 0 when unskinned / invalid.
+		uint32_t max_bone_scale_bits = 0x3F800000u; // floatBitsToUint(max_bone_scale), 1.0f default.
+	};
+
+	// GodotNext: nextgeo_skinned_runtime (#160). Cached per-cluster bone entry for CPU_cut_hash.
+	struct ClusterSkinBone {
+		uint16_t global_bone = 0;
+		float aabb_min[3] = { 0.0f, 0.0f, 0.0f };
+		float aabb_max[3] = { 0.0f, 0.0f, 0.0f };
+	};
+
 	// GodotNext: nextgeo_residency (#78). CPU mirror of resident cluster
 	// refinement metadata so CPU_cut_hash matches cluster_cull.glsl bit-for-bit.
 	struct ClusterRefineInfo {
@@ -367,6 +391,12 @@ public:
 		uint32_t group_count = 0;
 		uint32_t layout_stride = 0;
 		uint32_t vertex_layout = 0;
+		// GodotNext: nextgeo_skinned_runtime (#160). 0 (unskinned), 4 or 8 bone influences per vertex.
+		uint32_t skin_influences = 0;
+		// Per-local-cluster global byte offset into page_buffer to the #159 skinning block (UINT32_MAX = unskinned).
+		LocalVector<uint32_t> cluster_skin_offsets;
+		// CPU mirror of resident cluster bone-space AABBs for CPU_cut_hash parity.
+		LocalVector<LocalVector<ClusterSkinBone>> cluster_skin_bones;
 		LocalVector<uint32_t> group_page_ids;
 		LocalVector<LocalVector<uint32_t>> group_pages; // Distinct pages holding clusters of group g.
 		LocalVector<uint32_t> page_first_cluster;
@@ -401,6 +431,8 @@ public:
 	// mesh's eligible_surface_mask (index < 32).
 	bool mesh_surface_is_virtual(RID p_mesh, uint32_t p_surface) const;
 	bool mesh_is_stripped_to_coarse(RID p_mesh) const;
+	// GodotNext: nextgeo_skinned_runtime (#160). True when the mesh's VGD stores 4- or 8-influence skinning data.
+	bool mesh_is_skinned_virtual_geometry(RID p_mesh) const;
 	// 0 while the mesh still has VGD or never had it; the clear reason after
 	// a mesh_clear_virtual_geometry.
 	uint32_t mesh_clear_reason(RID p_mesh) const;
@@ -486,6 +518,19 @@ public:
 	uint32_t get_live_spline_count() const { return live_splines; }
 	uint32_t get_spline_entry_count() const { return spline_entries.size(); }
 	const SplineDeformEntry &get_spline_entry(uint32_t p_index) const;
+	// GodotNext: nextgeo_skinned_runtime (#160). Bind a skeleton to a virtual instance record and maintain
+	// the contiguous GPU skeleton palette arena (current + previous frame poses per active skeleton).
+	void instance_record_set_skeleton(uint32_t p_record, RID p_skeleton);
+	void skeleton_update_palette(RID p_skeleton, const float *p_bone_data, uint32_t p_bone_count);
+	void skeleton_data_changed(RID p_skeleton);
+	void skeleton_free_notify(RID p_skeleton);
+	SkinInstanceInfo get_skin_instance_info(uint32_t p_record) const;
+	RID instance_record_get_skeleton(uint32_t p_record) const;
+	const float *get_skeleton_palette_data(RID p_skeleton, bool p_previous, uint32_t &r_bone_count) const;
+	uint32_t get_palette_arena_bone_capacity() const { return palette_capacity_bones; }
+	uint32_t get_palette_arena_used_bones() const { return palette_used_bones; }
+	uint32_t get_palette_arena_free_block_count() const { return palette_free.size(); }
+	bool has_active_skinned_instances() const { return skin_instances_active; }
 
 	// Per frame: advance the free list and the temporal history, process page
 	// streaming uploads under the per-frame KiB cap, then upload dirty records.
@@ -574,6 +619,10 @@ public:
 	virtual RID get_cluster_buffer() const { return RID(); }
 	virtual RID get_residency_buffer() const { return RID(); }
 	virtual RID get_spline_buffer() const { return RID(); }
+	// GodotNext: nextgeo_skinned_runtime (#160). Lazy GPU buffers (null until skinned virtual geometry is active).
+	virtual RID get_skin_palette_buffer() const { return RID(); }
+	virtual RID get_skin_instance_buffer() const { return RID(); }
+	virtual RID get_cluster_skin_buffer() const { return RID(); }
 	uint32_t get_record_count() const { return used_slots; }
 	uint32_t get_mesh_record_count() const { return mesh_records.size(); }
 	uint32_t get_max_bvh_levels() const;
@@ -600,6 +649,17 @@ protected:
 	// GodotNext: spline_meshes (#161). Compact spline deformation buffer.
 	virtual void _upload_splines(uint32_t p_first, uint32_t p_count) {}
 	virtual void _reset_splines() {}
+	// GodotNext: nextgeo_skinned_runtime (#160). GPU skeleton palette arena, per-record skin side table,
+	// and per-cluster skinning-block byte offsets into page_buffer.
+	virtual bool _resize_skin_palette(uint32_t p_bytes) { return true; }
+	virtual void _upload_skin_palette(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
+	virtual void _reset_skin_palette() {}
+	virtual bool _resize_skin_instances(uint32_t p_bytes) { return true; }
+	virtual void _upload_skin_instances(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
+	virtual void _reset_skin_instances() {}
+	virtual bool _resize_cluster_skin(uint32_t p_bytes) { return true; }
+	virtual void _upload_cluster_skin(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
+	virtual void _reset_cluster_skin() {}
 	// Renderer-specific bookkeeping after a record slot is reused.
 	virtual void _record_reused(uint32_t p_record) {}
 	// Renderer-specific refusal (for example an out-of-memory RD buffer).
@@ -608,12 +668,29 @@ protected:
 	// One CPU-side slot. A freed slot is reusable on the next frame.
 	struct SlotState {
 		RID instance;
+		RID skeleton;
 		bool allocated = false;
 		bool dirty = false;
 		bool dirty_last = false;
 		bool initialized = false;
 		bool rewritten = false;
+		bool skin_dirty = false;
 		uint32_t free_frame = UINT32_MAX;
+	};
+
+	// GodotNext: nextgeo_skinned_runtime (#160). One active skeleton's current+previous bone palette
+	// slice inside the contiguous GPU palette arena (3 x vec4 = 48 B per bone).
+	struct SkeletonPaletteSlot {
+		uint32_t bone_offset = UINT32_MAX; // Start bone index; occupies bone_count * 2 bones.
+		uint32_t bone_count = 0;
+		uint32_t ref_count = 0;
+		float max_bone_scale = 1.0f;
+		bool initialized = false;
+		bool has_nonzero_pose = false;
+		bool dirty_this_frame = false;
+		bool dirty_last_frame = false;
+		LocalVector<float> cur_data; // bone_count * 12 floats.
+		LocalVector<float> prev_data; // bone_count * 12 floats.
 	};
 
 	struct PageSlot {
@@ -707,6 +784,11 @@ protected:
 	void _free_dag(uint32_t p_offset, uint32_t p_size);
 	uint32_t _alloc_clusters(uint32_t p_size);
 	void _free_clusters(uint32_t p_offset, uint32_t p_size);
+	uint32_t _alloc_palette_bones(uint32_t p_bones);
+	void _free_palette_bones(uint32_t p_offset, uint32_t p_bones);
+	bool _ensure_cluster_skin_buffer();
+	void _sync_record_skin_info(uint32_t p_record);
+	void _sync_skeleton_records(RID p_skeleton);
 	MeshRecord _parse_dag(const Vector<uint8_t> &p_dag, uint32_t p_base);
 	void _write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb, float p_lod_bias);
 
@@ -733,6 +815,7 @@ protected:
 	static void _io_worker_entry(void *p_userdata);
 
 	LocalVector<Record> records;
+	LocalVector<SkinInstanceInfo> skin_instances;
 	LocalVector<MeshRecord> mesh_records;
 	LocalVector<SlotState> slot_states;
 	LocalVector<uint32_t> free_now;
@@ -746,6 +829,7 @@ protected:
 	LocalVector<uint32_t> spline_free_now;
 	LocalVector<uint32_t> spline_free_next;
 	uint32_t live_splines = 0;
+	HashMap<RID, SkeletonPaletteSlot> skeleton_palettes;
 
 	HashMap<RID, MeshInfo> meshes;
 	HashMap<RID, uint32_t> mesh_indices;
@@ -777,6 +861,13 @@ protected:
 	};
 	LocalVector<DAGFree> dag_free;
 	LocalVector<DAGFree> cluster_free;
+	LocalVector<DAGFree> palette_free;
+	uint32_t palette_used_bones = 0;
+	uint32_t palette_capacity_bones = 0;
+	uint32_t skin_instance_capacity = 0;
+	bool skin_instances_active = false;
+	uint32_t cluster_skin_capacity = 0;
+	bool cluster_skin_active = false;
 	uint32_t live_records = 0;
 	uint32_t frame = 0;
 	uint32_t streamed_frame = UINT32_MAX;

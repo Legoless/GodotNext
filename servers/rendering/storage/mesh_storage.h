@@ -230,6 +230,12 @@ public:
 
 	virtual void skeleton_allocate_data(RID p_skeleton, int p_bones, bool p_2d_skeleton = false) = 0;
 	virtual int skeleton_get_bone_count(RID p_skeleton) const = 0;
+	// GodotNext: nextgeo_skinned_runtime (#160). 3D skeleton accessors for the NextGeo palette arena.
+	virtual bool skeleton_is_2d(RID p_skeleton) const { return false; }
+	virtual const float *skeleton_get_3d_data(RID p_skeleton, uint32_t &r_bone_count) const {
+		r_bone_count = 0;
+		return nullptr;
+	}
 	virtual void skeleton_bone_set_transform(RID p_skeleton, int p_bone, const Transform3D &p_transform) = 0;
 	virtual Transform3D skeleton_bone_get_transform(RID p_skeleton, int p_bone) const = 0;
 	virtual void skeleton_bone_set_transform_2d(RID p_skeleton, int p_bone, const Transform2D &p_transform) = 0;

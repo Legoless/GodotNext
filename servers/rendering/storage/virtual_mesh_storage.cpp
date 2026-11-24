@@ -46,8 +46,36 @@ static_assert(sizeof(RendererVirtualMeshStorage::Record) == 224, "NextGeo instan
 #endif
 static_assert(sizeof(RendererVirtualMeshStorage::MeshRecord) == 32, "NextGeo mesh record must stay 32 bytes (plan §6.3).");
 static_assert(sizeof(RendererVirtualMeshStorage::ClusterGPUDesc) == 16, "NextGeo cluster GPU descriptor must stay 16 bytes.");
+static_assert(sizeof(RendererVirtualMeshStorage::SkinInstanceInfo) == 16, "NextGeo skin instance side table entry must stay 16 bytes.");
 
 namespace {
+
+// Gershgorin upper bound on the spectral norm of a 3x4 bone matrix (3 row-major vec4s).
+// Matches nextgeo_bone_matrix_scale() and shaders/nextgeo/skinning_inc.glsl.
+float _bone_matrix_scale(const float p_rows[12]) {
+	const float c0x = p_rows[0], c0y = p_rows[4], c0z = p_rows[8];
+	const float c1x = p_rows[1], c1y = p_rows[5], c1z = p_rows[9];
+	const float c2x = p_rows[2], c2y = p_rows[6], c2z = p_rows[10];
+	const float d00 = c0x * c0x + c0y * c0y + c0z * c0z;
+	const float d11 = c1x * c1x + c1y * c1y + c1z * c1z;
+	const float d22 = c2x * c2x + c2y * c2y + c2z * c2z;
+	const float d01 = Math::abs(c0x * c1x + c0y * c1y + c0z * c1z);
+	const float d02 = Math::abs(c0x * c2x + c0y * c2y + c0z * c2z);
+	const float d12 = Math::abs(c1x * c2x + c1y * c2y + c1z * c2z);
+	const float m = MAX(d00 + d01 + d02, MAX(d11 + d01 + d12, d22 + d02 + d12));
+	return (m > 0.0f && Math::is_finite(m)) ? Math::sqrt(m) : 0.0f;
+}
+
+float _palette_max_bone_scale(const float *p_bones, uint32_t p_bone_count) {
+	if (p_bones == nullptr || p_bone_count == 0u) {
+		return 0.0f;
+	}
+	float max_scale = 0.0f;
+	for (uint32_t b = 0; b < p_bone_count; b++) {
+		max_scale = MAX(max_scale, _bone_matrix_scale(p_bones + b * 12u));
+	}
+	return max_scale;
+}
 
 uint32_t _ngm_vertex_float_stride(uint32_t p_vertex_layout) {
 	uint32_t stride = 0;
@@ -150,6 +178,9 @@ RendererVirtualMeshStorage::~RendererVirtualMeshStorage() {
 	_reset_clusters();
 	_reset_residency();
 	_reset_splines();
+	_reset_skin_palette();
+	_reset_skin_instances();
+	_reset_cluster_skin();
 }
 
 void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
@@ -161,6 +192,7 @@ void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
 		capacity *= 2;
 	}
 	records.resize(capacity);
+	skin_instances.resize(capacity);
 	slot_states.resize(capacity);
 	record_capacity = capacity;
 }
@@ -245,6 +277,9 @@ uint32_t RendererVirtualMeshStorage::_alloc_clusters(uint32_t p_size) {
 				_upload_clusters(entry.value.cluster_table_offset, entry.value.cluster_blob.ptr(), entry.value.cluster_table_size);
 			}
 		}
+		if (cluster_skin_active) {
+			_ensure_cluster_skin_buffer();
+		}
 	}
 	const uint32_t offset = cluster_used;
 	cluster_used += aligned;
@@ -259,6 +294,162 @@ void RendererVirtualMeshStorage::_free_clusters(uint32_t p_offset, uint32_t p_si
 	range.offset = p_offset;
 	range.size = (p_size + 15u) & ~15u;
 	cluster_free.push_back(range);
+}
+
+bool RendererVirtualMeshStorage::_ensure_cluster_skin_buffer() {
+	const uint32_t needed_bytes = MAX(cluster_capacity / 4u, 64u);
+	if (cluster_skin_active && cluster_skin_capacity >= needed_bytes) {
+		return true;
+	}
+	uint32_t target = cluster_skin_capacity == 0 ? 64u * 1024u : cluster_skin_capacity;
+	while (target < needed_bytes) {
+		target *= 2u;
+	}
+	if (!_resize_cluster_skin(target)) {
+		return false;
+	}
+	cluster_skin_capacity = target;
+	cluster_skin_active = true;
+	// Initialize every slot to UINT32_MAX (unskinned) before restoring resident skinned meshes.
+	LocalVector<uint32_t> sentinel;
+	sentinel.resize(target / sizeof(uint32_t));
+	for (uint32_t i = 0; i < sentinel.size(); i++) {
+		sentinel[i] = UINT32_MAX;
+	}
+	_upload_cluster_skin(0u, reinterpret_cast<const uint8_t *>(sentinel.ptr()), target);
+	for (const KeyValue<RID, MeshInfo> &entry : meshes) {
+		if (entry.value.cluster_table_size != 0 && !entry.value.cluster_skin_offsets.is_empty()) {
+			const uint32_t dst_off = entry.value.cluster_table_offset / 4u;
+			const uint32_t upload_bytes = uint32_t(entry.value.cluster_skin_offsets.size()) * sizeof(uint32_t);
+			if (dst_off + upload_bytes <= cluster_skin_capacity) {
+				_upload_cluster_skin(dst_off, reinterpret_cast<const uint8_t *>(entry.value.cluster_skin_offsets.ptr()), upload_bytes);
+			}
+		}
+	}
+	return true;
+}
+
+uint32_t RendererVirtualMeshStorage::_alloc_palette_bones(uint32_t p_bones) {
+	if (p_bones == 0u) {
+		return UINT32_MAX;
+	}
+	for (uint32_t index = 0; index < palette_free.size(); index++) {
+		if (palette_free[index].size < p_bones) {
+			continue;
+		}
+		const uint32_t offset = palette_free[index].offset;
+		palette_free[index].offset += p_bones;
+		palette_free[index].size -= p_bones;
+		if (palette_free[index].size == 0u) {
+			palette_free.remove_at(index);
+		}
+		return offset;
+	}
+	if (palette_used_bones + p_bones > palette_capacity_bones) {
+		uint32_t capacity = palette_capacity_bones == 0u ? 256u : palette_capacity_bones;
+		while (capacity < palette_used_bones + p_bones) {
+			capacity *= 2u;
+		}
+		const uint64_t bytes64 = uint64_t(capacity) * 48ull; // 3 x vec4 = 48 B per bone.
+		if (bytes64 > UINT32_MAX || !_resize_skin_palette(uint32_t(bytes64))) {
+			return UINT32_MAX;
+		}
+		palette_capacity_bones = capacity;
+		// Restore all resident skeleton palettes into the resized GPU buffer.
+		for (const KeyValue<RID, SkeletonPaletteSlot> &entry : skeleton_palettes) {
+			const SkeletonPaletteSlot &slot = entry.value;
+			if (slot.bone_offset != UINT32_MAX && slot.bone_count > 0u) {
+				const uint32_t half_bytes = slot.bone_count * 48u;
+				if (!slot.cur_data.is_empty()) {
+					_upload_skin_palette(slot.bone_offset * 48u, reinterpret_cast<const uint8_t *>(slot.cur_data.ptr()), half_bytes);
+				}
+				if (!slot.prev_data.is_empty()) {
+					_upload_skin_palette((slot.bone_offset + slot.bone_count) * 48u, reinterpret_cast<const uint8_t *>(slot.prev_data.ptr()), half_bytes);
+				}
+			}
+		}
+	}
+	const uint32_t offset = palette_used_bones;
+	palette_used_bones += p_bones;
+	return offset;
+}
+
+void RendererVirtualMeshStorage::_free_palette_bones(uint32_t p_offset, uint32_t p_bones) {
+	if (p_offset == UINT32_MAX || p_bones == 0u) {
+		return;
+	}
+	DAGFree range;
+	range.offset = p_offset;
+	range.size = p_bones;
+	uint32_t insert_at = palette_free.size();
+	for (uint32_t i = 0; i < palette_free.size(); i++) {
+		if (range.offset < palette_free[i].offset) {
+			insert_at = i;
+			break;
+		}
+	}
+	palette_free.insert(insert_at, range);
+	// Coalesce with next block.
+	if (insert_at + 1u < palette_free.size() &&
+			palette_free[insert_at].offset + palette_free[insert_at].size == palette_free[insert_at + 1u].offset) {
+		palette_free[insert_at].size += palette_free[insert_at + 1u].size;
+		palette_free.remove_at(insert_at + 1u);
+	}
+	// Coalesce with previous block.
+	if (insert_at > 0u &&
+			palette_free[insert_at - 1u].offset + palette_free[insert_at - 1u].size == palette_free[insert_at].offset) {
+		palette_free[insert_at - 1u].size += palette_free[insert_at].size;
+		palette_free.remove_at(insert_at);
+	}
+}
+
+void RendererVirtualMeshStorage::_sync_record_skin_info(uint32_t p_record) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	Record &record = records[p_record];
+	SlotState &state = slot_states[p_record];
+	SkinInstanceInfo next_info;
+	bool valid_palette = false;
+	if (state.skeleton.is_valid() && record.virtual_mesh < mesh_order.size()) {
+		const MeshInfo *mesh = meshes.getptr(mesh_order[record.virtual_mesh]);
+		if (mesh != nullptr && (mesh->skin_influences == 4u || mesh->skin_influences == 8u)) {
+			const SkeletonPaletteSlot *sk = skeleton_palettes.getptr(state.skeleton);
+			if (sk != nullptr && sk->bone_count > 0u && sk->bone_offset != UINT32_MAX) {
+				next_info.current_palette_offset = sk->bone_offset * 3u;
+				next_info.prev_palette_offset = (sk->bone_offset + sk->bone_count) * 3u;
+				next_info.bone_count = sk->bone_count;
+				const float scale = sk->max_bone_scale > 0.0f ? sk->max_bone_scale : 1.0f;
+				memcpy(&next_info.max_bone_scale_bits, &scale, sizeof(uint32_t));
+				valid_palette = true;
+				skin_instances_active = true;
+			}
+		}
+	}
+	const SkinInstanceInfo &prev_info = skin_instances[p_record];
+	if (prev_info.current_palette_offset != next_info.current_palette_offset ||
+			prev_info.prev_palette_offset != next_info.prev_palette_offset ||
+			prev_info.bone_count != next_info.bone_count ||
+			prev_info.max_bone_scale_bits != next_info.max_bone_scale_bits) {
+		skin_instances[p_record] = next_info;
+		state.skin_dirty = true;
+	}
+	const uint32_t next_flags = valid_palette ? (record.flags | RECORD_SKINNED_PALETTE) : (record.flags & ~RECORD_SKINNED_PALETTE);
+	if (record.flags != next_flags) {
+		record.flags = next_flags;
+		_mark_dirty(p_record);
+	}
+}
+
+void RendererVirtualMeshStorage::_sync_skeleton_records(RID p_skeleton) {
+	if (p_skeleton.is_null()) {
+		return;
+	}
+	for (uint32_t slot = 0; slot < used_slots; slot++) {
+		if (slot_states[slot].allocated && slot_states[slot].skeleton == p_skeleton) {
+			_sync_record_skin_info(slot);
+		}
+	}
 }
 
 RendererVirtualMeshStorage::MeshRecord RendererVirtualMeshStorage::_parse_dag(const Vector<uint8_t> &p_dag, uint32_t p_base) {
@@ -424,11 +615,12 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		}
 	}
 
-	// Resolve vertex layout, page count and page slot size from VGD / .ngm header.
+	// Resolve vertex layout, page count, page slot size, and skin influences from VGD / .ngm header.
 	info.vertex_layout = p_desc.vertex_layout;
+	info.skin_influences = p_desc.skin_influences;
 	uint32_t ngm_page_count = p_desc.page_count;
 	uint32_t ngm_page_size = p_desc.page_size;
-	if ((ngm_page_count == 0 || info.vertex_layout == 0 || ngm_page_size == 0) && !p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
+	if ((ngm_page_count == 0 || info.vertex_layout == 0 || ngm_page_size == 0 || info.skin_influences == 0) && !p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
 		Ref<NGMFile> ngm;
 		ngm.instantiate();
 		if (ngm->open(p_desc.ngm_path) == OK) {
@@ -441,6 +633,26 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 			}
 			if (ngm_page_size == 0) {
 				ngm_page_size = hdr.page_size;
+			}
+			if (info.skin_influences == 0 && (hdr.flags & NGM_FLAG_SKINNED) != 0u) {
+				info.skin_influences = hdr.skin_influences;
+			}
+		}
+	}
+	if (info.skin_influences == 0) {
+		for (int p = 0; p < p_desc.root_pages.size(); p++) {
+			const Vector<uint8_t> &raw = p_desc.root_pages[p];
+			if (raw.size() >= 20) {
+				uint32_t header[4] = {};
+				memcpy(header, raw.ptr(), sizeof(header));
+				if (header[3] >= 4u && uint64_t(header[3]) <= uint64_t(raw.size()) - 16ull) {
+					const uint32_t skin_start = uint32_t(raw.size()) - header[3];
+					const uint8_t inf = raw[int(skin_start + 1u)];
+					if (inf == 4u || inf == 8u) {
+						info.skin_influences = inf;
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -575,6 +787,13 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		info.cluster_blob.resize(int(cluster_bytes));
 		memset(info.cluster_blob.ptrw(), 0, cluster_bytes);
 		info.cluster_refine.resize(max_local_cluster_end);
+		if (info.skin_influences == 4u || info.skin_influences == 8u) {
+			info.cluster_skin_offsets.resize(max_local_cluster_end);
+			for (uint32_t c = 0; c < max_local_cluster_end; c++) {
+				info.cluster_skin_offsets[c] = UINT32_MAX;
+			}
+			info.cluster_skin_bones.resize(max_local_cluster_end);
+		}
 
 		if (_ensure_page_arena()) {
 			uint32_t pinned_ok = 0;
@@ -594,6 +813,13 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 				info.cluster_table_offset = cluster_offset;
 				info.cluster_table_size = cluster_bytes;
 				_upload_clusters(info.cluster_table_offset, info.cluster_blob.ptr(), info.cluster_table_size);
+				if (!info.cluster_skin_offsets.is_empty() && _ensure_cluster_skin_buffer()) {
+					const uint32_t dst_off = info.cluster_table_offset / 4u;
+					const uint32_t upload_bytes = uint32_t(info.cluster_skin_offsets.size()) * sizeof(uint32_t);
+					if (dst_off + upload_bytes <= cluster_skin_capacity) {
+						_upload_cluster_skin(dst_off, reinterpret_cast<const uint8_t *>(info.cluster_skin_offsets.ptr()), upload_bytes);
+					}
+				}
 				info.record.page_table_offset = info.cluster_table_offset / sizeof(ClusterGPUDesc);
 				info.record.page_count = pinned_ok;
 				if (info.record.cluster_count == 0) {
@@ -603,6 +829,8 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 				_free_mesh_page_slots(info);
 				info.cluster_blob.clear();
 				info.cluster_refine.clear();
+				info.cluster_skin_offsets.clear();
+				info.cluster_skin_bones.clear();
 			}
 		}
 	}
@@ -648,6 +876,7 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		records[slot].surface_mask = p_desc.eligible_surface_mask;
 		records[slot].pad0 = p_desc.eligible_surface_mask;
 		_mark_dirty(slot);
+		_sync_record_skin_info(slot);
 	}
 	if (RSG::mesh_storage != nullptr) {
 		RSG::mesh_storage->mesh_on_virtual_geometry_changed(p_mesh);
@@ -712,6 +941,7 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 		records[slot].surface_mask = 0;
 		records[slot].pad0 = 0;
 		_mark_dirty(slot);
+		_sync_record_skin_info(slot);
 	}
 	// Keep the reason for the routing fallback overlay (#79); the record store
 	// only needs to know the mesh is gone.
@@ -751,6 +981,11 @@ bool RendererVirtualMeshStorage::mesh_surface_is_virtual(RID p_mesh, uint32_t p_
 bool RendererVirtualMeshStorage::mesh_is_stripped_to_coarse(RID p_mesh) const {
 	const MeshInfo *info = meshes.getptr(p_mesh);
 	return info != nullptr && info->desc.stripped_to_coarse;
+}
+
+bool RendererVirtualMeshStorage::mesh_is_skinned_virtual_geometry(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return info != nullptr && (info->skin_influences == 4u || info->skin_influences == 8u);
 }
 
 uint32_t RendererVirtualMeshStorage::mesh_clear_reason(RID p_mesh) const {
@@ -807,6 +1042,8 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
 	}
+	// GodotNext: nextgeo_skinned_runtime (#160). Release skeleton ref and recycle palette bones before freeing slot.
+	instance_record_set_skeleton(p_record, RID());
 	SlotState &state = slot_states[p_record];
 	state.instance = RID();
 	state.allocated = false;
@@ -915,7 +1152,7 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET | RECORD_HAS_SPLINE | RECORD_SPLINE_INDEX_MASK;
+	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR | RECORD_VSM_DYNAMIC | RECORD_RT_EVALUATE_VERTEX_OFFSET | RECORD_SKINNED_PALETTE | RECORD_HAS_SPLINE | RECORD_SPLINE_INDEX_MASK;
 	uint32_t keep = record.flags & preserved_mask;
 	if ((p_flags & RECORD_VISIBLE) == 0u) {
 		keep &= ~RECORD_VISIBLE;
@@ -1138,7 +1375,7 @@ void RendererVirtualMeshStorage::instance_record_set_spline_deform(uint32_t p_re
 			slot = spline_free_now[spline_free_now.size() - 1];
 			spline_free_now.remove_at(spline_free_now.size() - 1);
 		} else {
-			ERR_FAIL_COND_MSG(spline_entries.size() >= 0x7FFFu, "NextGeo: spline deformation slot limit (32767) reached.");
+			ERR_FAIL_COND_MSG(spline_entries.size() >= 0x3FFFu, "NextGeo: spline deformation slot limit (16383) reached.");
 			slot = spline_entries.size();
 			spline_entries.push_back(SplineDeformEntry());
 			spline_allocated.push_back(0);
@@ -1171,6 +1408,202 @@ const SplineDeformEntry &RendererVirtualMeshStorage::get_spline_entry(uint32_t p
 	static const SplineDeformEntry fallback;
 	ERR_FAIL_UNSIGNED_INDEX_V(p_index, spline_entries.size(), fallback);
 	return spline_entries[p_index];
+}
+
+// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8).
+void RendererVirtualMeshStorage::instance_record_set_skeleton(uint32_t p_record, RID p_skeleton) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	SlotState &state = slot_states[p_record];
+	if (state.skeleton == p_skeleton) {
+		_sync_record_skin_info(p_record);
+		return;
+	}
+	if (state.skeleton.is_valid()) {
+		SkeletonPaletteSlot *old_sk = skeleton_palettes.getptr(state.skeleton);
+		if (old_sk != nullptr && old_sk->ref_count > 0u) {
+			old_sk->ref_count--;
+			if (old_sk->ref_count == 0u) {
+				if (old_sk->bone_offset != UINT32_MAX && old_sk->bone_count > 0u) {
+					_free_palette_bones(old_sk->bone_offset, old_sk->bone_count * 2u);
+				}
+				skeleton_palettes.erase(state.skeleton);
+			}
+		}
+	}
+	state.skeleton = p_skeleton;
+	if (p_skeleton.is_valid()) {
+		SkeletonPaletteSlot *sk = skeleton_palettes.getptr(p_skeleton);
+		if (sk != nullptr) {
+			sk->ref_count++;
+		} else {
+			SkeletonPaletteSlot slot;
+			slot.ref_count = 1u;
+			skeleton_palettes[p_skeleton] = slot;
+		}
+		if (RSG::mesh_storage != nullptr && !RSG::mesh_storage->skeleton_is_2d(p_skeleton)) {
+			uint32_t bone_count = 0u;
+			const float *data = RSG::mesh_storage->skeleton_get_3d_data(p_skeleton, bone_count);
+			if (data != nullptr && bone_count > 0u) {
+				skeleton_update_palette(p_skeleton, data, bone_count);
+			}
+		}
+	}
+	_sync_record_skin_info(p_record);
+}
+
+void RendererVirtualMeshStorage::skeleton_update_palette(RID p_skeleton, const float *p_bone_data, uint32_t p_bone_count) {
+	if (p_skeleton.is_null()) {
+		return;
+	}
+	SkeletonPaletteSlot *sk = skeleton_palettes.getptr(p_skeleton);
+	if (sk == nullptr) {
+		return;
+	}
+	if (p_bone_data == nullptr || p_bone_count == 0u) {
+		if (sk->bone_offset != UINT32_MAX && sk->bone_count > 0u) {
+			_free_palette_bones(sk->bone_offset, sk->bone_count * 2u);
+		}
+		sk->bone_offset = UINT32_MAX;
+		sk->bone_count = 0u;
+		sk->cur_data.clear();
+		sk->prev_data.clear();
+		sk->max_bone_scale = 1.0f;
+		sk->has_nonzero_pose = false;
+		sk->dirty_this_frame = false;
+		sk->dirty_last_frame = false;
+		_sync_skeleton_records(p_skeleton);
+		return;
+	}
+
+	const uint32_t float_count = p_bone_count * 12u;
+	const uint32_t half_bytes = p_bone_count * 48u;
+	bool incoming_nonzero = false;
+	for (uint32_t i = 0; i < float_count; i++) {
+		if (p_bone_data[i] != 0.0f) {
+			incoming_nonzero = true;
+			break;
+		}
+	}
+
+	const bool reallocated = (sk->bone_count != p_bone_count || sk->bone_offset == UINT32_MAX);
+	if (reallocated) {
+		if (sk->bone_offset != UINT32_MAX && sk->bone_count > 0u) {
+			_free_palette_bones(sk->bone_offset, sk->bone_count * 2u);
+		}
+		const uint32_t new_offset = _alloc_palette_bones(p_bone_count * 2u);
+		// Re-fetch pointer in case skeleton_palettes was iterated/touched (defensive).
+		sk = skeleton_palettes.getptr(p_skeleton);
+		if (sk == nullptr) {
+			return;
+		}
+		if (new_offset == UINT32_MAX) {
+			sk->bone_offset = UINT32_MAX;
+			sk->bone_count = 0u;
+			sk->cur_data.clear();
+			sk->prev_data.clear();
+			sk->max_bone_scale = 1.0f;
+			sk->has_nonzero_pose = false;
+			sk->dirty_this_frame = false;
+			sk->dirty_last_frame = false;
+			_sync_skeleton_records(p_skeleton);
+			return;
+		}
+		sk->bone_offset = new_offset;
+		sk->bone_count = p_bone_count;
+		sk->cur_data.resize(float_count);
+		sk->prev_data.resize(float_count);
+		sk->has_nonzero_pose = false;
+		sk->dirty_this_frame = false;
+		sk->dirty_last_frame = false;
+	}
+
+	if (reallocated || !sk->has_nonzero_pose) {
+		// Initial pose upload (or bone count resize): seed both current and previous palettes identically
+		// so the first rendered pose produces zero spawn velocity spike.
+		memcpy(sk->cur_data.ptr(), p_bone_data, half_bytes);
+		memcpy(sk->prev_data.ptr(), p_bone_data, half_bytes);
+		_upload_skin_palette(sk->bone_offset * 48u, reinterpret_cast<const uint8_t *>(sk->cur_data.ptr()), half_bytes);
+		_upload_skin_palette((sk->bone_offset + sk->bone_count) * 48u, reinterpret_cast<const uint8_t *>(sk->prev_data.ptr()), half_bytes);
+		sk->has_nonzero_pose = incoming_nonzero;
+		sk->dirty_this_frame = false;
+		sk->dirty_last_frame = false;
+	} else {
+		if (!sk->dirty_this_frame) {
+			// Snapshot previous frame's current palette into the previous-frame slot BEFORE overwriting current.
+			memcpy(sk->prev_data.ptr(), sk->cur_data.ptr(), half_bytes);
+			_upload_skin_palette((sk->bone_offset + sk->bone_count) * 48u, reinterpret_cast<const uint8_t *>(sk->prev_data.ptr()), half_bytes);
+			sk->dirty_this_frame = true;
+		}
+		memcpy(sk->cur_data.ptr(), p_bone_data, half_bytes);
+		_upload_skin_palette(sk->bone_offset * 48u, reinterpret_cast<const uint8_t *>(sk->cur_data.ptr()), half_bytes);
+	}
+
+	sk->max_bone_scale = incoming_nonzero ? _palette_max_bone_scale(sk->cur_data.ptr(), sk->bone_count) : 1.0f;
+	_sync_skeleton_records(p_skeleton);
+}
+
+void RendererVirtualMeshStorage::skeleton_data_changed(RID p_skeleton) {
+	if (p_skeleton.is_null() || !skeleton_palettes.has(p_skeleton)) {
+		return;
+	}
+	if (RSG::mesh_storage != nullptr) {
+		if (RSG::mesh_storage->skeleton_is_2d(p_skeleton)) {
+			skeleton_update_palette(p_skeleton, nullptr, 0u);
+			return;
+		}
+		uint32_t bone_count = 0u;
+		const float *data = RSG::mesh_storage->skeleton_get_3d_data(p_skeleton, bone_count);
+		skeleton_update_palette(p_skeleton, data, bone_count);
+	}
+}
+
+void RendererVirtualMeshStorage::skeleton_free_notify(RID p_skeleton) {
+	if (p_skeleton.is_null()) {
+		return;
+	}
+	for (uint32_t slot = 0; slot < used_slots; slot++) {
+		if (slot_states[slot].allocated && slot_states[slot].skeleton == p_skeleton) {
+			instance_record_set_skeleton(slot, RID());
+		}
+	}
+	SkeletonPaletteSlot *sk = skeleton_palettes.getptr(p_skeleton);
+	if (sk != nullptr) {
+		if (sk->bone_offset != UINT32_MAX && sk->bone_count > 0u) {
+			_free_palette_bones(sk->bone_offset, sk->bone_count * 2u);
+		}
+		skeleton_palettes.erase(p_skeleton);
+	}
+}
+
+RendererVirtualMeshStorage::SkinInstanceInfo RendererVirtualMeshStorage::get_skin_instance_info(uint32_t p_record) const {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return SkinInstanceInfo();
+	}
+	return skin_instances[p_record];
+}
+
+RID RendererVirtualMeshStorage::instance_record_get_skeleton(uint32_t p_record) const {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return RID();
+	}
+	return slot_states[p_record].skeleton;
+}
+
+const float *RendererVirtualMeshStorage::get_skeleton_palette_data(RID p_skeleton, bool p_previous, uint32_t &r_bone_count) const {
+	const SkeletonPaletteSlot *sk = skeleton_palettes.getptr(p_skeleton);
+	if (sk == nullptr || sk->bone_count == 0u) {
+		r_bone_count = 0u;
+		return nullptr;
+	}
+	const LocalVector<float> &vec = p_previous ? sk->prev_data : sk->cur_data;
+	if (vec.size() < sk->bone_count * 12u) {
+		r_bone_count = 0u;
+		return nullptr;
+	}
+	r_bone_count = sk->bone_count;
+	return vec.ptr();
 }
 
 void RendererVirtualMeshStorage::begin_frame() {
@@ -1207,6 +1640,14 @@ void RendererVirtualMeshStorage::begin_frame() {
 		spline_free_now.push_back(slot);
 	}
 	spline_free_next.clear();
+
+	// GodotNext: nextgeo_skinned_runtime (#160). Advance skeleton palette frame tracking once per frame.
+	for (KeyValue<RID, SkeletonPaletteSlot> &entry : skeleton_palettes) {
+		if (entry.value.dirty_this_frame) {
+			entry.value.dirty_last_frame = true;
+			entry.value.dirty_this_frame = false;
+		}
+	}
 }
 
 void RendererVirtualMeshStorage::process_streaming() {
@@ -1350,6 +1791,56 @@ void RendererVirtualMeshStorage::flush() {
 			spline_dirty_last[s] = spline_dirty[s] && !spline_rewritten[s];
 			spline_dirty[s] = 0;
 			spline_rewritten[s] = 0;
+		}
+	}
+
+	// GodotNext: nextgeo_skinned_runtime (#160). Steady-state previous-frame palette sync: a skeleton that
+	// animated last frame and is static this frame copies current -> previous so motion vectors return to zero.
+	for (KeyValue<RID, SkeletonPaletteSlot> &entry : skeleton_palettes) {
+		SkeletonPaletteSlot &sk = entry.value;
+		if (sk.dirty_last_frame && !sk.dirty_this_frame && sk.bone_offset != UINT32_MAX && sk.bone_count > 0u) {
+			const uint32_t half_bytes = sk.bone_count * 48u;
+			memcpy(sk.prev_data.ptr(), sk.cur_data.ptr(), half_bytes);
+			_upload_skin_palette((sk.bone_offset + sk.bone_count) * 48u, reinterpret_cast<const uint8_t *>(sk.prev_data.ptr()), half_bytes);
+			sk.dirty_last_frame = false;
+		}
+	}
+
+	// Upload the per-record skin instance side table lazily once any skinned virtual instance exists.
+	if (skin_instances_active && record_capacity > 0u) {
+		const uint32_t needed_bytes = record_capacity * uint32_t(sizeof(SkinInstanceInfo));
+		bool uploaded_all = false;
+		if (skin_instance_capacity < needed_bytes) {
+			if (_resize_skin_instances(needed_bytes)) {
+				skin_instance_capacity = needed_bytes;
+				if (used_slots > 0u) {
+					_upload_skin_instances(0u, reinterpret_cast<const uint8_t *>(skin_instances.ptr()), used_slots * uint32_t(sizeof(SkinInstanceInfo)));
+				}
+				for (uint32_t slot = 0; slot < used_slots; slot++) {
+					slot_states[slot].skin_dirty = false;
+				}
+				uploaded_all = true;
+			}
+		}
+		if (!uploaded_all && skin_instance_capacity >= needed_bytes) {
+			uint32_t s_first = UINT32_MAX;
+			uint32_t s_count = 0u;
+			for (uint32_t slot = 0; slot < used_slots; slot++) {
+				if (slot_states[slot].skin_dirty) {
+					if (s_first == UINT32_MAX) {
+						s_first = slot;
+					}
+					s_count++;
+					slot_states[slot].skin_dirty = false;
+				} else if (s_first != UINT32_MAX) {
+					_upload_skin_instances(s_first * uint32_t(sizeof(SkinInstanceInfo)), reinterpret_cast<const uint8_t *>(skin_instances.ptr() + s_first), s_count * uint32_t(sizeof(SkinInstanceInfo)));
+					s_first = UINT32_MAX;
+					s_count = 0u;
+				}
+			}
+			if (s_first != UINT32_MAX) {
+				_upload_skin_instances(s_first * uint32_t(sizeof(SkinInstanceInfo)), reinterpret_cast<const uint8_t *>(skin_instances.ptr() + s_first), s_count * uint32_t(sizeof(SkinInstanceInfo)));
+			}
 		}
 	}
 }
@@ -1663,6 +2154,12 @@ bool RendererVirtualMeshStorage::_ensure_page_arena() {
 		for (uint32_t c = 0; c < info.cluster_refine.size(); c++) {
 			info.cluster_refine[c] = ClusterRefineInfo();
 		}
+		for (uint32_t c = 0; c < info.cluster_skin_offsets.size(); c++) {
+			info.cluster_skin_offsets[c] = UINT32_MAX;
+		}
+		for (uint32_t c = 0; c < info.cluster_skin_bones.size(); c++) {
+			info.cluster_skin_bones[c].clear();
+		}
 		for (uint32_t p = 0; p < info.root_page_count; p++) {
 			uint32_t c_count = 0;
 			if (int(p) < info.desc.root_pages.size() && _is_valid_raw_page(info.desc.root_pages[int(p)], c_count)) {
@@ -1674,6 +2171,13 @@ bool RendererVirtualMeshStorage::_ensure_page_arena() {
 		}
 		if (info.cluster_table_size > 0 && !info.cluster_blob.is_empty()) {
 			_upload_clusters(info.cluster_table_offset, info.cluster_blob.ptr(), info.cluster_table_size);
+			if (!info.cluster_skin_offsets.is_empty() && _ensure_cluster_skin_buffer()) {
+				const uint32_t dst_off = info.cluster_table_offset / 4u;
+				const uint32_t upload_bytes = uint32_t(info.cluster_skin_offsets.size()) * sizeof(uint32_t);
+				if (dst_off + upload_bytes <= cluster_skin_capacity) {
+					_upload_cluster_skin(dst_off, reinterpret_cast<const uint8_t *>(info.cluster_skin_offsets.ptr()), upload_bytes);
+				}
+			}
 		}
 		_recompute_mesh_refine_ok(info);
 	}
@@ -1788,11 +2292,24 @@ bool RendererVirtualMeshStorage::_evict_slot(uint32_t p_slot, bool p_record_even
 				for (uint32_t i = 0; i < count && (base_cluster + i) < info->cluster_refine.size(); i++) {
 					info->cluster_refine[base_cluster + i] = ClusterRefineInfo();
 				}
+				for (uint32_t i = 0; i < count && (base_cluster + i) < info->cluster_skin_offsets.size(); i++) {
+					info->cluster_skin_offsets[base_cluster + i] = UINT32_MAX;
+				}
+				for (uint32_t i = 0; i < count && (base_cluster + i) < info->cluster_skin_bones.size(); i++) {
+					info->cluster_skin_bones[base_cluster + i].clear();
+				}
 				if (p_record_event && info->cluster_table_size > 0) {
 					_upload_clusters(
 							info->cluster_table_offset + base_cluster * sizeof(ClusterGPUDesc),
 							info->cluster_blob.ptr() + base_cluster * sizeof(ClusterGPUDesc),
 							count * sizeof(ClusterGPUDesc));
+					if (cluster_skin_active && !info->cluster_skin_offsets.is_empty() && (base_cluster + count) <= info->cluster_skin_offsets.size()) {
+						const uint32_t dst_off = info->cluster_table_offset / 4u + base_cluster * sizeof(uint32_t);
+						const uint32_t upload_bytes = count * sizeof(uint32_t);
+						if (dst_off + upload_bytes <= cluster_skin_capacity) {
+							_upload_cluster_skin(dst_off, reinterpret_cast<const uint8_t *>(info->cluster_skin_offsets.ptr() + base_cluster), upload_bytes);
+						}
+					}
 				}
 			}
 		}
@@ -1904,11 +2421,57 @@ bool RendererVirtualMeshStorage::_install_page_in_slot(MeshInfo &r_info, uint32_
 				r_info.cluster_refine[base_cluster + i] = ref_info;
 			}
 		}
+		// GodotNext: nextgeo_skinned_runtime (#160). Index per-cluster #159 skin blocks inside the page arena.
+		if (skin_bytes > 0u && needed_clusters <= r_info.cluster_skin_offsets.size()) {
+			uint32_t skin_cursor = 16u + page_clusters * 80u + page_vertices * stride * 4u + page_triangles * 3u;
+			const uint32_t skin_end = MIN(skin_cursor + skin_bytes, uint32_t(p_raw.size()));
+			for (uint32_t i = 0; i < page_clusters; i++) {
+				const uint8_t *rec = p_raw.ptr() + 16u + i * 80u;
+				const uint8_t vertex_count = rec[76];
+				r_info.cluster_skin_offsets[base_cluster + i] = UINT32_MAX;
+				if (base_cluster + i < r_info.cluster_skin_bones.size()) {
+					r_info.cluster_skin_bones[base_cluster + i].clear();
+				}
+				if (skin_cursor + 4u > skin_end) {
+					break;
+				}
+				const uint8_t bone_count = p_raw[int(skin_cursor + 0u)];
+				const uint8_t inf = p_raw[int(skin_cursor + 1u)];
+				if (inf != 4u && inf != 8u) {
+					break;
+				}
+				const uint32_t block_bytes = 4u + uint32_t(bone_count) * 26u + uint32_t(vertex_count) * uint32_t(inf) * 3u;
+				if (skin_cursor + block_bytes > skin_end) {
+					break;
+				}
+				r_info.cluster_skin_offsets[base_cluster + i] = page_global + skin_cursor;
+				if (base_cluster + i < r_info.cluster_skin_bones.size() && bone_count > 0u) {
+					LocalVector<ClusterSkinBone> &bones = r_info.cluster_skin_bones[base_cluster + i];
+					bones.resize(bone_count);
+					for (uint32_t b = 0; b < bone_count; b++) {
+						const uint8_t *be = p_raw.ptr() + skin_cursor + 4u + b * 26u;
+						uint16_t bone_id = 0u;
+						memcpy(&bone_id, be, sizeof(uint16_t));
+						bones[b].global_bone = bone_id;
+						memcpy(bones[b].aabb_min, be + 2u, sizeof(float) * 3u);
+						memcpy(bones[b].aabb_max, be + 14u, sizeof(float) * 3u);
+					}
+				}
+				skin_cursor += block_bytes;
+			}
+		}
 		if (p_record_event && r_info.cluster_table_size > 0 && page_clusters > 0) {
 			_upload_clusters(
 					r_info.cluster_table_offset + base_cluster * sizeof(ClusterGPUDesc),
 					r_info.cluster_blob.ptr() + base_cluster * sizeof(ClusterGPUDesc),
 					page_clusters * sizeof(ClusterGPUDesc));
+			if (skin_bytes > 0u && needed_clusters <= r_info.cluster_skin_offsets.size() && _ensure_cluster_skin_buffer()) {
+				const uint32_t dst_off = r_info.cluster_table_offset / 4u + base_cluster * sizeof(uint32_t);
+				const uint32_t upload_bytes = page_clusters * sizeof(uint32_t);
+				if (dst_off + upload_bytes <= cluster_skin_capacity) {
+					_upload_cluster_skin(dst_off, reinterpret_cast<const uint8_t *>(r_info.cluster_skin_offsets.ptr() + base_cluster), upload_bytes);
+				}
+			}
 		}
 	}
 

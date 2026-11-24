@@ -2423,8 +2423,8 @@ void ResourceImporterScene::get_internal_import_options(InternalImportCategory p
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/lods", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			// GodotNext: nextgeo_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
-			// GodotNext: nextgeo_skinned
-			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry_skinned", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
+			// GodotNext: nextgeo_skinned (#159, #160, plan §21.4.1). Per-asset opt-in, marked Experimental.
+			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry_skinned", PROPERTY_HINT_ENUM, "Default,Enable (Experimental),Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "lods/normal_merge_angle", PROPERTY_HINT_RANGE, "0,180,1,degrees"), 20.0f));
 			// GodotNext: mesh_sdf_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/distance_fields", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));

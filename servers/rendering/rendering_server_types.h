@@ -156,6 +156,8 @@ struct VirtualGeometryDesc {
 	// GodotNext: nextgeo_rt_native (#156). The proxy cut's clusters in its packing order, so native
 	// Nanite RT can give its triangles the proxy's Stage-2 card groups.
 	PackedInt32Array rt_proxy_clusters;
+	// GodotNext: nextgeo_skinned_runtime (#160). Bone influences per vertex (0 = unskinned, 4 or 8).
+	uint32_t skin_influences = 0;
 };
 
 /* STATUS INFORMATION */

@@ -72,6 +72,10 @@ struct NextGeoSurfaceFacts {
 	bool surface_in_mask = false;
 	bool draw_ready = false;
 	bool skeleton = false;
+	// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). True when the mesh's VGD
+	// carries #159 skinning data and the attached skeleton is a valid 3D skeleton with bones.
+	bool mesh_skinned_virtual_geometry = false;
+	bool blend_shapes = false;
 	bool instance_uniforms = false;
 	bool lightmapped = false;
 	bool chain_blocked = false; // next pass, material overlay or stencil anywhere in the chain.
@@ -119,7 +123,7 @@ inline NextGeoSurfaceRoute nextgeo_resolve_surface_route(const NextGeoSurfaceFac
 	if (view != NEXTGEO_FALLBACK_NONE) {
 		return { false, view };
 	}
-	if (p_facts.skeleton) {
+	if ((p_facts.skeleton && !p_facts.mesh_skinned_virtual_geometry) || p_facts.blend_shapes) {
 		return { false, NEXTGEO_FALLBACK_SKINNING };
 	}
 	if (p_facts.instance_uniforms) {

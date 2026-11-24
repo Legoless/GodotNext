@@ -62,6 +62,9 @@ void VirtualMeshStorage::free_resources() {
 	_reset_clusters();
 	_reset_residency();
 	_reset_splines();
+	_reset_skin_palette();
+	_reset_skin_instances();
+	_reset_cluster_skin();
 }
 
 uint64_t VirtualMeshStorage::_get_max_storage_buffer_range() const {
@@ -222,6 +225,120 @@ void VirtualMeshStorage::_reset_residency() {
 	}
 	residency_buffer = RID();
 	residency_bytes = 0;
+}
+
+bool VirtualMeshStorage::_resize_skin_palette(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: skin palette arena size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
+	if (skin_palette_buffer.is_valid()) {
+		rd->free_rid(skin_palette_buffer);
+		skin_palette_buffer = RID();
+	}
+	skin_palette_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	skin_palette_buffer = rd->storage_buffer_create(p_bytes);
+	return skin_palette_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_skin_palette(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || skin_palette_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > skin_palette_bytes);
+	rd->buffer_update(skin_palette_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_skin_palette() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && skin_palette_buffer.is_valid()) {
+		rd->free_rid(skin_palette_buffer);
+	}
+	skin_palette_buffer = RID();
+	skin_palette_bytes = 0;
+}
+
+bool VirtualMeshStorage::_resize_skin_instances(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: skin instance side table size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
+	if (skin_instance_buffer.is_valid()) {
+		rd->free_rid(skin_instance_buffer);
+		skin_instance_buffer = RID();
+	}
+	skin_instance_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	skin_instance_buffer = rd->storage_buffer_create(p_bytes);
+	return skin_instance_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_skin_instances(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || skin_instance_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > skin_instance_bytes);
+	rd->buffer_update(skin_instance_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_skin_instances() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && skin_instance_buffer.is_valid()) {
+		rd->free_rid(skin_instance_buffer);
+	}
+	skin_instance_buffer = RID();
+	skin_instance_bytes = 0;
+}
+
+bool VirtualMeshStorage::_resize_cluster_skin(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: cluster skin table size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
+	if (cluster_skin_buffer.is_valid()) {
+		rd->free_rid(cluster_skin_buffer);
+		cluster_skin_buffer = RID();
+	}
+	cluster_skin_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	cluster_skin_buffer = rd->storage_buffer_create(p_bytes);
+	return cluster_skin_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_cluster_skin(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || cluster_skin_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > cluster_skin_bytes);
+	rd->buffer_update(cluster_skin_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_cluster_skin() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && cluster_skin_buffer.is_valid()) {
+		rd->free_rid(cluster_skin_buffer);
+	}
+	cluster_skin_buffer = RID();
+	cluster_skin_bytes = 0;
 }
 
 void VirtualMeshStorage::_upload_records(uint32_t p_first, uint32_t p_count) {

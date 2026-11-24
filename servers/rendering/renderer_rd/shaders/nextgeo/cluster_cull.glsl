@@ -23,6 +23,35 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #include "raster_features_inc.glsl"
 // clang-format on
 
+#ifdef CLUSTER_CULL
+// GodotNext: nextgeo_skinned_runtime (#160). Shared across VSM_VIEW and main/shadow CLUSTER_CULL
+// before #ifdef VSM_VIEW so glsl_builders.py's include-once expansion exposes skinning_inc.glsl
+// to both branches.
+layout(set = 0, binding = 14, std430) buffer restrict readonly Pages {
+	uint data[];
+}
+pages;
+
+layout(set = 0, binding = 23, std430) buffer restrict readonly NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 0, binding = 24, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 0, binding = 25, std430) buffer restrict readonly NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+// clang-format off
+#include "skinning_inc.glsl"
+// clang-format on
+#endif
+
 #ifdef VSM_VIEW
 // GodotNext: vsm_nanite (#217, plan §21.3 contract S4, steps 1-3, 5-7). Per-page multi-view cluster
 // cull for Virtual Shadow Maps. One indirect dispatch chain handles all directional dirty pages, a
@@ -160,11 +189,6 @@ layout(set = 0, binding = 13, std430) buffer restrict readonly VSMNodesIn {
 vsm_nodes_in;
 
 #ifdef CLUSTER_CULL
-layout(set = 0, binding = 14, std430) buffer restrict readonly Pages {
-	uint data[];
-}
-pages;
-
 layout(set = 0, binding = 15, std430) buffer restrict readonly ClusterTable {
 	uvec4 data[];
 }
@@ -225,11 +249,27 @@ layout(set = 0, binding = 17, std430) buffer restrict VSMGroupArgsOut {
 	uvec4 data[];
 }
 vsm_group_args_out;
+
+#if !defined(VSM_SETUP) && !defined(VSM_SEED)
+layout(set = 0, binding = 24, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+float vsm_skin_instance_max_scale(uint p_record_idx) {
+	uvec4 sinfo = nextgeo_skin_instances.data[p_record_idx];
+	if (sinfo.z == 0u) {
+		return 1.0;
+	}
+	float s = uintBitsToFloat(sinfo.w);
+	return s > 0.0 ? s : 1.0;
+}
+#endif
 #endif
 
-// GodotNext: spline_meshes (#161). Bound in VSM_BVH and VSM CLUSTER_CULL.
+// GodotNext: spline_meshes (#161). Bound in VSM_BVH and VSM CLUSTER_CULL (binding 26, after 23..25 skinning).
 #if !defined(VSM_SETUP) && !defined(VSM_SEED)
-layout(set = 0, binding = 23, std430) buffer restrict readonly NextGeoSplines {
+layout(set = 0, binding = 26, std430) buffer restrict readonly NextGeoSplines {
 	SplineDeformEntry data[];
 }
 spline_deforms;
@@ -297,7 +337,7 @@ uint vsm_instance_layer(NextGeoInstanceRecord p_record, uint p_cull_flags, bool 
 	if (mode == NEXTGEO_RECORD_VSM_CACHE_STATIC || mode == NEXTGEO_RECORD_VSM_CACHE_RIGID) {
 		return 0u;
 	}
-	bool is_dynamic = ((p_record.flags & (NEXTGEO_RECORD_VSM_DYNAMIC | NEXTGEO_RECORD_RT_SKINNED)) != 0u) || vsm_record_moved(p_record) || p_dynamic_material;
+	bool is_dynamic = ((p_record.flags & (NEXTGEO_RECORD_VSM_DYNAMIC | NEXTGEO_RECORD_RT_SKINNED | NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) != 0u) || vsm_record_moved(p_record) || p_dynamic_material;
 	return is_dynamic ? 1u : 0u;
 }
 
@@ -312,8 +352,8 @@ vec3 vsm_light_origin(VSMMapData md) {
 }
 
 // Step 2: Projected error in shadow texels of the page's mip (matches P5's texel rule at mip 0,
-// scaled by 2^mip for coarser pages).
-float vsm_projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_error, VSMMapData md, uint mip) {
+// scaled by 2^mip for coarser pages). Skinned instances scale error by max bone scale (#160).
+float vsm_projected_error_skinned(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_error, float p_bone_scale, bool p_use_world_aabb_dist, VSMMapData md, uint mip) {
 	if (p_error >= 3.4e38) {
 		return vsm_params.max_texel_error + 1.0;
 	}
@@ -327,21 +367,32 @@ float vsm_projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, flo
 	}
 #endif
 	float scale = vsm_instance_scale(p_record);
+	float eff_scale = scale * p_bone_scale;
 	float page_texel = md.texel_scale * float(1u << mip);
 	if (!(page_texel > 0.0)) {
 		return vsm_params.max_texel_error + 1.0;
 	}
 	if (md.kind == VSM_MAP_KIND_DIRECTIONAL) {
-		return (p_error * scale / page_texel) * vsm_params.lod_bias;
+		return (p_error * eff_scale / page_texel) * vsm_params.lod_bias;
 	}
-	vec3 center = vsm_instance_point(p_record, p_lod_sphere.xyz);
-	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
-	// Inflate sphere radius by displacement and vertex-offset bounds.
-	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
-	float radius = (p_lod_sphere.w + expand) * scale;
 	vec3 light_origin = vsm_light_origin(md);
-	float distance = max(length(center - light_origin) - radius, max(md.near_w, 1.0e-5));
-	return (p_error * scale / (page_texel * distance)) * vsm_params.lod_bias;
+	float distance;
+	if (p_use_world_aabb_dist) {
+		vec3 closest = clamp(light_origin, p_record.world_aabb_min.xyz, p_record.world_aabb_max.xyz);
+		distance = max(length(closest - light_origin), max(md.near_w, 1.0e-5));
+	} else {
+		vec3 center = vsm_instance_point(p_record, p_lod_sphere.xyz);
+		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164) x vsm_nanite (#217).
+		// Inflate sphere radius by displacement and vertex-offset bounds.
+		float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+		float radius = (p_lod_sphere.w + expand) * scale;
+		distance = max(length(center - light_origin) - radius, max(md.near_w, 1.0e-5));
+	}
+	return (p_error * eff_scale / (page_texel * distance)) * vsm_params.lod_bias;
+}
+
+float vsm_projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_error, VSMMapData md, uint mip) {
+	return vsm_projected_error_skinned(p_record, p_lod_sphere, p_error, 1.0, false, md, mip);
 }
 
 bool vsm_corners_page_bounds(vec3 corners[8], VSMMapData md, uint mip, uvec2 slot, out vec2 r_px_min, out vec2 r_px_max, out float r_min_depth, out bool r_straddles_near) {
@@ -598,7 +649,8 @@ void main() {
 	uint req_flags = NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE;
 	if ((record.flags & req_flags) != req_flags ||
 			(record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_OFF ||
-			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS)) != 0u ||
+			(record.flags & NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS) != 0u ||
+			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) == NEXTGEO_RECORD_HAS_SKELETON ||
 			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
 			(record.layer_mask & meta.x) == 0u ||
 			record.virtual_mesh == 0xFFFFFFFFu) {
@@ -734,13 +786,15 @@ void main() {
 	uint group_page_id = vsm_dag_uint(base + 8u);
 	vec4 parent_lod = vec4(vsm_dag_float(base + 16u), vsm_dag_float(base + 20u), vsm_dag_float(base + 24u), vsm_dag_float(base + 28u));
 	float parent_error = vsm_dag_float(base + 32u);
-	if (vsm_projected_error(record, parent_lod, parent_error, md, mip) <= vsm_params.max_texel_error) {
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	float inst_bone_scale = is_skinned ? nextgeo_skin_instance_max_scale(record_idx) : 1.0;
+	if (vsm_projected_error_skinned(record, parent_lod, parent_error, inst_bone_scale, is_skinned, md, mip) <= vsm_params.max_texel_error) {
 		return;
 	}
 
 	bool prog_enabled = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS) != 0u;
 	bool pure_fixed = !prog_enabled || (record.surface_mask == record.pad0);
-	if (pure_fixed) {
+	if (pure_fixed && !is_skinned) {
 		vec3 g_min = vec3(vsm_dag_float(base + 36u), vsm_dag_float(base + 40u), vsm_dag_float(base + 44u));
 		vec3 g_max = vec3(vsm_dag_float(base + 48u), vsm_dag_float(base + 52u), vsm_dag_float(base + 56u));
 		vec2 px_min;
@@ -782,6 +836,13 @@ void main() {
 			continue;
 		}
 
+		uint cluster_table_idx = mesh.page_table_offset + local_cluster;
+		vec3 skin_lmin = vec3(0.0);
+		vec3 skin_lmax = vec3(0.0);
+		float cluster_bone_scale = inst_bone_scale;
+		bool has_skin_bounds = is_skinned && nextgeo_skin_cluster_bounds(record_idx, cluster_table_idx, skin_lmin, skin_lmax, cluster_bone_scale);
+		vec4 skin_sphere = has_skin_bounds ? vec4(0.5 * (skin_lmin + skin_lmax), 0.5 * length(skin_lmax - skin_lmin)) : vec4(0.0);
+
 		uint route_rec_word = 0xFFFFFFFFu;
 		if (page_cluster_hdr > 0u && local_cluster >= page_first_cluster && (local_cluster - page_first_cluster) < page_cluster_hdr) {
 			uint in_page = local_cluster - page_first_cluster;
@@ -795,14 +856,16 @@ void main() {
 						uintBitsToFloat(pages.data[rec_word + 7u]),
 						uintBitsToFloat(pages.data[rec_word + 8u]));
 				float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
-				float child_err = vsm_projected_error(record, own_lod, own_error, md, mip);
+				float child_err = has_skin_bounds
+						? vsm_projected_error_skinned(record, skin_sphere, own_error, cluster_bone_scale, false, md, mip)
+						: vsm_projected_error_skinned(record, own_lod, own_error, inst_bone_scale, is_skinned, md, mip);
 				if (child_err > vsm_params.max_texel_error && vsm_mesh_group_refine_ok(mesh_idx, uint(refined_group))) {
 					continue;
 				}
 			}
 		}
 
-		uint surface_id = cluster_table.data[mesh.page_table_offset + local_cluster].w & 0xFFFFu;
+		uint surface_id = cluster_table.data[cluster_table_idx].w & 0xFFFFu;
 		if (surface_id >= 32u || (avail_mask & (1u << surface_id)) == 0u) {
 			continue;
 		}
@@ -862,21 +925,35 @@ void main() {
 				spline_deform_bounds_sphere(sp, bounds.xyz, bounds.w);
 				max_edge *= sp.up_max_stretch.w;
 			}
-			vec3 c_w = vsm_instance_point(record, bounds.xyz);
 			float expand = max(record.prev_world_aabb_max.w, 0.0) + (has_wpo ? nextgeo_record_vertex_offset_bound(record) : 0.0);
-			float r_w = (bounds.w + expand) * route_scale;
 			vec2 px_min;
 			vec2 px_max;
 			float min_depth;
 			bool straddles_near;
-			if (!vsm_world_aabb_page_bounds(c_w - vec3(r_w), c_w + vec3(r_w), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
-				continue;
+			if (has_skin_bounds) {
+				if (!vsm_local_aabb_page_bounds(record, skin_lmin - vec3(expand), skin_lmax + vec3(expand), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+					continue;
+				}
+				if (!has_wpo && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+					vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_clusters, 1u));
+					continue;
+				}
+			} else if (!is_skinned) {
+				vec3 c_w = vsm_instance_point(record, bounds.xyz);
+				float r_w = (bounds.w + expand) * route_scale;
+				if (!vsm_world_aabb_page_bounds(c_w - vec3(r_w), c_w + vec3(r_w), md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+					continue;
+				}
+				if (!has_wpo && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+					vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_clusters, 1u));
+					continue;
+				}
 			}
-			if (!has_wpo && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
-				vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_clusters, 1u));
-				continue;
+			if (has_skin_bounds) {
+				software = vsm_sw_raster_route(record, route_scale, skin_sphere, max_edge * cluster_bone_scale, md, mip);
+			} else if (!is_skinned) {
+				software = vsm_sw_raster_route(record, route_scale, bounds, max_edge, md, mip);
 			}
-			software = vsm_sw_raster_route(record, route_scale, bounds, max_edge, md, mip);
 		}
 
 		uint cslot = atomicAdd(vsm_counters.cluster_count, 1u);
@@ -970,13 +1047,15 @@ void main() {
 	uint base = mesh.bvh_node_offset + node_idx * 80u;
 	vec4 lod_sphere = vec4(vsm_dag_float(base), vsm_dag_float(base + 4u), vsm_dag_float(base + 8u), vsm_dag_float(base + 12u));
 	float max_parent_error = vsm_dag_float(base + 16u);
-	if (vsm_projected_error(record, lod_sphere, max_parent_error, md, mip) <= vsm_params.max_texel_error) {
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	float inst_bone_scale = is_skinned ? vsm_skin_instance_max_scale(record_idx) : 1.0;
+	if (vsm_projected_error_skinned(record, lod_sphere, max_parent_error, inst_bone_scale, is_skinned, md, mip) <= vsm_params.max_texel_error) {
 		return;
 	}
 
 	bool prog_enabled = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS) != 0u;
 	bool pure_fixed = !prog_enabled || (record.surface_mask == record.pad0);
-	if (pure_fixed) {
+	if (pure_fixed && !is_skinned) {
 		vec3 n_min = vec3(vsm_dag_float(base + 20u), vsm_dag_float(base + 24u), vsm_dag_float(base + 28u));
 		vec3 n_max = vec3(vsm_dag_float(base + 32u), vsm_dag_float(base + 36u), vsm_dag_float(base + 40u));
 		vec2 px_min;
@@ -1114,10 +1193,12 @@ layout(set = 0, binding = 13, std430) buffer restrict DrawArgs {
 	uvec4 data[];
 }
 draw_args;
+#ifndef CLUSTER_CULL
 layout(set = 0, binding = 14, std430) buffer restrict readonly Pages {
 	uint data[];
 }
 pages;
+#endif
 // Word layout:
 //   [0] = request_count, [1] = request_capacity, [2] = overflow, [3] = used_slot_words
 //   [4 .. 4 + used_slot_words) = active resident slot bitset
@@ -1169,11 +1250,27 @@ raster_bin_state;
 const uint NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 6u;
 #endif
 
-// GodotNext: spline_meshes (#161). Bound in BVH_LEVEL and CLUSTER_CULL (main and shadow).
-layout(set = 0, binding = 23, std430) buffer restrict readonly NextGeoSplines {
+// GodotNext: spline_meshes (#161). Bound in BVH_LEVEL and CLUSTER_CULL (main and shadow) at binding 26.
+layout(set = 0, binding = 26, std430) buffer restrict readonly NextGeoSplines {
 	SplineDeformEntry data[];
 }
 spline_deforms;
+
+#ifndef CLUSTER_CULL
+layout(set = 0, binding = 24, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+float skin_instance_max_scale(uint p_record_idx) {
+	uvec4 sinfo = nextgeo_skin_instances.data[p_record_idx];
+	if (sinfo.z == 0u) {
+		return 1.0;
+	}
+	float s = uintBitsToFloat(sinfo.w);
+	return s > 0.0 ? s : 1.0;
+}
+#endif
 
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 	return vec3(
@@ -1184,8 +1281,8 @@ vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 
 // Plan §7.3 step 3 & §7.5: projected error in pixels / shadow texels for
 // perspective, orthographic directional splits (bit 2), and dual-paraboloid
-// hemispheres (bit 3).
-float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error, vec4 p_camera, vec4 p_view, mat4 p_view_proj, uint p_flags) {
+// hemispheres (bit 3). Skinned instances scale error by max bone scale (#160).
+float projected_error_params_skinned(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error, float p_bone_scale, bool p_use_world_aabb_dist, vec4 p_camera, vec4 p_view, mat4 p_view_proj, uint p_flags) {
 	if (p_max_parent_error >= 3.4e38) {
 		return p_camera.w + 1.0;
 	}
@@ -1197,21 +1294,36 @@ float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, 
 		p_max_parent_error = p_max_parent_error * sp.up_max_stretch.w + spline_deform_curvature_error(sp, raw_radius);
 	}
 	float scale = p_record.world_aabb_min.w;
+	float eff_scale = scale * p_bone_scale;
 	if ((p_flags & 4u) != 0u) {
-		return p_max_parent_error * scale * p_view.x * p_view.w;
+		return p_max_parent_error * eff_scale * p_view.x * p_view.w;
 	}
-	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
-	// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
-	float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
-	float radius = (p_lod_sphere.w + expand) * scale;
-	float distance = max(length(center - p_camera.xyz) - radius, p_view.z);
+	float distance;
+	if (p_use_world_aabb_dist) {
+		vec3 closest = clamp(p_camera.xyz, p_record.world_aabb_min.xyz, p_record.world_aabb_max.xyz);
+		distance = max(length(closest - p_camera.xyz), p_view.z);
+	} else {
+		vec3 center = instance_point(p_record, p_lod_sphere.xyz);
+		// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Inflate sphere radius by displacement and WPO bounds.
+		float expand = max(p_record.prev_world_aabb_max.w, 0.0) + nextgeo_record_vertex_offset_bound(p_record);
+		float radius = (p_lod_sphere.w + expand) * scale;
+		distance = max(length(center - p_camera.xyz) - radius, p_view.z);
+	}
 	if ((p_flags & 8u) != 0u) {
-		return p_max_parent_error * scale * 0.5 * p_view.y / distance * p_view.w;
+		return p_max_parent_error * eff_scale * 0.5 * p_view.y / distance * p_view.w;
 	}
-	return p_max_parent_error * scale * 0.5 * p_view.y * abs(p_view_proj[1][1]) / distance * p_view.w;
+	return p_max_parent_error * eff_scale * 0.5 * p_view.y * abs(p_view_proj[1][1]) / distance * p_view.w;
+}
+
+float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error, vec4 p_camera, vec4 p_view, mat4 p_view_proj, uint p_flags) {
+	return projected_error_params_skinned(p_record, p_lod_sphere, p_max_parent_error, 1.0, false, p_camera, p_view, p_view_proj, p_flags);
 }
 
 #ifndef SHADOW_VIEW
+float projected_error_skinned(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error, float p_bone_scale, bool p_use_world_aabb_dist) {
+	return projected_error_params_skinned(p_record, p_lod_sphere, p_max_parent_error, p_bone_scale, p_use_world_aabb_dist, cull.camera, cull.view, cull.view_proj, cull.cull.w);
+}
+
 float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error) {
 	return projected_error_params(p_record, p_lod_sphere, p_max_parent_error, cull.camera, cull.view, cull.view_proj, cull.cull.w);
 }
@@ -1240,7 +1352,67 @@ bool mesh_group_refine_ok(uint p_mesh_idx, uint p_group_idx) {
 }
 
 #ifdef CLUSTER_CULL
+// GodotNext: nextgeo_skinned_runtime (#160). Frustum and Phase-2 Hi-Z culling of skinned
+// cluster bone-bound union AABBs transformed to world space.
+bool skin_aabb_visible_planes(NextGeoInstanceRecord p_record, vec3 p_lmin, vec3 p_lmax, vec4 p_frustum[6]) {
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	vec3 lmin = p_lmin - vec3(disp_bound);
+	vec3 lmax = p_lmax + vec3(disp_bound);
+	vec3 corners[8];
+	for (int c = 0; c < 8; c++) {
+		vec3 lp = vec3((c & 1) != 0 ? lmax.x : lmin.x, (c & 2) != 0 ? lmax.y : lmin.y, (c & 4) != 0 ? lmax.z : lmin.z);
+		corners[c] = instance_point(p_record, lp);
+	}
+	for (uint plane = 0u; plane < 6u; plane++) {
+		bool any_in = false;
+		for (int c = 0; c < 8; c++) {
+			if (dot(p_frustum[plane].xyz, corners[c]) + p_frustum[plane].w >= 0.0) {
+				any_in = true;
+				break;
+			}
+		}
+		if (!any_in) {
+			return false;
+		}
+	}
+	return true;
+}
+
 #ifndef SHADOW_VIEW
+bool skin_aabb_hiz_occluded(NextGeoInstanceRecord p_record, vec3 p_lmin, vec3 p_lmax) {
+	if (params.phase == 0u || (cull.cull.w & 1u) == 0u) {
+		return false;
+	}
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	vec3 lmin = p_lmin - vec3(disp_bound);
+	vec3 lmax = p_lmax + vec3(disp_bound);
+	vec2 uv_min = vec2(2.0);
+	vec2 uv_max = vec2(-1.0);
+	float nearest_depth = 0.0;
+	for (int c = 0; c < 8; c++) {
+		vec3 lp = vec3((c & 1) != 0 ? lmax.x : lmin.x, (c & 2) != 0 ? lmax.y : lmin.y, (c & 4) != 0 ? lmax.z : lmin.z);
+		vec3 wp = instance_point(p_record, lp);
+		vec4 clip = cull.view_proj * vec4(wp, 1.0);
+		if (clip.w <= 0.0) {
+			return false;
+		}
+		vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+		uv_min = min(uv_min, uv);
+		uv_max = max(uv_max, uv);
+		nearest_depth = max(nearest_depth, clip.z / clip.w);
+	}
+	if (uv_min.x < 0.0 || uv_min.y < 0.0 || uv_max.x > 1.0 || uv_max.y > 1.0) {
+		return false;
+	}
+	vec2 sz = (uv_max - uv_min) * cull.view.xy * 0.5;
+	float mip = max(floor(log2(max(max(sz.x, sz.y), 1.0))), 0.0);
+	float occ = 1.0;
+	for (int tap = 0; tap < 4; tap++) {
+		vec2 uv = vec2((tap & 1) != 0 ? uv_max.x : uv_min.x, (tap & 2) != 0 ? uv_max.y : uv_min.y);
+		occ = min(occ, textureLod(hiz_prev, uv, mip).r);
+	}
+	return nearest_depth < occ;
+}
 // The most the instance's basis stretches a length, RendererRD::nextgeo_sw_raster_instance_scale(): a
 // Gershgorin bound on the Gram matrix of its columns, exact for a rotation times a scale, mirrored or
 // not. world_aabb_min.w cannot serve: it is negative for a mirrored instance.
@@ -1364,7 +1536,9 @@ void main() {
 	uint group_page_id = dag_uint(base + 8u);
 	vec4 parent_lod = vec4(dag_float(base + 16u), dag_float(base + 20u), dag_float(base + 24u), dag_float(base + 28u));
 	float parent_error = dag_float(base + 32u);
-	if (projected_error_params(record, parent_lod, parent_error, sc.camera, sc.view, sc.view_proj, sc.cull.w) <= sc.camera.w) {
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	float inst_bone_scale = is_skinned ? nextgeo_skin_instance_max_scale(entry.x) : 1.0;
+	if (projected_error_params_skinned(record, parent_lod, parent_error, inst_bone_scale, is_skinned, sc.camera, sc.view, sc.view_proj, sc.cull.w) <= sc.camera.w) {
 		return;
 	}
 
@@ -1384,6 +1558,23 @@ void main() {
 
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
 		uint global_cluster = cluster_offset + cluster;
+		vec3 skin_lmin = vec3(0.0);
+		vec3 skin_lmax = vec3(0.0);
+		float cluster_bone_scale = inst_bone_scale;
+		bool has_skin_bounds = false;
+		vec4 skin_sphere = vec4(0.0);
+		if (is_skinned && global_cluster >= mesh.cluster_offset) {
+			uint lc = global_cluster - mesh.cluster_offset;
+			if (lc < mesh.cluster_count) {
+				has_skin_bounds = nextgeo_skin_cluster_bounds(entry.x, mesh.page_table_offset + lc, skin_lmin, skin_lmax, cluster_bone_scale);
+				if (has_skin_bounds) {
+					if (!skin_aabb_visible_planes(record, skin_lmin, skin_lmax, sc.frustum)) {
+						continue;
+					}
+					skin_sphere = vec4(0.5 * (skin_lmin + skin_lmax), 0.5 * length(skin_lmax - skin_lmin));
+				}
+			}
+		}
 		if (page_cluster_hdr > 0u && global_cluster >= mesh.cluster_offset) {
 			uint local_cluster = global_cluster - mesh.cluster_offset;
 			if (local_cluster >= page_first_cluster && (local_cluster - page_first_cluster) < page_cluster_hdr) {
@@ -1397,7 +1588,9 @@ void main() {
 							uintBitsToFloat(pages.data[rec_word + 7u]),
 							uintBitsToFloat(pages.data[rec_word + 8u]));
 					float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
-					float child_px_err = projected_error_params(record, own_lod, own_error, sc.camera, sc.view, sc.view_proj, sc.cull.w);
+					float child_px_err = has_skin_bounds
+							? projected_error_params_skinned(record, skin_sphere, own_error, cluster_bone_scale, false, sc.camera, sc.view, sc.view_proj, sc.cull.w)
+							: projected_error_params_skinned(record, own_lod, own_error, inst_bone_scale, is_skinned, sc.camera, sc.view, sc.view_proj, sc.cull.w);
 					if (child_px_err > sc.camera.w) {
 						uint child_g = uint(refined_group);
 						if (mesh_group_refine_ok(mesh_idx, child_g)) {
@@ -1446,7 +1639,9 @@ void main() {
 	uint group_page_id = dag_uint(base + 8u);
 	vec4 parent_lod = vec4(dag_float(base + 16u), dag_float(base + 20u), dag_float(base + 24u), dag_float(base + 28u));
 	float parent_error = dag_float(base + 32u);
-	if (projected_error(record, parent_lod, parent_error) <= cull.camera.w) {
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	float inst_bone_scale = is_skinned ? nextgeo_skin_instance_max_scale(entry.x) : 1.0;
+	if (projected_error_skinned(record, parent_lod, parent_error, inst_bone_scale, is_skinned) <= cull.camera.w) {
 		return;
 	}
 
@@ -1470,6 +1665,26 @@ void main() {
 
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
 		uint global_cluster = cluster_offset + cluster;
+		vec3 skin_lmin = vec3(0.0);
+		vec3 skin_lmax = vec3(0.0);
+		float cluster_bone_scale = inst_bone_scale;
+		bool has_skin_bounds = false;
+		vec4 skin_sphere = vec4(0.0);
+		if (is_skinned && global_cluster >= mesh.cluster_offset) {
+			uint lc = global_cluster - mesh.cluster_offset;
+			if (lc < mesh.cluster_count) {
+				has_skin_bounds = nextgeo_skin_cluster_bounds(entry.x, mesh.page_table_offset + lc, skin_lmin, skin_lmax, cluster_bone_scale);
+				if (has_skin_bounds) {
+					if (!skin_aabb_visible_planes(record, skin_lmin, skin_lmax, cull.frustum)) {
+						continue;
+					}
+					if (skin_aabb_hiz_occluded(record, skin_lmin, skin_lmax)) {
+						continue;
+					}
+					skin_sphere = vec4(0.5 * (skin_lmin + skin_lmax), 0.5 * length(skin_lmax - skin_lmin));
+				}
+			}
+		}
 		uint route_rec_word = 0xFFFFFFFFu;
 		if (page_cluster_hdr > 0u && global_cluster >= mesh.cluster_offset) {
 			uint local_cluster = global_cluster - mesh.cluster_offset;
@@ -1485,7 +1700,9 @@ void main() {
 							uintBitsToFloat(pages.data[rec_word + 7u]),
 							uintBitsToFloat(pages.data[rec_word + 8u]));
 					float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
-					float child_px_err = projected_error(record, own_lod, own_error);
+					float child_px_err = has_skin_bounds
+							? projected_error_skinned(record, skin_sphere, own_error, cluster_bone_scale, false)
+							: projected_error_skinned(record, own_lod, own_error, inst_bone_scale, is_skinned);
 					if (child_px_err > cull.camera.w) {
 						uint child_g = uint(refined_group);
 						if (mesh_group_refine_ok(mesh_idx, child_g)) {
@@ -1496,7 +1713,7 @@ void main() {
 							if (missing_page != last_requested_page) {
 								last_requested_page = missing_page;
 								float scale = record.world_aabb_min.w;
-								vec4 req_lod = own_lod;
+								vec4 req_lod = has_skin_bounds ? skin_sphere : own_lod;
 								if ((record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
 									spline_deform_bounds_sphere(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, req_lod.xyz, req_lod.w);
 								}
@@ -1546,7 +1763,11 @@ void main() {
 					spline_deform_bounds_sphere(sp, bounds.xyz, bounds.w);
 					max_edge *= sp.up_max_stretch.w;
 				}
-				software = sw_raster_route(record, route_scale, bounds, max_edge);
+				if (has_skin_bounds) {
+					software = sw_raster_route(record, route_scale, skin_sphere, max_edge * cluster_bone_scale);
+				} else if (!is_skinned) {
+					software = sw_raster_route(record, route_scale, bounds, max_edge);
+				}
 			}
 			uint bin = NEXTGEO_RASTER_BIN_FIXED;
 			if ((cull.cull.w & NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS) != 0u) {
@@ -1624,7 +1845,9 @@ void main() {
 	vec4 lod_sphere = vec4(dag_float(base), dag_float(base + 4u), dag_float(base + 8u), dag_float(base + 12u));
 	float max_parent_error = dag_float(base + 16u);
 	uint child_count = min(dag_uint(base + 44u), 8u);
-	if (projected_error_params(record, lod_sphere, max_parent_error, sc.camera, sc.view, sc.view_proj, sc.cull.w) <= sc.camera.w) {
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	float inst_bone_scale = is_skinned ? skin_instance_max_scale(entry.x) : 1.0;
+	if (projected_error_params_skinned(record, lod_sphere, max_parent_error, inst_bone_scale, is_skinned, sc.camera, sc.view, sc.view_proj, sc.cull.w) <= sc.camera.w) {
 		return;
 	}
 	for (uint child = 0u; child < child_count; child++) {
@@ -1673,7 +1896,9 @@ void main() {
 	vec4 lod_sphere = vec4(dag_float(base), dag_float(base + 4u), dag_float(base + 8u), dag_float(base + 12u));
 	float max_parent_error = dag_float(base + 16u);
 	uint child_count = min(dag_uint(base + 44u), 8u);
-	if (projected_error(record, lod_sphere, max_parent_error) <= cull.camera.w) {
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	float inst_bone_scale = is_skinned ? skin_instance_max_scale(entry.x) : 1.0;
+	if (projected_error_skinned(record, lod_sphere, max_parent_error, inst_bone_scale, is_skinned) <= cull.camera.w) {
 		return;
 	}
 	for (uint child = 0u; child < child_count; child++) {

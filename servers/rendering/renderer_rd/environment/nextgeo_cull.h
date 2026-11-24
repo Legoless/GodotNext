@@ -81,19 +81,21 @@ inline uint32_t nextgeo_dispatch_group_count(uint32_t p_invocation_count) {
 
 // Instance-level cull predicates (plan §7.3 step 4, §7.5).
 inline bool nextgeo_instance_cullable(uint32_t p_flags, uint32_t p_layer_mask, uint32_t p_cull_mask) {
+	const bool skeleton_ok = (p_flags & RendererVirtualMeshStorage::RECORD_HAS_SKELETON) == 0 || (p_flags & RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE) != 0;
 	return (p_flags & RendererVirtualMeshStorage::RECORD_VALID) != 0 &&
 			(p_flags & RendererVirtualMeshStorage::RECORD_VISIBLE) != 0 &&
 			(p_flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK) != RendererVirtualMeshStorage::RECORD_CAST_SHADOW_SHADOWS_ONLY &&
-			(p_flags & RendererVirtualMeshStorage::RECORD_HAS_SKELETON) == 0 &&
+			skeleton_ok &&
 			(p_flags & RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS) == 0 &&
 			(p_layer_mask & p_cull_mask) != 0;
 }
 
 inline bool nextgeo_shadow_instance_cullable(uint32_t p_flags, uint32_t p_layer_mask, uint32_t p_cull_mask) {
+	const bool skeleton_ok = (p_flags & RendererVirtualMeshStorage::RECORD_HAS_SKELETON) == 0 || (p_flags & RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE) != 0;
 	return (p_flags & RendererVirtualMeshStorage::RECORD_VALID) != 0 &&
 			(p_flags & RendererVirtualMeshStorage::RECORD_VISIBLE) != 0 &&
 			(p_flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK) != RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF &&
-			(p_flags & RendererVirtualMeshStorage::RECORD_HAS_SKELETON) == 0 &&
+			skeleton_ok &&
 			(p_flags & RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS) == 0 &&
 			(p_layer_mask & p_cull_mask) != 0;
 }

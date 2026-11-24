@@ -118,6 +118,26 @@ layout(set = 0, binding = 9, std430) buffer restrict readonly NextGeoSplines {
 }
 spline_deforms;
 
+// GodotNext: nextgeo_skinned_runtime (#160). Skeleton palette arena, per-record skin table, cluster skin offsets.
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+// clang-format off
+#include "skinning_inc.glsl"
+// clang-format on
+
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
 #ifdef MODE_SHADOW
@@ -201,6 +221,8 @@ void main() {
 
 	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
 	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	uint cluster_table_idx = mesh.page_table_offset + local_cluster;
 	bool cull_disabled = ((record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_DOUBLE_SIDED) || ((record.pad1[0] & (1u << surface_id)) != 0u);
 	bool cull_front = (record.pad1[1] & (1u << surface_id)) != 0u;
 	if (cull_disabled) {
@@ -217,6 +239,9 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 0u]),
 					uintBitsToFloat(pages.data[pw + 1u]),
 					uintBitsToFloat(pages.data[pw + 2u]));
+			if (is_skinned) {
+				lp = nextgeo_skin_position(lp, entry.x, cluster_table_idx, vi, vert_count, false);
+			}
 			if (has_spline) {
 				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
 			}
@@ -250,6 +275,9 @@ void main() {
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
+	if (is_skinned) {
+		local_pos = nextgeo_skin_position(local_pos, entry.x, cluster_table_idx, v_idx, vert_count, false);
+	}
 	if (has_spline) {
 		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
 	}
@@ -324,7 +352,8 @@ void main() {
 
 	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
 	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
-
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	uint cluster_table_idx = mesh.page_table_offset + local_cluster;
 #ifndef DEBUG_BACKFACE
 	if ((bucket_flags & NEXTGEO_BUCKET_CULL_DISABLED) != 0u) {
 		// NEXTGEO_BUCKET_CULL_DISABLED: orient the triangle clockwise in clip space so both faces pass POLYGON_CULL_BACK.
@@ -341,6 +370,9 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 0u]),
 					uintBitsToFloat(pages.data[pw + 1u]),
 					uintBitsToFloat(pages.data[pw + 2u]));
+			if (is_skinned) {
+				lp = nextgeo_skin_position(lp, entry.x, cluster_table_idx, vi, vert_count, false);
+			}
 			if (has_spline) {
 				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
 			}
@@ -370,11 +402,14 @@ void main() {
 	}
 
 	uint pos_word = desc.x + v_idx * stride;
-	vec3 raw_local_pos = vec3(
+	vec3 bind_pos = vec3(
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
-	vec3 local_pos = has_spline ? spline_deform_position(spline_deforms.data[spline_idx].current, raw_local_pos) : raw_local_pos;
+	vec3 local_pos = is_skinned ? nextgeo_skin_position(bind_pos, entry.x, cluster_table_idx, v_idx, vert_count, false) : bind_pos;
+	if (has_spline) {
+		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
+	}
 
 	vec3 world_pos = vec3(
 			dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
@@ -390,7 +425,10 @@ void main() {
 #endif
 
 #ifdef WITH_VELOCITY
-	vec3 prev_local_pos = has_spline ? spline_deform_position(spline_deforms.data[spline_idx].previous, raw_local_pos) : raw_local_pos;
+	vec3 prev_local_pos = is_skinned ? nextgeo_skin_position(bind_pos, entry.x, cluster_table_idx, v_idx, vert_count, true) : bind_pos;
+	if (has_spline) {
+		prev_local_pos = spline_deform_position(spline_deforms.data[spline_idx].previous, prev_local_pos);
+	}
 	vec3 prev_world_pos = vec3(
 			dot(record.prev_transform[0].xyz, prev_local_pos) + record.prev_transform[0].w,
 			dot(record.prev_transform[1].xyz, prev_local_pos) + record.prev_transform[1].w,

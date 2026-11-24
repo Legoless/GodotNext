@@ -414,6 +414,9 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	const RID tiles_buf = tile_list_buffer.is_valid() ? tile_list_buffer : dummy_buffer;
 	const RID inst_buf = instance_data_buffer.is_valid() ? instance_data_buffer : dummy_buffer;
 	const RID spline_buf = p_storage->get_spline_buffer().is_valid() ? p_storage->get_spline_buffer() : dummy_buffer;
+	const RID skin_palette_buf = p_storage->get_skin_palette_buffer().is_valid() ? p_storage->get_skin_palette_buffer() : dummy_buffer;
+	const RID skin_inst_buf = p_storage->get_skin_instance_buffer().is_valid() ? p_storage->get_skin_instance_buffer() : dummy_buffer;
+	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_buffer;
 
 	LocalVector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, vis_tex));
@@ -426,6 +429,10 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tiles_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, inst_buf));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, spline_buf));
+	// GodotNext: nextgeo_skinned_runtime (#160). Bindings 17..19 match scene_forward_clustered_inc.glsl (9..15 = compute bins/velocity, 16 = splines).
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, skin_palette_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, skin_inst_buf));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, cluster_skin_buf));
 
 	return uniform_set_cache->get_cache_vec(p_shader_rid, RenderForwardClustered::TRANSFORMS_UNIFORM_SET, uniforms);
 }
@@ -592,6 +599,9 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 	const RID bucket_buf = bucket_table_buffer.is_valid() ? bucket_table_buffer : dummy_buffer;
 	const RID inst_buf = instance_data_buffer.is_valid() ? instance_data_buffer : dummy_buffer;
 	const RID spline_buf = p_storage->get_spline_buffer().is_valid() ? p_storage->get_spline_buffer() : dummy_buffer;
+	const RID skin_palette_buf = p_storage->get_skin_palette_buffer().is_valid() ? p_storage->get_skin_palette_buffer() : dummy_buffer;
+	const RID skin_inst_buf = p_storage->get_skin_instance_buffer().is_valid() ? p_storage->get_skin_instance_buffer() : dummy_buffer;
+	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_buffer;
 
 	// The resolve set of the tile quads, with the pixel list at binding 7, the bin state and the images.
 	LocalVector<RD::Uniform> resolve_uniforms;
@@ -611,6 +621,9 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 		}
 	}
 	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, spline_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, skin_palette_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, skin_inst_buf));
+	resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, cluster_skin_buf));
 
 	for (uint32_t i = 0; i < buckets.size(); i++) {
 		const MaterialBucket &bucket = buckets[i];

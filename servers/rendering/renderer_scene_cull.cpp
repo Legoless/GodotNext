@@ -1320,6 +1320,9 @@ void RendererSceneCull::instance_attach_skeleton(RID p_instance, RID p_skeleton)
 		ERR_FAIL_NULL(geom->geometry_instance);
 		geom->geometry_instance->set_skeleton(p_skeleton);
 	}
+	if (RSG::virtual_mesh_storage != nullptr && instance->virtual_record != UINT32_MAX) {
+		RSG::virtual_mesh_storage->instance_record_set_skeleton(instance->virtual_record, p_skeleton);
+	}
 	_instance_record_update_state(instance);
 }
 
@@ -2001,6 +2004,7 @@ void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 			geom->geometry_instance->set_nextgeo_record_index(p_instance->virtual_record);
 		}
 	}
+	RSG::virtual_mesh_storage->instance_record_set_skeleton(p_instance->virtual_record, p_instance->skeleton);
 	_instance_record_update_state(p_instance);
 	// GodotNext: nextgeo_displacement (#150). Push per-instance displacement bound before transform upload.
 	RSG::virtual_mesh_storage->instance_record_set_displacement_bound(p_instance->virtual_record, p_instance->displacement_bound);
@@ -5053,18 +5057,33 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 				uint32_t instance_cap = 0;
 				uint32_t selected = 0;
+				bool nextgi_rt_mesh_instances_checked = false;
+				const float rt_skinned_range = MIN(scene_radius, RendererRD::NEXTGI_RT_ANGULAR_CULL_DISTANCE);
+				const float rt_skinned_range_sq = rt_skinned_range * rt_skinned_range;
 				for (uint32_t i = 0; i < picked.size(); i++) {
 					if (reasons[i] != RendererRD::NEXTGI_RT_INCLUDED) {
 						instance_cap++;
 						continue;
 					}
-					InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(picked[i].instance->base_data);
+					Instance *rt_inst = picked[i].instance;
+					InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(rt_inst->base_data);
 					if (geometry_data == nullptr || geometry_data->geometry_instance == nullptr) {
 						continue;
 					}
+					// GodotNext: nextgeo_skinned_runtime (#160, plan §21.4 contract N8). Off-screen skinned
+					// instances inside the NextGI RT range must still run skeleton skinning so their #59 RT
+					// proxy BLASes stay current and refit cleanly when frustum-culled from the main view.
+					if (rt_inst->mesh_instance.is_valid()) {
+						const Vector3 inst_origin = picked[i].has_world ? picked[i].world.origin : rt_inst->transform.origin;
+						const Vector3 inst_center = rt_inst->transformed_aabb.has_surface() ? rt_inst->transformed_aabb.get_center() : inst_origin;
+						if (anchor.distance_squared_to(inst_origin) <= rt_skinned_range_sq || anchor.distance_squared_to(inst_center) <= rt_skinned_range_sq) {
+							RSG::mesh_storage->mesh_instance_check_for_update(rt_inst->mesh_instance);
+							nextgi_rt_mesh_instances_checked = true;
+						}
+					}
 					RendererSceneRender::NextGIRTInstance rt_instance;
 					rt_instance.geometry_instance = geometry_data->geometry_instance;
-					rt_instance.lightmapped = picked[i].instance->lightmap != nullptr;
+					rt_instance.lightmapped = rt_inst->lightmap != nullptr;
 					rt_instance.angular_radius = angular[i];
 					rt_instance.mesh_override = picked[i].mesh_override;
 					rt_instance.rt_transform = picked[i].world;
@@ -5076,9 +5095,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					rt_instance.gpu_particles = picked[i].gpu_particles;
 					rt_instance.gpu_indirect = picked[i].gpu_indirect;
 					// GodotNext: nextgi_shadow_policy (#145)
-					rt_instance.shadow_layers = picked[i].instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF ? picked[i].instance->layer_mask : 0u;
+					rt_instance.shadow_layers = rt_inst->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF ? rt_inst->layer_mask : 0u;
 					scenario->nextgi_rt_selection.push_back(rt_instance);
 					selected += picked[i].gpu_source.is_valid() ? picked[i].gpu_count : 1;
+				}
+				if (nextgi_rt_mesh_instances_checked) {
+					RSG::mesh_storage->update_mesh_instances();
 				}
 				scenario->nextgi_rt_not_in_scene = not_in_scene;
 				scenario->nextgi_rt_instance_cap = instance_cap;

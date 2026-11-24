@@ -110,6 +110,27 @@ layout(set = 0, binding = 7, std430) buffer restrict readonly NextGeoSplines {
 }
 nextgeo_spline_deforms;
 
+// GodotNext: nextgeo_skinned_runtime (#160). Skeleton palette arena, per-record skin table, cluster skin offsets.
+layout(set = 0, binding = 8, std430) buffer restrict readonly NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 0, binding = 9, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+#define NEXTGEO_SKIN_PAGES_DATA nextgeo_pages.data
+// clang-format off
+#include "skinning_inc.glsl"
+// clang-format on
+
 /* Set 1: the scene environment the material code reads, as scene_forward_clustered_inc.glsl names it. */
 
 layout(set = 1, binding = 0, std140) uniform SceneDataBlock {
@@ -756,6 +777,7 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 
 	vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
 	vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
+	float _ng_tan_sign = 1.0;
 	if ((_ng_layout & 0x04u) != 0u) {
 		vec4 _ng_tan4 = vec4(
 				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
@@ -764,7 +786,17 @@ bool _ng_raster_eval_vertex(uvec2 p_entry, uvec4 p_desc, uint p_v_idx, out vec4 
 				uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
 		_ng_w += 4u;
 		_ng_c_tan = _ng_tan4.xyz;
-		_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan4.w, vec3(0.0, 1.0, 0.0));
+		_ng_tan_sign = _ng_tan4.w;
+		_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+	}
+
+	if ((_ng_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u) {
+		NextGeoMeshRecord _ng_sk_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
+		uint _ng_sk_cluster_idx = _ng_sk_mesh.page_table_offset + (p_entry.y - _ng_sk_mesh.cluster_offset);
+		nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, p_entry.x, _ng_sk_cluster_idx, p_v_idx, _ng_vert_count, false);
+		if ((_ng_layout & 0x04u) != 0u) {
+			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+		}
 	}
 
 	vec2 _ng_c_uv = vec2(0.0);
@@ -906,6 +938,7 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 
 		vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
 		vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
+		float _ng_tan_sign = 1.0;
 		if ((_ng_layout & 0x04u) != 0u) {
 			vec4 _ng_tan4 = vec4(
 					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
@@ -914,7 +947,17 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 					uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
 			_ng_w += 4u;
 			_ng_c_tan = _ng_tan4.xyz;
-			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan4.w, vec3(0.0, 1.0, 0.0));
+			_ng_tan_sign = _ng_tan4.w;
+			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+		}
+
+		if ((_ng_record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u) {
+			NextGeoMeshRecord _ng_sk_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
+			uint _ng_sk_cluster_idx = _ng_sk_mesh.page_table_offset + (p_entry.y - _ng_sk_mesh.cluster_offset);
+			nextgeo_skin_vertex(_ng_c_pos, _ng_c_nrm, _ng_c_tan, p_entry.x, _ng_sk_cluster_idx, _ng_v_idx, _ng_vert_count, false);
+			if ((_ng_layout & 0x04u) != 0u) {
+				_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_c_tan) * _ng_tan_sign, vec3(0.0, 1.0, 0.0));
+			}
 		}
 
 		vec2 _ng_c_uv = vec2(0.0);

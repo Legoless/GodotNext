@@ -78,6 +78,26 @@ layout(set = 0, binding = 10, std430) buffer restrict readonly NextGeoSplines {
 }
 spline_deforms;
 
+// GodotNext: nextgeo_skinned_runtime (#160). Skeleton palette arena, per-record skin table, cluster skin offsets.
+layout(set = 0, binding = 11, std430) buffer restrict readonly NextGeoSkinPalette {
+	vec4 data[];
+}
+nextgeo_skin_palette;
+
+layout(set = 0, binding = 12, std430) buffer restrict readonly NextGeoSkinInstances {
+	uvec4 data[];
+}
+nextgeo_skin_instances;
+
+layout(set = 0, binding = 13, std430) buffer restrict readonly NextGeoClusterSkin {
+	uint data[];
+}
+nextgeo_cluster_skin;
+
+// clang-format off
+#include "nextgeo/skinning_inc.glsl"
+// clang-format on
+
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
 	vsm_page_info_out = 0xFFFFFFFFu;
@@ -138,6 +158,8 @@ void main() {
 
 	bool has_spline = (record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u;
 	uint spline_idx = record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT;
+	bool is_skinned = (record.flags & NEXTGEO_RECORD_SKINNED_PALETTE) != 0u;
+	uint cluster_table_idx = mesh.page_table_offset + local_cluster;
 	if (cull_disabled) {
 		vec4 tri_clip[3];
 		for (uint c = 0u; c < 3u; c++) {
@@ -152,6 +174,9 @@ void main() {
 					uintBitsToFloat(pages.data[pw + 0u]),
 					uintBitsToFloat(pages.data[pw + 1u]),
 					uintBitsToFloat(pages.data[pw + 2u]));
+			if (is_skinned) {
+				lp = nextgeo_skin_position(lp, pair.x, cluster_table_idx, vi, vert_count, false);
+			}
 			if (has_spline) {
 				lp = spline_deform_position(spline_deforms.data[spline_idx].current, lp);
 			}
@@ -184,6 +209,9 @@ void main() {
 			uintBitsToFloat(pages.data[pos_word + 0u]),
 			uintBitsToFloat(pages.data[pos_word + 1u]),
 			uintBitsToFloat(pages.data[pos_word + 2u]));
+	if (is_skinned) {
+		local_pos = nextgeo_skin_position(local_pos, pair.x, cluster_table_idx, v_idx, vert_count, false);
+	}
 	if (has_spline) {
 		local_pos = spline_deform_position(spline_deforms.data[spline_idx].current, local_pos);
 	}

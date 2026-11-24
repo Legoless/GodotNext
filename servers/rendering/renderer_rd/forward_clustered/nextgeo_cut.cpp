@@ -38,6 +38,7 @@
 #include "core/templates/hash_map.h"
 #include "core/variant/array.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_skinning.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -221,9 +222,11 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 		const bool cast_ok = is_shadow_view
 				? ((record.flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK) != RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF)
 				: ((record.flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK) != RendererVirtualMeshStorage::RECORD_CAST_SHADOW_SHADOWS_ONLY);
+		const bool skeleton_rejected = (record.flags & (RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE)) == RendererVirtualMeshStorage::RECORD_HAS_SKELETON;
 		if ((record.flags & (RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE)) != (RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE) ||
 				!cast_ok ||
-				(record.flags & (RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS)) != 0 ||
+				skeleton_rejected ||
+				(record.flags & RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS) != 0 ||
 				(record.gi_flags & RendererVirtualMeshStorage::GI_LIGHTMAPPED) != 0 ||
 				(is_shadow_view ? record.pad0 : record.surface_mask) == 0 ||
 				(record.layer_mask & cull_mask) == 0) {
@@ -267,7 +270,23 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 		const float scale = record.world_aabb_min[3];
 		const bool has_spline = (record.flags & RendererVirtualMeshStorage::RECORD_HAS_SPLINE) != 0u;
 		const SplineDeformPose spline_pose = has_spline ? p_storage->get_spline_entry(record.flags >> RendererVirtualMeshStorage::RECORD_SPLINE_INDEX_SHIFT).current : SplineDeformPose();
-		auto projected = [&](const float p_sphere[4], float p_error) {
+		const bool is_skinned = (record.flags & RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE) != 0u;
+		float inst_bone_scale = 1.0f;
+		const float *skin_palette = nullptr;
+		uint32_t skin_palette_bones = 0u;
+		if (is_skinned) {
+			const RendererVirtualMeshStorage::SkinInstanceInfo sinfo = p_storage->get_skin_instance_info(record_index);
+			if (sinfo.bone_count > 0u) {
+				float s = 1.0f;
+				memcpy(&s, &sinfo.max_bone_scale_bits, sizeof(float));
+				inst_bone_scale = s > 0.0f ? s : 1.0f;
+			}
+			const RID skel = p_storage->instance_record_get_skeleton(record_index);
+			if (skel.is_valid()) {
+				skin_palette = p_storage->get_skeleton_palette_data(skel, false, skin_palette_bones);
+			}
+		}
+		auto projected = [&](const float p_sphere[4], float p_error, float p_bone_scale, bool p_use_world_aabb_dist) {
 			if (p_error >= 3.4e38f) {
 				return tau + 1.0f;
 			}
@@ -279,21 +298,57 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 				spline_deform_bounds_sphere(spline_pose, local_center, local_radius);
 				eff_error = eff_error * spline_pose.up_max_stretch[3] + spline_deform_curvature_error(spline_pose, raw_radius);
 			}
+			const float eff_scale = scale * p_bone_scale;
 			if ((cut_flags & RendererRD::NEXTGEO_CUT_FLAG_ORTHOGRAPHIC) != 0) {
-				return eff_error * scale * p_cut.view[0] * lod_bias;
+				return eff_error * eff_scale * p_cut.view[0] * lod_bias;
 			}
-			const Vector3 center(
-					record.transform[0][0] * local_center.x + record.transform[0][1] * local_center.y + record.transform[0][2] * local_center.z + record.transform[0][3],
-					record.transform[1][0] * local_center.x + record.transform[1][1] * local_center.y + record.transform[1][2] * local_center.z + record.transform[1][3],
-					record.transform[2][0] * local_center.x + record.transform[2][1] * local_center.y + record.transform[2][2] * local_center.z + record.transform[2][3]);
-			// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Mirror cluster_cull.glsl bound inflation.
-			const float expand = MAX(record.prev_world_aabb_max[3], 0.0f) + wpo_bound;
-			const float radius = (local_radius + expand) * scale;
-			const float distance = MAX(center.distance_to(eye) - radius, znear);
+			float distance = znear;
+			if (p_use_world_aabb_dist) {
+				const Vector3 closest(
+						CLAMP(eye.x, lo.x, hi.x),
+						CLAMP(eye.y, lo.y, hi.y),
+						CLAMP(eye.z, lo.z, hi.z));
+				distance = MAX(closest.distance_to(eye), znear);
+			} else {
+				const Vector3 center(
+						record.transform[0][0] * local_center.x + record.transform[0][1] * local_center.y + record.transform[0][2] * local_center.z + record.transform[0][3],
+						record.transform[1][0] * local_center.x + record.transform[1][1] * local_center.y + record.transform[1][2] * local_center.z + record.transform[1][3],
+						record.transform[2][0] * local_center.x + record.transform[2][1] * local_center.y + record.transform[2][2] * local_center.z + record.transform[2][3]);
+				// GodotNext: nextgeo_displacement (#150), nextgeo_vertex_offset (#164). Mirror cluster_cull.glsl bound inflation.
+				const float expand = MAX(record.prev_world_aabb_max[3], 0.0f) + wpo_bound;
+				const float radius = (local_radius + expand) * scale;
+				distance = MAX(center.distance_to(eye) - radius, znear);
+			}
 			if ((cut_flags & RendererRD::NEXTGEO_CUT_FLAG_DUAL_PARABOLOID) != 0) {
-				return eff_error * scale * 0.5f * height / distance * lod_bias;
+				return eff_error * eff_scale * 0.5f * height / distance * lod_bias;
 			}
-			return eff_error * scale * 0.5f * height * p11 / distance * lod_bias;
+			return eff_error * eff_scale * 0.5f * height * p11 / distance * lod_bias;
+		};
+		auto skin_aabb_visible = [&](const Vector3 &p_lmin, const Vector3 &p_lmax) {
+			const float expand = MAX(record.prev_world_aabb_max[3], 0.0f) + wpo_bound;
+			const Vector3 lmin = p_lmin - Vector3(expand, expand, expand);
+			const Vector3 lmax = p_lmax + Vector3(expand, expand, expand);
+			Vector3 corners[8];
+			for (int c = 0; c < 8; c++) {
+				const Vector3 lp((c & 1) ? lmax.x : lmin.x, (c & 2) ? lmax.y : lmin.y, (c & 4) ? lmax.z : lmin.z);
+				corners[c] = Vector3(
+						record.transform[0][0] * lp.x + record.transform[0][1] * lp.y + record.transform[0][2] * lp.z + record.transform[0][3],
+						record.transform[1][0] * lp.x + record.transform[1][1] * lp.y + record.transform[1][2] * lp.z + record.transform[1][3],
+						record.transform[2][0] * lp.x + record.transform[2][1] * lp.y + record.transform[2][2] * lp.z + record.transform[2][3]);
+			}
+			for (int plane = 0; plane < 6; plane++) {
+				bool any_in = false;
+				for (int c = 0; c < 8; c++) {
+					if (plane_distance(p_cut.frustum[plane], corners[c]) >= 0.0f) {
+						any_in = true;
+						break;
+					}
+				}
+				if (!any_in) {
+					return false;
+				}
+			}
+			return true;
 		};
 		r_instances++;
 		LocalVector<uint32_t> stack;
@@ -305,7 +360,7 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 			const uint32_t base = node_base + node * 80;
 			const float sphere[4] = { read_f32(dag, base), read_f32(dag, base + 4), read_f32(dag, base + 8), read_f32(dag, base + 12) };
 			const float error = read_f32(dag, base + 16);
-			if (projected(sphere, error) <= tau) {
+			if (projected(sphere, error, inst_bone_scale, is_skinned) <= tau) {
 				continue;
 			}
 			const uint32_t child_count = MIN(read_u32(dag, base + 44), 8u);
@@ -327,7 +382,7 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 			const uint32_t base = 8 + group_index * 60;
 			const float sphere[4] = { read_f32(dag, base + 16), read_f32(dag, base + 20), read_f32(dag, base + 24), read_f32(dag, base + 28) };
 			const float error = read_f32(dag, base + 32);
-			if (projected(sphere, error) <= tau) {
+			if (projected(sphere, error, inst_bone_scale, is_skinned) <= tau) {
 				continue;
 			}
 			const uint32_t cluster_offset = read_u32(dag, base);
@@ -336,13 +391,45 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 			const bool page_has_slot = group_page_id < mesh->page_to_slot.size() && mesh->page_to_slot[group_page_id] != RendererVirtualMeshStorage::INVALID_PAGE_SLOT && slot_page_size >= 96u;
 			for (uint32_t cluster = 0; cluster < cluster_count; cluster++) {
 				const uint32_t global_cluster = cluster_offset + cluster;
+				bool has_skin_bounds = false;
+				float cluster_bone_scale = inst_bone_scale;
+				float skin_sphere[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+				if (is_skinned && skin_palette != nullptr && skin_palette_bones > 0u && global_cluster >= mesh->record.cluster_offset) {
+					const uint32_t local_cluster = global_cluster - mesh->record.cluster_offset;
+					if (local_cluster < mesh->cluster_skin_bones.size() && !mesh->cluster_skin_bones[local_cluster].is_empty()) {
+						const LocalVector<RendererVirtualMeshStorage::ClusterSkinBone> &bones = mesh->cluster_skin_bones[local_cluster];
+						LocalVector<RendererRD::NextGeoClusterSkinBone> ref_bones;
+						ref_bones.resize(bones.size());
+						for (uint32_t b = 0; b < bones.size(); b++) {
+							ref_bones[b].global_bone = bones[b].global_bone;
+							ref_bones[b].aabb_min = Vector3(bones[b].aabb_min[0], bones[b].aabb_min[1], bones[b].aabb_min[2]);
+							ref_bones[b].aabb_max = Vector3(bones[b].aabb_max[0], bones[b].aabb_max[1], bones[b].aabb_max[2]);
+						}
+						Vector3 lmin;
+						Vector3 lmax;
+						if (RendererRD::nextgeo_skin_cluster_bounds_from_bones(ref_bones.ptr(), ref_bones.size(), skin_palette, skin_palette_bones, lmin, lmax, cluster_bone_scale)) {
+							has_skin_bounds = true;
+							if (!skin_aabb_visible(lmin, lmax)) {
+								continue;
+							}
+							const Vector3 center = (lmin + lmax) * 0.5f;
+							const float radius = (lmax - lmin).length() * 0.5f;
+							skin_sphere[0] = center.x;
+							skin_sphere[1] = center.y;
+							skin_sphere[2] = center.z;
+							skin_sphere[3] = radius;
+						}
+					}
+				}
 				float cluster_cut_err = 0.0f;
 				if (page_has_slot && global_cluster >= mesh->record.cluster_offset) {
 					const uint32_t local_cluster = global_cluster - mesh->record.cluster_offset;
 					if (local_cluster < mesh->cluster_refine.size() && mesh->cluster_refine[local_cluster].valid) {
 						const RendererVirtualMeshStorage::ClusterRefineInfo &ref = mesh->cluster_refine[local_cluster];
 						if (ref.refined_group >= 0 && uint32_t(ref.refined_group) < group_count) {
-							const float child_err = projected(ref.group_lod, ref.group_error);
+							const float child_err = has_skin_bounds
+									? projected(skin_sphere, ref.group_error, cluster_bone_scale, false)
+									: projected(ref.group_lod, ref.group_error, inst_bone_scale, is_skinned);
 							if (child_err > tau && p_storage->mesh_is_group_refine_ok(mesh_index, uint32_t(ref.refined_group))) {
 								continue;
 							}
@@ -756,6 +843,9 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
 	const RID spline_buf = RSG::virtual_mesh_storage->get_spline_buffer();
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	RD::Uniform u_records(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
 	RD::Uniform u_meshes(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
 	RD::Uniform u_pages(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf);
@@ -764,14 +854,32 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	RD::Uniform u_raster(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params);
 	RD::Uniform u_buckets(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf);
 	RD::Uniform u_lists(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, raster_lists);
+	RD::Uniform u_skin_palette_11(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, skin_palette_buf);
+	RD::Uniform u_skin_instances_12(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, skin_inst_buf);
+	RD::Uniform u_cluster_skin_13(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, cluster_skin_buf);
+	RD::Uniform u_skin_palette_10(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, skin_palette_buf);
+	RD::Uniform u_skin_instances_11(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, skin_inst_buf);
+	RD::Uniform u_cluster_skin_12(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, cluster_skin_buf);
 
 	// Software clusters: one workgroup each, dispatched indirectly per bin.
 	{
 		RID shader = sw_shader.version_get_shader(sw_version, storage);
-		RD::Uniform u_counters(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_counters);
-		RD::Uniform u_vis64(vis64_type, 9, p_raster.vis64);
-		RD::Uniform u_splines(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf);
-		RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_counters, u_vis64, u_splines);
+		LocalVector<RD::Uniform> sw_u;
+		sw_u.push_back(u_records);
+		sw_u.push_back(u_meshes);
+		sw_u.push_back(u_pages);
+		sw_u.push_back(u_cluster_table);
+		sw_u.push_back(u_visible);
+		sw_u.push_back(u_raster);
+		sw_u.push_back(u_buckets);
+		sw_u.push_back(u_lists);
+		sw_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_counters));
+		sw_u.push_back(RD::Uniform(vis64_type, 9, p_raster.vis64));
+		sw_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
+		sw_u.push_back(u_skin_palette_11);
+		sw_u.push_back(u_skin_instances_12);
+		sw_u.push_back(u_cluster_skin_13);
+		RID set = uniform_set_cache->get_cache_vec(shader, 0, sw_u);
 		if (!set.is_valid()) {
 			return false;
 		}
@@ -800,9 +908,22 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		if (use_mesh_hw) {
 			RID pipeline = vis64_mesh_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
 			RID shader = vis64_mesh_shader.version_get_shader(vis64_mesh_version, variant);
-			RD::Uniform u_counters(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_counters);
-			RD::Uniform u_splines(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf);
-			RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64, u_counters, u_splines);
+			LocalVector<RD::Uniform> hw_u;
+			hw_u.push_back(u_records);
+			hw_u.push_back(u_meshes);
+			hw_u.push_back(u_pages);
+			hw_u.push_back(u_cluster_table);
+			hw_u.push_back(u_visible);
+			hw_u.push_back(u_raster);
+			hw_u.push_back(u_buckets);
+			hw_u.push_back(u_lists);
+			hw_u.push_back(u_vis64);
+			hw_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_counters));
+			hw_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
+			hw_u.push_back(u_skin_palette_11);
+			hw_u.push_back(u_skin_instances_12);
+			hw_u.push_back(u_cluster_skin_13);
+			RID set = uniform_set_cache->get_cache_vec(shader, 0, hw_u);
 			if (!pipeline.is_valid() || !set.is_valid()) {
 				return false;
 			}
@@ -816,8 +937,21 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		} else {
 			RID pipeline = vis64_raster_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
 			RID shader = vis64_raster_shader.version_get_shader(vis64_raster_version, variant);
-			RD::Uniform u_splines(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, spline_buf);
-			RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64, u_splines);
+			LocalVector<RD::Uniform> hw_u;
+			hw_u.push_back(u_records);
+			hw_u.push_back(u_meshes);
+			hw_u.push_back(u_pages);
+			hw_u.push_back(u_cluster_table);
+			hw_u.push_back(u_visible);
+			hw_u.push_back(u_raster);
+			hw_u.push_back(u_buckets);
+			hw_u.push_back(u_lists);
+			hw_u.push_back(u_vis64);
+			hw_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, spline_buf));
+			hw_u.push_back(u_skin_palette_10);
+			hw_u.push_back(u_skin_instances_11);
+			hw_u.push_back(u_cluster_skin_12);
+			RID set = uniform_set_cache->get_cache_vec(shader, 0, hw_u);
 			if (!pipeline.is_valid() || !set.is_valid()) {
 				return false;
 			}
@@ -848,18 +982,21 @@ bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, cons
 		}
 		RID pipeline = export_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
 		RID shader = export_shader.version_get_shader(export_version, variant);
-		LocalVector<RD::Uniform> export_uniforms;
-		export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
-		export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, clusters));
-		export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_params));
-		export_uniforms.push_back(RD::Uniform(vis64_type, 3, p_raster.vis64));
+		LocalVector<RD::Uniform> export_u;
+		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, clusters));
+		export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_params));
+		export_u.push_back(RD::Uniform(vis64_type, 3, p_raster.vis64));
 		if (with_velocity) {
-			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
-			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, cluster_buf));
-			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, page_buf));
-			export_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, spline_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, page_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cluster_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, skin_palette_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_inst_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, cluster_skin_buf));
+			export_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
 		}
-		RID set = uniform_set_cache->get_cache_vec(shader, 0, export_uniforms);
+		RID set = uniform_set_cache->get_cache_vec(shader, 0, export_u);
 		if (!pipeline.is_valid() || !set.is_valid()) {
 			return false;
 		}
@@ -1042,6 +1179,9 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
 	const RID counters_buf = p_counters.is_valid() ? p_counters : counters;
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	LocalVector<RD::Uniform> geometry_uniforms;
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
@@ -1051,6 +1191,9 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, RSG::virtual_mesh_storage->get_spline_buffer()));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_palette_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, skin_inst_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, cluster_skin_buf));
 	LocalVector<RD::Uniform> bin_uniforms;
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, raster_bin_lists));
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, raster_bin_state));
@@ -1281,16 +1424,23 @@ bool NextGeoCut::_draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	RID shader = raster_shader.version_get_shader(raster_version, variant);
-	RD::Uniform u0(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
-	RD::Uniform u1(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
-	RD::Uniform u2(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf);
-	RD::Uniform u3(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf);
-	RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters);
-	RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params);
-	RD::Uniform u6(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf);
-	RD::Uniform u9(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RSG::virtual_mesh_storage->get_spline_buffer());
-	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6, u9);
+	LocalVector<RD::Uniform> raster_u;
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RSG::virtual_mesh_storage->get_spline_buffer()));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, skin_palette_buf));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, skin_inst_buf));
+	raster_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, cluster_skin_buf));
+	RID set = uniform_set_cache->get_cache_vec(shader, 0, raster_u);
 	if (!set.is_valid()) {
 		return false;
 	}
@@ -1350,7 +1500,7 @@ void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, p_request_buf.is_valid() ? p_request_buf : dummy_page_buf));
 	if (p_include_splines) {
-		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, RSG::virtual_mesh_storage->get_spline_buffer()));
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, RSG::virtual_mesh_storage->get_spline_buffer()));
 	}
 }
 
@@ -1377,7 +1527,7 @@ void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, dummy_page_buf));
 	if (p_include_splines) {
-		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, RSG::virtual_mesh_storage->get_spline_buffer()));
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, RSG::virtual_mesh_storage->get_spline_buffer()));
 	}
 }
 
@@ -1973,6 +2123,9 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	rd->compute_list_end();
 
 	// Phase 1 BVH levels: one dispatch per level, ping-ponging node and indirect-arg buffers.
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	RENDER_TIMESTAMP("NextGeo BVH");
 	RID input = nodes;
 	for (uint32_t level = 0; level < max_levels; level++) {
@@ -1981,6 +2134,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		const RID args_out = bvh_args[(level + 1u) & 1u];
 		LocalVector<RD::Uniform> uniforms;
 		_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, input, output, groups, clusters, args_out, request_buf);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
 		RID set = _uniform_set(uniforms, 0);
 		if (!set.is_valid()) {
 			break;
@@ -2001,6 +2155,9 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		LocalVector<RD::Uniform> uniforms;
 		_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, groups, level_a, dummy_page_buf, clusters, bvh_args[0], request_buf);
 		_set_raster_bin_uniforms(uniforms);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, skin_palette_buf));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, cluster_skin_buf));
 		RID set = _uniform_set(uniforms, 1);
 		if (set.is_valid()) {
 			list = rd->compute_list_begin();
@@ -2057,6 +2214,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			const RID args_out = bvh_args[(level + 1u) & 1u];
 			LocalVector<RD::Uniform> uniforms;
 			_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, phase2_input, output, groups, clusters, args_out, request_buf);
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
 			RID set = _uniform_set(uniforms, 0);
 			if (!set.is_valid()) {
 				break;
@@ -2072,8 +2230,11 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		}
 
 		LocalVector<RD::Uniform> leaf_uniforms;
-		_set_common_uniforms(leaf_uniforms, active_counters, prev_hiz_tex, groups, level_a, dummy_page_buf, clusters, bvh_args[0], request_buf);
+		_set_common_uniforms(leaf_uniforms, active_counters, hiz_texture[1], groups, level_a, dummy_page_buf, clusters, bvh_args[0], request_buf);
 		_set_raster_bin_uniforms(leaf_uniforms);
+		leaf_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, skin_palette_buf));
+		leaf_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
+		leaf_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, cluster_skin_buf));
 		RID leaf_set = _uniform_set(leaf_uniforms, 1);
 		if (leaf_set.is_valid()) {
 			list = rd->compute_list_begin();
@@ -2336,6 +2497,9 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 		rd->compute_list_end();
 	}
 
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	RID input = shadow_nodes;
 	for (uint32_t level = 0; level < max_levels; level++) {
 		const RID output = (level % 2 == 0) ? shadow_level_a : shadow_level_b;
@@ -2343,6 +2507,7 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 		const RID args_out = shadow_bvh_args[(level + 1u) & 1u];
 		LocalVector<RD::Uniform> uniforms;
 		_set_shadow_uniforms(uniforms, active_counters, input, output, shadow_groups, shadow_clusters, args_out);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
 		RID set = _uniform_set(uniforms, 3);
 		if (!set.is_valid()) {
 			break;
@@ -2362,6 +2527,9 @@ bool NextGeoCut::dispatch_shadows(RendererVirtualMeshStorage *p_storage, const N
 	{
 		LocalVector<RD::Uniform> uniforms;
 		_set_shadow_uniforms(uniforms, active_counters, shadow_groups, shadow_level_a, dummy_page_buf, shadow_clusters, shadow_bvh_args[0]);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, skin_palette_buf));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, cluster_skin_buf));
 		RID set = _uniform_set(uniforms, 4);
 		if (set.is_valid()) {
 			RD::ComputeListID list = rd->compute_list_begin();
@@ -2437,16 +2605,23 @@ bool NextGeoCut::draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, con
 	}
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	RID shader = raster_shader.version_get_shader(raster_version, 4 + shadow_variant);
-	RD::Uniform u0(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
-	RD::Uniform u1(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
-	RD::Uniform u2(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf);
-	RD::Uniform u3(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf);
-	RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, shadow_clusters);
-	RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, shadow_raster_params);
-	RD::Uniform u6(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_page_buf);
-	RD::Uniform u9(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RSG::virtual_mesh_storage->get_spline_buffer());
-	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6, u9);
+	LocalVector<RD::Uniform> shadow_u;
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, shadow_clusters));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, shadow_raster_params));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_page_buf));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RSG::virtual_mesh_storage->get_spline_buffer()));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, skin_palette_buf));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, skin_inst_buf));
+	shadow_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, cluster_skin_buf));
+	RID set = uniform_set_cache->get_cache_vec(shader, 0, shadow_u);
 	if (!set.is_valid()) {
 		return false;
 	}
@@ -2825,6 +3000,9 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
+	const RID skin_palette_buf = RSG::virtual_mesh_storage->get_skin_palette_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = RSG::virtual_mesh_storage->get_skin_instance_buffer().is_valid() ? RSG::virtual_mesh_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = RSG::virtual_mesh_storage->get_cluster_skin_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	LocalVector<RD::Uniform> geometry_uniforms;
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
@@ -2834,6 +3012,9 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_inputs.map_data_buffer));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_inputs.dirty_buffer));
 	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, RSG::virtual_mesh_storage->get_spline_buffer()));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, skin_palette_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, skin_inst_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, cluster_skin_buf));
 
 	LocalVector<RD::Uniform> bin_uniforms;
 	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, vsm_bin_lists));
@@ -3084,6 +3265,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_page_buf;
 	const RID spline_buf = p_storage->get_spline_buffer();
+	const RID skin_palette_buf = p_storage->get_skin_palette_buffer().is_valid() ? p_storage->get_skin_palette_buffer() : dummy_page_buf;
+	const RID skin_inst_buf = p_storage->get_skin_instance_buffer().is_valid() ? p_storage->get_skin_instance_buffer() : dummy_page_buf;
+	const RID cluster_skin_buf = p_storage->get_cluster_skin_buffer().is_valid() ? p_storage->get_cluster_skin_buffer() : dummy_page_buf;
 	// GodotNext: vsm_max_storage_buffer_range (#306). Refuse to bind a page arena larger than the device limit.
 	const uint64_t max_storage_range = rd->limit_get(RD::LIMIT_MAX_STORAGE_BUFFER_RANGE);
 	ERR_FAIL_COND_V_MSG(max_storage_range > 0 && p_storage->get_page_buffer().is_valid() && p_storage->get_page_arena_allocation_bytes() > max_storage_range, false,
@@ -3245,7 +3429,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm_groups));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, args_out));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_group_args));
-			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, spline_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, spline_buf));
 			const RID set = uniform_set_cache->get_cache_vec(bvh_sh, 0, u);
 			if (set.is_null()) {
 				break;
@@ -3272,7 +3457,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, bin_table_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, bin_append_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, bin_state_buf));
-			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, spline_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, skin_palette_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, skin_inst_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, cluster_skin_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, spline_buf));
 			const RID set = uniform_set_cache->get_cache_vec(leaf_sh, 0, u);
 			if (set.is_null()) {
 				continue;
@@ -3300,6 +3488,9 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_inputs.pool_texture));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, vsm_counters[chain]));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, skin_palette_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, skin_inst_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, cluster_skin_buf));
 			const RID set = uniform_set_cache->get_cache_vec(sw_sh, 0, u);
 			if (set.is_valid()) {
 				const uint32_t push[4] = { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, p_inputs.count_sw_writes ? 1u : 0u, 0u, 0u };
@@ -3337,8 +3528,14 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			if (use_mesh_hw) {
 				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, vsm_hw_count_buf));
 				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, spline_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, skin_palette_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, skin_inst_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, cluster_skin_buf));
 			} else {
 				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, spline_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, skin_palette_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, skin_inst_buf));
+				u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, cluster_skin_buf));
 			}
 			const RID set = uniform_set_cache->get_cache_vec(hw_sh, 0, u);
 			if (pipeline.is_valid() && set.is_valid()) {

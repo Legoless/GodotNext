@@ -57,7 +57,8 @@ void main() {
 	NextGeoInstanceRecord record = instances.data[index];
 	if ((record.flags & (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE)) != (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE) ||
 			(record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_OFF ||
-			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS)) != 0u ||
+			(record.flags & NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS) != 0u ||
+			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) == NEXTGEO_RECORD_HAS_SKELETON ||
 			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
 			record.virtual_mesh == 0xFFFFFFFFu ||
 			record.pad0 == 0u ||
@@ -166,7 +167,8 @@ void main() {
 	NextGeoInstanceRecord record = instances.data[index];
 	if ((record.flags & (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE)) != (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE) ||
 			(record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_SHADOWS_ONLY ||
-			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS)) != 0u ||
+			(record.flags & NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS) != 0u ||
+			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_SKINNED_PALETTE)) == NEXTGEO_RECORD_HAS_SKELETON ||
 			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
 			record.virtual_mesh == 0xFFFFFFFFu ||
 			record.surface_mask == 0u ||
