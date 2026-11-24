@@ -52,8 +52,11 @@
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/integrate_dfg.glsl.gen.h"
 // GodotNext: vsm_non_nanite (#218)
+#include "servers/rendering/renderer_rd/shaders/df_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_instance_cull.glsl.gen.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
+
+class NextGISWRTTrace;
 
 #ifdef METAL_ENABLED
 #include "servers/rendering/renderer_rd/effects/metal_fx.h"
@@ -183,6 +186,17 @@ public:
 		};
 
 		RID render_sdfgi_uniform_set;
+		// GodotNext: df_shadows (#214, plan §21.3 contract S7). Half-res R8 mask array + RGBA16F guide.
+		RID df_shadow_mask;
+		RID df_shadow_guide;
+		Size2i df_shadow_half_size;
+		uint32_t df_shadow_layers = 0;
+
+		void ensure_df_shadow_targets(const Size2i &p_full_size, uint32_t p_layers);
+		void free_df_shadow_targets();
+		RID get_df_shadow_mask() const { return df_shadow_mask; }
+		RID get_df_shadow_guide() const { return df_shadow_guide; }
+		Size2i get_df_shadow_half_size() const { return df_shadow_half_size; }
 
 		void ensure_specular();
 		bool has_specular() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SPECULAR); }
@@ -977,6 +991,7 @@ private:
 		VSM_CULL_STATE_SINK,
 		VSM_CULL_STATE_REDRAW_MARKS, // Pairs not drawn whose page was marked to be drawn again.
 		VSM_CULL_STATE_WRITE_MISMATCH, // Pairs the write pass emitted that its count pass did not, or the reverse.
+		VSM_CULL_STATE_DF_FAR_CULLED, // GodotNext: df_shadows (#214). Non-Nanite directional casters dropped beyond distance_field_shadow_start.
 		VSM_CULL_STATE_WORDS = 8,
 	};
 	static constexpr uint32_t VSM_CULL_FLAG_CAPTURE = 1u; // A raster check: write each pair's cull box.
@@ -987,7 +1002,7 @@ private:
 	struct VSMBoxCullRecord {
 		uint32_t meta0[4] = {};
 		uint32_t meta1[4] = {};
-		float box_min[4] = {};
+		float box_min[4] = {}; // w: directional DF handoff start (>0 drops non-Nanite casters beyond it).
 		float box_max[4] = {};
 	};
 	static_assert(sizeof(VSMBoxCullRecord) == 64, "VSMBoxCullRecord must match vsm_instance_cull.glsl.");
@@ -1001,8 +1016,9 @@ private:
 		float model_row0[4] = {};
 		float model_row1[4] = {};
 		float model_row2[4] = {};
+		float df_params[4] = {}; // x: directional DF handoff start (>0 drops non-Nanite casters beyond it).
 	};
-	static_assert(sizeof(VSMSubCullRecord) == 128, "VSMSubCullRecord must match vsm_instance_cull.glsl.");
+	static_assert(sizeof(VSMSubCullRecord) == 144, "VSMSubCullRecord must match vsm_instance_cull.glsl.");
 
 	struct VSMCullPushConstant {
 		uint32_t table_maps = 0;
@@ -1013,8 +1029,9 @@ private:
 		uint32_t sub_record_index = 0;
 		float min_caster_texels = 1.0f;
 		uint32_t flags = 0; // VSM_CULL_FLAG_*.
+		float camera_pos_unused[4] = {}; // xyz: main camera world position for DF far-caster handoff culling.
 	};
-	static_assert(sizeof(VSMCullPushConstant) == 32, "VSMCullPushConstant must match vsm_instance_cull.glsl.");
+	static_assert(sizeof(VSMCullPushConstant) == 48, "VSMCullPushConstant must match vsm_instance_cull.glsl.");
 
 	struct VSMCasterTelemetry {
 		uint64_t object_id = 0;
@@ -1054,6 +1071,7 @@ private:
 		uint32_t pool_pages = 0;
 		uint32_t pair_capacity = 0;
 		float min_caster_texels = 1.0f;
+		Vector3 camera_position;
 		uint32_t light_count = 0;
 		uint32_t surface_element_count = 0;
 		uint32_t atlas_non_virtual_casters = 0;
@@ -1139,6 +1157,8 @@ private:
 	uint64_t vsm_dropped_pairs_total = 0;
 	uint64_t vsm_redraw_marks_total = 0;
 	uint64_t vsm_write_mismatch_total = 0;
+	uint64_t vsm_df_far_culled_total = 0;
+	uint32_t vsm_df_far_culled_last = 0;
 	static void _vsm_cull_state_received(const Vector<uint8_t> &p_data);
 
 	bool _ensure_vsm_cull_shader();
@@ -1185,6 +1205,47 @@ private:
 	void _vsm_update_projection(const RenderDataRD *p_render_data);
 	// The project setting rendering/lights_and_shadows/virtual_shadows/<p_name>, or p_default.
 	static Variant _vsm_setting(const char *p_name, const Variant &p_default);
+
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7, GV-10).
+	// Half-resolution R8 distance-field shadow mask pass traced through the PS global SDF and 2 m mesh SDFs.
+	struct DFParamsGPU {
+		uint32_t sizes[4] = {}; // full_w, full_h, half_w, half_h.
+		uint32_t counts[4] = {}; // light_count, max_steps, total_levels, flags (bit 0: normal_roughness, bit 1: detail).
+		uint32_t fresh[4] = {}; // coarse-skip mask, stale/climb mask, unused, unused.
+		int32_t extra_origins[4][4] = {}; // Levels 6..9 origins (xyz) and status (w).
+		float extra_voxel_size[4] = {}; // Levels 6..9 voxel sizes.
+		float world_to_view[3][4] = {}; // Camera inverse basis rows.
+	};
+	static_assert(sizeof(DFParamsGPU) == 176, "DFParamsGPU must match DFParams in df_shadow.glsl.");
+
+	struct DFLightGPU {
+		float pos_range[4] = {};
+		float dir_radius[4] = {};
+		float handoff_spot[4] = {};
+		uint32_t meta[4] = {};
+	};
+	static_assert(sizeof(DFLightGPU) == 64, "DFLightGPU must match DFLight in df_shadow.glsl.");
+
+	DfShadowShaderRD df_shader;
+	RID df_shader_version;
+	RID df_pipeline;
+	bool df_shader_ready = false;
+	bool df_shader_failed = false;
+	RID df_params_buffer;
+	RID df_lights_buffer;
+	RID df_default_mask;
+	RID df_default_guide;
+	RID df_nearest_sampler;
+	NextGISWRTTrace *df_swrt_trace = nullptr;
+	bool df_shadows_view = false;
+	RID df_bind_mask;
+	RID df_bind_guide;
+
+	void _ensure_df_default_textures();
+	bool _ensure_df_resources();
+	void _free_df_resources();
+	bool _df_view_has_lights(const RenderDataRD *p_render_data) const;
+	void _render_df_shadows(RenderDataRD *p_render_data, RID p_normal_roughness, bool p_use_nextgi);
 
 protected:
 	/* setup */
@@ -1260,6 +1321,9 @@ public:
 	virtual bool vsm_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) override;
 	virtual bool vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const override;
 	virtual bool vsm_raster_check_armed() const override;
+	// GodotNext: df_shadows (#214).
+	virtual bool df_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) override;
+	virtual bool df_light_skips_atlas(RID p_light_instance, RID p_environment) const override;
 
 	RenderForwardClustered();
 	~RenderForwardClustered();

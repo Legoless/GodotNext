@@ -97,9 +97,9 @@ struct DirectionalLightData {
 	vec2 uv_scale2;
 	vec2 uv_scale3;
 	vec2 uv_scale4;
-	// GodotNext: vsm_page_pool (#220). As LightData's.
+	// GodotNext: vsm_page_pool (#220) and df_shadows (#214). As LightData's, plus directional DF handoff distances.
 	uint vsm_map_base;
 	uint vsm_flags;
-	uint vsm_pad0;
-	uint vsm_pad1;
+	float df_shadow_start;
+	float df_shadow_distance;
 };

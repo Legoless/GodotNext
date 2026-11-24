@@ -33,6 +33,8 @@ vsm_page_table;
 #define VSM_CULL_STATE_SINK 3u
 #define VSM_CULL_STATE_REDRAW_MARKS 4u // Pairs the full list could not hold whose page was marked to be drawn again.
 #define VSM_CULL_STATE_WRITE_MISMATCH 5u // Pairs the write pass emitted that its count pass did not, or the reverse.
+// GodotNext: df_shadows (#214). Non-Nanite directional casters dropped beyond distance_field_shadow_start.
+#define VSM_CULL_STATE_DF_FAR_CULLED 6u
 
 #define VSM_CULL_FLAG_CAPTURE 1u // A raster check: write each pair's cull box.
 #define VSM_SUB_FLAG_VIEW_FACING 1u // The shadow material writes MODELVIEW_MATRIX (billboards).
@@ -40,7 +42,7 @@ vsm_page_table;
 struct VSMBoxCullRecord {
 	uvec4 meta0; // x: element_index, y: group_index, z: map_base, w: light_flags.
 	uvec4 meta1; // x: is_dynamic (0/1), y: caster_id, z: 0, w: 0.
-	vec4 box_min; // xyz: world AABB min.
+	vec4 box_min; // xyz: world AABB min, w: directional DF handoff start (>0 drops far non-Nanite casters, #214).
 	vec4 box_max; // xyz: world AABB max.
 };
 
@@ -53,6 +55,7 @@ struct VSMSubCullRecord {
 	vec4 model_row0;
 	vec4 model_row1;
 	vec4 model_row2;
+	vec4 df_params; // GodotNext: df_shadows (#214). x: directional DF handoff start (>0 drops far non-Nanite casters).
 };
 
 layout(push_constant, std430) uniform Params {
@@ -64,6 +67,7 @@ layout(push_constant, std430) uniform Params {
 	uint sub_record_index;
 	float min_caster_texels;
 	uint flags; // VSM_CULL_FLAG_*.
+	vec4 camera_pos_unused; // GodotNext: df_shadows (#214). xyz: camera world position for directional DF handoff cull.
 }
 params;
 
@@ -185,13 +189,26 @@ void vsm_write_pair(uint group_index, uint group_base, uint group_cap, uint elem
 	vsm_cull_sink(atomicAdd(cull_state.data[VSM_CULL_STATE_REDRAW_MARKS], 1u));
 }
 
-void vsm_emit_or_count_box(uint element_index, uint sub_index, uint group_index, uint map_base, uint light_flags, uint is_dynamic, uint caster_id, vec3 box_min, vec3 box_max, bool write_pairs) {
+void vsm_emit_or_count_box(uint element_index, uint sub_index, uint group_index, uint map_base, uint light_flags, uint is_dynamic, uint caster_id, vec3 box_min, vec3 box_max, float df_handoff_start, bool write_pairs) {
 	uint dirty_limit = min(vsm_alloc_state.data[VSM_STATE_DIRTY], params.pool_pages);
 	if (dirty_limit == 0u || map_base == VSM_MAP_NONE) {
 		return;
 	}
 	if (!(box_max.x >= box_min.x && box_max.y >= box_min.y && box_max.z >= box_min.z)) {
 		return;
+	}
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Drop non-Nanite casters from directional maps
+	// beyond distance_field_shadow_start when DF far-shadow handoff is active.
+	if ((light_flags & VSM_LIGHT_FLAGS_KIND_MASK) == VSM_MAP_KIND_DIRECTIONAL && df_handoff_start > 0.0) {
+		vec3 cam = params.camera_pos_unused.xyz;
+		vec3 closest = clamp(cam, box_min, box_max);
+		vec3 delta = closest - cam;
+		if (dot(delta, delta) > df_handoff_start * df_handoff_start) {
+			if (!write_pairs) {
+				vsm_cull_sink(atomicAdd(cull_state.data[VSM_CULL_STATE_DF_FAR_CULLED], 1u));
+			}
+			return;
+		}
 	}
 	float dx = box_max.x - box_min.x;
 	float dy = box_max.y - box_min.y;
@@ -466,6 +483,7 @@ void main() {
 		cull_state.data[VSM_CULL_STATE_SINK] = 0u;
 		cull_state.data[VSM_CULL_STATE_REDRAW_MARKS] = 0u;
 		cull_state.data[VSM_CULL_STATE_WRITE_MISMATCH] = 0u;
+		cull_state.data[VSM_CULL_STATE_DF_FAR_CULLED] = 0u;
 	}
 }
 #endif
@@ -477,7 +495,7 @@ void main() {
 		return;
 	}
 	VSMBoxCullRecord rec = box_records.data[i];
-	vsm_emit_or_count_box(rec.meta0.x, 0u, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, rec.box_min.xyz, rec.box_max.xyz, false);
+	vsm_emit_or_count_box(rec.meta0.x, 0u, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, rec.box_min.xyz, rec.box_max.xyz, rec.box_min.w, false);
 }
 #endif
 
@@ -493,7 +511,7 @@ void main() {
 	if (!vsm_sub_instance_box(rec, sub, bmin, bmax)) {
 		return;
 	}
-	vsm_emit_or_count_box(rec.meta0.x, sub, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, bmin, bmax, false);
+	vsm_emit_or_count_box(rec.meta0.x, sub, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, bmin, bmax, rec.df_params.x, false);
 }
 #endif
 
@@ -566,7 +584,7 @@ void main() {
 		return;
 	}
 	VSMBoxCullRecord rec = box_records.data[i];
-	vsm_emit_or_count_box(rec.meta0.x, 0u, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, rec.box_min.xyz, rec.box_max.xyz, true);
+	vsm_emit_or_count_box(rec.meta0.x, 0u, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, rec.box_min.xyz, rec.box_max.xyz, rec.box_min.w, true);
 }
 #endif
 
@@ -582,6 +600,6 @@ void main() {
 	if (!vsm_sub_instance_box(rec, sub, bmin, bmax)) {
 		return;
 	}
-	vsm_emit_or_count_box(rec.meta0.x, sub, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, bmin, bmax, true);
+	vsm_emit_or_count_box(rec.meta0.x, sub, rec.meta0.y, rec.meta0.z, rec.meta0.w, rec.meta1.x, rec.meta1.y, bmin, bmax, rec.df_params.x, true);
 }
 #endif

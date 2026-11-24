@@ -2362,7 +2362,7 @@
 			<param index="0" name="light" type="RID" />
 			<param index="1" name="method" type="int" enum="RenderingServer.LightShadowMethod" />
 			<description>
-				Sets the shadow method of this 3D light. Equivalent to [member Light3D.shadow_method]. [constant LIGHT_SHADOW_METHOD_RAY_TRACED] and [constant LIGHT_SHADOW_METHOD_DISTANCE_FIELD] are not implemented yet: the light keeps the value and uses [constant LIGHT_SHADOW_METHOD_PROJECT], and the first light set to each prints one warning.
+				Sets the shadow method of this 3D light. Equivalent to [member Light3D.shadow_method]. [constant LIGHT_SHADOW_METHOD_DISTANCE_FIELD] traces soft distance-field shadows through the PS global and mesh SDFs on Forward+ when mesh SDFs are enabled (otherwise falling back to [constant LIGHT_SHADOW_METHOD_PROJECT]). [constant LIGHT_SHADOW_METHOD_RAY_TRACED] is not implemented yet: the light keeps the value and uses [constant LIGHT_SHADOW_METHOD_PROJECT], and the first light set to it prints one warning.
 			</description>
 		</method>
 		<method name="lightmap_create">
@@ -5508,7 +5508,13 @@
 		<constant name="LIGHT_PARAM_CONTACT_SHADOW_BLUR" value="21" enum="LightParam">
 			Blurs the edges of the contact shadow. [code]0.0[/code] produces sharp shadows; higher values increase the noise magnitude.
 		</constant>
-		<constant name="LIGHT_PARAM_MAX" value="22" enum="LightParam">
+		<constant name="LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START" value="22" enum="LightParam">
+			Distance from the camera (in 3D units) at which a [DirectionalLight3D] hands off from dynamic shadow maps to distance-field far shadows traced through the PS global SDF. Equivalent to [member Light3D.distance_field_shadow_start].
+		</constant>
+		<constant name="LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE" value="23" enum="LightParam">
+			Maximum distance from the camera (in 3D units) covered by distance-field far shadows on a [DirectionalLight3D]. Equivalent to [member Light3D.distance_field_shadow_distance].
+		</constant>
+		<constant name="LIGHT_PARAM_MAX" value="24" enum="LightParam">
 			Represents the size of the [enum LightParam] enum.
 		</constant>
 		<constant name="LIGHT_BAKE_DISABLED" value="0" enum="LightBakeMode">
@@ -5533,7 +5539,7 @@
 			Ray-traced shadows. Not implemented yet: the light uses [constant LIGHT_SHADOW_METHOD_PROJECT].
 		</constant>
 		<constant name="LIGHT_SHADOW_METHOD_DISTANCE_FIELD" value="4" enum="LightShadowMethod">
-			Distance-field shadows. Not implemented yet: the light uses [constant LIGHT_SHADOW_METHOD_PROJECT].
+			The light traces soft distance-field shadows through the PS global and mesh SDFs on Forward+ when mesh SDFs are enabled; falls back to [constant LIGHT_SHADOW_METHOD_PROJECT] when unavailable.
 		</constant>
 		<constant name="LIGHT_SHADOW_METHOD_MAX" value="5" enum="LightShadowMethod">
 			Represents the size of the [enum LightShadowMethod] enum.

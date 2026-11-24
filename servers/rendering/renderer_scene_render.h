@@ -407,6 +407,8 @@ public:
 		uint32_t vsm_invalidation_count = 0;
 		uint64_t vsm_invalidation_epoch = 0;
 		uint64_t vsm_static_mode_invalidations = 0;
+		// GodotNext: df_shadows (#214). Shadow-casting mesh/MultiMesh instances for PS global/mesh SDF shadows.
+		const LocalVector<NextGIRTInstance> *df_sdf_instances = nullptr;
 	};
 
 	struct CameraData {
@@ -468,6 +470,9 @@ public:
 	// no atlas tile and no atlas pass. The renderer asks the same questions for its atlas passes.
 	virtual bool vsm_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) { return false; }
 	virtual bool vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const { return false; }
+	// GodotNext: df_shadows (#214). Whether the view supports DF shadows and whether a light skips the atlas.
+	virtual bool df_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) { return false; }
+	virtual bool df_light_skips_atlas(RID p_light_instance, RID p_environment) const { return false; }
 	// A raster check is armed: lights that skip the atlas still get their atlas caster lists, for its diff.
 	virtual bool vsm_raster_check_armed() const { return false; }
 	virtual Dictionary geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const { return Dictionary(); }

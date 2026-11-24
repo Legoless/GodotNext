@@ -213,6 +213,19 @@ public:
 	// positions (one per 16 px tile) and culled with mesh-SDF samples. Needs prepare_view_params().
 	void build_detail_froxels(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting);
 	bool is_detail_active() const;
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Standalone DF-shadow scene update (when
+	// NextGI SWRT is inactive), extra far levels 6..9 for 2 km directional shadows, and view froxel prep.
+	void update_scene_for_df(RenderDataRD *p_render_data, uint32_t p_target_levels);
+	void update_extra_levels_for_df(RenderDataRD *p_render_data, uint32_t p_target_levels);
+	void prepare_df_view(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, bool p_reuse_froxels);
+	RID get_page_buffer(uint32_t p_level) const;
+	RID get_dummy_buffer() const;
+	Vector3i get_clipmap_origin(uint32_t p_level) const { return clipmaps.get_origin(p_level); }
+	int32_t get_level_status(uint32_t p_level) const;
+	uint32_t get_df_coarse_mask(uint32_t p_levels) const;
+	uint32_t get_df_active_levels() const { return MAX(active_levels, df_extra_levels); }
+	bool has_df_detail_froxels() const;
+	uint32_t get_instance_count() const { return instances.size(); }
 	// The frame-block slot the last update_scene() ran in ("none" outside the block).
 	const String &get_update_slot() const { return last_update_slot; }
 
@@ -310,7 +323,8 @@ private:
 	bool _ensure_gpu();
 	bool _ensure_field();
 	void _note_reduced(uint32_t p_levels_before);
-	void _collect_instances(RenderDataRD *p_render_data);
+	void _collect_instances(RenderDataRD *p_render_data, bool p_prefer_df_feed = false);
+	void _build_detail_froxels_internal(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, bool p_force);
 	void _upload_instances();
 	void _upload_detail_meshes();
 	void _fill_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_screen_trace, bool p_wrc, bool p_readback, RID p_target);
@@ -329,6 +343,8 @@ private:
 	NextGIGlobalSDFGPU *field = nullptr;
 	NextGIGlobalSDFClipmaps clipmaps;
 	uint32_t active_levels = NextGIGlobalSDF::BASE_LEVELS;
+	uint32_t df_extra_levels = 0; // GodotNext: df_shadows (#214). Highest active level updated for DF shadows (up to MAX_LEVELS).
+	bool df_detail_froxels_ready = false;
 	bool reduced = false;
 	bool benchmark = false; // run_microbenchmark()'s tracer never reports SWRT_REDUCED.
 	bool field_failed = false;

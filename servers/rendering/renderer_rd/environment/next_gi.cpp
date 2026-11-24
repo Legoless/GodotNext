@@ -61,6 +61,8 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: df_shadows (#214).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 // GodotNext: nextgi_xr_off (#255). XR views that rendered without NextGI.
 static SafeNumeric<uint64_t> nextgi_multiview_views_skipped;
@@ -501,6 +503,8 @@ bool NextGI::update_tier(const TierInputs &p_inputs, Quality p_quality_setting, 
 
 	// GodotNext: ps_mesh_sdf_atlas (#185). keep_when_hwrt=false releases the
 	// brick pool while HWRT is active; the runtime tier switch is then disabled.
+	// GodotNext: df_shadows (#214). Tell DF shadows whether HWRT is active so the tier rule reflects keep_when_hwrt.
+	RendererVirtualShadowMapStorage::set_df_nextgi_hwrt(result.tier == TIER_HWRT);
 	if (result.tier == TIER_HWRT && !bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/keep_when_hwrt"))) {
 		MeshStorage *mesh_storage = MeshStorage::get_singleton();
 		if (mesh_storage != nullptr && mesh_storage->get_sdf_atlas().get_resident_bytes() > 0) {
@@ -1841,6 +1845,8 @@ void NextGI::free_far_field() {
 }
 
 NextGI::~NextGI() {
+	// GodotNext: df_shadows (#214).
+	RendererVirtualShadowMapStorage::set_df_nextgi_hwrt(false);
 	_unregister_device_lost_callback();
 	// GodotNext: nextgi_src_cards
 	if (src != nullptr) {

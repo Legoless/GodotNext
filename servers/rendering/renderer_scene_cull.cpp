@@ -4128,9 +4128,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	max_shadows_used = 0;
 
 	if (p_using_shadows) { //setup shadow maps
-		// GodotNext: vsm_projection (#222). Whether this view's light loop samples virtual shadow maps.
+		// GodotNext: vsm_projection (#222) and df_shadows (#214). Whether this view's light loop samples
+		// virtual shadow maps or distance-field shadows.
 		const bool vsm_view_samples = scene_render->vsm_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count);
 		const bool vsm_check_casters = vsm_view_samples && scene_render->vsm_raster_check_armed();
+		const bool df_view_samples = scene_render->df_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count);
 
 		// Directional Shadows
 
@@ -4173,6 +4175,12 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				} else if (!vsm_check_casters) {
 					RSG::light_storage->shadow_atlas_remove_light(p_shadow_atlas, light->instance);
 				}
+				continue;
+			}
+			// GodotNext: df_shadows (#214). Per-light DISTANCE_FIELD local lights trace the SDF mask instead of
+			// drawing into the shadow atlas (unless volumetric fog still reads the atlas).
+			if (df_view_samples && scene_render->df_light_skips_atlas(light->instance, p_environment)) {
+				RSG::light_storage->shadow_atlas_remove_light(p_shadow_atlas, light->instance);
 				continue;
 			}
 
@@ -4900,6 +4908,108 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_directional_light_dirty = scene_cull_result.nextgi_directional_light_dirty;
 			for (const RendererSceneRender::NextGIRTInstance &rt_instance : scenario->nextgi_rt_selection) {
 				scene_cull_result.nextgi_rt_instances.push_back(rt_instance);
+			}
+		}
+
+		// GodotNext: df_shadows (#214, plan §21.3 contract S7). Collect visible shadow-casting meshes and
+		// static 3D MultiMeshes for PS global/mesh SDF shadows whenever this view has any active DF light.
+		sdfgi_update_data.df_sdf_instances = nullptr;
+		if (p_using_shadows && scene_render->df_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count)) {
+			float df_max_radius = 0.0f;
+			uint32_t df_dir_seen = 0;
+			for (Instance *dir_ins : scenario->directional_lights) {
+				if (!dir_ins->visible || !(dir_ins->layer_mask & p_visible_layers)) {
+					continue;
+				}
+				if (df_dir_seen >= RendererSceneRender::MAX_DIRECTIONAL_LIGHTS) {
+					break;
+				}
+				df_dir_seen++;
+				if (!RSG::light_storage->light_has_shadow(dir_ins->base) || RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+					continue;
+				}
+				const RSE::LightShadowMethod sm = RSG::light_storage->light_get_shadow_method(dir_ins->base);
+				const float smax = RSG::light_storage->light_get_param(dir_ins->base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE);
+				const float dstart = RSG::light_storage->light_get_param(dir_ins->base, RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START);
+				const float ddist = RSG::light_storage->light_get_param(dir_ins->base, RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
+				if (RendererVirtualShadowMapStorage::light_uses_df(sm)) {
+					df_max_radius = MAX(df_max_radius, ddist > 0.0f ? ddist : (smax > 0.0f ? smax : 2000.0f));
+				} else if (RendererVirtualShadowMapStorage::df_directional_handoff_start(dstart, ddist, smax, true) > 0.0f) {
+					df_max_radius = MAX(df_max_radius, ddist);
+				}
+			}
+			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size(); i++) {
+				Instance *pos_ins = scene_cull_result.lights[i];
+				if (!RSG::light_storage->light_has_shadow(pos_ins->base)) {
+					continue;
+				}
+				if (RendererVirtualShadowMapStorage::light_uses_df(RSG::light_storage->light_get_shadow_method(pos_ins->base))) {
+					const float ldist = float(pos_ins->transform.origin.distance_to(camera_position)) + RSG::light_storage->light_get_param(pos_ins->base, RSE::LIGHT_PARAM_RANGE);
+					df_max_radius = MAX(df_max_radius, MAX(ldist, 200.0f));
+				}
+			}
+			if (df_max_radius > 0.0f) {
+				const float collect_radius = CLAMP(df_max_radius, 200.0f, 3200.0f);
+				const Vector3 anchor = p_camera_data->main_transform.origin;
+				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+				for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
+					Instance *instance = E->self();
+					if (!instance->visible || instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_OFF) {
+						continue;
+					}
+					if (instance->mesh_instance.is_valid()) {
+						continue; // Skinned/blend-shape meshes have no static mesh SDF.
+					}
+					InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(instance->base_data);
+					if (geometry_data == nullptr || geometry_data->geometry_instance == nullptr) {
+						continue;
+					}
+					if (instance->base_type == RSE::INSTANCE_MESH) {
+						const AABB &box = instance->transformed_aabb;
+						const Vector3 closest(CLAMP(anchor.x, box.position.x, box.position.x + box.size.x), CLAMP(anchor.y, box.position.y, box.position.y + box.size.y), CLAMP(anchor.z, box.position.z, box.position.z + box.size.z));
+						if (float(closest.distance_to(anchor)) > collect_radius) {
+							continue;
+						}
+						RendererSceneRender::NextGIRTInstance rt_instance;
+						rt_instance.geometry_instance = geometry_data->geometry_instance;
+						rt_instance.lightmapped = instance->lightmap != nullptr;
+						rt_instance.shadow_layers = instance->layer_mask;
+						scene_cull_result.df_sdf_instances.push_back(rt_instance);
+					} else if (instance->base_type == RSE::INSTANCE_MULTIMESH && mesh_storage != nullptr && mesh_storage->owns_multimesh(instance->base)) {
+						if (mesh_storage->multimesh_get_transform_format(instance->base) != RSE::MULTIMESH_TRANSFORM_3D || mesh_storage->multimesh_uses_indirect(instance->base) || mesh_storage->multimesh_is_rt_dynamic(instance->base)) {
+							continue;
+						}
+						const RID mesh = mesh_storage->multimesh_get_mesh(instance->base);
+						if (!mesh_storage->owns_mesh(mesh)) {
+							continue;
+						}
+						uint32_t element_count = 0;
+						uint32_t stride = 0;
+						const float *transforms = mesh_storage->multimesh_get_rt_transforms(instance->base, element_count, stride);
+						if (transforms == nullptr || stride < 12) {
+							continue;
+						}
+						const AABB mesh_aabb = mesh_storage->mesh_get_aabb(mesh);
+						for (uint32_t element = 0; element < element_count; element++) {
+							const Transform3D world = RendererRD::nextgi_rt_element_world(instance->transform, transforms + element * stride);
+							const AABB elem_aabb = world.xform(mesh_aabb);
+							const Vector3 closest(CLAMP(anchor.x, elem_aabb.position.x, elem_aabb.position.x + elem_aabb.size.x), CLAMP(anchor.y, elem_aabb.position.y, elem_aabb.position.y + elem_aabb.size.y), CLAMP(anchor.z, elem_aabb.position.z, elem_aabb.position.z + elem_aabb.size.z));
+							if (float(closest.distance_to(anchor)) > collect_radius) {
+								continue;
+							}
+							RendererSceneRender::NextGIRTInstance rt_instance;
+							rt_instance.geometry_instance = geometry_data->geometry_instance;
+							rt_instance.mesh_override = mesh;
+							rt_instance.rt_transform = world;
+							rt_instance.has_rt_transform = true;
+							rt_instance.element_index = element;
+							rt_instance.lightmapped = instance->lightmap != nullptr;
+							rt_instance.shadow_layers = instance->layer_mask;
+							scene_cull_result.df_sdf_instances.push_back(rt_instance);
+						}
+					}
+				}
+				sdfgi_update_data.df_sdf_instances = &scene_cull_result.df_sdf_instances;
 			}
 		}
 	}

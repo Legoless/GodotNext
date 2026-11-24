@@ -292,6 +292,7 @@ public:
 				uint32_t avboit_composite : 3;
 				uint32_t use_vsm : 1; // GodotNext: vsm_projection (#222). The view samples virtual shadow maps.
 				uint32_t use_vsm_coarse : 1; // GodotNext: vsm_fog_translucency (#215). Transparent coarse-page VSM lookup.
+				uint32_t use_df_shadows : 1; // GodotNext: df_shadows (#214). The view samples half-res DF shadow mask.
 			};
 		};
 

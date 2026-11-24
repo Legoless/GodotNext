@@ -487,7 +487,7 @@ void NextGISWRTTrace::_note_reduced(uint32_t p_levels_before) {
 	}
 }
 
-void NextGISWRTTrace::_collect_instances(RenderDataRD *p_render_data) {
+void NextGISWRTTrace::_collect_instances(RenderDataRD *p_render_data, bool p_prefer_df_feed) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr) {
 		return;
@@ -509,7 +509,14 @@ void NextGISWRTTrace::_collect_instances(RenderDataRD *p_render_data) {
 	instance_card_sets.clear();
 	record_sources.clear();
 	two_sided.clear();
-	const LocalVector<RendererSceneRender::NextGIRTInstance> *feed = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->nextgi_rt_instances : nullptr;
+	const LocalVector<RendererSceneRender::NextGIRTInstance> *feed = nullptr;
+	if (p_render_data->sdfgi_update_data != nullptr) {
+		if (p_prefer_df_feed && p_render_data->sdfgi_update_data->df_sdf_instances != nullptr) {
+			feed = p_render_data->sdfgi_update_data->df_sdf_instances;
+		} else {
+			feed = p_render_data->sdfgi_update_data->nextgi_rt_instances;
+		}
+	}
 	HashMap<InstanceKey, FedInstance, InstanceKeyHasher> current;
 	LocalVector<AABB> dirty;
 	const bool src_ready = NextGISRC::get_singleton() != nullptr;
@@ -1086,7 +1093,13 @@ RID NextGISWRTTrace::create_trace_uniform_set(RID p_shader, uint32_t p_set, bool
 }
 
 void NextGISWRTTrace::build_detail_froxels(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting) {
-	if (!is_detail_active() || p_render_data == nullptr || !screen_depth.is_valid()) {
+	_build_detail_froxels_internal(p_render_data, p_lighting, false);
+}
+
+void NextGISWRTTrace::_build_detail_froxels_internal(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, bool p_force) {
+	const bool can_detail = gpu != nullptr && gpu->mesh_info_buffer.is_valid() && !instances.is_empty();
+	if ((!p_force && !is_detail_active()) || !can_detail || p_render_data == nullptr || !screen_depth.is_valid()) {
+		df_detail_froxels_ready = false;
 		return;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -1118,6 +1131,9 @@ void NextGISWRTTrace::build_detail_froxels(RenderDataRD *p_render_data, NextGIVo
 		rd->compute_list_dispatch(list, (uint32_t(instances.size()) + 7u) / 8u, MIN(cell_groups, 1024u), groups_z);
 		rd->compute_list_end();
 		rd->draw_command_end_label();
+		df_detail_froxels_ready = true;
+	} else {
+		df_detail_froxels_ready = false;
 	}
 	if (mark_set.is_valid()) {
 		rd->free_rid(mark_set);
@@ -1125,6 +1141,149 @@ void NextGISWRTTrace::build_detail_froxels(RenderDataRD *p_render_data, NextGIVo
 	if (cull_set.is_valid()) {
 		rd->free_rid(cull_set);
 	}
+}
+
+void NextGISWRTTrace::update_scene_for_df(RenderDataRD *p_render_data, uint32_t p_target_levels) {
+	// GodotNext: df_shadows (#214). Standalone DF global/mesh SDF maintenance when NextGI SWRT is not active.
+	if (p_render_data == nullptr || p_render_data->scene_data == nullptr) {
+		return;
+	}
+	benchmark = true; // Never report NextGI SWRT_REDUCED from the standalone DF tracer.
+	if (!_ensure_gpu() || !_ensure_field()) {
+		return;
+	}
+	_collect_instances(p_render_data, true);
+	if (p_render_data->sdfgi_update_data != nullptr && p_render_data->sdfgi_update_data->nextgi_dirty_volume_count > 0) {
+		clipmaps.add_dirty_volumes(p_render_data->sdfgi_update_data->nextgi_dirty_volumes, p_render_data->sdfgi_update_data->nextgi_dirty_volume_count);
+	}
+	const uint32_t target = CLAMP(p_target_levels, MIN_LEVELS, NextGIGlobalSDF::MAX_LEVELS);
+	const Vector3 camera = p_render_data->scene_data->cam_transform.origin;
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	// Levels 0..min(target, BASE_LEVELS)-1 fill active_levels; levels 6..target-1 extend range to 2+ km.
+	const uint32_t desired_base = MIN(target, NextGIGlobalSDF::BASE_LEVELS);
+	if (active_levels < desired_base && !reduced) {
+		active_levels = desired_base;
+	}
+	NextGIGlobalSDFClipmaps::Stats stats = clipmaps.update(*field, instances, camera, frame, target);
+	uint32_t built_levels = target;
+	while (stats.allocation_failed && built_levels > MIN_LEVELS) {
+		built_levels = NextGIGlobalSDFClipmaps::drop_top_level(*field, clipmaps, built_levels, MIN_LEVELS);
+		if (stats.failed_level < built_levels) {
+			clipmaps.invalidate_level(stats.failed_level);
+		}
+		stats = clipmaps.update(*field, instances, camera, frame, built_levels);
+	}
+	active_levels = MIN(built_levels, NextGIGlobalSDF::BASE_LEVELS);
+	df_extra_levels = built_levels;
+	_upload_detail_meshes();
+	_upload_instances();
+}
+
+void NextGISWRTTrace::update_extra_levels_for_df(RenderDataRD *p_render_data, uint32_t p_target_levels) {
+	// GodotNext: df_shadows (#214). When reusing NextGI's TIER_SOFTWARE tracer (levels 0..5),
+	// populate levels 6..target-1 on demand for far directional DF shadows (up to 2+ km).
+	if (!is_ready() || p_render_data == nullptr || p_render_data->scene_data == nullptr) {
+		return;
+	}
+	const uint32_t target = CLAMP(p_target_levels, active_levels, NextGIGlobalSDF::MAX_LEVELS);
+	if (target <= active_levels) {
+		df_extra_levels = active_levels;
+		return;
+	}
+	Vector<NextGIGlobalSDF::Instance> far_instances;
+	const LocalVector<RendererSceneRender::NextGIRTInstance> *df_feed = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->df_sdf_instances : nullptr;
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (df_feed != nullptr && mesh_storage != nullptr) {
+		for (const RendererSceneRender::NextGIRTInstance &source : *df_feed) {
+			if (source.gpu_source.is_valid() || source.geometry_instance == nullptr) {
+				continue;
+			}
+			RenderGeometryInstanceBase *geometry = static_cast<RenderGeometryInstanceBase *>(source.geometry_instance);
+			if (geometry->data == nullptr || geometry->mesh_instance.is_valid()) {
+				continue;
+			}
+			const RID mesh = source.mesh_override.is_valid() ? source.mesh_override : geometry->data->base;
+			if (!mesh.is_valid() || !mesh_storage->owns_mesh(mesh)) {
+				continue;
+			}
+			const Transform3D transform = source.has_rt_transform ? source.rt_transform : geometry->transform;
+			if (!(Math::abs(transform.basis.determinant()) > 1.0e-8f)) {
+				continue;
+			}
+			const NextGISDFAtlas::MeshPages *pages = mesh_storage->get_sdf_atlas().get_pages(mesh);
+			if (pages == nullptr || pages->field.is_null()) {
+				continue;
+			}
+			MeshSDFData *data = field_cache.getptr(mesh);
+			if (data == nullptr) {
+				data = &field_cache.insert(mesh, pages->field->get_data())->value;
+			}
+			if (!data->is_valid() || data->page_tables.is_empty() || data->brick_data.is_empty()) {
+				continue;
+			}
+			NextGIGlobalSDF::Instance inst;
+			inst.transform = transform;
+			inst.field = data;
+			inst.dynamic = mesh_storage->mesh_nextgi_rt_is_dynamic(mesh);
+			inst.two_sided = pages->field->is_two_sided();
+			far_instances.push_back(inst);
+		}
+	}
+	const Vector<NextGIGlobalSDF::Instance> &src = far_instances.is_empty() ? instances : far_instances;
+	const Vector3 camera = p_render_data->scene_data->cam_transform.origin;
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	clipmaps.update_range(*field, src, camera, frame, active_levels, target);
+	df_extra_levels = target;
+}
+
+void NextGISWRTTrace::prepare_df_view(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, bool p_reuse_froxels) {
+	if (!is_ready() || p_render_data == nullptr || p_render_data->scene_data == nullptr) {
+		df_detail_froxels_ready = false;
+		return;
+	}
+	if (p_reuse_froxels && is_detail_active()) {
+		df_detail_froxels_ready = true;
+		return;
+	}
+	prepare_view_params(p_render_data, p_lighting);
+	_build_detail_froxels_internal(p_render_data, p_lighting, true);
+}
+
+RID NextGISWRTTrace::get_page_buffer(uint32_t p_level) const {
+	if (field != nullptr && p_level < NextGIGlobalSDF::MAX_LEVELS) {
+		const RID buf = field->get_page_buffer(p_level);
+		if (buf.is_valid()) {
+			return buf;
+		}
+	}
+	return gpu != nullptr ? gpu->dummy_buffer : RID();
+}
+
+RID NextGISWRTTrace::get_dummy_buffer() const {
+	return gpu != nullptr ? gpu->dummy_buffer : RID();
+}
+
+int32_t NextGISWRTTrace::get_level_status(uint32_t p_level) const {
+	if (p_level >= get_df_active_levels() || !clipmaps.is_level_valid(p_level)) {
+		return 0;
+	}
+	const bool partial = field != nullptr && field->get_missing_bricks(p_level) > 0;
+	return partial ? 2 : 1;
+}
+
+uint32_t NextGISWRTTrace::get_df_coarse_mask(uint32_t p_levels) const {
+	uint32_t fresh = 0u;
+	const uint32_t count = MIN(p_levels, NextGIGlobalSDF::MAX_LEVELS);
+	for (uint32_t level = 0; level < count; level++) {
+		if (clipmaps.is_level_valid(level) && clipmaps.get_pending_dirty(level) == 0) {
+			fresh |= 1u << level;
+		}
+	}
+	return fresh;
+}
+
+bool NextGISWRTTrace::has_df_detail_froxels() const {
+	return df_detail_froxels_ready && gpu != nullptr && gpu->mesh_info_buffer.is_valid() && gpu->froxel_buffer.is_valid() && !instances.is_empty();
 }
 
 void NextGISWRTTrace::_bind_wrc(NextGI *p_next_gi, RenderSceneBuffersRD *p_render_buffers) {

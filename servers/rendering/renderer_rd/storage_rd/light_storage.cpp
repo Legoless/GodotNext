@@ -168,6 +168,9 @@ void LightStorage::_light_initialize(RID p_light, RSE::LightType p_type) {
 	light.param[RSE::LIGHT_PARAM_TRANSMITTANCE_BIAS] = 0.05;
 	light.param[RSE::LIGHT_PARAM_INTENSITY] = p_type == RSE::LIGHT_DIRECTIONAL ? 100000.0 : 1000.0;
 	light.param[RSE::LIGHT_PARAM_CONTACT_SHADOW_BLUR] = 1.0;
+	// GodotNext: df_shadows (#214).
+	light.param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START] = 0.0;
+	light.param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE] = 0.0;
 
 	light_owner.initialize_rid(p_light, light);
 }
@@ -239,7 +242,9 @@ void LightStorage::light_set_param(RID p_light, RSE::LightParam p_param, float p
 		case RSE::LIGHT_PARAM_SHADOW_SPLIT_3_OFFSET:
 		case RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS:
 		case RSE::LIGHT_PARAM_SHADOW_PANCAKE_SIZE:
-		case RSE::LIGHT_PARAM_SHADOW_BIAS: {
+		case RSE::LIGHT_PARAM_SHADOW_BIAS:
+		case RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START:
+		case RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE: {
 			light->version++;
 			light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
 		} break;
@@ -865,23 +870,39 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 				light_data.bake_mode = light->bake_mode;
 
-				// GodotNext: vsm_page_pool (#220). Reflection probes keep the main view's clipmap levels.
+				// GodotNext: vsm_page_pool (#220) and df_shadows (#214). Reflection probes keep the main view's clipmap levels.
 				{
 					uint32_t vsm_map_base = RendererVirtualShadowMapStorage::MAP_NONE;
 					uint32_t vsm_flags = 0;
+					float df_start = 0.0f;
+					float df_distance = 0.0f;
 					VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+					const bool df_view = vsm != nullptr && vsm->get_df_view_enabled();
+					const bool df_available = df_view && RendererVirtualShadowMapStorage::is_df_available();
+					const bool df_full = p_using_shadows && light->shadow && df_available && RendererVirtualShadowMapStorage::light_uses_df(light->shadow_method);
+					const float raw_shadow_max_dist = light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE];
+					const float raw_df_start = light->param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START];
+					const float raw_df_dist = light->param[RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE];
+					float df_handoff_start = 0.0f;
+					if (p_using_shadows && light->shadow && df_available && !df_full) {
+						df_handoff_start = RendererVirtualShadowMapStorage::df_directional_handoff_start(raw_df_start, raw_df_dist, raw_shadow_max_dist, true);
+					}
 					if (vsm != nullptr) {
 						// The level count follows the light alone, never a view's far plane: views with
 						// different far planes would otherwise reallocate the levels every frame. A max
 						// distance of 0 (the camera's far plane for atlas shadows) takes every level.
-						float max_distance = light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE];
+						float max_distance = raw_shadow_max_dist;
 						if (max_distance <= 0.0f) {
 							max_distance = float(Math::INF);
+						}
+						if (df_handoff_start > 0.0f) {
+							// DF handoff covers beyond distance_field_shadow_start, so VSM only needs clipmaps up to the handoff.
+							max_distance = df_handoff_start;
 						}
 						VirtualShadowMapStorage::LightUpdate update;
 						update.kind = RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL;
 						// GodotNext: vsm_settings_debug (#221). Only lights whose method resolves to VIRTUAL.
-						update.casts_shadow = light->shadow && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method);
+						update.casts_shadow = light->shadow && !df_full && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method);
 						update.transform = light_transform;
 						update.camera_position = p_camera_transform.origin;
 						update.max_distance = max_distance;
@@ -891,15 +912,41 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						update.caster_mask = light->shadow_caster_mask;
 						update.reverse_cull = light->reverse_cull;
 						vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
+
+						if (df_full || df_handoff_start > 0.0f) {
+							const float eff_df_end = df_full ? (raw_df_dist > 0.0f ? raw_df_dist : (raw_shadow_max_dist > 0.0f ? raw_shadow_max_dist : 2000.0f)) : raw_df_dist;
+							VirtualShadowMapStorage::DFViewLight dfl;
+							dfl.light_instance = light_instance->self;
+							dfl.type = RSE::LIGHT_DIRECTIONAL;
+							// Toward the sun in world space (+Z of directional light basis).
+							dfl.direction = light_transform.basis.xform(Vector3(0, 0, 1)).normalized();
+							dfl.range = eff_df_end;
+							dfl.source_radius = RendererVirtualShadowMapStorage::directional_tan_half_angle(light_data.size);
+							dfl.handoff_start = df_full ? 0.0f : df_handoff_start;
+							dfl.handoff_end = eff_df_end;
+							dfl.full_df = df_full;
+							const uint32_t df_layer = vsm->assign_df_light(dfl);
+							if (df_layer != RendererVirtualShadowMapStorage::DF_LAYER_NONE) {
+								vsm_flags |= RendererVirtualShadowMapStorage::df_pack_flags(df_layer, df_full);
+								df_start = dfl.handoff_start;
+								df_distance = eff_df_end;
+							}
+						}
 					}
 					light_data.vsm_map_base = vsm_map_base;
 					light_data.vsm_flags = vsm_flags;
-					light_data.vsm_pad[0] = 0;
-					light_data.vsm_pad[1] = 0;
+					light_data.df_shadow_start = df_start;
+					light_data.df_shadow_distance = df_distance;
 					// GodotNext: vsm_projection (#222). If this view skipped the directional atlas pass for a VSM light
 					// whose map update failed to produce a sampleable map, do not sample an unrendered atlas slot.
-					if (vsm != nullptr && vsm->get_view_samples() && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method) &&
+					if (vsm != nullptr && vsm->get_view_samples() && !df_full && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method) &&
 							(vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) == 0 &&
+							light_instance->last_scene_shadow_pass != RendererSceneRenderRD::get_singleton()->get_scene_pass()) {
+						light_data.shadow_opacity = 0.0;
+					}
+					// If a full-DF directional light exceeded the per-view DF layer cap and had its atlas pass skipped,
+					// do not sample an unrendered atlas slot.
+					if (df_full && (vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_DF_SAMPLE) == 0 &&
 							light_instance->last_scene_shadow_pass != RendererSceneRenderRD::get_singleton()->get_scene_pass()) {
 						light_data.shadow_opacity = 0.0;
 					}
@@ -964,8 +1011,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					}
 
 					float fade_start = light->param[RSE::LIGHT_PARAM_SHADOW_FADE_START];
-					light_data.fade_from = -light_data.shadow_split_offsets[limit] * MIN(fade_start, 0.999); //using 1.0 would break smoothstep
-					light_data.fade_to = -light_data.shadow_split_offsets[limit];
+					float fade_dist = light_data.shadow_split_offsets[limit];
+					// GodotNext: df_shadows (#214). Extend directional shadow fade distance to cover DF far shadows
+					// up to distance_field_shadow_distance so far DF shadows are not wiped out at Dynamic Shadow Distance.
+					if ((light_data.vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_DF_SAMPLE) != 0 && light_data.df_shadow_distance > 0.0f) {
+						fade_dist = (light_data.vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_DF_FULL) != 0 ? light_data.df_shadow_distance : MAX(fade_dist, light_data.df_shadow_distance);
+					}
+					light_data.fade_from = -fade_dist * MIN(fade_start, 0.999); //using 1.0 would break smoothstep
+					light_data.fade_to = -fade_dist;
 				}
 
 				r_directional_light_count++;
@@ -1282,12 +1335,37 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		// GodotNext: vsm_projection (#222). The view's light loop samples the light's virtual shadow maps: it
 		// needs no atlas tile (the scene cull gave it none unless volumetric fog samples its atlas).
 		const bool vsm_shadow = p_using_shadows && light->shadow && (light_data.vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) != 0;
+		// GodotNext: df_shadows (#214). Per-light DISTANCE_FIELD local light: assign a DF mask layer (within
+		// the per-view layer cap) when in shadow range and the DF tier is active.
+		bool df_shadow = false;
 
 		bool in_shadow_range = true;
-		if ((needs_shadow || vsm_shadow) && light->distance_fade) { // GodotNext: vsm_projection (#222)
+		const bool wants_df_local = p_using_shadows && light->shadow && RendererVirtualShadowMapStorage::light_uses_df(light->shadow_method);
+		if ((needs_shadow || vsm_shadow || wants_df_local) && light->distance_fade) { // GodotNext: vsm_projection (#222), df_shadows (#214)
 			if (distance > light->distance_fade_shadow + light->distance_fade_length) {
 				// Out of range, don't draw shadows to improve performance.
 				in_shadow_range = false;
+			}
+		}
+
+		if (wants_df_local && in_shadow_range) {
+			VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+			if (vsm != nullptr && vsm->get_df_view_enabled()) {
+				VirtualShadowMapStorage::DFViewLight dfl;
+				dfl.light_instance = light_instance->self;
+				dfl.type = type;
+				dfl.position = light_transform.origin;
+				dfl.direction = light_transform.basis.xform(Vector3(0, 0, -1)).normalized();
+				dfl.range = type == RSE::LIGHT_AREA ? (radius + float(area_size.length()) * 0.5f) : radius;
+				// Soft penumbra driven by LIGHT_PARAM_SIZE (area lights fall back to half their min extent when size == 0).
+				dfl.source_radius = (type == RSE::LIGHT_AREA && size <= 0.0f) ? (MIN(float(area_size.x), float(area_size.y)) * 0.5f) : size;
+				dfl.cos_spot_angle = type == RSE::LIGHT_SPOT ? Math::cos(Math::deg_to_rad(spot_angle)) : -1.0f;
+				dfl.full_df = true;
+				const uint32_t df_layer = vsm->assign_df_light(dfl);
+				if (df_layer != RendererVirtualShadowMapStorage::DF_LAYER_NONE) {
+					light_data.vsm_flags |= RendererVirtualShadowMapStorage::df_pack_flags(df_layer, true);
+					df_shadow = true;
+				}
 			}
 		}
 
@@ -1368,15 +1446,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				}
 				light_data.shadow_bias *= MAX(light_data.soft_shadow_scale, 1.0f);
 			}
-			// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). No PCSS for a light the light loop
-			// samples through VSM: SMRT takes the penumbra from the light's size, and fog reads coarse pages.
-			if (vsm_shadow) {
+			// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214). No PCSS for a light
+			// sampled through VSM or DF: SMRT/DF drive the penumbra and VSM fog reads coarse pages.
+			if (vsm_shadow || df_shadow) {
 				light_data.soft_shadow_size = 0.0;
 			}
-		} else if (vsm_shadow && in_shadow_range) {
-			// GodotNext: vsm_projection (#222). The light loop samples the light's virtual shadow maps: no atlas
-			// tile, no PCSS (SMRT takes the penumbra from the light's size). The shadow matrix stays, as the
-			// atlas path's, for light projectors.
+		} else if ((vsm_shadow || df_shadow) && in_shadow_range) {
+			// GodotNext: vsm_projection (#222), df_shadows (#214). The light loop samples virtual shadow maps
+			// or the DF shadow mask: no atlas tile, no PCSS. The shadow matrix stays for light projectors.
 			light_data.shadow_opacity = light->param[RSE::LIGHT_PARAM_SHADOW_OPACITY] * shadow_opacity_fade;
 			light_data.shadow_bias = 0.0;
 			light_data.shadow_normal_bias = 0.0;

@@ -44,6 +44,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 // GodotNext: vsm_page_marking (#219).
+#include "servers/rendering/renderer_rd/environment/next_gi_global_sdf.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 // GodotNext: vsm_non_nanite (#218).
 #include "core/object/callable_mp.h"
@@ -200,7 +202,59 @@ bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_mfx_tempor
 }
 #endif
 
+void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_df_shadow_targets(const Size2i &p_full_size, uint32_t p_layers) {
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7).
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+	const Size2i half_size(MAX((p_full_size.x + 1) / 2, 1), MAX((p_full_size.y + 1) / 2, 1));
+	const uint32_t layers = CLAMP(p_layers, 1u, RendererVirtualShadowMapStorage::DF_MAX_LIGHTS_PER_VIEW);
+	if (df_shadow_mask.is_valid() && df_shadow_guide.is_valid() && df_shadow_half_size == half_size && df_shadow_layers == layers) {
+		return;
+	}
+	free_df_shadow_targets();
+	{
+		RD::TextureFormat fmt;
+		fmt.format = RD::DATA_FORMAT_R8_UNORM;
+		fmt.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		fmt.width = uint32_t(half_size.x);
+		fmt.height = uint32_t(half_size.y);
+		fmt.array_layers = layers;
+		fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		df_shadow_mask = rd->texture_create(fmt, RD::TextureView());
+		rd->set_resource_name(df_shadow_mask, "DF Shadow Mask Array");
+	}
+	{
+		RD::TextureFormat fmt;
+		fmt.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		fmt.texture_type = RD::TEXTURE_TYPE_2D;
+		fmt.width = uint32_t(half_size.x);
+		fmt.height = uint32_t(half_size.y);
+		fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		df_shadow_guide = rd->texture_create(fmt, RD::TextureView());
+		rd->set_resource_name(df_shadow_guide, "DF Shadow Guide");
+	}
+	df_shadow_half_size = half_size;
+	df_shadow_layers = layers;
+}
+
+void RenderForwardClustered::RenderBufferDataForwardClustered::free_df_shadow_targets() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		if (df_shadow_mask.is_valid()) {
+			rd->free_rid(df_shadow_mask);
+		}
+		if (df_shadow_guide.is_valid()) {
+			rd->free_rid(df_shadow_guide);
+		}
+	}
+	df_shadow_mask = RID();
+	df_shadow_guide = RID();
+	df_shadow_half_size = Size2i();
+	df_shadow_layers = 0;
+}
+
 void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
+	free_df_shadow_targets();
 	// JIC, should already have been cleared
 	if (render_buffers) {
 		render_buffers->clear_context(RB_SCOPE_FORWARD_CLUSTERED);
@@ -268,6 +322,7 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::configure_interna
 	render_buffers = p_render_buffers;
 	ERR_FAIL_NULL(render_buffers);
 
+	free_df_shadow_targets();
 	ss_effects_data.ssil = {};
 	ss_effects_data.ssao = {};
 	ss_effects_data.ssr = {};
@@ -2185,10 +2240,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 			RID li = p_render_data->render_shadows[i].light;
 			RID base = light_storage->light_instance_get_base_light(li);
-			// GodotNext: vsm_projection (#222, issue step 7). A light this view samples through its virtual
-			// shadow maps gets no atlas pass (a positional one has no tile either; its entries come only from a
-			// raster check's caster cull). Contact shadows keep their entry.
-			const bool atlas_pass = !(vsm_sample_view && vsm_light_skips_atlas(li, p_render_data->environment));
+			// GodotNext: vsm_projection (#222, issue step 7) / df_shadows (#214). A light this view samples
+			// through virtual shadow maps or per-light distance-field shadows gets no atlas pass.
+			// Contact shadows keep their entry.
+			const bool atlas_pass = !(vsm_sample_view && vsm_light_skips_atlas(li, p_render_data->environment)) && !(df_shadows_view && df_light_skips_atlas(li, p_render_data->environment));
 			if (atlas_pass) {
 				vsm_atlas_passes++;
 			} else {
@@ -2575,10 +2630,13 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	uint32_t directional_light_count = 0;
 	uint32_t positional_light_count = 0;
-	// GodotNext: vsm_projection (#222). The lights of a view that samples VSM get LIGHT_FLAGS_SAMPLE.
+	// GodotNext: vsm_projection (#222) / df_shadows (#214). The lights of a view that samples VSM get
+	// LIGHT_FLAGS_SAMPLE, and DF-enabled lights get layer assignments for df_shadow.glsl.
 	RendererRD::VirtualShadowMapStorage *vsm_storage = RendererRD::VirtualShadowMapStorage::get_singleton();
 	if (vsm_storage != nullptr) {
 		vsm_storage->set_view_samples(vsm_sample_view);
+		const RendererVirtualShadowMapStorage::PoolQuality df_quality = vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality();
+		vsm_storage->set_df_view_enabled(df_shadows_view, RendererVirtualShadowMapStorage::df_read_max_lights(df_quality));
 	}
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
 	if (vsm_storage != nullptr) {
@@ -2615,6 +2673,22 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	// GodotNext: vsm_projection (#222). What this view's light loop reads to sample the maps.
 	if (vsm_sample_view) {
 		_vsm_update_projection(p_render_data);
+	}
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Half-resolution cone-traced DF shadow mask pass.
+	if (df_shadows_view) {
+		_render_df_shadows(p_render_data, p_normal_roughness_slices != nullptr ? p_normal_roughness_slices[0] : RID(), p_use_nextgi);
+	} else {
+		df_bind_mask = RID();
+		df_bind_guide = RID();
+		if (vsm_storage != nullptr) {
+			RendererRD::VirtualShadowMapStorage::DFStats empty_stats;
+			const RendererVirtualShadowMapStorage::PoolQuality df_quality = vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality();
+			empty_stats.max_lights = RendererVirtualShadowMapStorage::df_read_max_lights(df_quality);
+			vsm_storage->record_df_stats(empty_stats);
+		}
+	}
+	if (vsm_storage != nullptr) {
+		vsm_storage->set_df_view_enabled(false);
 	}
 
 	if (rb_data.is_valid()) {
@@ -2816,6 +2890,394 @@ void RenderForwardClustered::_vsm_update_projection(const RenderDataRD *p_render
 	vsm_translucent_coarse = (translucent_quality == VSM::TRANSLUCENT_QUALITY_COARSE);
 	RD::get_singleton()->buffer_update(vsm_projection_params_buffer, 0, sizeof(VSMProjectionParams), &params);
 	vsm->set_projection_params(params.counts[1], params.counts[2], params.counts[3], params.misc[0] != 0u, uint32_t(translucent_quality));
+}
+
+// GodotNext: df_shadows (#214, plan §21.3 contract S7, GV-10).
+bool RenderForwardClustered::df_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) {
+	if (p_reflection_probe || p_render_buffers.is_null() || p_view_count != 1) {
+		return false;
+	}
+	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	if (rb.is_null() || !rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	return RendererVirtualShadowMapStorage::is_df_available();
+}
+
+bool RenderForwardClustered::df_light_skips_atlas(RID p_light_instance, RID p_environment) const {
+	if (!RendererVirtualShadowMapStorage::is_df_available()) {
+		return false;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	if (!light_storage->owns_light_instance(p_light_instance)) {
+		return false;
+	}
+	const RID base = light_storage->light_instance_get_base_light(p_light_instance);
+	if (base.is_null() || !light_storage->light_has_shadow(base)) {
+		return false;
+	}
+	if (!RendererVirtualShadowMapStorage::light_uses_df(light_storage->light_get_shadow_method(base))) {
+		return false;
+	}
+	if (p_environment.is_valid() && environment_get_volumetric_fog_enabled(p_environment) && light_storage->light_get_param(base, RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY) > 0.0f) {
+		return false;
+	}
+	return true;
+}
+
+bool RenderForwardClustered::_df_view_has_lights(const RenderDataRD *p_render_data) const {
+	if (p_render_data == nullptr || p_render_data->lights == nullptr || p_render_data->scene_data == nullptr) {
+		return false;
+	}
+	if (p_render_data->reflection_probe.is_valid() || p_render_data->render_buffers.is_null() || p_render_data->scene_data->view_count != 1) {
+		return false;
+	}
+	if (!p_render_data->render_buffers->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	if (!RendererVirtualShadowMapStorage::is_df_available()) {
+		return false;
+	}
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	const RendererVirtualShadowMapStorage::PoolQuality df_quality = (vsm != nullptr && vsm->is_active()) ? vsm->get_quality() : RendererVirtualShadowMapStorage::read_quality();
+	if (RendererVirtualShadowMapStorage::df_read_max_lights(df_quality) == 0u) {
+		return false;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+		const RID li = (*p_render_data->lights)[i];
+		if (!light_storage->owns_light_instance(li)) {
+			continue;
+		}
+		const RID base = light_storage->light_instance_get_base_light(li);
+		if (base.is_null() || !light_storage->light_has_shadow(base)) {
+			continue;
+		}
+		const RSE::LightShadowMethod sm = light_storage->light_get_shadow_method(base);
+		if (RendererVirtualShadowMapStorage::light_uses_df(sm)) {
+			return true;
+		}
+		if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL && light_storage->light_directional_get_sky_mode(base) != RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+			const float start = light_storage->light_get_param(base, RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START);
+			const float dist = light_storage->light_get_param(base, RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
+			const float shadow_max = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE);
+			if (RendererVirtualShadowMapStorage::df_directional_handoff_start(start, dist, shadow_max, true) > 0.0f) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void RenderForwardClustered::_ensure_df_default_textures() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	if (df_default_mask.is_null()) {
+		RD::TextureFormat fmt;
+		fmt.format = RD::DATA_FORMAT_R8_UNORM;
+		fmt.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		fmt.width = 1;
+		fmt.height = 1;
+		fmt.array_layers = RendererVirtualShadowMapStorage::DF_MAX_LIGHTS_PER_VIEW;
+		fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<uint8_t> one;
+		one.resize(1);
+		one.write[0] = 255u;
+		Vector<Vector<uint8_t>> layers;
+		for (uint32_t i = 0; i < RendererVirtualShadowMapStorage::DF_MAX_LIGHTS_PER_VIEW; i++) {
+			layers.push_back(one);
+		}
+		df_default_mask = rd->texture_create(fmt, RD::TextureView(), layers);
+		rd->set_resource_name(df_default_mask, "DF Shadow Default Mask");
+	}
+	if (df_default_guide.is_null()) {
+		RD::TextureFormat fmt;
+		fmt.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		fmt.texture_type = RD::TEXTURE_TYPE_2D;
+		fmt.width = 1;
+		fmt.height = 1;
+		fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<uint8_t> data;
+		data.resize_initialized(8); // (0, 0, 0, 0): linear depth 0 -> bilateral upsample falls back to unshadowed 1.0.
+		Vector<Vector<uint8_t>> slices;
+		slices.push_back(data);
+		df_default_guide = rd->texture_create(fmt, RD::TextureView(), slices);
+		rd->set_resource_name(df_default_guide, "DF Shadow Default Guide");
+	}
+}
+
+bool RenderForwardClustered::_ensure_df_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	_ensure_df_default_textures();
+	if (df_shader_ready) {
+		return true;
+	}
+	if (df_shader_failed) {
+		return false;
+	}
+	Vector<String> modes;
+	modes.push_back("");
+	df_shader.initialize(modes);
+	df_shader_version = df_shader.version_create();
+	if (df_shader_version.is_null()) {
+		df_shader_failed = true;
+		return false;
+	}
+	const RID shader_rid = df_shader.version_get_shader(df_shader_version, 0);
+	if (shader_rid.is_null()) {
+		df_shader.version_free(df_shader_version);
+		df_shader_version = RID();
+		df_shader_failed = true;
+		return false;
+	}
+	df_pipeline = rd->compute_pipeline_create(shader_rid);
+	if (df_pipeline.is_null()) {
+		df_shader.version_free(df_shader_version);
+		df_shader_version = RID();
+		df_shader_failed = true;
+		return false;
+	}
+	if (df_params_buffer.is_null()) {
+		df_params_buffer = rd->storage_buffer_create(sizeof(DFParamsGPU));
+		rd->set_resource_name(df_params_buffer, "DF Shadow Params");
+	}
+	if (df_lights_buffer.is_null()) {
+		df_lights_buffer = rd->storage_buffer_create(sizeof(DFLightGPU) * RendererVirtualShadowMapStorage::DF_MAX_LIGHTS_PER_VIEW);
+		rd->set_resource_name(df_lights_buffer, "DF Shadow Lights");
+	}
+	if (df_nearest_sampler.is_null()) {
+		RD::SamplerState sstate;
+		sstate.mag_filter = RD::SAMPLER_FILTER_NEAREST;
+		sstate.min_filter = RD::SAMPLER_FILTER_NEAREST;
+		sstate.mip_filter = RD::SAMPLER_FILTER_NEAREST;
+		sstate.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		sstate.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		sstate.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		df_nearest_sampler = rd->sampler_create(sstate);
+	}
+	df_shader_ready = true;
+	return true;
+}
+
+void RenderForwardClustered::_free_df_resources() {
+	if (df_swrt_trace != nullptr) {
+		memdelete(df_swrt_trace);
+		df_swrt_trace = nullptr;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	for (RID *rid : { &df_pipeline, &df_params_buffer, &df_lights_buffer, &df_default_mask, &df_default_guide, &df_nearest_sampler }) {
+		if (rd != nullptr && rid->is_valid()) {
+			rd->free_rid(*rid);
+		}
+		*rid = RID();
+	}
+	if (df_shader_version.is_valid()) {
+		df_shader.version_free(df_shader_version);
+		df_shader_version = RID();
+	}
+	df_shader_ready = false;
+	df_shader_failed = false;
+	df_bind_mask = RID();
+	df_bind_guide = RID();
+}
+
+void RenderForwardClustered::_render_df_shadows(RenderDataRD *p_render_data, RID p_normal_roughness, bool p_use_nextgi) {
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7, GV-10).
+	df_bind_mask = RID();
+	df_bind_guide = RID();
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	RenderingDevice *rd = RD::get_singleton();
+	if (vsm == nullptr || rd == nullptr || p_render_data == nullptr || p_render_data->scene_data == nullptr || !RendererVirtualShadowMapStorage::is_df_available()) {
+		return;
+	}
+	const LocalVector<RendererRD::VirtualShadowMapStorage::DFViewLight> &df_lights = vsm->get_df_lights();
+	const RendererVirtualShadowMapStorage::PoolQuality df_quality = vsm->is_active() ? vsm->get_quality() : RendererVirtualShadowMapStorage::read_quality();
+	RendererRD::VirtualShadowMapStorage::DFStats stats;
+	stats.max_lights = vsm->get_df_view_max_lights();
+	stats.lights_dropped = vsm->get_df_dropped_lights();
+	if (df_lights.is_empty()) {
+		vsm->record_df_stats(stats);
+		return;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (rb.is_null() || !rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		vsm->record_df_stats(stats);
+		return;
+	}
+	Ref<RenderBufferDataForwardClustered> rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	if (rb_data.is_null() || !_ensure_df_resources()) {
+		vsm->record_df_stats(stats);
+		return;
+	}
+
+	const float max_df_dist = vsm->get_df_max_distance();
+	uint32_t target_levels = NextGIGlobalSDF::BASE_LEVELS;
+	while (target_levels < NextGIGlobalSDF::MAX_LEVELS && NextGIGlobalSDF::level_voxel_size(target_levels - 1u) * 60.0f < max_df_dist) {
+		target_levels++;
+	}
+
+	NextGISWRTTrace *swrt_trace = nullptr;
+	bool reused_nextgi = false;
+	if (p_use_nextgi && next_gi.get_tier_result().tier == RendererRD::NextGI::TIER_SOFTWARE && next_gi.get_swrt_trace() != nullptr && next_gi.get_swrt_trace()->is_ready()) {
+		swrt_trace = next_gi.get_swrt_trace();
+		reused_nextgi = true;
+		swrt_trace->update_extra_levels_for_df(p_render_data, target_levels);
+		const bool reuse_froxels = !RendererRD::NextGI::is_lumen_lite() && !RendererRD::NextGI::is_reflections_only() && swrt_trace->is_detail_active();
+		swrt_trace->prepare_df_view(p_render_data, next_gi.get_voxel_lighting(), reuse_froxels);
+	} else {
+		if (df_swrt_trace == nullptr) {
+			df_swrt_trace = memnew(NextGISWRTTrace);
+		}
+		df_swrt_trace->update_scene_for_df(p_render_data, target_levels);
+		df_swrt_trace->prepare_df_view(p_render_data, nullptr, false);
+		swrt_trace = df_swrt_trace;
+	}
+
+	if (swrt_trace == nullptr || !swrt_trace->is_ready()) {
+		vsm->record_df_stats(stats);
+		return;
+	}
+
+	const Size2i full_size = rb->get_internal_size();
+	const uint32_t light_count = MIN(df_lights.size(), RendererVirtualShadowMapStorage::DF_MAX_LIGHTS_PER_VIEW);
+	rb_data->ensure_df_shadow_targets(full_size, light_count);
+	const RID mask_tex = rb_data->get_df_shadow_mask();
+	const RID guide_tex = rb_data->get_df_shadow_guide();
+	const Size2i half_size = rb_data->get_df_shadow_half_size();
+	const RID depth_tex = rb->get_depth_texture(0);
+	if (mask_tex.is_null() || guide_tex.is_null() || depth_tex.is_null()) {
+		vsm->record_df_stats(stats);
+		return;
+	}
+
+	const uint32_t active_levels = MIN(swrt_trace->get_df_active_levels(), NextGIGlobalSDF::MAX_LEVELS);
+	const bool has_normal = p_normal_roughness.is_valid();
+	const bool has_detail = swrt_trace->has_df_detail_froxels();
+	const uint32_t fresh_mask = swrt_trace->get_df_coarse_mask(active_levels);
+
+	DFParamsGPU params;
+	params.sizes[0] = uint32_t(MAX(full_size.x, 1));
+	params.sizes[1] = uint32_t(MAX(full_size.y, 1));
+	params.sizes[2] = uint32_t(MAX(half_size.x, 1));
+	params.sizes[3] = uint32_t(MAX(half_size.y, 1));
+	params.counts[0] = light_count;
+	params.counts[1] = RendererVirtualShadowMapStorage::df_preset_max_steps(df_quality);
+	params.counts[2] = active_levels;
+	params.counts[3] = (has_normal ? 1u : 0u) | (has_detail ? 2u : 0u);
+	params.fresh[0] = fresh_mask;
+	params.fresh[1] = fresh_mask;
+	for (uint32_t i = 0; i < 4u; i++) {
+		const uint32_t lvl = 6u + i;
+		const Vector3i origin = swrt_trace->get_clipmap_origin(lvl);
+		params.extra_origins[i][0] = origin.x;
+		params.extra_origins[i][1] = origin.y;
+		params.extra_origins[i][2] = origin.z;
+		params.extra_origins[i][3] = swrt_trace->get_level_status(lvl);
+		params.extra_voxel_size[i] = NextGIGlobalSDF::level_voxel_size(lvl);
+	}
+	const Basis &cam_basis = p_render_data->scene_data->cam_transform.basis;
+	for (int i = 0; i < 3; i++) {
+		const Vector3 col = cam_basis.get_column(i).normalized();
+		params.world_to_view[i][0] = float(col.x);
+		params.world_to_view[i][1] = float(col.y);
+		params.world_to_view[i][2] = float(col.z);
+		params.world_to_view[i][3] = 0.0f;
+	}
+
+	DFLightGPU gpu_lights[RendererVirtualShadowMapStorage::DF_MAX_LIGHTS_PER_VIEW] = {};
+	for (uint32_t i = 0; i < light_count; i++) {
+		const RendererRD::VirtualShadowMapStorage::DFViewLight &src = df_lights[i];
+		gpu_lights[i].pos_range[0] = float(src.position.x);
+		gpu_lights[i].pos_range[1] = float(src.position.y);
+		gpu_lights[i].pos_range[2] = float(src.position.z);
+		gpu_lights[i].pos_range[3] = src.range;
+		gpu_lights[i].dir_radius[0] = float(src.direction.x);
+		gpu_lights[i].dir_radius[1] = float(src.direction.y);
+		gpu_lights[i].dir_radius[2] = float(src.direction.z);
+		gpu_lights[i].dir_radius[3] = src.source_radius;
+		gpu_lights[i].handoff_spot[0] = src.handoff_start;
+		gpu_lights[i].handoff_spot[1] = src.handoff_end;
+		gpu_lights[i].handoff_spot[2] = src.cos_spot_angle;
+		gpu_lights[i].handoff_spot[3] = 0.0f;
+		uint32_t ltype = 0u;
+		switch (src.type) {
+			case RSE::LIGHT_DIRECTIONAL:
+				ltype = 0u;
+				break;
+			case RSE::LIGHT_OMNI:
+				ltype = 1u;
+				break;
+			case RSE::LIGHT_SPOT:
+				ltype = 2u;
+				break;
+			case RSE::LIGHT_AREA:
+				ltype = 3u;
+				break;
+		}
+		gpu_lights[i].meta[0] = ltype;
+		gpu_lights[i].meta[1] = src.full_df ? 1u : 0u;
+	}
+
+	rd->buffer_update(df_params_buffer, 0, sizeof(DFParamsGPU), &params);
+	rd->buffer_update(df_lights_buffer, 0, sizeof(DFLightGPU) * light_count, gpu_lights);
+
+	const RID shader_rid = df_shader.version_get_shader(df_shader_version, 0);
+	const RID normal_tex = has_normal ? p_normal_roughness : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	Vector<RD::Uniform> set0_uniforms;
+	{
+		RD::Uniform u(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, df_nearest_sampler);
+		u.append_id(depth_tex);
+		set0_uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, df_nearest_sampler);
+		u.append_id(normal_tex);
+		set0_uniforms.push_back(u);
+	}
+	set0_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, df_params_buffer));
+	set0_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, df_lights_buffer));
+	set0_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, mask_tex));
+	set0_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, guide_tex));
+	for (uint32_t i = 0; i < 4u; i++) {
+		set0_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, swrt_trace->get_page_buffer(6u + i)));
+	}
+
+	const RID set0 = rd->uniform_set_create(set0_uniforms, shader_rid, 0);
+	const RID set1 = swrt_trace->create_trace_uniform_set(shader_rid, 1, true, reused_nextgi ? next_gi.get_voxel_lighting() : nullptr);
+	if (set0.is_valid() && set1.is_valid()) {
+		RENDER_TIMESTAMP("Distance-Field Shadow Mask");
+		rd->draw_command_begin_label("Distance-Field Shadow Mask");
+		RD::ComputeListID clist = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(clist, df_pipeline);
+		rd->compute_list_bind_uniform_set(clist, set0, 0);
+		rd->compute_list_bind_uniform_set(clist, set1, 1);
+		rd->compute_list_dispatch(clist, (uint32_t(half_size.x) + 7u) / 8u, (uint32_t(half_size.y) + 7u) / 8u, light_count);
+		rd->compute_list_end();
+		rd->draw_command_end_label();
+
+		df_bind_mask = mask_tex;
+		df_bind_guide = guide_tex;
+
+		stats.lights_traced = light_count;
+		stats.global_sdf_levels = active_levels;
+		stats.sdf_instances = swrt_trace->get_instance_count();
+		stats.half_width = uint32_t(half_size.x);
+		stats.half_height = uint32_t(half_size.y);
+		stats.detail_refinement = has_detail;
+		stats.reused_nextgi_swrt = reused_nextgi;
+	}
+	if (set0.is_valid()) {
+		rd->free_rid(set0);
+	}
+	if (set1.is_valid()) {
+		rd->free_rid(set1);
+	}
+	vsm->record_df_stats(stats);
 }
 
 void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
@@ -3254,6 +3716,8 @@ void RenderForwardClustered::_vsm_cull_state_received(const Vector<uint8_t> &p_d
 	const uint32_t dropped = state[VSM_CULL_STATE_DROPPED_PAIRS];
 	self->vsm_redraw_marks_total += state[VSM_CULL_STATE_REDRAW_MARKS];
 	self->vsm_write_mismatch_total += state[VSM_CULL_STATE_WRITE_MISMATCH];
+	self->vsm_df_far_culled_last = state[VSM_CULL_STATE_DF_FAR_CULLED];
+	self->vsm_df_far_culled_total += self->vsm_df_far_culled_last;
 	if (dropped == 0) {
 		return;
 	}
@@ -3434,6 +3898,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		uint32_t map_base = RendererVirtualShadowMapStorage::MAP_NONE;
 		uint32_t light_flags = 0;
 		bool reverse_cull = false;
+		float df_handoff_start = 0.0f;
 	};
 	struct UniqueCaster {
 		GeometryInstanceForwardClustered *inst = nullptr;
@@ -3474,6 +3939,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		const RID base_light = light_storage->light_instance_get_base_light(vs.light);
 		const bool rev_cull = base_light.is_valid() && light_storage->light_get_reverse_cull_face_mode(base_light);
 		const uint32_t lflags = RendererVirtualShadowMapStorage::light_flags(range->kind, range->count);
+		const float df_handoff_start = (range->kind == RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL) ? vsm->get_df_handoff_start(vs.light) : 0.0f;
 		HashSet<GeometryInstanceForwardClustered *> *light_casters = capture ? &vsm_light_casters[vs.light] : nullptr;
 		if (capture) {
 			VSMRasterCheckCapture::Light check_light;
@@ -3537,6 +4003,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				ref.map_base = range->first;
 				ref.light_flags = lflags;
 				ref.reverse_cull = rev_cull;
+				ref.df_handoff_start = df_handoff_start;
 				clights.push_back(ref);
 			}
 		}
@@ -3967,6 +4434,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				memcpy(rec.model_row0, &idata.transform[0], 4 * sizeof(float));
 				memcpy(rec.model_row1, &idata.transform[4], 4 * sizeof(float));
 				memcpy(rec.model_row2, &idata.transform[8], 4 * sizeof(float));
+				rec.df_params[0] = lref.df_handoff_start;
 				sub_records.push_back(rec);
 				sub_record_buffers.push_back(sub_buf);
 				sub_record_buffer_bytes.push_back(sub_bytes);
@@ -4017,7 +4485,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 				rec.box_min[0] = float(bmin.x);
 				rec.box_min[1] = float(bmin.y);
 				rec.box_min[2] = float(bmin.z);
-				rec.box_min[3] = 0.0f;
+				rec.box_min[3] = lref.df_handoff_start;
 				rec.box_max[0] = float(bmax.x);
 				rec.box_max[1] = float(bmax.y);
 				rec.box_max[2] = float(bmax.z);
@@ -4076,6 +4544,11 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		push.sub_record_index = 0;
 		push.min_caster_texels = min_caster_texels;
 		push.flags = capture ? VSM_CULL_FLAG_CAPTURE : 0u;
+		const Vector3 cam_origin = p_render_data->scene_data->cam_transform.origin;
+		push.camera_pos_unused[0] = float(cam_origin.x);
+		push.camera_pos_unused[1] = float(cam_origin.y);
+		push.camera_pos_unused[2] = float(cam_origin.z);
+		push.camera_pos_unused[3] = 0.0f;
 
 		auto bind_cull = [&](RD::ComputeListID p_list, VSMCullMode p_mode) -> RID {
 			const RID shader_rid = vsm_cull_shader.version_get_shader(vsm_cull_version, p_mode);
@@ -4231,6 +4704,8 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 	stats["dropped_pairs_total"] = int64_t(vsm_dropped_pairs_total);
 	stats["redraw_marks_total"] = int64_t(vsm_redraw_marks_total);
 	stats["write_mismatch_total"] = int64_t(vsm_write_mismatch_total);
+	stats["df_far_culled"] = int64_t(vsm_df_far_culled_last);
+	stats["df_far_culled_total"] = int64_t(vsm_df_far_culled_total);
 	vsm->set_last_raster_stats(stats);
 
 	if (capture) {
@@ -4240,6 +4715,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		vsm_raster_check.pool_pages = pool_pages;
 		vsm_raster_check.pair_capacity = pair_capacity;
 		vsm_raster_check.min_caster_texels = min_caster_texels;
+		vsm_raster_check.camera_position = p_render_data->scene_data->cam_transform.origin;
 		vsm_raster_check.light_count = active_vsm_lights;
 		vsm_raster_check.surface_element_count = element_count;
 		vsm_raster_check.atlas_non_virtual_casters = atlas_non_virtual_count;
@@ -4642,14 +5118,17 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	HashSet<VSMPairTuple, VSMPairTupleHasher> cpu_robust;
 	uint64_t cpu_total_pairs = 0;
 	uint64_t cpu_small_culled = 0;
+	uint64_t cpu_df_far_culled = 0;
 	LocalVector<uint32_t> tmp_dirty;
 
-	auto add_cpu_box = [&](uint32_t p_elem, uint32_t p_sub, uint32_t p_group, uint32_t p_map_base, uint32_t p_light_flags, bool p_dyn, uint32_t p_caster, const AABB &p_box) {
+	auto add_cpu_box = [&](uint32_t p_elem, uint32_t p_sub, uint32_t p_group, uint32_t p_map_base, uint32_t p_light_flags, bool p_dyn, uint32_t p_caster, const AABB &p_box, float p_df_handoff_start) {
 		const uint32_t dyn_bit = p_dyn ? (1u << 31u) : 0u;
 		uint32_t small = 0;
-		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, p_box, p_dyn, min_texels, tmp_dirty, small);
+		uint32_t df_far = 0;
+		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, p_box, p_dyn, min_texels, tmp_dirty, small, cap.camera_position, p_df_handoff_start, &df_far);
 		cpu_total_pairs += tmp_dirty.size();
 		cpu_small_culled += small;
+		cpu_df_far_culled += df_far;
 		for (uint32_t d : tmp_dirty) {
 			cpu_exact.insert({ p_group, p_elem, p_sub, d | dyn_bit, p_caster });
 		}
@@ -4667,7 +5146,7 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 		AABB union_box = p_box;
 		union_box.grow_by(eps);
 		uint32_t unused = 0;
-		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, union_box, p_dyn, min_texels * (1.0f - VSM_CHECK_TOLERANCE), tmp_dirty, unused);
+		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, union_box, p_dyn, min_texels * (1.0f - VSM_CHECK_TOLERANCE), tmp_dirty, unused, cap.camera_position, p_df_handoff_start > 0.0f ? p_df_handoff_start * (1.0f + VSM_CHECK_TOLERANCE) : 0.0f);
 		for (uint32_t d : tmp_dirty) {
 			cpu_union.insert({ p_group, p_elem, p_sub, d | dyn_bit, p_caster });
 		}
@@ -4677,7 +5156,7 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 				MIN(eps, float(p_box.size.y) * 0.25f),
 				MIN(eps, float(p_box.size.z) * 0.25f));
 		const AABB robust_box(p_box.position + shrink, p_box.size - shrink * 2.0f);
-		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, robust_box, p_dyn, min_texels * (1.0f + VSM_CHECK_TOLERANCE), tmp_dirty, unused);
+		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, robust_box, p_dyn, min_texels * (1.0f + VSM_CHECK_TOLERANCE), tmp_dirty, unused, cap.camera_position, p_df_handoff_start > 0.0f ? p_df_handoff_start * (1.0f - VSM_CHECK_TOLERANCE) : 0.0f);
 		for (uint32_t d : tmp_dirty) {
 			cpu_robust.insert({ p_group, p_elem, p_sub, d | dyn_bit, p_caster });
 		}
@@ -4686,7 +5165,7 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	for (const VSMBoxCullRecord &rec : cap.box_records) {
 		const Vector3 bmin(rec.box_min[0], rec.box_min[1], rec.box_min[2]);
 		const Vector3 bmax(rec.box_max[0], rec.box_max[1], rec.box_max[2]);
-		add_cpu_box(rec.meta0[0], 0u, rec.meta0[1], rec.meta0[2], rec.meta0[3], rec.meta1[0] != 0u, rec.meta1[1], AABB(bmin, bmax - bmin));
+		add_cpu_box(rec.meta0[0], 0u, rec.meta0[1], rec.meta0[2], rec.meta0[3], rec.meta1[0] != 0u, rec.meta1[1], AABB(bmin, bmax - bmin), rec.box_min[3]);
 	}
 
 	uint32_t sub_snapshot_short = 0;
@@ -4719,7 +5198,7 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 			}
 			AABB sub_box;
 			if (RendererVirtualShadowMapStorage::sub_instance_box(model, sub_transforms[snap_idx].ptr(), sub, cur_ofs, stride_vec4, format_2d, trail_steps, local_aabb, rec.local_min[3], sub_box, (rec.meta2[3] & VSM_SUB_FLAG_VIEW_FACING) != 0u, rec.local_max[3])) {
-				add_cpu_box(rec.meta0[0], sub, rec.meta0[1], rec.meta0[2], rec.meta0[3], rec.meta1[0] != 0u, rec.meta1[1], sub_box);
+				add_cpu_box(rec.meta0[0], sub, rec.meta0[1], rec.meta0[2], rec.meta0[3], rec.meta1[0] != 0u, rec.meta1[1], sub_box, rec.df_params[0]);
 			}
 		}
 	}
@@ -4738,6 +5217,7 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	const uint32_t cull_sink = group_count > 0 ? cull_state[VSM_CULL_STATE_SINK] : 0u;
 	const uint32_t redraw_marks = group_count > 0 ? cull_state[VSM_CULL_STATE_REDRAW_MARKS] : 0u;
 	const uint32_t write_mismatch = group_count > 0 ? cull_state[VSM_CULL_STATE_WRITE_MISMATCH] : 0u;
+	const uint32_t gpu_df_far_culled = group_count > 0 ? cull_state[VSM_CULL_STATE_DF_FAR_CULLED] : 0u;
 	const uint32_t raster_sink = !pair_texels.is_empty() ? pair_texels[0] : 0u;
 
 	// The page-table entry of a dirty record, and whether the cull marked it to be drawn again (a pair the
@@ -5230,6 +5710,8 @@ Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
 	result["gpu_small_culled"] = int64_t(gpu_small_culled);
 	result["cpu_total_pairs"] = int64_t(cpu_total_pairs);
 	result["cpu_small_culled"] = int64_t(cpu_small_culled);
+	result["gpu_df_far_culled"] = int64_t(gpu_df_far_culled);
+	result["cpu_df_far_culled"] = int64_t(cpu_df_far_culled);
 	result["scan_mismatches"] = int64_t(scan_mismatches);
 	result["pair_unexpected"] = int64_t(pair_unexpected);
 	result["pair_missing"] = int64_t(pair_missing);
@@ -5882,6 +6364,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RD::get_singleton()->draw_command_end_label();
 
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Need depth + normal-roughness prepass when DF shadows run.
+	const bool using_df_shadows = !is_reflection_probe && _df_view_has_lights(p_render_data);
+
 	if (!is_reflection_probe) {
 		if (using_voxelgi) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
@@ -5907,8 +6392,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// GodotNext: megalights_inputs (#136). The input targets and the ML_ALBEDO / ML_MATERIAL
 		// debug draws need the normal-roughness prepass. Do not downgrade a voxel GI prepass.
 		// GodotNext: rr_guides (#205). So does the RR guide pack.
+		// GodotNext: df_shadows (#214). Half-res DF cone trace and 2x2 bilateral upsample guide use normal-roughness.
 		const bool ml_debug_draw = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL;
-		if ((megalights_inputs_active || ml_debug_draw || rr_guides_active) && depth_pass_mode == PASS_MODE_DEPTH) {
+		if ((megalights_inputs_active || ml_debug_draw || rr_guides_active || using_df_shadows) && depth_pass_mode == PASS_MODE_DEPTH) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -6129,11 +6615,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83) / nextgeo_residency (#78)
 	// GodotNext: megalights_inputs (#136) / rr_guides (#205)
 	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo || megalights_inputs_active || rr_guides_active;
-	// GodotNext: vsm_page_marking (#219). Page marking reads the prepass depth.
+	// GodotNext: vsm_page_marking (#219) / df_shadows (#214). Page marking and DF shadow mask read prepass depth.
 	const bool using_vsm = _vsm_marks_view(p_render_data);
-	force_depth_pre_pass = force_depth_pre_pass || using_vsm;
+	force_depth_pre_pass = force_depth_pre_pass || using_vsm || using_df_shadows;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 	vsm_mark_view = using_vsm && depth_pre_pass;
+	df_shadows_view = using_df_shadows && depth_pre_pass;
+	df_bind_mask = RID();
+	df_bind_guide = RID();
 	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite/Nanite cull.
 	vsm_debug_view_marked = false;
 	vsm_debug_view_pairs = false;
@@ -6146,6 +6635,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
 	base_specialization.use_vsm = vsm_sample_view; // GodotNext: vsm_projection (#222)
+	base_specialization.use_df_shadows = df_shadows_view; // GodotNext: df_shadows (#214)
 
 	if (depth_pre_pass) { //depth pre pass
 		// GodotNext: megalights_decals (#136). The MegaLights input prepass runs the decal loop, but
@@ -6184,8 +6674,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
 		finish_depth = finish_depth || using_nextgi || using_nextgeo;
-		// GodotNext: vsm_page_marking (#219). With MSAA, marking reads the resolved depth.
-		finish_depth = finish_depth || using_vsm;
+		// GodotNext: vsm_page_marking (#219) / df_shadows (#214). With MSAA, marking and DF mask read resolved depth.
+		finish_depth = finish_depth || using_vsm || using_df_shadows;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		render_list_params.use_nextgeo_proxy = is_reflection_probe;
 		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
@@ -8841,6 +9331,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 56, vsm_projection_blue_noise));
 		// GodotNext: vsm_fog_translucency (#215). Missing-coarse-page atomic counters for transparent coarse lookups.
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 57, vsm_ready ? vsm->get_coarse_miss_buffer() : vsm_projection_default_miss_buffer));
+		// GodotNext: df_shadows (#214). Half-res R8 DF shadow mask array and RGBA16F guide (defaults when off).
+		_ensure_df_default_textures();
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 58, df_bind_mask.is_valid() ? df_bind_mask : df_default_mask));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 59, df_bind_guide.is_valid() ? df_bind_guide : df_default_guide));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)
@@ -10882,6 +11376,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 	}
 	_free_vsm_raster_resources();
 	_free_vsm_projection_resources(); // GodotNext: vsm_projection (#222)
+	_free_df_resources(); // GodotNext: df_shadows (#214)
 	vsm_cull_instances.reset();
 	next_gi.free_far_field();
 	nextgeo_cut.free_resources();

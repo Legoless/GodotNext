@@ -88,6 +88,8 @@ public:
 	// runs out leaves a finer level partial, and the trace reads its missing bricks
 	// (NextGIGlobalSDFGPU::PAGE_MISSING) from the complete level above.
 	Stats update(NextGIGlobalSDFGPU &r_field, const Vector<NextGIGlobalSDF::Instance> &p_instances, const Vector3 &p_camera, uint64_t p_frame, uint32_t p_levels);
+	// GodotNext: df_shadows (#214). Plans and rebuilds levels [p_first_level, p_levels), coarsest first.
+	Stats update_range(NextGIGlobalSDFGPU &r_field, const Vector<NextGIGlobalSDF::Instance> &p_instances, const Vector3 &p_camera, uint64_t p_frame, uint32_t p_first_level, uint32_t p_levels);
 
 	// SWRT_REDUCED: frees the top level's slots and returns the new level count,
 	// never below p_min_levels.

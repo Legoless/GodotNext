@@ -367,6 +367,14 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_INDIRECT_ALL " + itos(INDIRECT_ALL) + "u\n";
 	// GodotNext: vsm_projection (#222).
 	defines += "#define VSM_LIGHT_FLAGS_SAMPLE " + itos(LIGHT_FLAGS_SAMPLE) + "u\n";
+	// GodotNext: df_shadows (#214).
+	defines += "#define VSM_LIGHT_FLAGS_DF_SAMPLE " + itos(LIGHT_FLAGS_DF_SAMPLE) + "u\n";
+	defines += "#define VSM_LIGHT_FLAGS_DF_FULL " + itos(LIGHT_FLAGS_DF_FULL) + "u\n";
+	defines += "#define VSM_LIGHT_FLAGS_DF_LAYER_SHIFT " + itos(LIGHT_FLAGS_DF_LAYER_SHIFT) + "u\n";
+	defines += "#define VSM_LIGHT_FLAGS_DF_LAYER_MASK " + itos(LIGHT_FLAGS_DF_LAYER_MASK) + "u\n";
+	defines += "#define VSM_DF_MAX_LIGHTS " + itos(DF_MAX_LIGHTS_PER_VIEW) + "u\n";
+	defines += "#define VSM_DF_BLEND_BAND_FRACTION " + vformat("%.6f", DF_BLEND_BAND_FRACTION) + "\n";
+	defines += "#define VSM_DF_DETAIL_METERS " + vformat("%.6f", DF_DETAIL_METERS) + "\n";
 	defines += "#define VSM_CLIPMAP_LEVEL0_EXTENT " + vformat("%.6f", CLIPMAP_LEVEL0_EXTENT) + "\n";
 	defines += "#define VSM_SMRT_MAX_RAYS " + itos(SMRT_MAX_RAYS) + "u\n";
 	defines += "#define VSM_SMRT_MAX_STEPS " + itos(SMRT_MAX_STEPS) + "u\n";
@@ -1903,15 +1911,26 @@ bool RendererVirtualShadowMapStorage::sub_instance_box(const float p_model[12], 
 	return true;
 }
 
-void RendererVirtualShadowMapStorage::cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled) {
+void RendererVirtualShadowMapStorage::cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled, const Vector3 &p_camera_position, float p_df_handoff_start, uint32_t *r_df_far_culled) {
 	r_dirty_indices.clear();
 	r_small_culled = 0;
+	if (r_df_far_culled != nullptr) {
+		*r_df_far_culled = 0;
+	}
 	if (p_maps == nullptr || p_map_dirty_counts == nullptr || p_map_dirty_offsets == nullptr || p_dirty == nullptr || p_dirty_limit == 0 || p_map_base == MAP_NONE) {
 		return;
 	}
 	const Vector3 box_min = p_box.position;
 	const Vector3 box_max = p_box.position + p_box.size;
 	if (!(box_max.x >= box_min.x && box_max.y >= box_min.y && box_max.z >= box_min.z)) {
+		return;
+	}
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Drop non-Nanite casters from directional maps
+	// beyond distance_field_shadow_start when DF far-shadow handoff is active.
+	if ((p_light_flags & LIGHT_FLAGS_KIND_MASK) == MAP_KIND_DIRECTIONAL && df_directional_caster_culled(p_box, p_camera_position, p_df_handoff_start)) {
+		if (r_df_far_culled != nullptr) {
+			(*r_df_far_culled)++;
+		}
 		return;
 	}
 	const float dx = float(box_max.x) - float(box_min.x);
@@ -2106,6 +2125,8 @@ const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL 
 const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local";
 const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL_MOVING = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving";
 const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving";
+// GodotNext: df_shadows (#214).
+const char *const RendererVirtualShadowMapStorage::SETTING_DF_MAX_LIGHTS = "rendering/lights_and_shadows/virtual_shadows/df_max_lights";
 
 namespace {
 
@@ -2120,6 +2141,10 @@ SafeNumeric<uint32_t> vsm_fallback_lines;
 SafeNumeric<uint32_t> vsm_unimplemented_warned; // One bit per RSE::LightShadowMethod.
 SafeNumeric<uint32_t> vsm_unimplemented_warnings;
 SafeNumeric<uint64_t> vsm_frame_stats[RendererVirtualShadowMapStorage::FRAME_STAT_MAX];
+// GodotNext: df_shadows (#214).
+SafeFlag vsm_df_nextgi_hwrt;
+SafeFlag vsm_df_fallback_reported;
+SafeNumeric<uint32_t> vsm_df_fallback_lines;
 
 } // namespace
 
@@ -2156,7 +2181,7 @@ String RendererVirtualShadowMapStorage::format_fallback_line(TierReason p_reason
 }
 
 bool RendererVirtualShadowMapStorage::is_light_shadow_method_implemented(RSE::LightShadowMethod p_method) {
-	return p_method == RSE::LIGHT_SHADOW_METHOD_PROJECT || p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL || p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS;
+	return p_method == RSE::LIGHT_SHADOW_METHOD_PROJECT || p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL || p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS || p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD;
 }
 
 const char *RendererVirtualShadowMapStorage::get_light_shadow_method_name(RSE::LightShadowMethod p_method) {
@@ -2176,19 +2201,219 @@ const char *RendererVirtualShadowMapStorage::get_light_shadow_method_name(RSE::L
 	}
 }
 
-bool RendererVirtualShadowMapStorage::light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project) {
+bool RendererVirtualShadowMapStorage::light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_df_available) {
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL) {
 		return true;
 	}
 	if (p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS) {
 		return false;
 	}
-	// PROJECT, and the methods that are not implemented yet (they resolve to PROJECT).
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD) {
+		return !p_df_available && p_project == SHADOW_METHOD_VIRTUAL;
+	}
+	// PROJECT, and methods that are not implemented yet (RAY_TRACED resolves to PROJECT).
 	return p_project == SHADOW_METHOD_VIRTUAL;
 }
 
-RSE::LightShadowMethod RendererVirtualShadowMapStorage::resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available) {
-	return (p_vsm_available && light_shadow_method_wants_virtual(p_method, p_project)) ? RSE::LIGHT_SHADOW_METHOD_VIRTUAL : RSE::LIGHT_SHADOW_METHOD_ATLAS;
+RSE::LightShadowMethod RendererVirtualShadowMapStorage::resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available, bool p_df_available) {
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD && p_df_available) {
+		return RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD;
+	}
+	return (p_vsm_available && light_shadow_method_wants_virtual(p_method, p_project, p_df_available)) ? RSE::LIGHT_SHADOW_METHOD_VIRTUAL : RSE::LIGHT_SHADOW_METHOD_ATLAS;
+}
+
+/* DISTANCE-FIELD SHADOWS (#214, plan §21.3 contract S7, GV-10) */
+
+RendererVirtualShadowMapStorage::DFTierReason RendererVirtualShadowMapStorage::evaluate_df_tier(const DFTierInputs &p_inputs) {
+	if (!p_inputs.forward_plus) {
+		return DF_TIER_REASON_UNSUPPORTED_RENDERER;
+	}
+	if (!p_inputs.mesh_sdf_enabled) {
+		return DF_TIER_REASON_MESH_SDF_DISABLED;
+	}
+	if (p_inputs.nextgi_hwrt && !p_inputs.keep_when_hwrt) {
+		return DF_TIER_REASON_DROPPED_FOR_HWRT;
+	}
+	return DF_TIER_REASON_NONE;
+}
+
+const char *RendererVirtualShadowMapStorage::get_df_tier_reason_name(DFTierReason p_reason) {
+	switch (p_reason) {
+		case DF_TIER_REASON_NONE:
+			return "NONE";
+		case DF_TIER_REASON_UNSUPPORTED_RENDERER:
+			return "UNSUPPORTED_RENDERER";
+		case DF_TIER_REASON_MESH_SDF_DISABLED:
+			return "MESH_SDF_DISABLED";
+		case DF_TIER_REASON_DROPPED_FOR_HWRT:
+			return "DROPPED_FOR_HWRT";
+		default:
+			return "INVALID";
+	}
+}
+
+String RendererVirtualShadowMapStorage::format_df_fallback_line(DFTierReason p_reason) {
+	return vformat("DF Shadows: distance-field shadows are not available (reason=%s); lights fall back to the primary shadow method.", get_df_tier_reason_name(p_reason));
+}
+
+void RendererVirtualShadowMapStorage::set_df_nextgi_hwrt(bool p_hwrt) {
+	vsm_df_nextgi_hwrt.set_to(p_hwrt);
+}
+
+RendererVirtualShadowMapStorage::DFTierReason RendererVirtualShadowMapStorage::get_df_tier_reason() {
+	DFTierInputs inputs;
+	inputs.forward_plus = get_tier_reason() != TIER_REASON_UNSUPPORTED_RENDERER;
+	inputs.nextgi_hwrt = vsm_df_nextgi_hwrt.is_set();
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings != nullptr) {
+		const StringName gen_name = "rendering/global_illumination/mesh_sdf/generate";
+		if (settings->has_setting(gen_name)) {
+			inputs.mesh_sdf_enabled = bool(settings->get_setting_with_override(gen_name));
+		}
+		const StringName keep_name = "rendering/global_illumination/mesh_sdf/keep_when_hwrt";
+		if (settings->has_setting(keep_name)) {
+			inputs.keep_when_hwrt = bool(settings->get_setting_with_override(keep_name));
+		}
+	}
+	return evaluate_df_tier(inputs);
+}
+
+bool RendererVirtualShadowMapStorage::light_uses_df(RSE::LightShadowMethod p_method) {
+	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available(), is_df_available()) == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD;
+}
+
+bool RendererVirtualShadowMapStorage::report_df_fallback() {
+	const DFTierReason reason = get_df_tier_reason();
+	if (reason == DF_TIER_REASON_NONE || !vsm_df_fallback_reported.set_if_clear()) {
+		return false;
+	}
+	vsm_df_fallback_lines.increment();
+	print_line(format_df_fallback_line(reason));
+	return true;
+}
+
+uint32_t RendererVirtualShadowMapStorage::get_df_fallback_line_count() {
+	return vsm_df_fallback_lines.get();
+}
+
+uint32_t RendererVirtualShadowMapStorage::df_read_max_lights(PoolQuality p_quality) {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	int64_t value = -1;
+	if (settings != nullptr && settings->has_setting(SETTING_DF_MAX_LIGHTS)) {
+		value = int64_t(settings->get_setting_with_override(SETTING_DF_MAX_LIGHTS));
+	}
+	return df_effective_max_lights(value, p_quality);
+}
+
+float RendererVirtualShadowMapStorage::df_directional_handoff_start(float p_start, float p_distance, float p_shadow_max_distance, bool p_df_available) {
+	if (!p_df_available || !(p_distance > 0.0f)) {
+		return 0.0f;
+	}
+	const float effective_start = p_start > 0.0f ? p_start : p_shadow_max_distance;
+	if (!(effective_start > 0.0f) || !(p_distance > effective_start)) {
+		return 0.0f;
+	}
+	return effective_start;
+}
+
+float RendererVirtualShadowMapStorage::df_directional_blend(float p_depth, float p_start, float p_distance) {
+	if (!Math::is_finite(p_depth) || !(p_start > 0.0f) || !(p_distance > p_start)) {
+		return 0.0f;
+	}
+	const float blend_lo = p_start * (1.0f - DF_BLEND_BAND_FRACTION);
+	const float denom = MAX(p_start - blend_lo, 1e-4f);
+	const float u = CLAMP((p_depth - blend_lo) / denom, 0.0f, 1.0f);
+	return u * u * (3.0f - 2.0f * u);
+}
+
+bool RendererVirtualShadowMapStorage::df_directional_caster_culled(const AABB &p_box, const Vector3 &p_camera_position, float p_handoff_start) {
+	if (!(p_handoff_start > 0.0f)) {
+		return false;
+	}
+	const Vector3 bmin = p_box.position;
+	const Vector3 bmax = p_box.position + p_box.size;
+	const Vector3 closest(
+			CLAMP(p_camera_position.x, bmin.x, bmax.x),
+			CLAMP(p_camera_position.y, bmin.y, bmax.y),
+			CLAMP(p_camera_position.z, bmin.z, bmax.z));
+	return float(closest.distance_squared_to(p_camera_position)) > p_handoff_start * p_handoff_start;
+}
+
+float RendererVirtualShadowMapStorage::df_cone_visibility_step(float p_sdf, float p_t, float p_cone_tan, float p_min_radius) {
+	if (p_sdf <= 0.0f) {
+		return 0.0f;
+	}
+	const float cone_r = MAX(p_cone_tan * p_t, MAX(p_min_radius, 1e-4f));
+	const float u = CLAMP(p_sdf / cone_r, 0.0f, 1.0f);
+	return u * u * (3.0f - 2.0f * u);
+}
+
+float RendererVirtualShadowMapStorage::df_cone_trace_analytic_sphere(const Vector3 &p_origin, const Vector3 &p_dir, float p_tmax, float p_cone_tan, const Vector3 &p_sphere_center, float p_sphere_radius, uint32_t p_max_steps, float p_voxel_size) {
+	if (!(p_tmax > 0.0f) || !(p_dir.length_squared() > 1e-12f)) {
+		return 1.0f;
+	}
+	const Vector3 dir = p_dir.normalized();
+	const float cone_tan = MAX(p_cone_tan, DF_MIN_CONE_TAN);
+	const float voxel = MAX(p_voxel_size, 1e-3f);
+	const float band = 0.5f * voxel;
+	float t = 0.0f;
+	float vis = 1.0f;
+	for (uint32_t step = 0; step < MAX(p_max_steps, 1u) && t < p_tmax; step++) {
+		const Vector3 p = p_origin + dir * t;
+		const float d = float(p.distance_to(p_sphere_center)) - p_sphere_radius;
+		const float surface_d = d - band;
+		if (surface_d <= 0.0f) {
+			return 0.0f;
+		}
+		if (t > 0.0f) {
+			vis = MIN(vis, df_cone_visibility_step(surface_d, t, cone_tan, band));
+			if (vis <= 0.005f) {
+				return 0.0f;
+			}
+		}
+		t += MAX(d, 0.25f * voxel);
+	}
+	return CLAMP(vis, 0.0f, 1.0f);
+}
+
+float RendererVirtualShadowMapStorage::df_upsample_2x2(float p_depth, const Vector3 &p_normal, const Vector2 &p_frac, const float p_tap_mask[4], const float p_tap_depth[4], const Vector3 p_tap_normal[4]) {
+	const float fx = CLAMP(float(p_frac.x), 0.0f, 1.0f);
+	const float fy = CLAMP(float(p_frac.y), 0.0f, 1.0f);
+	const float b[4] = {
+		(1.0f - fx) * (1.0f - fy),
+		fx * (1.0f - fy),
+		(1.0f - fx) * fy,
+		fx * fy,
+	};
+	const float inv_depth = 1.0f / MAX(p_depth, 0.05f);
+	float w_sum = 0.0f;
+	float v_sum = 0.0f;
+	float best_depth_err = 1.0e30f;
+	float fallback_mask = 1.0f;
+	bool any_valid = false;
+	for (uint32_t i = 0; i < 4; i++) {
+		const float td = p_tap_depth[i];
+		if (!(td > 0.0f)) {
+			continue;
+		}
+		any_valid = true;
+		const float rel_depth = std::fabs(td - p_depth) * inv_depth;
+		if (rel_depth < best_depth_err) {
+			best_depth_err = rel_depth;
+			fallback_mask = p_tap_mask[i];
+		}
+		const float w_depth = std::exp(-rel_depth * 32.0f);
+		const float ndot = MAX(float(p_normal.dot(p_tap_normal[i])), 0.0f);
+		const float ndot2 = ndot * ndot;
+		const float w_normal = ndot2 * ndot2;
+		const float w = b[i] * w_depth * w_normal;
+		w_sum += w;
+		v_sum += w * p_tap_mask[i];
+	}
+	if (!any_valid) {
+		return 1.0f;
+	}
+	return w_sum > 1e-5f ? CLAMP(v_sum / w_sum, 0.0f, 1.0f) : CLAMP(fallback_mask, 0.0f, 1.0f);
 }
 
 void RendererVirtualShadowMapStorage::set_startup_state(TierReason p_reason, ShadowMethod p_project, bool p_dev_switch) {
@@ -2203,6 +2428,8 @@ void RendererVirtualShadowMapStorage::reset_startup_state() {
 	vsm_state_set.clear();
 	// A renderer created after this one reports its own fallback line and warnings once again.
 	vsm_fallback_reported.clear();
+	vsm_df_fallback_reported.clear();
+	vsm_df_nextgi_hwrt.clear();
 	vsm_unimplemented_warned.set(0);
 	reset_frame_stats();
 }
@@ -2220,7 +2447,7 @@ bool RendererVirtualShadowMapStorage::is_dev_switch_forcing() {
 }
 
 bool RendererVirtualShadowMapStorage::light_uses_vsm(RSE::LightShadowMethod p_method) {
-	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available()) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL;
+	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available(), is_df_available()) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL;
 }
 
 bool RendererVirtualShadowMapStorage::report_fallback() {
@@ -2244,7 +2471,11 @@ void RendererVirtualShadowMapStorage::note_light_shadow_method(RSE::LightShadowM
 			WARN_PRINT(vformat("The %s light shadow method is not implemented yet; lights with it use the project's shadow method (rendering/lights_and_shadows/shadow_method).", get_light_shadow_method_name(p_method)));
 		}
 	}
-	if (light_shadow_method_wants_virtual(p_method, get_project_shadow_method())) {
+	const bool df_avail = is_df_available();
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD && !df_avail) {
+		report_df_fallback();
+	}
+	if (light_shadow_method_wants_virtual(p_method, get_project_shadow_method(), df_avail)) {
 		report_fallback();
 	}
 }

@@ -2415,6 +2415,12 @@ Dictionary RenderingServer::virtual_shadow_maps_get_tier_info() {
 	info["dev_switch"] = RendererVirtualShadowMapStorage::is_dev_switch_forcing();
 	info["fallback_lines"] = int64_t(RendererVirtualShadowMapStorage::get_fallback_line_count());
 	info["unimplemented_warnings"] = int64_t(RendererVirtualShadowMapStorage::get_unimplemented_warning_count());
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Distance-field shadow tier status.
+	const RendererVirtualShadowMapStorage::DFTierReason df_reason = RendererVirtualShadowMapStorage::get_df_tier_reason();
+	info["df_available"] = df_reason == RendererVirtualShadowMapStorage::DF_TIER_REASON_NONE;
+	info["df_reason"] = String(RendererVirtualShadowMapStorage::get_df_tier_reason_name(df_reason));
+	info["df_fallback_lines"] = int64_t(RendererVirtualShadowMapStorage::get_df_fallback_line_count());
+	info["df_max_lights"] = int64_t(RendererVirtualShadowMapStorage::df_read_max_lights(RendererVirtualShadowMapStorage::read_quality()));
 	bool active = false;
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
@@ -2828,6 +2834,9 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_TRANSMITTANCE_BIAS);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_INTENSITY);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_CONTACT_SHADOW_BLUR);
+	// GodotNext: df_shadows (#214).
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DISABLED);
@@ -4132,6 +4141,9 @@ void RenderingServer::init() {
 		// GodotNext: vsm_caching (#212, plan §21.3 contract S5). Deferred static invalidation budget in
 		// pages per frame (0 = unlimited).
 		GLOBAL_DEF(PropertyInfo(Variant::INT, VSM::SETTING_DEFERRED_INVALIDATION_BUDGET, PROPERTY_HINT_RANGE, "0,16384,1,or_greater"), 0);
+		// GodotNext: df_shadows (#214, plan §21.3 contract S7). Max DF shadow mask layers per view
+		// (-1 = VSM quality preset, clamped to 8).
+		GLOBAL_DEF(PropertyInfo(Variant::INT, VSM::SETTING_DF_MAX_LIGHTS, PROPERTY_HINT_RANGE, vformat("-1,%d,1", VSM::DF_MAX_LIGHTS_PER_VIEW)), -1);
 	}
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);

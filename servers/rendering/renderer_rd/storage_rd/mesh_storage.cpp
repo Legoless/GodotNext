@@ -650,9 +650,10 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 
 	// GodotNext: nextgi_rt_arena
 	_mesh_nextgi_rt_add_surface(p_mesh, mesh->surface_count - 1, mesh, s, new_surface);
-	// GodotNext: ps_mesh_sdf_atlas (#185). Generate a runtime SDF one frame
-	// later, once the mesh's surfaces have settled.
-	if (sdf_runtime_generate && !mesh->nextgi_skip_rt_arena && !sdf_baked.has(p_mesh)) {
+	// GodotNext: ps_mesh_sdf_atlas (#185) / df_shadows (#214). Generate a runtime SDF one frame
+	// later, once the mesh's surfaces have settled, whenever NextGI or mesh_sdf/generate needs SDFs.
+	const bool want_runtime_sdf = sdf_runtime_generate && (nextgi_cpu_geometry_enabled || (ProjectSettings::get_singleton() != nullptr && bool(ProjectSettings::get_singleton()->get_setting_with_override("rendering/global_illumination/mesh_sdf/generate"))));
+	if (want_runtime_sdf && !mesh->nextgi_skip_rt_arena && !sdf_baked.has(p_mesh)) {
 		sdf_pending.insert(p_mesh);
 	}
 
@@ -749,9 +750,10 @@ void MeshStorage::_mesh_nextgi_rt_rebuild_chunk_address_buffer() {
 }
 
 void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface_index, Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data) {
-	// GodotNext: ps_swrt_trace (#186, #188). The CPU copy is decoded whenever it is kept; the arena
-	// upload below needs nextgi_rt_enabled.
-	if (!nextgi_cpu_geometry_enabled || p_mesh->nextgi_skip_rt_arena) {
+	// GodotNext: ps_swrt_trace (#186, #188) / df_shadows (#214). Keep the CPU triangle copy whenever
+	// NextGI or runtime mesh SDF generation needs it; the RT arena upload below still needs nextgi_rt_enabled.
+	const bool keep_cpu_for_sdf = sdf_runtime_generate && ProjectSettings::get_singleton() != nullptr && bool(ProjectSettings::get_singleton()->get_setting_with_override("rendering/global_illumination/mesh_sdf/generate"));
+	if (!(nextgi_cpu_geometry_enabled || keep_cpu_for_sdf) || p_mesh->nextgi_skip_rt_arena) {
 		return;
 	}
 	// GodotNext: nextgeo_nextgi (#77). Surfaces covered by a VirtualGeometryData use the VGD RT

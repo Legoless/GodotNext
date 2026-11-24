@@ -236,10 +236,12 @@ private:
 		float uv_scale2[2];
 		float uv_scale3[2];
 		float uv_scale4[2];
-		// GodotNext: vsm_page_pool (#220). As LightData's.
+		// GodotNext: vsm_page_pool (#220) and df_shadows (#214). As LightData's, plus directional DF
+		// far-shadow handoff distances in the two trailing floats (same 480-byte std140 layout).
 		uint32_t vsm_map_base;
 		uint32_t vsm_flags;
-		uint32_t vsm_pad[2];
+		float df_shadow_start;
+		float df_shadow_distance;
 	};
 	// GodotNext: vsm_page_pool (#220). An std140 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.

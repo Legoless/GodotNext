@@ -49,6 +49,9 @@ void Light3D::set_param(Param p_param, real_t p_value) {
 		if (p_param == PARAM_SPOT_ANGLE) {
 			update_configuration_warnings();
 		}
+	} else if (p_param == PARAM_DISTANCE_FIELD_SHADOW_START || p_param == PARAM_DISTANCE_FIELD_SHADOW_DISTANCE) {
+		// GodotNext: df_shadows (#214).
+		update_configuration_warnings();
 	}
 }
 
@@ -206,15 +209,24 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 		warnings.push_back(RTR("A light's scale does not affect the visual size of the light."));
 	}
 
-	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). The tier rule's reason on every light that would
-	// use virtual shadow maps but cannot.
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1) and df_shadows (#214, contract S7).
+	// The tier rule's reason on every light that would use virtual or distance-field shadows but cannot.
 	if (shadow && RS::get_singleton() != nullptr) {
-		if (shadow_method == SHADOW_METHOD_RAY_TRACED || shadow_method == SHADOW_METHOD_DISTANCE_FIELD) {
+		if (shadow_method == SHADOW_METHOD_RAY_TRACED) {
 			warnings.push_back(RTR("This shadow method is not implemented yet. The light uses the project's shadow method (Rendering > Lights and Shadows > Shadow Method)."));
 		}
 		const Dictionary tier = RS::get_singleton()->virtual_shadow_maps_get_tier_info();
+		const bool df_available = bool(tier.get("df_available", false));
+		const String df_reason = String(tier.get("df_reason", ""));
+		if (shadow_method == SHADOW_METHOD_DISTANCE_FIELD && !df_available) {
+			warnings.push_back(vformat(RTR("Distance-field shadows are not available (%s). Enable Rendering > Global Illumination > Mesh SDF > Generate on a Forward+ renderer. This light falls back to the project's shadow method."), df_reason));
+		}
+		if (type == RSE::LIGHT_DIRECTIONAL && shadow_method != SHADOW_METHOD_DISTANCE_FIELD && param[PARAM_DISTANCE_FIELD_SHADOW_DISTANCE] > 0.0 && param[PARAM_DISTANCE_FIELD_SHADOW_DISTANCE] > param[PARAM_DISTANCE_FIELD_SHADOW_START] && !df_available) {
+			warnings.push_back(vformat(RTR("Directional distance-field far-shadow handoff is not available (%s). Enable Rendering > Global Illumination > Mesh SDF > Generate on a Forward+ renderer; shadows continue with the primary shadow method to full distance."), df_reason));
+		}
 		const bool project_virtual = String(tier.get("project_shadow_method", "atlas")) == "virtual";
-		const bool wants_virtual = shadow_method == SHADOW_METHOD_VIRTUAL || (shadow_method != SHADOW_METHOD_ATLAS && project_virtual);
+		const bool df_falls_back = shadow_method == SHADOW_METHOD_DISTANCE_FIELD && !df_available;
+		const bool wants_virtual = shadow_method == SHADOW_METHOD_VIRTUAL || ((shadow_method == SHADOW_METHOD_PROJECT || shadow_method == SHADOW_METHOD_RAY_TRACED || df_falls_back) && project_virtual);
 		if (wants_virtual && !bool(tier.get("available", false))) {
 			warnings.push_back(vformat(RTR("Virtual shadow maps are not available on this renderer or device (%s). This light uses the shadow atlas."), String(tier.get("reason", ""))));
 		}
@@ -382,6 +394,9 @@ void Light3D::_validate_property(PropertyInfo &p_property) const {
 	} else if (get_light_type() != RSE::LIGHT_DIRECTIONAL && (p_property.name == "shadow_contact_shadows_allow" || p_property.name == "shadow_contact_shadows_blur")) {
 		// Contact shadows are currently only supported on DirectionalLight3D.
 		p_property.usage = PROPERTY_USAGE_NONE;
+	} else if (get_light_type() != RSE::LIGHT_DIRECTIONAL && (p_property.name == "distance_field_shadow_start" || p_property.name == "distance_field_shadow_distance")) {
+		// GodotNext: df_shadows (#214). Directional DF far-shadow handoff distances apply only to DirectionalLight3D.
+		p_property.usage = PROPERTY_USAGE_NONE;
 	}
 }
 
@@ -471,6 +486,11 @@ void Light3D::_bind_methods() {
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "shadow_contact_shadows_blur", PROPERTY_HINT_RANGE, "0,10,0.001"), "set_param", "get_param", PARAM_CONTACT_SHADOW_BLUR);
 	ADD_SUBGROUP("", "");
 
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7).
+	ADD_GROUP("Distance Field Shadow", "distance_field_shadow_");
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_start", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_START);
+	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_distance", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
+
 	ADD_GROUP("Distance Fade", "distance_fade_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "distance_fade_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_enable_distance_fade", "is_distance_fade_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "distance_fade_begin", PROPERTY_HINT_RANGE, "0.0,4096.0,0.01,or_greater,suffix:m"), "set_distance_fade_begin", "get_distance_fade_begin");
@@ -504,6 +524,9 @@ void Light3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(PARAM_TRANSMITTANCE_BIAS);
 	BIND_ENUM_CONSTANT(PARAM_INTENSITY);
 	BIND_ENUM_CONSTANT(PARAM_CONTACT_SHADOW_BLUR);
+	// GodotNext: df_shadows (#214).
+	BIND_ENUM_CONSTANT(PARAM_DISTANCE_FIELD_SHADOW_START);
+	BIND_ENUM_CONSTANT(PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
 	BIND_ENUM_CONSTANT(PARAM_MAX);
 
 	BIND_ENUM_CONSTANT(BAKE_DISABLED);
@@ -566,6 +589,9 @@ Light3D::Light3D(RSE::LightType p_type) {
 	set_param(PARAM_TRANSMITTANCE_BIAS, 0.05);
 	set_param(PARAM_SHADOW_FADE_START, 1);
 	set_param(PARAM_CONTACT_SHADOW_BLUR, 1.0);
+	// GodotNext: df_shadows (#214).
+	set_param(PARAM_DISTANCE_FIELD_SHADOW_START, 0.0);
+	set_param(PARAM_DISTANCE_FIELD_SHADOW_DISTANCE, 0.0);
 	// For OmniLight3D and SpotLight3D, specified in Lumens.
 	set_param(PARAM_INTENSITY, 1000.0);
 	set_temperature(6500.0); // Nearly white.

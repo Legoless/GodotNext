@@ -330,6 +330,43 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	ProjectionStats last_projection;
 	uint64_t projection_views = 0;
 
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Per-view DF shadow light assignment
+	// and telemetry (works independently of whether VSM itself is active).
+public:
+	struct DFViewLight {
+		RID light_instance;
+		RSE::LightType type = RSE::LIGHT_DIRECTIONAL;
+		Vector3 position; // World space (local lights).
+		Vector3 direction; // World space (directional: toward light; spot/area: shine direction).
+		float range = 0.0f; // Local lights: light range; directional: max trace distance.
+		float source_radius = 0.0f; // Local: LIGHT_PARAM_SIZE (or area half-extent); directional: tan(half angular diameter).
+		float cos_spot_angle = -1.0f; // Spot lights only.
+		float handoff_start = 0.0f; // Directional handoff start (>0 = handoff, 0 = full DF).
+		float handoff_end = 0.0f; // Directional DF max distance.
+		bool full_df = false; // True for per-light DISTANCE_FIELD, false for directional handoff.
+	};
+	struct DFStats {
+		uint32_t lights_traced = 0;
+		uint32_t lights_dropped = 0;
+		uint32_t max_lights = DF_MAX_LIGHTS_PER_VIEW;
+		uint32_t global_sdf_levels = 0;
+		uint32_t sdf_instances = 0;
+		uint32_t half_width = 0;
+		uint32_t half_height = 0;
+		bool detail_refinement = false;
+		bool reused_nextgi_swrt = false;
+		uint64_t views = 0;
+	};
+
+private:
+	bool df_view_enabled = false;
+	uint32_t df_view_max_lights = DF_MAX_LIGHTS_PER_VIEW;
+	LocalVector<DFViewLight> df_view_lights;
+	uint32_t df_view_dropped = 0;
+	float df_view_max_distance = 0.0f;
+	HashMap<RID, float> df_view_handoff_starts;
+	DFStats last_df_stats;
+
 	bool _ensure_shader();
 	RID _shader(ShaderMode p_mode);
 
@@ -387,6 +424,16 @@ public:
 		}
 	}
 	bool get_view_samples() const { return view_samples; }
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Per-view DF shadow mask layer allocation.
+	void set_df_view_enabled(bool p_enabled, uint32_t p_max_lights = DF_MAX_LIGHTS_PER_VIEW);
+	bool get_df_view_enabled() const { return df_view_enabled; }
+	uint32_t assign_df_light(const DFViewLight &p_light);
+	const LocalVector<DFViewLight> &get_df_lights() const { return df_view_lights; }
+	uint32_t get_df_dropped_lights() const { return df_view_dropped; }
+	uint32_t get_df_view_max_lights() const { return df_view_max_lights; }
+	float get_df_max_distance() const { return df_view_max_distance; }
+	float get_df_handoff_start(RID p_light_instance) const;
+	void record_df_stats(const DFStats &p_stats);
 	// The view that samples the maps: its shadow-atlas passes kept and skipped, after update_light() ran for
 	// its lights; then its SMRT counts (set_projection_params()). get_debug_info() reports them as "projection".
 	void record_projection_view(uint32_t p_atlas_passes, uint32_t p_atlas_passes_skipped) {

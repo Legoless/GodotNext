@@ -18,6 +18,9 @@ if "RD_GLSL" in env["BUILDERS"]:
     env.Depends("vsm_raster_nextgeo.glsl.gen.h", nextgeo_includes)
     env.Depends("vsm_raster_nextgeo_mesh.glsl.gen.h", nextgeo_includes)
     env.Depends("vsm_raster_sw.glsl.gen.h", nextgeo_includes)
+    # GodotNext: df_shadows (#214). df_shadow.glsl includes PS global/mesh SDF trace headers from environment/.
+    env_includes = [str(f) for f in Glob("environment/*_inc.glsl")]
+    env.Depends("df_shadow.glsl.gen.h", env_includes)
 
     # compile include files
     for glsl_file in gl_include_files:

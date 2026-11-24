@@ -268,6 +268,9 @@ enum LightParam {
 	LIGHT_PARAM_TRANSMITTANCE_BIAS,
 	LIGHT_PARAM_INTENSITY,
 	LIGHT_PARAM_CONTACT_SHADOW_BLUR,
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7).
+	LIGHT_PARAM_DISTANCE_FIELD_SHADOW_START,
+	LIGHT_PARAM_DISTANCE_FIELD_SHADOW_DISTANCE,
 	LIGHT_PARAM_MAX,
 };
 
@@ -277,9 +280,10 @@ enum LightBakeMode {
 	LIGHT_BAKE_DYNAMIC,
 };
 
-// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). The per-light shadow method. PROJECT follows
-// rendering/lights_and_shadows/shadow_method; RAY_TRACED (#141) and DISTANCE_FIELD (#214) resolve to PROJECT,
-// with one warning, until their tasks land.
+// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1) and df_shadows (#214, contract S7). The per-light
+// shadow method. PROJECT follows rendering/lights_and_shadows/shadow_method; DISTANCE_FIELD traces through
+// the PS global SDF and mesh SDFs when enabled; RAY_TRACED (#141) resolves to PROJECT, with one warning,
+// until its task lands.
 enum LightShadowMethod {
 	LIGHT_SHADOW_METHOD_PROJECT,
 	LIGHT_SHADOW_METHOD_VIRTUAL,

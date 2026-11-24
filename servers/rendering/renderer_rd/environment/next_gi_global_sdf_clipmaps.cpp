@@ -192,12 +192,19 @@ void NextGIGlobalSDFClipmaps::invalidate_level(uint32_t p_level) {
 }
 
 NextGIGlobalSDFClipmaps::Stats NextGIGlobalSDFClipmaps::update(NextGIGlobalSDFGPU &r_field, const Vector<NextGIGlobalSDF::Instance> &p_instances, const Vector3 &p_camera, uint64_t p_frame, uint32_t p_levels) {
+	return update_range(r_field, p_instances, p_camera, p_frame, 0u, p_levels);
+}
+
+NextGIGlobalSDFClipmaps::Stats NextGIGlobalSDFClipmaps::update_range(NextGIGlobalSDFGPU &r_field, const Vector<NextGIGlobalSDF::Instance> &p_instances, const Vector3 &p_camera, uint64_t p_frame, uint32_t p_first_level, uint32_t p_levels) {
 	Stats stats;
 	const uint32_t count = MIN(p_levels, NextGIGlobalSDF::MAX_LEVELS);
+	if (p_first_level >= count) {
+		return stats;
+	}
 	Plan plan;
 	// Coarsest first: the coarse levels take few bricks and hold the fallback for a finer
 	// level's missing bricks.
-	for (uint32_t level = count; level-- > 0;) {
+	for (uint32_t level = count; level-- > p_first_level;) {
 		plan_level(level, p_camera, p_frame, plan);
 		if (!plan.update) {
 			continue;

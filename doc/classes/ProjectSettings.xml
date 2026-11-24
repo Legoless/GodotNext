@@ -3429,6 +3429,9 @@
 		<member name="rendering/lights_and_shadows/virtual_shadows/deferred_invalidation_budget" type="int" setter="" getter="" default="0">
 			Maximum number of kept, invalidated static virtual shadow map pages to re-render per frame in each view that marks virtual shadow map pages (with several such views, each one re-renders up to this many). [code]0[/code] disables the budget and re-renders every invalidated static page immediately. When greater than [code]0[/code], pages with the highest screen pixel coverage are re-rendered first and remaining invalidated pages keep their cached static depth until a later frame. Newly allocated and scrolled pages are never deferred.
 		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/df_max_lights" type="int" setter="" getter="" default="-1">
+			Maximum number of distance-field shadow mask layers traced per view (up to 8). Each directional light using distance-field far-shadow handoff and each light with [member Light3D.shadow_method] set to [constant Light3D.SHADOW_METHOD_DISTANCE_FIELD] uses one layer in the half-resolution R8 mask array. [code]-1[/code] selects the default for the active [member rendering/lights_and_shadows/virtual_shadows/quality] preset: 2 at Low, 4 at Medium, 8 at High and Epic. [code]0[/code] disables distance-field shadow tracing.
+		</member>
 		<member name="rendering/lights_and_shadows/virtual_shadows/max_physical_pages.epic" type="int" setter="" getter="" default="16384">
 			The physical pages in the virtual shadow map pool (32 KiB each) at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
 		</member>

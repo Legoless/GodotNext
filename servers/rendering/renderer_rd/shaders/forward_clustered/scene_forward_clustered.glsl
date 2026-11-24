@@ -3117,16 +3117,23 @@ void fragment_shader(in SceneData scene_data) {
 	m_var.xyz += normal_bias;
 
 #ifdef VSM_PROJECTION
-					// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). The light's virtual shadow maps
-					// replace its cascades; forward transparents take one coarse-page tap when translucent_quality == 0.
-					if (vsm_light_sampled(directional_lights.data[i].vsm_flags)) {
-						if (sc_use_vsm_coarse()) {
-							shadow = vsm_shadow_coarse_directional(vsm_projection.data.counts.x, directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), depth_z);
-						} else {
-							float vsm_size = clamp(directional_lights.data[i].size, 0.0, 1.0);
-							shadow = vsm_shadow_directional(directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), sqrt(vsm_size / (2.0 - vsm_size)), depth_z, vsm_pixel_noise());
-						}
-					} else if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
+					// GodotNext: vsm_projection (#222), vsm_fog_translucency (#215), df_shadows (#214). The light's virtual
+					// shadow maps replace its cascades (with coarse-page lookup on forward transparents when coarse mode is
+					// on); directional DF handoff blends from primary shadow (VSM/atlas) to the half-res DF mask across a
+					// 10% band ending at df_shadow_start, up to df_shadow_distance.
+					const uint dir_vsm_flags = directional_lights.data[i].vsm_flags;
+					const bool dir_df_sampled = df_light_sampled(dir_vsm_flags);
+					const bool dir_df_full = dir_df_sampled && df_light_full(dir_vsm_flags);
+					const float dir_df_blend = dir_df_full ? 1.0 : (dir_df_sampled ? df_directional_blend(depth_z, directional_lights.data[i].df_shadow_start, directional_lights.data[i].df_shadow_distance) : 0.0);
+					if (dir_df_blend < 0.999) {
+						if (vsm_light_sampled(dir_vsm_flags)) {
+							if (sc_use_vsm_coarse()) {
+								shadow = vsm_shadow_coarse_directional(vsm_projection.data.counts.x, directional_lights.data[i].vsm_map_base, dir_vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), depth_z);
+							} else {
+								float vsm_size = clamp(directional_lights.data[i].size, 0.0, 1.0);
+								shadow = vsm_shadow_directional(directional_lights.data[i].vsm_map_base, dir_vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), sqrt(vsm_size / (2.0 - vsm_size)), depth_z, vsm_pixel_noise());
+							}
+						} else if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
 #else
 				//version with soft shadows, more expensive
 				if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
@@ -3301,6 +3308,13 @@ void fragment_shader(in SceneData scene_data) {
 							shadow = mix(shadow, shadow2, pssm_blend);
 						}
 					}
+#ifdef VSM_PROJECTION
+					} // dir_df_blend < 0.999
+					if (dir_df_blend > 0.001) {
+						float df_shadow = df_shadow_upsample(df_light_layer(dir_vsm_flags), depth_z, geo_normal);
+						shadow = dir_df_blend >= 0.999 ? df_shadow : mix(shadow, df_shadow, dir_df_blend);
+					}
+#endif
 
 #ifdef USE_LIGHTMAP
 					if (shadowmask_mode == LIGHTMAP_SHADOWMASK_MODE_REPLACE) {

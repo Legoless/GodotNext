@@ -330,3 +330,35 @@ including property changes that recreate the primitive's render state. No source
 | Visibility ranges and HLOD | The directional caster collection records whether an instance's visibility range (or its HLOD parent) hid it; when that changes, the instance's cached bounds are invalidated in its layer, as hiding or showing it would, from the next frame on. Local lights do not apply visibility ranges to casters, as upstream's shadow atlas does not. | UE: adding or removing a caster invalidates. Before, a range swap left the hidden mesh's shadow in cached pages and the shown mesh's shadow only on new pages. |
 | Deferred budget per view | `deferred_invalidation_budget` applies in each view that marks pages (`MODE_DEFER_SCAN` takes it whole per view); the setting's description says so. | The pages a view accepts are counted on the GPU, so a per-frame budget across views would need a counter carried between views' passes; GV-3 and the PR-time checks use one view. |
 | GPU check | `virtual_shadow_maps_get_check_result()` also compares the invalidation pass with `invalidate_map_model()` and `invalidate_box_model()` (every entry, every page record's layer-1 flags, both counters), returns the CPU model's page counts (`invalidation.box_static_pages_model`: the model's count on the emitted boxes) and the boxes themselves (`invalidation.box_list`). `tests/vsm/caching.gd` checks that each actor frame's one box equals the actor's scripted swept bounds, which makes `box_static_pages_model` the analytic swept-bounds overlap for GV-4's actor line. | R7: the dynamic-if-used path now has CPU/GPU parity; the bound API is unchanged. |
+
+## Distance-field shadows (#214), 2026-11-23
+
+The code follows plan §21.3 (contract S7, distance-field half; GV-10), issue #214, #182's global SDF
+clipmaps (`NextGIGlobalSDF`, `NextGIGlobalSDFClipmaps`, `NextGIGlobalSDFGPU`), #185/#186's mesh SDF
+atlas and 2 m detail froxel grid (`NextGISWRTTrace`, `nextgi_sdf_trace_inc.glsl`), #218's non-Nanite
+VSM cull (`vsm_instance_cull.glsl`), #221's `Light3D.shadow_method` and tier-info surface, and #222's
+Forward+ light loop. No outside source, shader, paper, or SDK was consulted.
+
+### Provisional values (#214)
+
+They live in `servers/rendering/storage/virtual_shadow_map_storage.h`, and PQ (§22) measures and
+tunes them against GV-10.
+
+| Value | Provisional | Derivation |
+|---|---|---|
+| Mask resolution | Half internal resolution (`ceil(w/2) x ceil(h/2)`), `R8_UNORM` 2D array | Contract S7 / issue #214 step 1: one cone trace per half-res pixel per DF light, with a matching half-res `RGBA16F` view-normal + linear-depth guide for the 2 × 2 bilateral upsample. |
+| Max DF lights per view (`DF_MAX_LIGHTS_PER_VIEW`, `rendering/lights_and_shadows/virtual_shadows/df_max_lights`) | Preset Low / Medium / High / Epic = 2 / 4 / 8 / 8 (hard cap 8; `-1` follows preset) | Contract S7 / issue #214 step 1: max 8 layers per view, scalable by quality preset. |
+| Global SDF trace steps (`df_preset_max_steps`) | Low / Medium / High / Epic = 32 / 48 / 64 / 64 | Matches `NextGISWRTTrace::MAX_STEPS` (64) at High/Epic and scales down at Low/Medium. |
+| Directional handoff blend band (`DF_BLEND_BAND_FRACTION`) | 10% (`[0.9 * start, start]`) using cubic smoothstep | Contract S7 / issue #214 step 3: 10% blend band across the handoff so there is no visible seam between VSM/CSM and DF far shadows. |
+| Near-receiver mesh SDF refinement (`DF_DETAIL_METERS`) | 2.0 m | Issue #214 step 1 and `SWRT_DETAIL_METERS` (#186): refines the first 2 m from the receiver against per-mesh SDFs in the view's detail froxel grid before continuing in the global SDF. |
+| Minimum cone half-angle tangent (`DF_MIN_CONE_TAN`) | 0.004 (~0.23°) | Keeps point/zero-radius lights crisp without dividing by zero while letting `light_size` / `light_angular_distance` widen penumbras smoothly. |
+
+### Contract decisions (#214), 2026-11-23
+
+| Topic | Decision | Why |
+|---|---|---|
+| Half-res guide texture | `df_shadow.glsl` writes both `df_shadow_mask` (`R8_UNORM` 2D array) and `df_shadow_guide` (`RGBA16F` 2D: view-space unit normal + linear depth, layer 0 only) in `_pre_opaque_render()`. The forward color pass reads bindings 57–58 only. | Avoids any depth-buffer read/write hazard during the opaque color pass (where `depth_buffer` is `RB_TEX_BACK_DEPTH`) and works identically for opaque, transparent, and NextGeo compute shading bins. |
+| Global SDF coverage up to 2+ km | `NextGIGlobalSDFClipmaps::update_range()` populates levels 6–9 (up to `MAX_LEVELS = 10`, half-extent 3.28 km) on demand when `df_max_distance` exceeds level 5's ~200 m reach, reusing NextGI's `TIER_SOFTWARE` tracer when active or a standalone `NextGISWRTTrace` otherwise. | Reuses #182's existing 10-level brick pool and coarse bound buffer with zero extra work when DF shadows are off or short-range. |
+| Directional far-caster VSM drop | `LightStorage::update_light_buffers()` clamps the directional VSM `max_distance` to `distance_field_shadow_start` (keeping `fade_from`/`fade_to` extended to `distance_field_shadow_distance`), and `vsm_instance_cull.glsl` + `cull_box_dirty_pages()` drop non-Nanite casters whose world AABB nearest point to the camera exceeds `distance_field_shadow_start`, counting them in `VSM_CULL_STATE_DF_FAR_CULLED`. | Issue #214 step 3: drops far non-Nanite casters from directional VSM maps while keeping CPU/GPU cull parity in `get_vsm_raster_check_result()`. |
+| Tier rule & fallback | `evaluate_df_tier()` requires Forward+ with `rendering/global_illumination/mesh_sdf/generate` enabled and not dropped by HWRT (`keep_when_hwrt == false`). Reasons: `UNSUPPORTED_RENDERER`, `MESH_SDF_DISABLED`, `DROPPED_FOR_HWRT`. Exposed in `virtual_shadow_maps_get_tier_info()` (`df_available`, `df_reason`, `df_fallback_lines`, `df_max_lights`) and `Light3D::get_configuration_warnings()`. When unavailable, directional handoff is ignored so VSM/atlas continues to full distance, and `SHADOW_METHOD_DISTANCE_FIELD` falls back to `SHADOW_METHOD_PROJECT`. | Issue #214 step 5: clear inspector/debug reason and zero impact when DF shadows are off or unavailable. |
+| Self-shadowing guard | Soft cone visibility accumulates once the sample clears `2 * band` above the receiver's tangent plane and clamps the effective cone tangent to `max(0.5 * NdotL, DF_MIN_CONE_TAN)`, while hard interior hits (`surface_d <= 0`) still occlude immediately. | Guarantees an unobstructed flat receiver never self-shadows at grazing light angles or wide light radii while preserving crisp contact shadows. |

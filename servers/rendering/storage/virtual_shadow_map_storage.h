@@ -155,6 +155,25 @@ public:
 	// shadow atlas (vsm_shadow_directional() and vsm_shadow_local() in vsm_smrt_inc.glsl).
 	static constexpr uint32_t LIGHT_FLAGS_SAMPLE = 1u << 7;
 	static_assert((LIGHT_FLAGS_SAMPLE & (LIGHT_FLAGS_KIND_MASK | (LIGHT_FLAGS_COUNT_MASK << LIGHT_FLAGS_COUNT_SHIFT))) == 0, "LIGHT_FLAGS_SAMPLE must not overlap the kind and count bits.");
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Distance-field shadow flags packed into the
+	// unused upper bits of LightData::vsm_flags and DirectionalLightData::vsm_flags:
+	// - bit 8: the view's half-res R8 DF shadow mask array holds a layer for this light;
+	// - bit 9: the light uses DF shadows exclusively (per-light DISTANCE_FIELD); clear = directional handoff;
+	// - bits 12-15: layer index [0, DF_MAX_LIGHTS_PER_VIEW) in the DF shadow mask texture array.
+	static constexpr uint32_t LIGHT_FLAGS_DF_SAMPLE = 1u << 8;
+	static constexpr uint32_t LIGHT_FLAGS_DF_FULL = 1u << 9;
+	static constexpr uint32_t LIGHT_FLAGS_DF_LAYER_SHIFT = 12;
+	static constexpr uint32_t LIGHT_FLAGS_DF_LAYER_MASK = 0xFu;
+	static constexpr uint32_t DF_MAX_LIGHTS_PER_VIEW = 8;
+	static constexpr uint32_t DF_LAYER_NONE = 0xFFFFFFFFu;
+	static constexpr uint32_t df_pack_flags(uint32_t p_layer, bool p_full) {
+		return p_layer < DF_MAX_LIGHTS_PER_VIEW ? (LIGHT_FLAGS_DF_SAMPLE | (p_full ? LIGHT_FLAGS_DF_FULL : 0u) | ((p_layer & LIGHT_FLAGS_DF_LAYER_MASK) << LIGHT_FLAGS_DF_LAYER_SHIFT)) : 0u;
+	}
+	static constexpr uint32_t df_layer(uint32_t p_light_flags) {
+		return (p_light_flags >> LIGHT_FLAGS_DF_LAYER_SHIFT) & LIGHT_FLAGS_DF_LAYER_MASK;
+	}
+	static_assert((LIGHT_FLAGS_DF_SAMPLE & (LIGHT_FLAGS_SAMPLE | LIGHT_FLAGS_KIND_MASK | (LIGHT_FLAGS_COUNT_MASK << LIGHT_FLAGS_COUNT_SHIFT))) == 0, "DF flags must not overlap VSM flags.");
+	static_assert(DF_MAX_LIGHTS_PER_VIEW <= LIGHT_FLAGS_DF_LAYER_MASK + 1u, "DF layer index fits its 4-bit field.");
 	// The map of a light's clipmap level or face p_index, or MAP_NONE when the light has no maps or
 	// p_index is not below its map count. The CPU model of vsm_light_map() in
 	// vsm_page_table_inc.glsl: consumers never add an index to vsm_map_base themselves, since
@@ -661,8 +680,10 @@ public:
 
 	// CPU model of vsm_cull_box_dirty_pages() in vsm_instance_cull.glsl: emits the dirty-record indices
 	// of a light's maps whose page frustum and static/dynamic dirty layer touch p_box and pass the
-	// small-caster threshold p_min_texels.
-	static void cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled);
+	// small-caster threshold p_min_texels. GodotNext: df_shadows (#214): for directional maps when
+	// p_df_handoff_start > 0, non-Nanite casters whose closest point to p_camera_position exceeds
+	// p_df_handoff_start are dropped (counted in r_df_far_culled).
+	static void cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled, const Vector3 &p_camera_position = Vector3(), float p_df_handoff_start = 0.0f, uint32_t *r_df_far_culled = nullptr);
 
 	/* PRODUCT SURFACE (#221, plan §21.3.2 S1, budget V6) */
 
@@ -697,15 +718,78 @@ public:
 	// The one line printed when a light would use virtual shadow maps below the tier.
 	static String format_fallback_line(TierReason p_reason);
 
-	// What a light's shadow method resolves to: LIGHT_SHADOW_METHOD_VIRTUAL or LIGHT_SHADOW_METHOD_ATLAS.
-	// PROJECT takes p_project; RAY_TRACED (#141) and DISTANCE_FIELD (#214) are not implemented yet and take
-	// PROJECT; VIRTUAL without p_vsm_available takes ATLAS. Pure.
-	static RSE::LightShadowMethod resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available);
-	// Whether p_method resolves to VIRTUAL before the tier is applied (resolve_light_shadow_method() with VSM
-	// available).
-	static bool light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project);
+	// What a light's shadow method resolves to: LIGHT_SHADOW_METHOD_VIRTUAL, LIGHT_SHADOW_METHOD_ATLAS, or
+	// LIGHT_SHADOW_METHOD_DISTANCE_FIELD (#214). PROJECT takes p_project; RAY_TRACED (#141) is not
+	// implemented yet and takes PROJECT; DISTANCE_FIELD takes DISTANCE_FIELD when p_df_available is true and
+	// otherwise falls back to p_project; VIRTUAL without p_vsm_available takes ATLAS. Pure.
+	static RSE::LightShadowMethod resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available, bool p_df_available = false);
+	// Whether p_method resolves to VIRTUAL before the VSM tier is applied (resolve_light_shadow_method()
+	// with VSM available).
+	static bool light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_df_available = false);
 	static bool is_light_shadow_method_implemented(RSE::LightShadowMethod p_method);
 	static const char *get_light_shadow_method_name(RSE::LightShadowMethod p_method);
+
+	/* DISTANCE-FIELD SHADOWS (#214, plan §21.3 contract S7, GV-10) */
+
+	// Distance-field shadows trace through the PS global SDF (#182) refined with mesh SDFs (#185) within
+	// DF_DETAIL_METERS of the receiver, writing a half-res R8 mask array (at most DF_MAX_LIGHTS_PER_VIEW
+	// layers). Available only on Forward+ when PS mesh SDFs are enabled and not dropped for HWRT.
+	enum DFTierReason : uint32_t {
+		DF_TIER_REASON_NONE,
+		DF_TIER_REASON_UNSUPPORTED_RENDERER, // Mobile, Compatibility, or no Forward+ renderer.
+		DF_TIER_REASON_MESH_SDF_DISABLED, // rendering/global_illumination/mesh_sdf/generate is false.
+		DF_TIER_REASON_DROPPED_FOR_HWRT, // NextGI runs HWRT with mesh_sdf/keep_when_hwrt = false.
+		DF_TIER_REASON_MAX,
+	};
+	struct DFTierInputs {
+		bool forward_plus = false;
+		bool mesh_sdf_enabled = false;
+		bool nextgi_hwrt = false;
+		bool keep_when_hwrt = true;
+	};
+	static DFTierReason evaluate_df_tier(const DFTierInputs &p_inputs);
+	static const char *get_df_tier_reason_name(DFTierReason p_reason);
+	static String format_df_fallback_line(DFTierReason p_reason);
+	static void set_df_nextgi_hwrt(bool p_hwrt);
+	static DFTierReason get_df_tier_reason();
+	static bool is_df_available() { return get_df_tier_reason() == DF_TIER_REASON_NONE; }
+	static bool light_uses_df(RSE::LightShadowMethod p_method);
+	static bool report_df_fallback();
+	static uint32_t get_df_fallback_line_count();
+
+	static constexpr float DF_BLEND_BAND_FRACTION = 0.1f; // 10% blend band across the directional handoff.
+	static constexpr float DF_DETAIL_METERS = 2.0f; // Mesh SDF refinement distance from receiver.
+	static constexpr float DF_MIN_CONE_TAN = 0.004f; // Minimum cone half-angle tangent for crisp AA at size 0.
+	static constexpr uint32_t DF_MAX_STEPS = 64; // Default step budget for global SDF cone trace.
+	static const char *const SETTING_DF_MAX_LIGHTS;
+	static constexpr uint32_t df_preset_max_lights(PoolQuality p_quality) {
+		return p_quality == POOL_QUALITY_LOW ? 2u : (p_quality == POOL_QUALITY_MEDIUM ? 4u : DF_MAX_LIGHTS_PER_VIEW);
+	}
+	static constexpr uint32_t df_preset_max_steps(PoolQuality p_quality) {
+		return p_quality == POOL_QUALITY_LOW ? 32u : (p_quality == POOL_QUALITY_MEDIUM ? 48u : DF_MAX_STEPS);
+	}
+	static constexpr uint32_t df_effective_max_lights(int64_t p_setting, PoolQuality p_quality) {
+		const uint32_t preset = df_preset_max_lights(p_quality);
+		return p_setting < 0 ? preset : (p_setting > int64_t(DF_MAX_LIGHTS_PER_VIEW) ? DF_MAX_LIGHTS_PER_VIEW : uint32_t(p_setting));
+	}
+	static uint32_t df_read_max_lights(PoolQuality p_quality);
+
+	// Directional far-shadow handoff: returns the effective handoff start distance (> 0) when DF far
+	// shadows are active for a directional light, or 0 when disabled or unavailable. When p_start <= 0
+	// and p_distance > p_shadow_max_distance > 0, hands off at p_shadow_max_distance.
+	static float df_directional_handoff_start(float p_start, float p_distance, float p_shadow_max_distance, bool p_df_available);
+	// Smoothstep weight in [0, 1] across the 10% blend band [p_start * 0.9, p_start]: 0 = primary shadow
+	// (VSM/atlas), 1 = DF shadow mask. Pure CPU model of df_directional_blend() in scene_forward_lights_inc.glsl.
+	static float df_directional_blend(float p_depth, float p_start, float p_distance);
+	// True when a non-Nanite directional caster AABB lies completely beyond p_handoff_start from the camera.
+	static bool df_directional_caster_culled(const AABB &p_box, const Vector3 &p_camera_position, float p_handoff_start);
+	// Single-step one-sided soft-shadow cone visibility in [0, 1]. CPU model of df_shadow.glsl.
+	static float df_cone_visibility_step(float p_sdf, float p_t, float p_cone_tan, float p_min_radius);
+	// Analytic sphere occluder cone trace matching df_shadow.glsl's march and penumbra rule.
+	static float df_cone_trace_analytic_sphere(const Vector3 &p_origin, const Vector3 &p_dir, float p_tmax, float p_cone_tan, const Vector3 &p_sphere_center, float p_sphere_radius, uint32_t p_max_steps = DF_MAX_STEPS, float p_voxel_size = 0.1f);
+	// Depth- and normal-aware 2x2 bilateral upsample. CPU model of df_shadow_upsample() in
+	// scene_forward_lights_inc.glsl.
+	static float df_upsample_2x2(float p_depth, const Vector3 &p_normal, const Vector2 &p_frac, const float p_tap_mask[4], const float p_tap_depth[4], const Vector3 p_tap_normal[4]);
 
 	// The process-wide state the light storages and the scene cull read. The Forward+ storage sets it at
 	// startup (set_startup_state()); without one the tier reason is TIER_REASON_UNSUPPORTED_RENDERER.

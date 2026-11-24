@@ -1001,6 +1001,8 @@ public:
 
 		// GodotNext: nextgi_rt_feed
 		LocalVector<RendererSceneRender::NextGIRTInstance> nextgi_rt_instances;
+		// GodotNext: df_shadows (#214). Shadow-casting meshes/MultiMeshes for DF shadow global/mesh SDFs.
+		LocalVector<RendererSceneRender::NextGIRTInstance> df_sdf_instances;
 		LocalVector<NextGIFarSource> nextgi_far_sources;
 		LocalVector<AABB> nextgi_dirty_volumes;
 		LocalVector<AABB> nextgi_light_volumes;
@@ -1032,6 +1034,7 @@ public:
 
 			// GodotNext: nextgi_rt_feed
 			nextgi_rt_instances.clear();
+			df_sdf_instances.clear();
 			nextgi_far_sources.clear();
 			nextgi_dirty_volumes.clear();
 			nextgi_light_volumes.clear();
@@ -1064,6 +1067,7 @@ public:
 
 			// GodotNext: nextgi_rt_feed
 			nextgi_rt_instances.clear();
+			df_sdf_instances.clear();
 			nextgi_far_sources.clear();
 			nextgi_dirty_volumes.clear();
 			nextgi_light_volumes.clear();
@@ -1098,6 +1102,9 @@ public:
 			// GodotNext: nextgi_rt_feed
 			for (const RendererSceneRender::NextGIRTInstance &instance : p_cull_result.nextgi_rt_instances) {
 				nextgi_rt_instances.push_back(instance);
+			}
+			for (const RendererSceneRender::NextGIRTInstance &instance : p_cull_result.df_sdf_instances) {
+				df_sdf_instances.push_back(instance);
 			}
 		}
 

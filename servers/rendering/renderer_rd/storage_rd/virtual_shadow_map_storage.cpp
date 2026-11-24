@@ -434,11 +434,53 @@ bool VirtualShadowMapStorage::_pool_resize(uint32_t p_page_count) {
 
 void VirtualShadowMapStorage::begin_light_update() {
 	view_directional.clear();
+	// GodotNext: df_shadows (#214). Reset per-view DF shadow assignments before update_light_buffers() populates them.
+	df_view_lights.clear();
+	df_view_dropped = 0;
+	df_view_max_distance = 0.0f;
+	df_view_handoff_starts.clear();
 	// GodotNext: vsm_settings_debug (#221).
 	if (active) {
 		_update_scalability();
 		_record_frame_stats(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0, false);
 	}
+}
+
+void VirtualShadowMapStorage::set_df_view_enabled(bool p_enabled, uint32_t p_max_lights) {
+	df_view_enabled = p_enabled;
+	df_view_max_lights = MIN(p_max_lights, DF_MAX_LIGHTS_PER_VIEW);
+}
+
+uint32_t VirtualShadowMapStorage::assign_df_light(const DFViewLight &p_light) {
+	if (!df_view_enabled) {
+		return DF_LAYER_NONE;
+	}
+	if (df_view_lights.size() >= df_view_max_lights) {
+		df_view_dropped++;
+		return DF_LAYER_NONE;
+	}
+	const uint32_t layer = df_view_lights.size();
+	df_view_lights.push_back(p_light);
+	if (p_light.type == RSE::LIGHT_DIRECTIONAL) {
+		df_view_max_distance = MAX(df_view_max_distance, p_light.handoff_end);
+		if (!p_light.full_df && p_light.handoff_start > 0.0f && p_light.light_instance.is_valid()) {
+			df_view_handoff_starts[p_light.light_instance] = p_light.handoff_start;
+		}
+	} else {
+		df_view_max_distance = MAX(df_view_max_distance, p_light.range);
+	}
+	return layer;
+}
+
+float VirtualShadowMapStorage::get_df_handoff_start(RID p_light_instance) const {
+	const float *found = df_view_handoff_starts.getptr(p_light_instance);
+	return found != nullptr ? *found : 0.0f;
+}
+
+void VirtualShadowMapStorage::record_df_stats(const DFStats &p_stats) {
+	const uint64_t prev_views = last_df_stats.views;
+	last_df_stats = p_stats;
+	last_df_stats.views = prev_views + (p_stats.lights_traced > 0 ? 1u : 0u);
 }
 
 void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpdate &p_light, uint32_t &r_map_base, uint32_t &r_flags) {
@@ -627,6 +669,23 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 		projection["view_missing_coarse_pages_translucent"] = int64_t(miss_translucent_view);
 		projection["view_missing_coarse_pages"] = int64_t(miss_fog_view + miss_translucent_view);
 		info["projection"] = projection;
+	}
+	// GodotNext: df_shadows (#214, plan §21.3 contract S7). Distance-field shadows status and last-view telemetry.
+	{
+		const DFTierReason df_reason = get_df_tier_reason();
+		Dictionary df;
+		df["available"] = df_reason == DF_TIER_REASON_NONE;
+		df["reason"] = String(get_df_tier_reason_name(df_reason));
+		df["lights_traced"] = int64_t(last_df_stats.lights_traced);
+		df["lights_dropped"] = int64_t(last_df_stats.lights_dropped);
+		df["max_lights"] = int64_t(last_df_stats.max_lights);
+		df["global_sdf_levels"] = int64_t(last_df_stats.global_sdf_levels);
+		df["sdf_instances"] = int64_t(last_df_stats.sdf_instances);
+		df["half_size"] = Vector2i(int32_t(last_df_stats.half_width), int32_t(last_df_stats.half_height));
+		df["detail_refinement"] = last_df_stats.detail_refinement;
+		df["reused_nextgi_swrt"] = last_df_stats.reused_nextgi_swrt;
+		df["views"] = int64_t(last_df_stats.views);
+		info["df_shadows"] = df;
 	}
 	if (state_buffer.is_valid() && RD::get_singleton() != nullptr) {
 		const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(state_buffer, 0, STATE_SIZE * uint32_t(sizeof(uint32_t)));

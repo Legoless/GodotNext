@@ -191,6 +191,12 @@ bool sc_use_vsm_coarse() {
 	return ((sc_packed_1() >> 12) & 1U) != 0;
 }
 
+// GodotNext: df_shadows (#214). The view's light loop samples the half-res R8 DF shadow mask array for
+// lights whose vsm_flags carry VSM_LIGHT_FLAGS_DF_SAMPLE.
+bool sc_use_df_shadows() {
+	return ((sc_packed_1() >> 13) & 1U) != 0;
+}
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
@@ -625,6 +631,10 @@ layout(set = 1, binding = 57, std430) buffer restrict VSMCoarseMiss {
 }
 vsm_coarse_miss;
 #endif
+// GodotNext: df_shadows (#214, plan §21.3 contract S7). Half-res R8 DF shadow mask array (1 layer per DF light,
+// max 8) and its matching half-res view-space normal + linear-depth guide written by df_shadow.glsl.
+layout(set = 1, binding = 58) uniform texture2DArray df_shadow_mask;
+layout(set = 1, binding = 59) uniform texture2D df_shadow_guide;
 
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #define VSM_PROJECTION
