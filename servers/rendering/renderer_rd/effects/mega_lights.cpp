@@ -149,6 +149,8 @@ static uint32_t ml_xorshift32_from_u64(uint64_t &r_state) {
 	return uint32_t(z >> 32);
 }
 
+static SafeNumeric<uint64_t> ml_total_allocated_bytes;
+
 static void ml_free_rid(RD *p_rd, RID &r_rid) {
 	if (p_rd != nullptr && r_rid.is_valid()) {
 		p_rd->free_rid(r_rid);
@@ -204,6 +206,16 @@ MegaLightsViewData::MegaLightsViewData() {
 	denoise_readback->pending.clear();
 }
 
+void MegaLightsViewData::_update_memory_accounting() {
+	const uint64_t next_total = sampling_bytes + visibility_bytes + retrace_bytes + shade_bytes + denoise_bytes + denoise_debug_bytes + reference_bytes + verify_bytes + transient_bytes;
+	if (next_total >= tracked_total_bytes) {
+		ml_total_allocated_bytes.add(next_total - tracked_total_bytes);
+	} else {
+		ml_total_allocated_bytes.sub(tracked_total_bytes - next_total);
+	}
+	tracked_total_bytes = next_total;
+}
+
 void MegaLightsViewData::_free_sampling_buffers() {
 	RD *rd = RD::get_singleton();
 	ml_free_rid(rd, sample_buffer);
@@ -216,6 +228,8 @@ void MegaLightsViewData::_free_sampling_buffers() {
 	samples_per_pixel = 0;
 	guiding_write_index = 0;
 	guiding_has_history = false;
+	sampling_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_visibility_buffers() {
@@ -229,6 +243,9 @@ void MegaLightsViewData::_free_visibility_buffers() {
 	ml_free_rid(rd, vis_sample_ray_map_buffer);
 	vis_list_capacity = 0;
 	ml_free_rid(rd, vis_retrace_buffer);
+	visibility_bytes = 0;
+	retrace_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_shade_buffers() {
@@ -242,6 +259,8 @@ void MegaLightsViewData::_free_shade_buffers() {
 	shade_full_size = Size2i();
 	denoise_output_diffuse = RID();
 	denoise_output_specular = RID();
+	shade_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_denoise_buffers() {
@@ -267,12 +286,16 @@ void MegaLightsViewData::_free_denoise_buffers() {
 	denoise_has_cam_transform = false;
 	denoise_output_diffuse = RID();
 	denoise_output_specular = RID();
+	denoise_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_denoise_debug_texture() {
 	RD *rd = RD::get_singleton();
 	ml_free_rid(rd, denoise_debug_texture);
 	denoise_debug_size = Size2i();
+	denoise_debug_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_reference_buffers() {
@@ -281,6 +304,8 @@ void MegaLightsViewData::_free_reference_buffers() {
 	reference_accum_size = Size2i();
 	reference_frame_count = 0;
 	reference_camera_hash = 0;
+	reference_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_verify_buffers() {
@@ -288,6 +313,8 @@ void MegaLightsViewData::_free_verify_buffers() {
 	ml_free_rid(rd, verify_accum_texture);
 	ml_free_rid(rd, verify_counts_buffer);
 	verify_size = Size2i();
+	verify_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::_free_transient_buffers() {
@@ -297,6 +324,8 @@ void MegaLightsViewData::_free_transient_buffers() {
 	layer_group_capacity = 0;
 	ml_free_rid(rd, light_shadow_policy_buffer);
 	light_shadow_policy_capacity = 0;
+	transient_bytes = 0;
+	_update_memory_accounting();
 }
 
 void MegaLightsViewData::configure(RenderSceneBuffersRD *p_render_buffers) {
@@ -397,6 +426,9 @@ bool MegaLightsViewData::ensure_sampling_buffers(const Size2i &p_internal_size, 
 	rd->buffer_clear(guiding_buffers[1], 0, guiding_bytes);
 	guiding_write_index = 0;
 	guiding_has_history = false;
+	sampling_bytes = uint64_t(sample_bytes) + uint64_t(vis_bytes) + 2ull * uint64_t(guiding_bytes) + total_samples * 2ull;
+	transient_bytes = (params_ubo.is_valid() ? sizeof(MegaLights::ParamsUBO) : 0ull) + uint64_t(layer_group_capacity) * sizeof(uint32_t) + uint64_t(light_shadow_policy_capacity) * 4ull * sizeof(uint32_t);
+	_update_memory_accounting();
 	return true;
 }
 
@@ -438,6 +470,8 @@ bool MegaLightsViewData::ensure_visibility_buffers(uint32_t p_total_samples) {
 	vis_vsm_list_buffer = rd->storage_buffer_create(vis_list_capacity * sizeof(uint32_t));
 	vis_sample_ray_map_buffer = rd->storage_buffer_create(vis_list_capacity * sizeof(uint32_t));
 	ERR_FAIL_COND_V(!vis_ray_list_buffer.is_valid() || !vis_vsm_list_buffer.is_valid() || !vis_sample_ray_map_buffer.is_valid(), false);
+	visibility_bytes = sizeof(MegaLights::VisParamsUBO) + 8ull * sizeof(uint32_t) + 8ull * sizeof(uint32_t) + sizeof(MegaLights::VisVSMProjectionParams) + uint64_t(vis_list_capacity) * 4ull * sizeof(uint32_t);
+	_update_memory_accounting();
 	return true;
 }
 
@@ -452,6 +486,8 @@ bool MegaLightsViewData::ensure_retrace_buffer() {
 	ERR_FAIL_COND_V(!vis_retrace_buffer.is_valid(), false);
 	const uint32_t header[4] = { 0u, 0u, 0u, 0u };
 	rd->buffer_update(vis_retrace_buffer, 0, sizeof(header), header);
+	retrace_bytes = bytes;
+	_update_memory_accounting();
 	return true;
 }
 
@@ -494,6 +530,10 @@ bool MegaLightsViewData::ensure_shade_buffers(const Size2i &p_internal_size, con
 		ml_free_rid(rd, shade_sample_specular);
 		shade_sample_size = Size2i();
 	}
+	const uint64_t full_px = uint64_t(MAX(shade_full_size.x, 0)) * uint64_t(MAX(shade_full_size.y, 0));
+	const uint64_t sample_px = uint64_t(MAX(shade_sample_size.x, 0)) * uint64_t(MAX(shade_sample_size.y, 0));
+	shade_bytes = sizeof(NextGIDenoise::MegaLightsDenoiseParamsGPU) + 2ull * full_px * 8ull + 2ull * sample_px * 8ull;
+	_update_memory_accounting();
 	return true;
 }
 
@@ -568,6 +608,10 @@ bool MegaLightsViewData::ensure_denoise_buffers(const Size2i &p_internal_size, b
 	denoise_history_index = 0;
 	denoise_has_history = false;
 	denoise_has_cam_transform = false;
+	const uint64_t px = uint64_t(p_internal_size.x) * uint64_t(p_internal_size.y);
+	// 9 RGBA16F textures (2*diff, 2*spec, 2*moments, scratch diff/spec, prev_depth_normal) + 2 R32U history_len + stats + reset mask.
+	denoise_bytes = 9ull * px * 8ull + 2ull * px * 4ull + 4ull * sizeof(uint32_t) + uint64_t(reset_bytes);
+	_update_memory_accounting();
 	return true;
 }
 
@@ -585,6 +629,8 @@ bool MegaLightsViewData::ensure_denoise_debug_texture(const Size2i &p_internal_s
 	ERR_FAIL_COND_V(!denoise_debug_texture.is_valid(), false);
 	rd->texture_clear(denoise_debug_texture, Color(0, 0, 0, 1), 0, 1, 0, 1);
 	denoise_debug_size = p_internal_size;
+	denoise_debug_bytes = uint64_t(p_internal_size.x) * uint64_t(p_internal_size.y) * 8ull;
+	_update_memory_accounting();
 	return true;
 }
 
@@ -617,6 +663,9 @@ bool MegaLightsViewData::ensure_reference_buffers(const Size2i &p_internal_size)
 	reference_accum_size = p_internal_size;
 	reference_frame_count = 0;
 	reference_camera_hash = 0;
+	reference_bytes = uint64_t(p_internal_size.x) * uint64_t(p_internal_size.y) * 16ull;
+	transient_bytes = (params_ubo.is_valid() ? sizeof(MegaLights::ParamsUBO) : 0ull) + uint64_t(layer_group_capacity) * sizeof(uint32_t) + uint64_t(light_shadow_policy_capacity) * 4ull * sizeof(uint32_t);
+	_update_memory_accounting();
 	return true;
 }
 
@@ -646,6 +695,8 @@ bool MegaLightsViewData::ensure_verify_buffers(const Size2i &p_internal_size) {
 	rd->texture_clear(verify_accum_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	rd->buffer_clear(verify_counts_buffer, 0, count_bytes);
 	verify_size = p_internal_size;
+	verify_bytes = uint64_t(p_internal_size.x) * uint64_t(p_internal_size.y) * 16ull + uint64_t(count_bytes);
+	_update_memory_accounting();
 	return true;
 }
 
@@ -659,6 +710,8 @@ bool MegaLightsViewData::ensure_layer_group_buffer(uint32_t p_count) {
 	ml_free_rid(rd, layer_group_buffer);
 	layer_group_capacity = MAX(required, 256u);
 	layer_group_buffer = rd->storage_buffer_create(layer_group_capacity * sizeof(uint32_t));
+	transient_bytes = (params_ubo.is_valid() ? sizeof(MegaLights::ParamsUBO) : 0ull) + uint64_t(layer_group_capacity) * sizeof(uint32_t) + uint64_t(light_shadow_policy_capacity) * 4ull * sizeof(uint32_t);
+	_update_memory_accounting();
 	return layer_group_buffer.is_valid();
 }
 
@@ -672,6 +725,8 @@ bool MegaLightsViewData::ensure_light_shadow_policy_buffer(uint32_t p_count) {
 	ml_free_rid(rd, light_shadow_policy_buffer);
 	light_shadow_policy_capacity = MAX(required * 2u, 64u);
 	light_shadow_policy_buffer = rd->storage_buffer_create(light_shadow_policy_capacity * 4u * sizeof(uint32_t));
+	transient_bytes = (params_ubo.is_valid() ? sizeof(MegaLights::ParamsUBO) : 0ull) + uint64_t(layer_group_capacity) * sizeof(uint32_t) + uint64_t(light_shadow_policy_capacity) * 4ull * sizeof(uint32_t);
+	_update_memory_accounting();
 	return light_shadow_policy_buffer.is_valid();
 }
 
@@ -763,15 +818,78 @@ void MegaLightsViewData::advance_guiding_history() {
 
 /* MegaLights Pure Device-Free Helpers */
 
+bool MegaLights::is_enabled() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	return ps != nullptr && ps->has_setting(SETTING_ENABLED) && bool(ps->get_setting(SETTING_ENABLED));
+}
+
+bool MegaLights::effective_directional_lights() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const bool setting_on = ps != nullptr && ps->has_setting(SETTING_DIRECTIONAL_LIGHTS) && bool(ps->get_setting(SETTING_DIRECTIONAL_LIGHTS));
+	return setting_on || check_wants_directional_lights();
+}
+
+int MegaLights::read_nextgi_quality_level() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	NextGI::Quality setting = NextGI::QUALITY_AUTO;
+	if (ps != nullptr && ps->has_setting("rendering/global_illumination/nextgi/quality")) {
+		setting = NextGI::Quality(CLAMP(int(ps->get_setting("rendering/global_illumination/nextgi/quality")), 0, NextGI::QUALITY_MAX - 1));
+	}
+	return int(NextGI::resolve_quality(setting));
+}
+
+MegaLights::DownsampleMode MegaLights::downsample_for_quality_preset(int p_quality_level) {
+	// Low (0), Medium (1), High (2) use half-res 2x2 rotating downsample; Epic (3) uses full resolution.
+	return p_quality_level >= 3 ? DOWNSAMPLE_FULL : DOWNSAMPLE_HALF;
+}
+
+MegaLights::QualityPreset MegaLights::quality_preset_for_level(int p_quality_level) {
+	QualityPreset preset;
+	preset.samples_per_pixel = samples_for_quality_preset(p_quality_level);
+	preset.downsample = downsample_for_quality_preset(p_quality_level);
+	preset.screen_trace_steps = screen_trace_steps_for_quality(p_quality_level);
+	return preset;
+}
+
+bool MegaLights::light_uses_megalights(bool p_megalights_active, RSE::LightMegaLightsMode p_mode, RSE::LightType p_type, bool p_directional_lights_enabled) {
+	if (!p_megalights_active) {
+		return false;
+	}
+	if (p_mode == RSE::LIGHT_MEGALIGHTS_DISALLOW) {
+		return false;
+	}
+	if (p_mode == RSE::LIGHT_MEGALIGHTS_ALLOW) {
+		return true;
+	}
+	if (p_type == RSE::LIGHT_DIRECTIONAL) {
+		return p_directional_lights_enabled;
+	}
+	return true;
+}
+
+uint64_t MegaLights::get_total_allocated_bytes() {
+	return ml_total_allocated_bytes.get();
+}
+
 MegaLights::DownsampleMode MegaLights::parse_downsample_variant(const Variant &p_value) {
 	if (p_value.get_type() == Variant::STRING || p_value.get_type() == Variant::STRING_NAME) {
 		const String s = String(p_value).to_lower().strip_edges();
 		if (s == "full" || s == "0") {
 			return DOWNSAMPLE_FULL;
 		}
+		if (s == "auto" || s == "2") {
+			return DOWNSAMPLE_AUTO;
+		}
 		return DOWNSAMPLE_HALF;
 	}
-	return int(p_value) == int(DOWNSAMPLE_FULL) ? DOWNSAMPLE_FULL : DOWNSAMPLE_HALF;
+	const int v = int(p_value);
+	if (v == int(DOWNSAMPLE_FULL)) {
+		return DOWNSAMPLE_FULL;
+	}
+	if (v == int(DOWNSAMPLE_AUTO)) {
+		return DOWNSAMPLE_AUTO;
+	}
+	return DOWNSAMPLE_HALF;
 }
 
 MegaLights::DenoiserMode MegaLights::parse_denoiser_variant(const Variant &p_value) {
@@ -802,6 +920,7 @@ MegaLights::Settings MegaLights::validate_settings(const Settings &p_settings) {
 	Settings out = p_settings;
 	out.samples_per_pixel = CLAMP(out.samples_per_pixel, MIN_SAMPLES_PER_PIXEL, MAX_SAMPLES_PER_PIXEL);
 	out.downsample = out.downsample == DOWNSAMPLE_FULL ? DOWNSAMPLE_FULL : DOWNSAMPLE_HALF;
+	out.screen_trace_steps = CLAMP(out.screen_trace_steps, 1u, 64u);
 	out.denoiser = out.denoiser == DENOISER_RR_BYPASS ? DENOISER_RR_BYPASS : DENOISER_BUILTIN;
 	if (!Math::is_finite(out.falloff_cull_threshold) || out.falloff_cull_threshold < 0.0f) {
 		out.falloff_cull_threshold = DEFAULT_FALLOFF_CULL_THRESHOLD;
@@ -816,15 +935,24 @@ MegaLights::Settings MegaLights::validate_settings(const Settings &p_settings) {
 
 MegaLights::Settings MegaLights::read_settings() {
 	Settings s;
+	const QualityPreset preset = quality_preset_for_level(read_nextgi_quality_level());
+	s.samples_per_pixel = preset.samples_per_pixel;
+	s.downsample = preset.downsample;
+	s.screen_trace_steps = preset.screen_trace_steps;
 	ProjectSettings *ps = ProjectSettings::get_singleton();
 	if (ps == nullptr) {
-		return s;
+		return validate_settings(s);
+	}
+	if (ps->has_setting(SETTING_ENABLED)) {
+		s.enabled = bool(ps->get_setting(SETTING_ENABLED));
 	}
 	if (ps->has_setting(SETTING_SAMPLES_PER_PIXEL)) {
-		s.samples_per_pixel = uint32_t(MAX(int(ps->get_setting(SETTING_SAMPLES_PER_PIXEL)), 1));
+		const int raw_spp = int(ps->get_setting(SETTING_SAMPLES_PER_PIXEL));
+		s.samples_per_pixel = raw_spp <= 0 ? preset.samples_per_pixel : uint32_t(raw_spp);
 	}
 	if (ps->has_setting(SETTING_DOWNSAMPLE)) {
-		s.downsample = parse_downsample_variant(ps->get_setting(SETTING_DOWNSAMPLE));
+		const DownsampleMode raw_ds = parse_downsample_variant(ps->get_setting(SETTING_DOWNSAMPLE));
+		s.downsample = (raw_ds == DOWNSAMPLE_AUTO) ? preset.downsample : raw_ds;
 	}
 	if (ps->has_setting(SETTING_DIRECTIONAL_LIGHTS)) {
 		s.directional_lights = bool(ps->get_setting(SETTING_DIRECTIONAL_LIGHTS));
@@ -1229,6 +1357,8 @@ MegaLights::TierStatus MegaLights::resolve_visibility_tier(const TierInputs &p_i
 		st.tier = VISIBILITY_TIER_DISABLED;
 		st.tier_name = "UNAVAILABLE";
 		st.backend = "none";
+		st.status_label = "Unavailable";
+		st.status_warning = "MegaLights is unavailable in Mobile and Compatibility renderers; switch to the Forward+ renderer.";
 		st.reason = "UNSUPPORTED_RENDERER";
 		return st;
 	}
@@ -1243,6 +1373,8 @@ MegaLights::TierStatus MegaLights::resolve_visibility_tier(const TierInputs &p_i
 				st.far_field_supported = p_inputs.far_field_requested;
 				st.tier_name = "HWRT_INLINE_ONLY";
 				st.backend = "metal_ray_query";
+				st.status_label = "Experimental";
+				st.status_warning = "Experimental on Apple M2+ (inline ray query only).";
 				st.experimental_label = "Experimental (Apple M2+ inline ray query only)";
 				st.reason = "METAL_INLINE_RAY_QUERY_EXPERIMENTAL";
 				return st;
@@ -1255,6 +1387,8 @@ MegaLights::TierStatus MegaLights::resolve_visibility_tier(const TierInputs &p_i
 			st.far_field_supported = p_inputs.far_field_requested;
 			st.tier_name = "HWRT";
 			st.backend = "hwrt_ray_query";
+			st.status_label = "Production";
+			st.status_warning = "";
 			st.reason = "HWRT_RAY_QUERY_AVAILABLE";
 			return st;
 		}
@@ -1265,6 +1399,8 @@ MegaLights::TierStatus MegaLights::resolve_visibility_tier(const TierInputs &p_i
 		st.swrt_extension = true;
 		st.tier_name = "SWRT_EXTENSION";
 		st.backend = "swrt_global_sdf";
+		st.status_label = "Extension";
+		st.status_warning = "Using non-RT SWRT global SDF continuation extension (hardware ray tracing recommended).";
 		st.experimental_label = "Extension (SWRT global SDF continuation)";
 		st.reason = "NON_RT_SWRT_CONTINUATION_EXTENSION";
 		return st;
@@ -1273,6 +1409,8 @@ MegaLights::TierStatus MegaLights::resolve_visibility_tier(const TierInputs &p_i
 	st.tier = VISIBILITY_TIER_SCREEN_ONLY;
 	st.tier_name = "SCREEN_ONLY";
 	st.backend = "screen_trace";
+	st.status_label = "Screen-Trace Fallback";
+	st.status_warning = "Hardware ray tracing is disabled or unavailable; MegaLights shadows use screen-space traces only. Enable NextGI hardware ray tracing for full MegaLights shadows.";
 	st.reason = p_inputs.swrt_continuation_requested ? "SWRT_SDF_UNAVAILABLE" : "NO_HWRT_RAY_QUERY";
 	return st;
 }
@@ -1281,7 +1419,8 @@ Dictionary MegaLights::get_tier_info() {
 	TierInputs in;
 	RD *rd = RD::get_singleton();
 	const Settings s = read_settings();
-	in.forward_plus = rd != nullptr;
+	const String method = OS::get_singleton() != nullptr ? OS::get_singleton()->get_current_rendering_method() : String();
+	in.forward_plus = (rd != nullptr) && (method.is_empty() || method == "forward_plus");
 	in.screen_traces_enabled = s.screen_traces;
 	in.far_field_requested = s.far_field;
 	in.swrt_continuation_requested = s.swrt_continuation;
@@ -1303,8 +1442,11 @@ Dictionary MegaLights::get_tier_info() {
 
 	const TierStatus st = resolve_visibility_tier(in);
 	Dictionary info;
+	info["enabled"] = s.enabled;
 	info["tier"] = String(st.tier_name);
 	info["backend"] = String(st.backend);
+	info["status_label"] = String(st.status_label);
+	info["status_warning"] = String(st.status_warning);
 	info["experimental"] = st.experimental;
 	info["experimental_label"] = String(st.experimental_label);
 	info["inline_ray_query_only"] = st.inline_ray_query_only;
@@ -1314,6 +1456,11 @@ Dictionary MegaLights::get_tier_info() {
 	info["screen_traces_enabled"] = in.screen_traces_enabled;
 	info["distant_screen_traces_length"] = double(s.distant_screen_traces_length);
 	info["vsm_supported"] = st.vsm_supported;
+	info["quality_level"] = read_nextgi_quality_level();
+	info["samples_per_pixel"] = int(s.samples_per_pixel);
+	info["downsample"] = (s.downsample == DOWNSAMPLE_FULL) ? String("full") : String("half");
+	info["screen_trace_steps"] = int(s.screen_trace_steps);
+	info["memory_bytes"] = int64_t(get_total_allocated_bytes());
 	info["denoiser"] = (s.denoiser == DENOISER_RR_BYPASS) ? String("rr_bypass") : String("builtin");
 	info["rr_bypass"] = (s.denoiser == DENOISER_RR_BYPASS);
 	info["reason"] = String(st.reason);
@@ -1535,6 +1682,12 @@ bool MegaLights::check_wants_swrt() {
 	MegaLightsCheckState &st = ml_check_state();
 	MutexLock lock(st.mutex);
 	return st.active && bool(st.options.get("swrt", false));
+}
+
+bool MegaLights::check_wants_directional_lights() {
+	MegaLightsCheckState &st = ml_check_state();
+	MutexLock lock(st.mutex);
+	return st.active && bool(st.options.get("directional_lights", false));
 }
 
 Dictionary MegaLights::get_check_result() {
@@ -2305,8 +2458,9 @@ void MegaLights::_dispatch_visibility_chain(const FrameInputs &p_inputs, const R
 	NextGIFarField *far_field = (hwrt_ready && want_far_field && rt_scene != nullptr) ? rt_scene->get_far_field() : nullptr;
 	const bool use_far_field = far_field != nullptr && far_field->is_trace_ready() && far_field->get_tlas().is_valid();
 
-	// Upload per-light shadow policies (with VSM routing flag when VSM is active & allowed).
-	_upload_light_shadow_policies(p_inputs, p_view, p_settings.directional_lights, vsm_buffers_ready);
+	// Upload per-light shadow policies for all local and directional lights (so per-light
+	// Light3D.megalights == ALLOW directional lights get policies even when directional_lights == false).
+	_upload_light_shadow_policies(p_inputs, p_view, true, vsm_buffers_ready);
 
 	// Fill MLVisParams UBO.
 	const Projection depth_proj = NextGIViewMath::depth_projection(scene_data->cam_projection, p_inputs.flip_y, scene_data->taa_jitter);
@@ -2355,7 +2509,7 @@ void MegaLights::_dispatch_visibility_chain(const FrameInputs &p_inputs, const R
 	ubo.light_counts[0] = light_storage->get_omni_light_count();
 	ubo.light_counts[1] = light_storage->get_spot_light_count();
 	ubo.light_counts[2] = light_storage->get_area_light_count();
-	ubo.light_counts[3] = p_settings.directional_lights ? rd_data->directional_light_count : 0u;
+	ubo.light_counts[3] = rd_data->directional_light_count;
 
 	const float dist_len = p_settings.distant_screen_traces_length;
 	const float near_len = MIN(DEFAULT_NEAR_SCREEN_TRACE_LENGTH, dist_len);
@@ -3090,7 +3244,7 @@ void MegaLights::render_reference(const FrameInputs &p_inputs, Ref<RenderSceneBu
 		next_n = 1u;
 	}
 	_upload_layer_group_masks(view);
-	_upload_light_shadow_policies(p_inputs, view, settings.directional_lights);
+	_upload_light_shadow_policies(p_inputs, view, true);
 	// Reference mode uses falloff threshold 0.0 for unbiased exhaustive shading.
 	_dispatch_reference_rt(p_inputs, view, settings, next_n - 1u, next_n, p_force_visible_one, 0.0f);
 	view->set_reference_state(next_n, cam_hash);
@@ -3289,7 +3443,7 @@ Dictionary MegaLights::_run_check(const FrameInputs &p_inputs, const Ref<MegaLig
 			p_view->reset_reference();
 		}
 
-		_upload_light_shadow_policies(p_inputs, p_view, cfg.directional_lights);
+		_upload_light_shadow_policies(p_inputs, p_view, true);
 
 		uint32_t target_after_batch = MIN(st.completed_steps + steps_per_frame, st.total_steps);
 		if (!st.checkpoint_recorded && st.completed_steps < checkpoint && target_after_batch > checkpoint) {
@@ -4008,7 +4162,7 @@ Dictionary MegaLights::_run_check(const FrameInputs &p_inputs, const Ref<MegaLig
 		double ref_rel_err = 0.0;
 		if (compare_reference) {
 			p_view->reset_reference();
-			_upload_light_shadow_policies(p_inputs, p_view, cfg.directional_lights);
+			_upload_light_shadow_policies(p_inputs, p_view, true);
 			for (uint32_t rf = 0; rf < ref_frames; rf++) {
 				_dispatch_reference_rt(p_inputs, p_view, cfg, rf, rf + 1u, !tlas_ready, cfg.falloff_cull_threshold);
 			}
@@ -4150,6 +4304,10 @@ Dictionary MegaLights::_run_check(const FrameInputs &p_inputs, const Ref<MegaLig
 	res["area_count"] = int(light_storage->get_area_light_count());
 	res["directional_count"] = int(p_inputs.render_data->directional_light_count);
 	return res;
+}
+
+void MegaLights::render(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb) {
+	render_sampling(p_inputs, p_rb);
 }
 
 void MegaLights::render_sampling(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb) {

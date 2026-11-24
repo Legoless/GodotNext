@@ -304,6 +304,17 @@ enum LightShadowMethod {
 	LIGHT_SHADOW_METHOD_MAX,
 };
 
+// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+// Per-light MegaLights opt-in: PROJECT follows rendering/megalights/enabled (and
+// rendering/megalights/directional_lights for DirectionalLight3D), ALLOW forces this light into
+// MegaLights whenever MegaLights is active for the view, and DISALLOW keeps it in the Forward+ loop.
+enum LightMegaLightsMode {
+	LIGHT_MEGALIGHTS_PROJECT,
+	LIGHT_MEGALIGHTS_ALLOW,
+	LIGHT_MEGALIGHTS_DISALLOW,
+	LIGHT_MEGALIGHTS_MAX,
+};
+
 // GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
 // Per-light shadow method inside MegaLights: AUTO uses MegaLights ray tracing (inline ray query / SWRT),
 // RAY_TRACED forces MegaLights ray tracing, and VIRTUAL skips ray queries and samples VSM via SMRT (2 rays).

@@ -1788,7 +1788,7 @@ uint light_grid_cell_index(uvec2 p_screen_pixel, float p_linear_depth) {
 	return (tz * implementation_data.light_grid_dims.y + tile.y) * implementation_data.light_grid_dims.x + tile.x;
 }
 
-void light_grid_process_lights(uvec2 p_screen_pixel, uint p_layer_mask, uint p_instance_flags, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3 vertex_ddx, vec3 vertex_ddy, hvec3 f0, half roughness, half metallic, float taa_frame_count, hvec3 albedo, inout half alpha, vec2 screen_uv, hvec3 energy_compensation,
+void light_grid_process_lights(bool p_skip_megalights, uvec2 p_screen_pixel, uint p_layer_mask, uint p_instance_flags, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3 vertex_ddx, vec3 vertex_ddy, hvec3 f0, half roughness, half metallic, float taa_frame_count, hvec3 albedo, inout half alpha, vec2 screen_uv, hvec3 energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 		hvec3 backlight,
 #endif
@@ -1815,8 +1815,8 @@ void light_grid_process_lights(uvec2 p_screen_pixel, uint p_layer_mask, uint p_i
 
 	for (uint k = 0u; k < count; k++) {
 		uint entry = packed_light_grid_indices.data[offset + k];
-		if ((entry & LIGHT_GRID_ENTRY_FLAG_MEGALIGHTS) != 0u) {
-			continue; // Handled by MegaLights.
+		if (p_skip_megalights && (entry & LIGHT_GRID_ENTRY_FLAG_MEGALIGHTS) != 0u) {
+			continue; // Handled by MegaLights on non-fallback opaque pixels.
 		}
 		uint ltype = (entry >> LIGHT_GRID_ENTRY_TYPE_SHIFT) & LIGHT_GRID_ENTRY_TYPE_MASK;
 		uint light_index = entry & LIGHT_GRID_ENTRY_INDEX_MASK;

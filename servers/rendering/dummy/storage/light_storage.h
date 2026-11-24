@@ -100,6 +100,9 @@ public:
 	// nothing and prints neither the VSM fallback line nor the unimplemented-method warning.
 	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) override {}
 	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const override { return RSE::LIGHT_SHADOW_METHOD_PROJECT; }
+	// GodotNext: megalights_frame (#143).
+	virtual void light_set_megalights(RID p_light, RSE::LightMegaLightsMode p_mode) override {}
+	virtual RSE::LightMegaLightsMode light_get_megalights(RID p_light) const override { return RSE::LIGHT_MEGALIGHTS_PROJECT; }
 	// GodotNext: megalights_visibility (#146).
 	virtual void light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) override {}
 	virtual RSE::LightMegaLightsShadowMethod light_get_megalights_shadow_method(RID p_light) const override { return RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO; }

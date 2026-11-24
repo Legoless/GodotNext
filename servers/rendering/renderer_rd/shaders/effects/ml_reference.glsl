@@ -171,9 +171,12 @@ void main() {
 	uint omni_count = params.light_counts.x;
 	uint spot_count = params.light_counts.y;
 	uint area_count = params.light_counts.z;
-	uint dir_count = include_directional ? min(params.light_counts.w, uint(MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS)) : 0u;
+	uint dir_count = min(params.light_counts.w, uint(MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS));
 
 	for (uint i = 0u; i < omni_count; i++) {
+		if ((ml_omni_lights.data[i].light_flags & LIGHT_FLAG_MEGALIGHTS_DISALLOW) != 0u) {
+			continue;
+		}
 		uint lid = ml_pack_sample_light(ML_LIGHT_TYPE_OMNI, i);
 		vec2 u_emit = need_ray ? ml_stbn_sample_uv(fpx, frame, lid * 31u + 7u) : vec2(0.5);
 		MLLightEval ev = ml_eval_omni(ml_omni_lights.data[i], surf, falloff_threshold, use_soft_shadows, use_lf, u_emit, need_ray);
@@ -186,6 +189,9 @@ void main() {
 
 	uint spot_policy_base = omni_count;
 	for (uint i = 0u; i < spot_count; i++) {
+		if ((ml_spot_lights.data[i].light_flags & LIGHT_FLAG_MEGALIGHTS_DISALLOW) != 0u) {
+			continue;
+		}
 		uint lid = ml_pack_sample_light(ML_LIGHT_TYPE_SPOT, i);
 		vec2 u_emit = need_ray ? ml_stbn_sample_uv(fpx, frame, lid * 31u + 7u) : vec2(0.5);
 		MLLightEval ev = ml_eval_spot(ml_spot_lights.data[i], surf, falloff_threshold, use_soft_shadows, use_lf, u_emit, need_ray);
@@ -198,6 +204,9 @@ void main() {
 
 	uint area_policy_base = omni_count + spot_count;
 	for (uint i = 0u; i < area_count; i++) {
+		if ((ml_area_lights.data[i].light_flags & LIGHT_FLAG_MEGALIGHTS_DISALLOW) != 0u) {
+			continue;
+		}
 		uint lid = ml_pack_sample_light(ML_LIGHT_TYPE_AREA, i);
 		vec2 u_emit = need_ray ? ml_stbn_sample_uv(fpx, frame, lid * 31u + 7u) : vec2(0.5);
 		MLLightEval ev = ml_eval_area(ml_area_lights.data[i], surf, falloff_threshold, use_lf, u_emit, need_ray);
@@ -210,6 +219,11 @@ void main() {
 
 	uint dir_policy_base = omni_count + spot_count + area_count;
 	for (uint i = 0u; i < dir_count; i++) {
+		uint dflags = ml_directional_lights.data[i].light_flags;
+		bool d_ml = ((dflags & LIGHT_FLAG_MEGALIGHTS) != 0u) || (include_directional && (dflags & LIGHT_FLAG_MEGALIGHTS_DISALLOW) == 0u);
+		if (!d_ml) {
+			continue;
+		}
 		uint lid = ml_pack_sample_light(ML_LIGHT_TYPE_DIRECTIONAL, i);
 		vec2 u_emit = need_ray ? ml_stbn_sample_uv(fpx, frame, lid * 31u + 7u) : vec2(0.5);
 		MLLightEval ev = ml_eval_directional(ml_directional_lights.data[i], surf, use_soft_shadows, use_lf, u_emit, need_ray);

@@ -2429,6 +2429,14 @@
 				Sets the maximum SDFGI cascade in which the 3D light's indirect lighting is rendered. Higher values allow the light to be rendered in SDFGI further away from the camera.
 			</description>
 		</method>
+		<method name="light_set_megalights">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="mode" type="int" enum="RenderingServer.LightMegaLightsMode" />
+			<description>
+				Sets whether this 3D light participates in MegaLights when [member ProjectSettings.rendering/megalights/enabled] is active on Forward+. Equivalent to [member Light3D.megalights].
+			</description>
+		</method>
 		<method name="light_set_megalights_shadow_method">
 			<return type="void" />
 			<param index="0" name="light" type="RID" />
@@ -2681,7 +2689,7 @@
 		<method name="megalights_get_tier_info">
 			<return type="Dictionary" />
 			<description>
-				Returns MegaLights visibility-chain tier and capability information for the active renderer and device, including [code]tier[/code] ([code]"HWRT"[/code], [code]"HWRT_INLINE_ONLY"[/code], [code]"SWRT_EXTENSION"[/code], [code]"SCREEN_ONLY"[/code], or [code]"UNAVAILABLE"[/code]), [code]backend[/code], [code]experimental[/code], [code]experimental_label[/code] (reporting Apple M2+ Metal inline-ray-query-only Experimental status cleanly), [code]inline_ray_query_only[/code], [code]retrace_supported[/code], [code]far_field_enabled[/code], [code]swrt_extension[/code], [code]vsm_supported[/code], [code]screen_traces_enabled[/code], [code]distant_screen_traces_length[/code], and [code]reason[/code].
+				Returns MegaLights status, quality preset resolution, memory usage, and visibility-chain capability information for the active renderer and device, including [code]enabled[/code], [code]tier[/code] ([code]"HWRT"[/code], [code]"HWRT_INLINE_ONLY"[/code], [code]"SWRT_EXTENSION"[/code], [code]"SCREEN_ONLY"[/code], or [code]"UNAVAILABLE"[/code]), [code]status_label[/code] ([code]"Production"[/code], [code]"Experimental"[/code], [code]"Extension"[/code], [code]"Screen-Trace Fallback"[/code], or [code]"Unavailable"[/code]), [code]status_warning[/code], [code]backend[/code], [code]experimental[/code], [code]experimental_label[/code] (reporting Apple M2+ Metal inline-ray-query-only Experimental status cleanly), [code]inline_ray_query_only[/code], [code]retrace_supported[/code], [code]far_field_enabled[/code], [code]swrt_extension[/code], [code]vsm_supported[/code], [code]screen_traces_enabled[/code], [code]distant_screen_traces_length[/code], [code]quality_level[/code], [code]samples_per_pixel[/code], [code]downsample[/code], [code]screen_trace_steps[/code], [code]denoiser[/code], [code]rr_bypass[/code], [code]memory_bytes[/code], and [code]reason[/code].
 			</description>
 		</method>
 		<method name="megalights_request_check">
@@ -5770,6 +5778,18 @@
 		</constant>
 		<constant name="LIGHT_SHADOW_METHOD_MAX" value="5" enum="LightShadowMethod">
 			Represents the size of the [enum LightShadowMethod] enum.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_PROJECT" value="0" enum="LightMegaLightsMode">
+			Follows [member ProjectSettings.rendering/megalights/enabled] (and [member ProjectSettings.rendering/megalights/directional_lights] for directional lights).
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_ALLOW" value="1" enum="LightMegaLightsMode">
+			Opts this light into MegaLights whenever MegaLights is active for the view.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_DISALLOW" value="2" enum="LightMegaLightsMode">
+			Excludes this light from MegaLights and keeps it in the standard Forward+ light loop.
+		</constant>
+		<constant name="LIGHT_MEGALIGHTS_MAX" value="3" enum="LightMegaLightsMode">
+			Represents the size of the [enum LightMegaLightsMode] enum.
 		</constant>
 		<constant name="LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO" value="0" enum="LightMegaLightsShadowMethod">
 			Automatically uses the MegaLights ray-traced visibility chain.

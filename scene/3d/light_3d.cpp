@@ -284,6 +284,15 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 		}
 	}
 
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	if (megalights != MEGALIGHTS_DISALLOW && RS::get_singleton() != nullptr) {
+		const Dictionary ml_tier = RS::get_singleton()->megalights_get_tier_info();
+		if ((bool(ml_tier.get("enabled", false)) || megalights == MEGALIGHTS_ALLOW) && String(ml_tier.get("tier", "")) == "UNAVAILABLE") {
+			const String ml_warn = String(ml_tier.get("status_warning", ""));
+			warnings.push_back(ml_warn.is_empty() ? RTR("MegaLights is unavailable in Mobile and Compatibility renderers; this light uses standard shading.") : ml_warn);
+		}
+	}
+
 	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 	if (light_function.is_valid() && light_function->get_shader_mode() != Shader::MODE_LIGHT_FUNCTION) {
 		warnings.push_back(RTR("Light function material must use a shader with `shader_type light_function;`."));
@@ -311,6 +320,18 @@ void Light3D::set_shadow_method(ShadowMethod p_method) {
 
 Light3D::ShadowMethod Light3D::get_shadow_method() const {
 	return shadow_method;
+}
+
+void Light3D::set_megalights(MegaLightsMode p_mode) {
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	ERR_FAIL_INDEX(int(p_mode), int(RSE::LIGHT_MEGALIGHTS_MAX));
+	megalights = p_mode;
+	RS::get_singleton()->light_set_megalights(light, RSE::LightMegaLightsMode(p_mode));
+	update_configuration_warnings();
+}
+
+Light3D::MegaLightsMode Light3D::get_megalights() const {
+	return megalights;
 }
 
 void Light3D::set_megalights_shadow_method(MegaLightsShadowMethod p_method) {
@@ -547,6 +568,9 @@ void Light3D::_bind_methods() {
 	// GodotNext: vsm_settings_debug (#221).
 	ClassDB::bind_method(D_METHOD("set_shadow_method", "method"), &Light3D::set_shadow_method);
 	ClassDB::bind_method(D_METHOD("get_shadow_method"), &Light3D::get_shadow_method);
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	ClassDB::bind_method(D_METHOD("set_megalights", "mode"), &Light3D::set_megalights);
+	ClassDB::bind_method(D_METHOD("get_megalights"), &Light3D::get_megalights);
 	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
 	ClassDB::bind_method(D_METHOD("set_megalights_shadow_method", "method"), &Light3D::set_megalights_shadow_method);
 	ClassDB::bind_method(D_METHOD("get_megalights_shadow_method"), &Light3D::get_megalights_shadow_method);
@@ -619,8 +643,9 @@ void Light3D::_bind_methods() {
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_start", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_START);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "distance_field_shadow_distance", PROPERTY_HINT_RANGE, "0,8192,0.1,or_greater,exp,suffix:m"), "set_param", "get_param", PARAM_DISTANCE_FIELD_SHADOW_DISTANCE);
 
-	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
-	ADD_GROUP("MegaLights", "megalights_");
+	// GodotNext: megalights_frame (#143) / megalights_visibility (#146, plan §21.3 contract M4, M6).
+	ADD_GROUP("MegaLights", "");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "megalights", PROPERTY_HINT_ENUM, "Project,Allow,Disallow"), "set_megalights", "get_megalights");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "megalights_shadow_method", PROPERTY_HINT_ENUM, "Auto,Ray Traced,Virtual"), "set_megalights_shadow_method", "get_megalights_shadow_method");
 
 	ADD_GROUP("Distance Fade", "distance_fade_");
@@ -680,6 +705,11 @@ void Light3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_METHOD_ATLAS);
 	BIND_ENUM_CONSTANT(SHADOW_METHOD_RAY_TRACED);
 	BIND_ENUM_CONSTANT(SHADOW_METHOD_DISTANCE_FIELD);
+
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	BIND_ENUM_CONSTANT(MEGALIGHTS_PROJECT);
+	BIND_ENUM_CONSTANT(MEGALIGHTS_ALLOW);
+	BIND_ENUM_CONSTANT(MEGALIGHTS_DISALLOW);
 
 	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
 	BIND_ENUM_CONSTANT(MEGALIGHTS_SHADOW_METHOD_AUTO);

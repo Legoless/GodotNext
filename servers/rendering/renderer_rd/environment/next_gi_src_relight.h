@@ -42,6 +42,8 @@ namespace RendererRD {
 enum {
 	NEXTGI_SRC_RELIGHT_TEXEL_CAP = 256 * 1024, // High. Medium and Epic are #55.
 	NEXTGI_SRC_RELIGHT_RAY_CAP = 256 * 1024,
+	// GodotNext: megalights_frame (#143, GM-10, R2 cap). Strict <= 256,000 rays/frame cap at High when MegaLights is active.
+	NEXTGI_SRC_RELIGHT_MEGALIGHTS_HIGH_RAY_CAP = 256000,
 	NEXTGI_SRC_MAX_SHADOWED_LIGHTS = 8,
 	NEXTGI_SRC_MASK_EVALS_PER_FRAME = 2,
 	NEXTGI_SRC_RADIANCE_SIZE = 4096,
@@ -51,6 +53,8 @@ enum {
 enum NextGILightFlags {
 	NEXTGI_LIGHT_FLAG_SHADOW = 1u << 0,
 	NEXTGI_LIGHT_FLAG_STATIC = 1u << 1,
+	// GodotNext: megalights_frame (#143, GM-10). Light is routed to MegaLights; SRC traces card shadows unless VIRTUAL.
+	NEXTGI_LIGHT_FLAG_MEGALIGHTS = 1u << 2,
 	NEXTGI_LIGHT_REUSE_SHIFT = 8u,
 	NEXTGI_LIGHT_REUSE_NONE = 0xFFFFFFu,
 };

@@ -4799,10 +4799,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 		}
 
-		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4). When MegaLights is active for this
-		// view and any shadow-casting light requests megalights_shadow_method == VIRTUAL, activate VSM on demand
-		// (keeping zero allocations when MegaLights is off).
+		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4) / megalights_frame (#143, contract M6).
+		// When MegaLights is active for this view and any shadow-casting light routed to MegaLights requests
+		// megalights_shadow_method == VIRTUAL, activate VSM on demand (keeping zero allocations when MegaLights is off).
 		const bool ml_view_active = p_reflection_probe.is_null() && (RendererRD::MegaLightsInputs::is_requested() || RendererRD::MegaLights::has_pending_check());
+		const bool ml_dir_lights = RendererRD::MegaLights::effective_directional_lights();
 		if (ml_view_active && !scene_render->is_vsm_active() && RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
 			bool ml_wants_vsm = false;
 			for (Instance *dir_ins : scenario->directional_lights) {
@@ -4811,6 +4812,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 				if (RSG::light_storage->light_has_shadow(dir_ins->base) &&
 						RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) != RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY &&
+						RendererRD::MegaLights::light_uses_megalights(ml_view_active, RSG::light_storage->light_get_megalights(dir_ins->base), RSE::LIGHT_DIRECTIONAL, ml_dir_lights) &&
 						RSG::light_storage->light_get_megalights_shadow_method(dir_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL) {
 					ml_wants_vsm = true;
 					break;
@@ -4819,6 +4821,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size() && !ml_wants_vsm; i++) {
 				Instance *pos_ins = scene_cull_result.lights[i];
 				if (RSG::light_storage->light_has_shadow(pos_ins->base) &&
+						RendererRD::MegaLights::light_uses_megalights(ml_view_active, RSG::light_storage->light_get_megalights(pos_ins->base), RSG::light_storage->light_get_type(pos_ins->base), false) &&
 						RSG::light_storage->light_get_megalights_shadow_method(pos_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL) {
 					ml_wants_vsm = true;
 				}
@@ -4888,7 +4891,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose shadow method resolves to VIRTUAL
 				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
 				const RSE::LightShadowMethod dir_sm = RSG::light_storage->light_get_shadow_method(dir_ins->base);
-				const bool dir_ml_vsm = ml_view_active && RSG::light_storage->light_get_megalights_shadow_method(dir_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+				const bool dir_ml_vsm = RendererRD::MegaLights::light_uses_megalights(ml_view_active, RSG::light_storage->light_get_megalights(dir_ins->base), RSE::LIGHT_DIRECTIONAL, ml_dir_lights) &&
+						RSG::light_storage->light_get_megalights_shadow_method(dir_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
 				const bool dir_vsm = dir_ml_vsm || RendererVirtualShadowMapStorage::light_uses_vsm(dir_sm) ||
 						(scene_render->rt_light_in_overflow_fallback(dir_light->instance, p_render_buffers) &&
 								RendererVirtualShadowMapStorage::light_uses_vsm_fallback(dir_sm));
@@ -5015,7 +5019,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose shadow method resolves to VIRTUAL
 				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
 				const RSE::LightShadowMethod pos_sm = RSG::light_storage->light_get_shadow_method(pos_ins->base);
-				const bool pos_ml_vsm = ml_view_active && RSG::light_storage->light_get_megalights_shadow_method(pos_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+				const bool pos_ml_vsm = RendererRD::MegaLights::light_uses_megalights(ml_view_active, RSG::light_storage->light_get_megalights(pos_ins->base), RSG::light_storage->light_get_type(pos_ins->base), false) &&
+						RSG::light_storage->light_get_megalights_shadow_method(pos_ins->base) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
 				const bool pos_vsm = pos_ml_vsm || RendererVirtualShadowMapStorage::light_uses_vsm(pos_sm) ||
 						(scene_render->rt_light_in_overflow_fallback(pos_light->instance, p_render_buffers) &&
 								RendererVirtualShadowMapStorage::light_uses_vsm_fallback(pos_sm));

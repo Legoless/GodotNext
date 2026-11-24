@@ -140,6 +140,10 @@ void main() {
 
 		for (uint i = 0u; i < list_count; i++) {
 			uint entry = packed_grid_indices.data[list_offset + i];
+			// GodotNext: megalights_frame (#143). Skip lights excluded via Light3D.megalights = DISALLOW.
+			if ((entry & (1u << 18u)) == 0u) {
+				continue;
+			}
 			uint ltype = (entry >> ML_SAMPLE_TYPE_SHIFT) & ML_SAMPLE_TYPE_MASK;
 			uint lidx = entry & ML_SAMPLE_INDEX_MASK;
 			uint light_id = ml_pack_sample_light(ltype, lidx);
@@ -169,10 +173,16 @@ void main() {
 		}
 	}
 
-	// Optional directional lights (disabled by default via rendering/megalights/directional_lights).
-	if (include_directional) {
+	// Directional lights: included when rendering/megalights/directional_lights is enabled (unless DISALLOW)
+	// or per-light Light3D.megalights == ALLOW (carried via LIGHT_FLAG_MEGALIGHTS).
+	{
 		uint dir_count = min(params.light_counts.w, uint(MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS));
 		for (uint d = 0u; d < dir_count; d++) {
+			uint dflags = ml_directional_lights.data[d].light_flags;
+			bool d_ml = ((dflags & LIGHT_FLAG_MEGALIGHTS) != 0u) || (include_directional && (dflags & LIGHT_FLAG_MEGALIGHTS_DISALLOW) == 0u);
+			if (!d_ml) {
+				continue;
+			}
 			uint light_id = ml_pack_sample_light(ML_LIGHT_TYPE_DIRECTIONAL, d);
 			MLLightEval ev = ml_eval_directional(ml_directional_lights.data[d], surf, use_soft_shadows, use_lf, vec2(0.5), false);
 			if (!ev.valid) {

@@ -290,6 +290,55 @@ Contract decisions for M5:
   denoise, velocity, or debug buffers are allocated and legacy frames stay byte-identical. Forward+ color-pass
   Set 1 bindings (`69+`) and `ShaderSpecialization::packed_1` bit `16+` remain untouched (reserved for #143).
 
+### MegaLights in the frame (#143, contracts M1 & M6, GM-9, GM-10), 2026-11-24
+
+Written from first principles using plan §21.3 contracts M1 and M6 (GM-9, GM-10), issue #143, and GodotNext's
+own subsystems: #136 M1 direct-light inputs, #139 packed froxel light grid (`LIGHT_GRID_ENTRY_FLAG_MEGALIGHTS`),
+#142 sampling core, #146 visibility chain (`Light3D.megalights_shadow_method`), #135 denoiser (demodulated diffuse
+and specular targets), #55 NextGI quality presets and RT-scene composition rules, #31 NextGI SRC relight
+(`next_gi_relight.cpp`, `nextgi_src_relight_inc.glsl`), and `NextGIEditorPlugin`. No Unreal Engine source or
+shaders, UE plugins, NvRTX, or third-party implementations were consulted.
+
+Contract decisions for M1 & M6:
+- **Project setting, Auto quality presets (#55) & shared RT-scene composition:** Registers
+  `rendering/megalights/enabled = false` (opt-in). `rendering/megalights/samples_per_pixel = 0` (Auto) and
+  `rendering/megalights/downsample = 2` (Auto) resolve from the active NextGI quality preset (Low: 2 spp / Half /
+  8 screen-trace steps; Medium: 2 spp / Half / 12 steps; High: 4 spp / Half / 16 steps; Epic: 8 spp / Full /
+  24 steps), while explicit user values override Auto. MegaLights shares `NextGIRTScene` directly so Medium
+  exclusions automatically match NextGI.
+- **Status labels & non-blocking editor HWRT offer:** `MegaLights::resolve_visibility_tier()` and
+  `RenderingServer.megalights_get_tier_info()` report `status_label` (`"Production"` on Windows/Linux HWRT,
+  `"Experimental"` on Apple M2+ inline ray query, `"Unavailable"` with an explicit `status_warning` on Mobile
+  and Compatibility) plus live `memory_bytes`. `Light3D::get_configuration_warnings()` warns when MegaLights is
+  enabled on an unsupported renderer, `EditorInspectorPluginMegaLights` displays the status label on `Light3D`,
+  and `NextGIEditorPlugin` shows a one-time non-blocking `ConfirmationDialog` offering to enable HWRT when
+  `rendering/megalights/enabled` flips from `false` to `true` while HWRT is disabled on a ray-query-capable device.
+- **Per-light opt-in (`Light3D.megalights`) & `LIGHT_FLAG_MEGALIGHTS`:** Adds `Light3D.MegaLightsMode`
+  (`MEGALIGHTS_PROJECT`, `MEGALIGHTS_ALLOW`, `MEGALIGHTS_DISALLOW`) alongside `#146`'s `megalights_shadow_method`
+  and wires `RenderingServer.light_set_megalights()`. Replaces the first padding word in `LightData` (288 B) and
+  `DirectionalLightData` (512 B) with `uint32_t light_flags` carrying `LIGHT_FLAG_MEGALIGHTS = (1u << 0u)` (also
+  consumed by #137 volumetric fog) and `LIGHT_FLAG_MEGALIGHTS_DISALLOW = (1u << 1u)`, and propagates
+  `is_ml_light` into `ClusterBuilderRD::add_packed_light()` (packed light-grid bit 18).
+- **Frame order & Forward+ color-pass composite (`scene_forward_clustered.glsl`):** Executes in `_render_scene` /
+  `_pre_opaque_render` strictly as: depth prepass (+ M1 inputs) → light buffers + packed light grid → VSM marking/
+  raster/projection → `MegaLights::render()` [sample → visibility → guiding → shade + denoise] → Forward+ opaque
+  color pass (regular Forward+ meshes and NextGeo Stage B tile quads & compute shading bins). Binds Set 1
+  `69` (`megalights_diffuse`), `70` (`megalights_specular`), `71` (`megalights_material`, defaulting to
+  `DEFAULT_RD_TEXTURE_BLACK` when off or during the depth prepass to avoid SyncVal hazards) and
+  `ShaderSpecialization::packed_1` bit `16` (`use_megalights`, cleared during depth prepass and transparent pass).
+  Non-fallback pixels re-modulate `diffuse_direct * max(albedo * (1 - metallic), 0.01) + specular_direct * max(EnvBRDF, 0.01)`
+  scaled by the exact SSAO direct-occlusion ratio (since `ml_albedo.a` carries material/decal AO only) and skip
+  `LIGHT_FLAG_MEGALIGHTS` lights in the directional, packed light-grid, and legacy clustered loops; fallback pixels
+  (`MEGALIGHTS_FALLBACK` or M1 model 3, e.g. custom `light()`) skip the composite and run the full clustered loop
+  identically to MegaLights off.
+- **GM-9 off identity & zero allocations:** When `rendering/megalights/enabled = false`, `RenderSceneBuffersRD`
+  and `MegaLightsViewData` allocate zero buffers (`memory_bytes == 0`), zero MegaLights passes run,
+  `use_megalights = false`, `LIGHT_FLAG_MEGALIGHTS = 0`, and rendered frames are byte-identical to baseline.
+- **NextGI SRC interplay (GM-10):** In `NextGIRelight::relight()`, MegaLights lights whose shadow method is not
+  `VIRTUAL` skip shadow-atlas reuse (`NEXTGI_LIGHT_REUSE_NONE`) so `nextgi_src_relight_inc.glsl` traces ray-traced
+  card shadows while rotating `<= 2` shadowed lights per texel per frame, and enforces the R2 cap
+  (`NEXTGI_SRC_RELIGHT_MEGALIGHTS_HIGH_RAY_CAP = 256000`) at High quality (`src_relight_rays <= 256000`).
+
 ## Contract decisions
 
 ### M1 direct-light input targets (#136), 2026-11-08 — for later review

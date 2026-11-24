@@ -1490,7 +1490,8 @@ void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_dat
 				continue;
 			}
 			const bool rt_light = RendererVirtualShadowMapStorage::light_uses_rt(light_storage->light_get_shadow_method(light));
-			const bool ml_rt_light = ml_alloc_active && light_storage->light_get_megalights_shadow_method(light) != RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+			const bool ml_rt_light = MegaLights::light_uses_megalights(ml_alloc_active, light_storage->light_get_megalights(light), light_storage->light_get_type(light), MegaLights::effective_directional_lights()) &&
+					light_storage->light_get_megalights_shadow_method(light) != RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
 			if (!rt_light && !ml_rt_light) {
 				continue;
 			}

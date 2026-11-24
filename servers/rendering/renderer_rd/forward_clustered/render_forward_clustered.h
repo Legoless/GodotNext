@@ -87,8 +87,12 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	RendererRD::NextGeoDebug nextgeo_debug;
 	bool nextgeo_virtual_active = false;
 	bool nextgeo_visibility_only_active = false;
-	// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135). True only when this view writes the input targets.
+	// GodotNext: megalights_inputs (#136) / megalights_denoiser (#135) / megalights_frame (#143).
 	bool megalights_inputs_active = false;
+	bool megalights_composite_active = false;
+	RID ml_bind_diffuse;
+	RID ml_bind_specular;
+	RID ml_bind_material;
 	bool view_reset_temporal_history = false;
 	// GodotNext: light_grid (#139, plan §21.3 contract M2). True only when this view builds and shades from the packed light grid.
 	bool packed_light_grid_active = false;
@@ -1338,7 +1342,7 @@ public:
 
 	/* callback from updating our lighting UBOs, used to populate cluster builder */
 	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) override;
-	virtual void setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index = 0, float p_barn_door_angle_deg = 90.0f, float p_barn_door_length = 0.2f, float p_intensity = 1.0f) override;
+	virtual void setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index = 0, float p_barn_door_angle_deg = 90.0f, float p_barn_door_length = 0.2f, float p_intensity = 1.0f, bool p_megalights_handled = false) override;
 	virtual void setup_added_decal(const Transform3D &p_transform, const Vector3 &p_half_size) override;
 
 	virtual void base_uniforms_changed() override;

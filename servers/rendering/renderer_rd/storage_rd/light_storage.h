@@ -90,6 +90,8 @@ private:
 		bool allow_contact_shadows = true;
 		// GodotNext: vsm_settings_debug (#221).
 		RSE::LightShadowMethod shadow_method = RSE::LIGHT_SHADOW_METHOD_PROJECT;
+		// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+		RSE::LightMegaLightsMode megalights_mode = RSE::LIGHT_MEGALIGHTS_PROJECT;
 		// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
 		RSE::LightMegaLightsShadowMethod megalights_shadow_method = RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO;
 		// GodotNext: light_source_parity (#140).
@@ -210,7 +212,9 @@ private:
 		// GodotNext: rt_shadows (#141). Tile-sparse lookup base (UINT32_MAX when unused) and packed screen-tile rect + flags.
 		uint32_t rt_shadow_tile_base;
 		uint32_t rt_shadow_flags;
-		uint32_t rt_shadow_pad[2];
+		// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Per-light flags (shared with #137 volumetric fog).
+		uint32_t light_flags;
+		uint32_t rt_shadow_pad;
 	};
 	// GodotNext: vsm_page_pool (#220), light_source_parity (#140), rt_shadows (#141). An std430 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
@@ -286,7 +290,9 @@ private:
 		// GodotNext: rt_shadows (#141). Tile-sparse lookup base (UINT32_MAX when unused) and packed screen-tile rect + flags.
 		uint32_t rt_shadow_tile_base;
 		uint32_t rt_shadow_flags;
-		uint32_t rt_shadow_pad[2];
+		// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Per-light flags (shared with #137 volumetric fog).
+		uint32_t light_flags;
+		uint32_t rt_shadow_pad;
 	};
 	// GodotNext: vsm_page_pool (#220), light_source_parity (#140), rt_shadows (#141). An std140 array element: keep the GLSL copy in
 	// light_data_inc.glsl in step.
@@ -596,6 +602,11 @@ public:
 	// GodotNext: vsm_settings_debug (#221).
 	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) override;
 	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const override;
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	static constexpr uint32_t LIGHT_FLAG_MEGALIGHTS = (1u << 0u);
+	static constexpr uint32_t LIGHT_FLAG_MEGALIGHTS_DISALLOW = (1u << 1u);
+	virtual void light_set_megalights(RID p_light, RSE::LightMegaLightsMode p_mode) override;
+	virtual RSE::LightMegaLightsMode light_get_megalights(RID p_light) const override;
 	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
 	virtual void light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) override;
 	virtual RSE::LightMegaLightsShadowMethod light_get_megalights_shadow_method(RID p_light) const override;

@@ -39,8 +39,15 @@ TEST_FORCE_LINK(test_megalights)
 #include "scene/main/viewport.h"
 #include "servers/rendering/renderer_rd/effects/denoise.h"
 #include "servers/rendering/renderer_rd/effects/mega_lights.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
+#include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
+#include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/rendering_server.h"
+#ifdef TOOLS_ENABLED
+#include "editor/scene/3d/nextgi_editor_plugin.h"
+#endif
 
 #include <cmath>
 #include <cstdint>
@@ -870,4 +877,243 @@ TEST_CASE("[Renderer][MegaLights] Firefly clamped-energy math, camera cut, reset
 	CHECK_FALSE(view->get_denoise_clamp_stats_buffer().is_valid());
 	CHECK_FALSE(view->has_denoise_history());
 	CHECK_EQ(view->get_denoise_stats().clamped_energy_ratio, 0.0);
+}
+
+// GodotNext: megalights_frame (#143, plan §21.3 contracts M1 & M6, GM-9, GM-10).
+
+TEST_CASE("[Renderer][MegaLights] Frame setting default off, Auto quality presets (#55), and zero allocation (#143)") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+
+	// 1. rendering/megalights/enabled defaults to false and allocates zero bytes when off (GM-9).
+	CHECK(ps->has_setting(ML::SETTING_ENABLED));
+	CHECK_EQ(bool(ps->get_setting(ML::SETTING_ENABLED)), false);
+	CHECK_FALSE(ML::is_enabled());
+	CHECK_FALSE(RendererRD::MegaLightsInputs::is_project_enabled());
+	CHECK_EQ(ML::get_total_allocated_bytes(), uint64_t(0));
+
+	// 2. Quality preset table (#55: Low/Medium/High/Epic -> spp, downsample, screen_trace_steps).
+	const ML::QualityPreset p_low = ML::quality_preset_for_level(0);
+	const ML::QualityPreset p_med = ML::quality_preset_for_level(1);
+	const ML::QualityPreset p_high = ML::quality_preset_for_level(2);
+	const ML::QualityPreset p_epic = ML::quality_preset_for_level(3);
+	CHECK_EQ(p_low.samples_per_pixel, 2u);
+	CHECK_EQ(p_low.downsample, ML::DOWNSAMPLE_HALF);
+	CHECK_EQ(p_low.screen_trace_steps, 8u);
+	CHECK_EQ(p_med.samples_per_pixel, 2u);
+	CHECK_EQ(p_med.downsample, ML::DOWNSAMPLE_HALF);
+	CHECK_EQ(p_med.screen_trace_steps, 12u);
+	CHECK_EQ(p_high.samples_per_pixel, 4u);
+	CHECK_EQ(p_high.downsample, ML::DOWNSAMPLE_HALF);
+	CHECK_EQ(p_high.screen_trace_steps, 16u);
+	CHECK_EQ(p_epic.samples_per_pixel, 8u);
+	CHECK_EQ(p_epic.downsample, ML::DOWNSAMPLE_FULL);
+	CHECK_EQ(p_epic.screen_trace_steps, 24u);
+
+	// Auto downsample variant parsing.
+	CHECK_EQ(ML::parse_downsample_variant(2), ML::DOWNSAMPLE_AUTO);
+	CHECK_EQ(ML::parse_downsample_variant(String("auto")), ML::DOWNSAMPLE_AUTO);
+	CHECK_EQ(ML::parse_downsample_variant(String("Auto")), ML::DOWNSAMPLE_AUTO);
+
+	// 3. Auto spp (0) and Auto downsample (2) follow NextGI quality preset; explicit overrides win.
+	const Variant prev_q = ps->get_setting("rendering/global_illumination/nextgi/quality");
+	const Variant prev_spp = ps->get_setting(ML::SETTING_SAMPLES_PER_PIXEL);
+	const Variant prev_ds = ps->get_setting(ML::SETTING_DOWNSAMPLE);
+
+	ps->set_setting(ML::SETTING_SAMPLES_PER_PIXEL, 0);
+	ps->set_setting(ML::SETTING_DOWNSAMPLE, int(ML::DOWNSAMPLE_AUTO));
+
+	ps->set_setting("rendering/global_illumination/nextgi/quality", 1); // Medium
+	const ML::Settings s_med = ML::read_settings();
+	CHECK_EQ(s_med.samples_per_pixel, 2u);
+	CHECK_EQ(s_med.downsample, ML::DOWNSAMPLE_HALF);
+	CHECK_EQ(s_med.screen_trace_steps, 12u);
+
+	ps->set_setting("rendering/global_illumination/nextgi/quality", 2); // High
+	const ML::Settings s_high = ML::read_settings();
+	CHECK_EQ(s_high.samples_per_pixel, 4u);
+	CHECK_EQ(s_high.downsample, ML::DOWNSAMPLE_HALF);
+	CHECK_EQ(s_high.screen_trace_steps, 16u);
+
+	ps->set_setting("rendering/global_illumination/nextgi/quality", 3); // Epic
+	const ML::Settings s_epic = ML::read_settings();
+	CHECK_EQ(s_epic.samples_per_pixel, 8u);
+	CHECK_EQ(s_epic.downsample, ML::DOWNSAMPLE_FULL);
+	CHECK_EQ(s_epic.screen_trace_steps, 24u);
+
+	// Explicit override ignores NextGI preset.
+	ps->set_setting(ML::SETTING_SAMPLES_PER_PIXEL, 6);
+	ps->set_setting(ML::SETTING_DOWNSAMPLE, int(ML::DOWNSAMPLE_HALF));
+	const ML::Settings s_override = ML::read_settings();
+	CHECK_EQ(s_override.samples_per_pixel, 6u);
+	CHECK_EQ(s_override.downsample, ML::DOWNSAMPLE_HALF);
+
+	ps->set_setting("rendering/global_illumination/nextgi/quality", prev_q);
+	ps->set_setting(ML::SETTING_SAMPLES_PER_PIXEL, prev_spp);
+	ps->set_setting(ML::SETTING_DOWNSAMPLE, prev_ds);
+
+	// 4. Toggling rendering/megalights/enabled live updates is_enabled() and is_project_enabled().
+	const Variant prev_en = ps->get_setting(ML::SETTING_ENABLED);
+	ps->set_setting(ML::SETTING_ENABLED, true);
+	CHECK(ML::is_enabled());
+	CHECK(RendererRD::MegaLightsInputs::is_project_enabled());
+	CHECK(RendererRD::MegaLightsInputs::is_requested());
+	ps->set_setting(ML::SETTING_ENABLED, prev_en);
+	CHECK_FALSE(ML::is_enabled());
+	CHECK_FALSE(RendererRD::MegaLightsInputs::is_project_enabled());
+}
+
+TEST_CASE("[Renderer][MegaLights] Per-light opt-in, LightData flags, and ShaderSpecialization bit 16 (#143)") {
+	// 1. Enum parity between Light3D::MegaLightsMode and RSE::LightMegaLightsMode.
+	CHECK_EQ(int(Light3D::MEGALIGHTS_PROJECT), int(RSE::LIGHT_MEGALIGHTS_PROJECT));
+	CHECK_EQ(int(Light3D::MEGALIGHTS_ALLOW), int(RSE::LIGHT_MEGALIGHTS_ALLOW));
+	CHECK_EQ(int(Light3D::MEGALIGHTS_DISALLOW), int(RSE::LIGHT_MEGALIGHTS_DISALLOW));
+
+	bool valid = false;
+	CHECK_EQ(ClassDB::get_integer_constant("RenderingServer", "LIGHT_MEGALIGHTS_PROJECT", &valid), int64_t(RSE::LIGHT_MEGALIGHTS_PROJECT));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("RenderingServer", "LIGHT_MEGALIGHTS_ALLOW", &valid), int64_t(RSE::LIGHT_MEGALIGHTS_ALLOW));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("RenderingServer", "LIGHT_MEGALIGHTS_DISALLOW", &valid), int64_t(RSE::LIGHT_MEGALIGHTS_DISALLOW));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("Light3D", "MEGALIGHTS_PROJECT", &valid), int64_t(Light3D::MEGALIGHTS_PROJECT));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("Light3D", "MEGALIGHTS_ALLOW", &valid), int64_t(Light3D::MEGALIGHTS_ALLOW));
+	CHECK(valid);
+	CHECK_EQ(ClassDB::get_integer_constant("Light3D", "MEGALIGHTS_DISALLOW", &valid), int64_t(Light3D::MEGALIGHTS_DISALLOW));
+	CHECK(valid);
+
+	// 2. Light3D node property roundtrip (preserving #146 megalights_shadow_method).
+	OmniLight3D *omni = memnew(OmniLight3D);
+	CHECK_EQ(omni->get_megalights(), Light3D::MEGALIGHTS_PROJECT);
+	omni->set_megalights(Light3D::MEGALIGHTS_DISALLOW);
+	CHECK_EQ(omni->get_megalights(), Light3D::MEGALIGHTS_DISALLOW);
+	omni->set_megalights(Light3D::MEGALIGHTS_ALLOW);
+	CHECK_EQ(omni->get_megalights(), Light3D::MEGALIGHTS_ALLOW);
+	CHECK_EQ(omni->get_megalights_shadow_method(), Light3D::MEGALIGHTS_SHADOW_METHOD_AUTO);
+	memdelete(omni);
+
+	DirectionalLight3D *sun = memnew(DirectionalLight3D);
+	CHECK_EQ(sun->get_megalights(), Light3D::MEGALIGHTS_PROJECT);
+	sun->set_megalights(Light3D::MEGALIGHTS_ALLOW);
+	CHECK_EQ(sun->get_megalights(), Light3D::MEGALIGHTS_ALLOW);
+	memdelete(sun);
+
+	// 3. Per-light MegaLights routing truth table (local & directional x PROJECT/ALLOW/DISALLOW x active).
+	CHECK_FALSE(ML::light_uses_megalights(false, RSE::LIGHT_MEGALIGHTS_PROJECT, RSE::LIGHT_OMNI, false));
+	CHECK_FALSE(ML::light_uses_megalights(false, RSE::LIGHT_MEGALIGHTS_ALLOW, RSE::LIGHT_OMNI, false));
+	CHECK(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_PROJECT, RSE::LIGHT_OMNI, false));
+	CHECK(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_PROJECT, RSE::LIGHT_SPOT, false));
+	CHECK(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_PROJECT, RSE::LIGHT_AREA, false));
+	CHECK(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_ALLOW, RSE::LIGHT_OMNI, false));
+	CHECK_FALSE(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_DISALLOW, RSE::LIGHT_OMNI, false));
+	// Directional lights follow rendering/megalights/directional_lights in PROJECT mode, opt-in on ALLOW, opt-out on DISALLOW.
+	CHECK_FALSE(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_PROJECT, RSE::LIGHT_DIRECTIONAL, false));
+	CHECK(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_PROJECT, RSE::LIGHT_DIRECTIONAL, true));
+	CHECK(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_ALLOW, RSE::LIGHT_DIRECTIONAL, false));
+	CHECK_FALSE(ML::light_uses_megalights(true, RSE::LIGHT_MEGALIGHTS_DISALLOW, RSE::LIGHT_DIRECTIONAL, true));
+
+	// 4. LightData & DirectionalLightData flag contracts and ShaderSpecialization::packed_1 bit 16.
+	CHECK_EQ(RendererRD::LightStorage::LIGHT_FLAG_MEGALIGHTS, uint32_t(1u << 0u));
+	CHECK_EQ(RendererRD::LightStorage::LIGHT_FLAG_MEGALIGHTS_DISALLOW, uint32_t(1u << 1u));
+
+	RendererSceneRenderImplementation::SceneShaderForwardClustered::ShaderSpecialization spec = {};
+	spec.packed_0 = 0;
+	spec.packed_1 = 0;
+	spec.use_rt_shadows = 1;
+	CHECK_EQ(spec.packed_1, uint32_t(1u << 15u));
+	spec.packed_1 = 0;
+	spec.use_megalights = 1;
+	CHECK_EQ(spec.packed_1, uint32_t(1u << 16u));
+
+	// 5. NextGI SRC GM-10 cap and flag non-overlap.
+	CHECK_EQ(int(RendererRD::NEXTGI_SRC_RELIGHT_MEGALIGHTS_HIGH_RAY_CAP), 256000);
+	CHECK_EQ(uint32_t(RendererRD::NEXTGI_LIGHT_FLAG_MEGALIGHTS) & uint32_t(RendererRD::NEXTGI_LIGHT_FLAG_SHADOW | RendererRD::NEXTGI_LIGHT_FLAG_STATIC), 0u);
+}
+
+TEST_CASE("[Renderer][MegaLights] Status labels (Production, Experimental, Unavailable) and HWRT editor offer (#143)") {
+	// 1. Desktop Windows/Linux HWRT -> Production.
+	ML::TierInputs desktop;
+	desktop.forward_plus = true;
+	desktop.supports_ray_query = true;
+	desktop.supports_ray_tracing_pipeline = true;
+	desktop.is_metal = false;
+	desktop.nextgi_hwrt_available = true;
+	desktop.vsm_available = true;
+	const ML::TierStatus st_prod = ML::resolve_visibility_tier(desktop);
+	CHECK_EQ(String(st_prod.status_label), String("Production"));
+	CHECK(String(st_prod.status_warning).is_empty());
+
+	// 2. Apple M2+ Metal inline ray query -> Experimental.
+	ML::TierInputs mac_m2;
+	mac_m2.forward_plus = true;
+	mac_m2.supports_ray_query = true;
+	mac_m2.supports_ray_tracing_pipeline = false;
+	mac_m2.is_metal = true;
+	mac_m2.is_apple_m2_or_newer = true;
+	mac_m2.nextgi_hwrt_available = true;
+	const ML::TierStatus st_mac = ML::resolve_visibility_tier(mac_m2);
+	CHECK_EQ(String(st_mac.status_label), String("Experimental"));
+	CHECK(st_mac.experimental);
+	CHECK(String(st_mac.experimental_label).contains("Apple M2+"));
+
+	// 3. Mobile / Compatibility -> Unavailable with explicit warning.
+	ML::TierInputs mobile;
+	mobile.forward_plus = false;
+	mobile.supports_ray_query = true;
+	const ML::TierStatus st_unavail = ML::resolve_visibility_tier(mobile);
+	CHECK_EQ(String(st_unavail.status_label), String("Unavailable"));
+	CHECK_FALSE(String(st_unavail.status_warning).is_empty());
+	CHECK(String(st_unavail.status_warning).contains("Mobile"));
+	CHECK(String(st_unavail.status_warning).contains("Compatibility"));
+
+	// 4. RenderingServer.megalights_get_tier_info() includes #143 keys.
+	const Dictionary info = RenderingServer::get_singleton()->megalights_get_tier_info();
+	CHECK(info.has("enabled"));
+	CHECK(info.has("status_label"));
+	CHECK(info.has("status_warning"));
+	CHECK(info.has("quality_level"));
+	CHECK(info.has("samples_per_pixel"));
+	CHECK(info.has("downsample"));
+	CHECK(info.has("screen_trace_steps"));
+	CHECK(info.has("memory_bytes"));
+	CHECK_EQ(int64_t(info["memory_bytes"]), int64_t(0));
+
+#ifdef TOOLS_ENABLED
+	// 5. Editor HWRT offer condition logic (headless, non-blocking).
+	// Offer fires ONLY on false -> true transition when ray query is supported, not previously offered,
+	// and either NextGI is disabled or hardware_ray_tracing == 1 (Off).
+	CHECK(NextGIEditorPlugin::should_offer_megalights_hwrt(false, true, false, 0, false, true));
+	CHECK(NextGIEditorPlugin::should_offer_megalights_hwrt(false, true, true, 1, false, true));
+	// Do NOT offer when HWRT is already active (nextgi enabled + hwrt Auto or Force).
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_megalights_hwrt(false, true, true, 0, false, true));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_megalights_hwrt(false, true, true, 2, false, true));
+	// Do NOT offer when already enabled, turning off, already offered, or device lacks ray query.
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_megalights_hwrt(true, true, false, 0, false, true));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_megalights_hwrt(true, false, false, 0, false, true));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_megalights_hwrt(false, true, false, 0, true, true));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_megalights_hwrt(false, true, false, 0, false, false));
+
+	// Status formatter covers Production, Experimental, and Unavailable cleanly.
+	Dictionary prod_dict;
+	prod_dict["tier"] = "HWRT";
+	prod_dict["status_label"] = "Production";
+	prod_dict["experimental"] = false;
+	CHECK(NextGIEditorPlugin::format_megalights_status(prod_dict).contains("Production"));
+
+	Dictionary mac_dict;
+	mac_dict["tier"] = "HWRT_INLINE_ONLY";
+	mac_dict["status_label"] = "Experimental";
+	mac_dict["experimental"] = true;
+	mac_dict["experimental_label"] = "Experimental (Apple M2+ — inline ray query only)";
+	CHECK(NextGIEditorPlugin::format_megalights_status(mac_dict).contains("Experimental"));
+	CHECK(NextGIEditorPlugin::format_megalights_status(mac_dict).contains("Apple M2+"));
+
+	Dictionary mob_dict;
+	mob_dict["tier"] = "UNAVAILABLE";
+	mob_dict["status_label"] = "Unavailable";
+	mob_dict["status_warning"] = "MegaLights requires the Forward+ renderer (unavailable in Mobile and Compatibility).";
+	CHECK(NextGIEditorPlugin::format_megalights_status(mob_dict).contains("Unavailable"));
+	CHECK(NextGIEditorPlugin::format_megalights_status(mob_dict).contains("Mobile"));
+#endif
 }

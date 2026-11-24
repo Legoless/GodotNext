@@ -202,7 +202,7 @@ public:
 
 	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) {}
 	// GodotNext: light_grid (#139). Extended with per-type light index, AreaLight3D barn doors, and intensity proxy.
-	virtual void setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index = 0, float p_barn_door_angle_deg = 90.0f, float p_barn_door_length = 0.2f, float p_intensity = 1.0f) {}
+	virtual void setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index = 0, float p_barn_door_angle_deg = 90.0f, float p_barn_door_length = 0.2f, float p_intensity = 1.0f, bool p_megalights_handled = false) {}
 	virtual void setup_added_decal(const Transform3D &p_transform, const Vector3 &p_half_size) {}
 
 	/* GI */

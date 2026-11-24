@@ -33,6 +33,7 @@
 // GodotNext: megalights_inputs (#136). Header-only so #143 can take over
 // MegaLightsInputs::is_requested() without a new translation unit.
 
+#include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
@@ -104,12 +105,20 @@ public:
 	// only, so it is not stored. F0 is packed from the base albedo, not the
 	// diffuse product, so metals keep their tint.
 	//
-	// #143 replaces is_requested() with the project setting. Until then the
-	// switch is GODOTNEXT_MEGALIGHTS_INPUTS=1, read once, or set_requested().
+	// GodotNext: megalights_frame (#143). Driven by rendering/megalights/enabled (default false),
+	// while retaining the GODOTNEXT_MEGALIGHTS_INPUTS=1 debug hook and set_requested() override for tests.
+	static bool is_project_enabled() {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		return ps != nullptr && ps->has_setting("rendering/megalights/enabled") && bool(ps->get_setting("rendering/megalights/enabled"));
+	}
+
 	static bool is_requested() {
 		State &state = _state();
 		if (state.override_set) {
 			return state.requested;
+		}
+		if (is_project_enabled()) {
+			return true;
 		}
 		if (!state.env_latched) {
 			state.env_latched = true;

@@ -591,6 +591,8 @@ public:
 	FUNC2(light_set_bake_mode, RID, RSE::LightBakeMode)
 	// GodotNext: vsm_settings_debug (#221).
 	FUNC2(light_set_shadow_method, RID, RSE::LightShadowMethod)
+	// GodotNext: megalights_frame (#143).
+	FUNC2(light_set_megalights, RID, RSE::LightMegaLightsMode)
 	// GodotNext: megalights_visibility (#146).
 	FUNC2(light_set_megalights_shadow_method, RID, RSE::LightMegaLightsShadowMethod)
 	FUNC2(light_set_max_sdfgi_cascade, RID, uint32_t)

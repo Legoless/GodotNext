@@ -250,6 +250,13 @@ bool sc_use_rt_shadows() {
 	return ((sc_packed_1() >> 15) & 1U) != 0;
 }
 
+// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6, GM-9). The opaque color pass
+// composites denoised demodulated MegaLights direct diffuse/specular on non-fallback pixels and skips
+// lights carrying LIGHT_FLAG_MEGALIGHTS in the Forward+ light loops.
+bool sc_use_megalights() {
+	return ((sc_packed_1() >> 16) & 1U) != 0;
+}
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
@@ -725,6 +732,13 @@ layout(set = 1, binding = 66, std430) buffer restrict readonly RTShadowTileLooku
 }
 rt_shadow_tile_lookup;
 layout(set = 1, binding = 67) uniform texture2D rt_shadow_hit_dist;
+
+// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6). Set 1 bindings 69..71 (after #161
+// binding 68 spline_deforms): denoised demodulated diffuse & specular direct radiance from #135 and
+// #136 M1 material/shading-model target (black defaults when MegaLights is off or in depth prepass).
+layout(set = 1, binding = 69) uniform texture2D megalights_diffuse;
+layout(set = 1, binding = 70) uniform texture2D megalights_specular;
+layout(set = 1, binding = 71) uniform texture2D megalights_material;
 
 #define FORWARD_CLUSTERED_LIGHT_GRID
 

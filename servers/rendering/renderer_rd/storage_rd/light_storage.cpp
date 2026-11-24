@@ -37,7 +37,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 // GodotNext: light_function_atlas (#138).
 #include "servers/rendering/renderer_rd/storage_rd/light_function_atlas.h"
-// GodotNext: vsm_page_pool (#220) / rt_shadows (#141).
+// GodotNext: vsm_page_pool (#220) / rt_shadows (#141) / megalights_frame (#143).
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
@@ -461,6 +462,25 @@ RSE::LightShadowMethod LightStorage::light_get_shadow_method(RID p_light) const 
 	const Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL_V(light, RSE::LIGHT_SHADOW_METHOD_PROJECT);
 	return light->shadow_method;
+}
+
+void LightStorage::light_set_megalights(RID p_light, RSE::LightMegaLightsMode p_mode) {
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	ERR_FAIL_INDEX(int(p_mode), int(RSE::LIGHT_MEGALIGHTS_MAX));
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	if (light->megalights_mode == p_mode) {
+		return;
+	}
+	light->megalights_mode = p_mode;
+	light->version++;
+	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+}
+
+RSE::LightMegaLightsMode LightStorage::light_get_megalights(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RSE::LIGHT_MEGALIGHTS_PROJECT);
+	return light->megalights_mode;
 }
 
 void LightStorage::light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) {
@@ -1283,6 +1303,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					bool rt_accepted = false;
 					bool rt_in_overflow = false;
 					VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+					// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+					const bool ml_view_active = vsm != nullptr && vsm->get_megalights_view_active();
+					const bool ml_dir_enabled = MegaLights::effective_directional_lights();
+					const bool is_ml_light = MegaLights::light_uses_megalights(ml_view_active, light->megalights_mode, RSE::LIGHT_DIRECTIONAL, ml_dir_enabled);
 					const float raw_shadow_max_dist = light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE];
 					const bool wants_rt = p_using_shadows && light->shadow && rt_view && RendererVirtualShadowMapStorage::light_uses_rt(light->shadow_method);
 					if (wants_rt) {
@@ -1323,9 +1347,10 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						}
 						VirtualShadowMapStorage::LightUpdate update;
 						update.kind = RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL;
-						// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose method resolves to VIRTUAL
-						// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
-						const bool ml_vsm = vsm->get_megalights_view_active() && light->megalights_shadow_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+						// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146) / megalights_frame (#143).
+						// Only lights whose method resolves to VIRTUAL (or RT-overflow fallback lights whose underlying fallback
+						// method is VIRTUAL, or MegaLights VSM-method lights routed to MegaLights this frame).
+						const bool ml_vsm = is_ml_light && light->megalights_shadow_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
 						const bool vsm_eligible = ml_vsm || (rt_in_overflow ? RendererVirtualShadowMapStorage::light_uses_vsm_fallback(light->shadow_method) : (!wants_rt && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method)));
 						update.casts_shadow = light->shadow && (!df_full || ml_vsm) && vsm_eligible;
 						update.transform = light_transform;
@@ -1366,8 +1391,15 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					light_data.df_shadow_distance = df_distance;
 					light_data.rt_shadow_tile_base = rt_tile_base;
 					light_data.rt_shadow_flags = rt_flags;
-					light_data.rt_shadow_pad[0] = 0;
-					light_data.rt_shadow_pad[1] = 0;
+					// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+					uint32_t dir_lflags = 0u;
+					if (is_ml_light) {
+						dir_lflags |= LIGHT_FLAG_MEGALIGHTS;
+					} else if (ml_view_active && light->megalights_mode == RSE::LIGHT_MEGALIGHTS_DISALLOW) {
+						dir_lflags |= LIGHT_FLAG_MEGALIGHTS_DISALLOW;
+					}
+					light_data.light_flags = dir_lflags;
+					light_data.rt_shadow_pad = 0;
 					// GodotNext: vsm_projection (#222). If this view skipped the directional atlas pass for a VSM light
 					// whose map update failed to produce a sampleable map, do not sample an unrendered atlas slot.
 					if (vsm != nullptr && vsm->get_view_samples() && !df_full && !rt_accepted && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method) &&
@@ -1686,8 +1718,9 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_data.position[1] = pos.y;
 		light_data.position[2] = pos.z;
 
-		// GodotNext: vsm_page_pool (#220), vsm_local_lights (#216), rt_shadows (#141).
+		// GodotNext: vsm_page_pool (#220), vsm_local_lights (#216), rt_shadows (#141), megalights_frame (#143).
 		bool rt_shadow = false;
+		bool is_ml_light = false;
 		{
 			uint32_t rt_tile_base = NEXTGI_RT_SHADOW_TILE_NONE;
 			uint32_t rt_flags = 0u;
@@ -1726,13 +1759,16 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			uint32_t vsm_map_base = RendererVirtualShadowMapStorage::MAP_NONE;
 			uint32_t vsm_flags = 0;
 			VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+			const bool ml_view_active = vsm != nullptr && vsm->get_megalights_view_active();
+			is_ml_light = MegaLights::light_uses_megalights(ml_view_active, light->megalights_mode, type, false);
 			if (vsm != nullptr) {
 				const RendererVirtualShadowMapStorage::MapKind kind = type == RSE::LIGHT_OMNI ? RendererVirtualShadowMapStorage::MAP_KIND_OMNI : (type == RSE::LIGHT_SPOT ? RendererVirtualShadowMapStorage::MAP_KIND_SPOT : RendererVirtualShadowMapStorage::MAP_KIND_AREA);
 				VirtualShadowMapStorage::LightUpdate update;
 				update.kind = kind;
-				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146). Only lights whose method resolves to VIRTUAL
-				// (or RT-overflow fallback lights whose underlying fallback method is VIRTUAL, or MegaLights VSM-method lights when MegaLights is active).
-				const bool ml_vsm = vsm->get_megalights_view_active() && light->megalights_shadow_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
+				// GodotNext: vsm_settings_debug (#221) / rt_shadows (#141) / megalights_visibility (#146) / megalights_frame (#143).
+				// Only lights whose method resolves to VIRTUAL (or RT-overflow fallback lights whose underlying fallback
+				// method is VIRTUAL, or MegaLights VSM-method lights routed to MegaLights this frame).
+				const bool ml_vsm = is_ml_light && light->megalights_shadow_method == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
 				const bool vsm_eligible = ml_vsm || (rt_in_overflow ? RendererVirtualShadowMapStorage::light_uses_vsm_fallback(light->shadow_method) : (!wants_rt_local && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method)));
 				update.casts_shadow = light->shadow && vsm_eligible;
 				update.transform = light_transform;
@@ -1762,8 +1798,15 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			light_data.vsm_pad = 0;
 			light_data.rt_shadow_tile_base = rt_tile_base;
 			light_data.rt_shadow_flags = rt_flags;
-			light_data.rt_shadow_pad[0] = 0;
-			light_data.rt_shadow_pad[1] = 0;
+			// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+			uint32_t pos_lflags = 0u;
+			if (is_ml_light) {
+				pos_lflags |= LIGHT_FLAG_MEGALIGHTS;
+			} else if (ml_view_active && light->megalights_mode == RSE::LIGHT_MEGALIGHTS_DISALLOW) {
+				pos_lflags |= LIGHT_FLAG_MEGALIGHTS_DISALLOW;
+			}
+			light_data.light_flags = pos_lflags;
+			light_data.rt_shadow_pad = 0;
 		}
 
 		Vector3 direction = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 0, -1))).normalized();
@@ -2035,7 +2078,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				index,
 				light->param[RSE::LIGHT_PARAM_BARN_DOOR_ANGLE],
 				light->param[RSE::LIGHT_PARAM_BARN_DOOR_LENGTH],
-				intensity_proxy);
+				intensity_proxy,
+				is_ml_light);
 
 		r_positional_light_count++;
 	}

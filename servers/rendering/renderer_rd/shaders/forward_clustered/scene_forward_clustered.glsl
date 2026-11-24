@@ -2903,7 +2903,15 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6).
+	// ml_albedo.a already folded material+decal mix(1, ao, ao_light_affect) into MegaLights direct radiance.
+	// Track the additional direct-light AO factor contributed by SSAO so the composite applies SSAO once.
+	float ml_mat_direct_ao = 1.0;
+	bool ml_ssao_applied = false;
+	float ml_ssao_direct_scale = 1.0;
 	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {
+		ml_mat_direct_ao = mix(1.0, ao, ao_light_affect);
+		ml_ssao_applied = true;
 #ifdef MODE_VISIBILITY_RESOLVE
 #ifdef USE_MULTIVIEW
 		float ssao = textureLod(sampler2DArray(ao_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0).r;
@@ -3160,6 +3168,11 @@ void fragment_shader(in SceneData scene_data) {
 
 	// convert ao to direct light ao
 	ao = mix(1.0, ao, ao_light_affect);
+#ifndef AMBIENT_LIGHT_DISABLED
+	if (ml_ssao_applied) {
+		ml_ssao_direct_scale = (ml_mat_direct_ao > 1e-4) ? clamp(ao / ml_mat_direct_ao, 0.0, 1.0) : 1.0;
+	}
+#endif
 
 	//this saves some VGPRs
 	vec3 f0 = F0(metallic, specular, albedo);
@@ -3222,6 +3235,19 @@ void fragment_shader(in SceneData scene_data) {
 // LIGHTING
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6, GM-9).
+	// Non-fallback opaque pixels composite denoised MegaLights direct radiance and skip lights
+	// carrying LIGHT_FLAG_MEGALIGHTS in the Forward+ loops. Fallback materials (#136 model 3 or
+	// MEGALIGHTS_FALLBACK) bypass the composite and shade every light through Forward+.
+	bool ml_pixel_active = false;
+#if !defined(MEGALIGHTS_FALLBACK) && !defined(USE_VERTEX_LIGHTING) && !defined(MODE_RENDER_SDF) && !defined(MODE_VSM)
+	if (sc_use_megalights()) {
+		vec4 ml_mat_px = texelFetch(sampler2D(megalights_material, SAMPLER_NEAREST_CLAMP), ivec2(NEXTGEO_FRAG_COORD.xy), 0);
+		uint ml_model_px = uint(clamp(round(ml_mat_px.b * 255.0), 0.0, 255.0)) & 3u;
+		ml_pixel_active = (ml_model_px != 3u);
+	}
+#endif
+
 #ifdef USE_VERTEX_LIGHTING
 	diffuse_light += diffuse_light_interp.rgb;
 	direct_specular_light += specular_light_interp.rgb * f0;
@@ -3275,6 +3301,10 @@ void fragment_shader(in SceneData scene_data) {
 
 				if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
+				}
+
+				if (ml_pixel_active && (directional_lights.data[i].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+					continue; // Handled by MegaLights direct-light composite.
 				}
 
 				float shadow = 1.0;
@@ -3554,6 +3584,10 @@ void fragment_shader(in SceneData scene_data) {
 				continue; // Statically baked light and object uses lightmap, skip
 			}
 
+			if (ml_pixel_active && (directional_lights.data[i].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+				continue; // Handled by MegaLights direct-light composite.
+			}
+
 #ifdef LIGHT_TRANSMITTANCE_USED
 			float transmittance_z = transmittance_depth;
 #ifndef SHADOWS_DISABLED
@@ -3726,7 +3760,7 @@ void fragment_shader(in SceneData scene_data) {
 #else
 		uvec2 lg_screen_pixel = uvec2(NEXTGEO_FRAG_COORD.xy);
 #endif
-		light_grid_process_lights(lg_screen_pixel, instances.data[instance_index].layer_mask, instances.data[instance_index].flags, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+		light_grid_process_lights(ml_pixel_active, lg_screen_pixel, instances.data[instance_index].layer_mask, instances.data[instance_index].flags, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 				backlight,
 #endif
@@ -3784,6 +3818,10 @@ void fragment_shader(in SceneData scene_data) {
 
 				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
+				}
+
+				if (ml_pixel_active && (omni_lights.data[light_index].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+					continue; // Handled by MegaLights direct-light composite.
 				}
 
 				light_process_omni(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
@@ -3847,6 +3885,10 @@ void fragment_shader(in SceneData scene_data) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 
+				if (ml_pixel_active && (spot_lights.data[light_index].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+					continue; // Handled by MegaLights direct-light composite.
+				}
+
 				light_process_spot(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 						backlight,
@@ -3906,6 +3948,10 @@ void fragment_shader(in SceneData scene_data) {
 
 				if (area_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
+				}
+
+				if (ml_pixel_active && (area_lights.data[light_index].light_flags & LIGHT_FLAG_MEGALIGHTS) != 0u) {
+					continue; // Handled by MegaLights direct-light composite.
 				}
 
 				light_process_area(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
@@ -4219,6 +4265,31 @@ void fragment_shader(in SceneData scene_data) {
 	// apply metallic
 	diffuse_light *= 1.0 - metallic;
 	ambient_light *= 1.0 - metallic;
+
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	// Composite denoised demodulated direct diffuse & specular radiance on non-fallback opaque pixels,
+	// matching #135's exact demodulation factors (0.01 floor) and applying SSAO direct occlusion once.
+#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && !defined(MEGALIGHTS_FALLBACK) && !defined(USE_VERTEX_LIGHTING) && !defined(MODE_RENDER_SDF) && !defined(MODE_VSM)
+	if (ml_pixel_active) {
+		ivec2 ml_px = ivec2(NEXTGEO_FRAG_COORD.xy);
+		vec3 ml_diff_demod = max(texelFetch(sampler2D(megalights_diffuse, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
+		vec3 ml_spec_demod = max(texelFetch(sampler2D(megalights_specular, SAMPLER_NEAREST_CLAMP), ml_px, 0).rgb, vec3(0.0));
+		vec3 ml_diff_factor = max(albedo * (1.0 - metallic), vec3(0.01));
+		float ml_nov = clamp(dot(normal, view), 0.0001, 1.0);
+		vec2 ml_dfg = prefiltered_dfg(roughness, ml_nov);
+		vec3 ml_energy_comp = 1.0 + f0 * (1.0 / max(ml_dfg.y, 1e-4) - 1.0);
+		float ml_f90 = clamp(dot(f0, vec3(50.0 * 0.33)), 0.0, 1.0);
+		vec3 ml_spec_env_brdf = max(ml_energy_comp * ((vec3(ml_f90) - f0) * ml_dfg.x + f0 * ml_dfg.y), vec3(0.0));
+		vec3 ml_spec_factor = max(ml_spec_env_brdf, vec3(0.01));
+#ifndef AMBIENT_LIGHT_DISABLED
+		float ml_direct_ssao = ml_ssao_direct_scale;
+#else
+		float ml_direct_ssao = 1.0;
+#endif
+		diffuse_light += ml_diff_demod * ml_diff_factor * ml_direct_ssao;
+		direct_specular_light += ml_spec_demod * ml_spec_factor * ml_direct_ssao;
+	}
+#endif
 
 #ifndef FOG_DISABLED
 	//restore fog

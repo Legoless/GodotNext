@@ -2880,6 +2880,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_bake_mode", "light", "bake_mode"), &RenderingServer::light_set_bake_mode);
 	// GodotNext: vsm_settings_debug (#221)
 	ClassDB::bind_method(D_METHOD("light_set_shadow_method", "light", "method"), &RenderingServer::light_set_shadow_method);
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	ClassDB::bind_method(D_METHOD("light_set_megalights", "light", "mode"), &RenderingServer::light_set_megalights);
 	// GodotNext: megalights_visibility (#146, plan §21.3 contract M4).
 	ClassDB::bind_method(D_METHOD("light_set_megalights_shadow_method", "light", "method"), &RenderingServer::light_set_megalights_shadow_method);
 	ClassDB::bind_method(D_METHOD("light_set_max_sdfgi_cascade", "light", "cascade"), &RenderingServer::light_set_max_sdfgi_cascade);
@@ -2963,6 +2965,12 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_MAX);
+
+	// GodotNext: megalights_frame (#143).
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_PROJECT);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_ALLOW);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_DISALLOW);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_MAX);
 
 	// GodotNext: megalights_visibility (#146).
 	BIND_ENUM_CONSTANT(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_AUTO);
@@ -4307,11 +4315,16 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/light_function_atlas/format", PROPERTY_HINT_ENUM, "R8,RGBA8"), 0);
 	GLOBAL_DEF("rendering/lights_and_shadows/light_function_atlas/translucent", false);
 
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6, GM-9).
+	// Opt-in direct-light stochastic sampling, visibility chain, and denoised Forward+ composite (off by default).
+	GLOBAL_DEF("rendering/megalights/enabled", false);
 	// GodotNext: megalights_sampling (#142, plan §21.3 contract M3, GM-1, GM-2, budget M-3).
 	// Per-pixel weighted light sampling over the packed grid, half-res 2x2 rotating downsample,
 	// directional light opt-in, falloff early cull threshold, and exhaustive ray-traced reference mode.
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/samples_per_pixel", PROPERTY_HINT_RANGE, "1,16,1"), 4);
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/downsample", PROPERTY_HINT_ENUM, "Full,Half"), 1);
+	// 0 = Auto (follows NextGI quality preset: Low/Medium=2, High=4, Epic=8).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/samples_per_pixel", PROPERTY_HINT_RANGE, "0,16,1"), 0);
+	// 2 = Auto (follows NextGI quality preset: Low/Medium/High=Half, Epic=Full).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/megalights/downsample", PROPERTY_HINT_ENUM, "Full,Half,Auto"), 2);
 	GLOBAL_DEF("rendering/megalights/directional_lights", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/megalights/falloff_cull_threshold", PROPERTY_HINT_RANGE, "0.0,0.1,0.0001,or_greater"), 0.001);
 	GLOBAL_DEF("rendering/megalights/reference_mode", false);

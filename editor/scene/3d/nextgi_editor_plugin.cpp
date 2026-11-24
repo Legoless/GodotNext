@@ -37,6 +37,7 @@
 #include "editor/editor_node.h"
 #include "editor/file_system/editor_file_system.h"
 #include "editor/settings/editor_settings.h"
+#include "scene/3d/light_3d.h"
 #include "scene/3d/world_environment.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
@@ -52,6 +53,7 @@ void NextGIEditorPlugin::_notification(int p_what) {
 		case NOTIFICATION_ENTER_TREE: {
 			// Reading the setting works before it is registered. A missing key is off.
 			nextgi_was_enabled = ProjectSettings::get_singleton()->get_setting("rendering/global_illumination/nextgi/enabled", false);
+			megalights_was_enabled = ProjectSettings::get_singleton()->get_setting("rendering/megalights/enabled", false);
 			ProjectSettings::get_singleton()->connect("settings_changed", callable_mp(this, &NextGIEditorPlugin::_on_project_settings_changed));
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
@@ -84,6 +86,17 @@ void NextGIEditorPlugin::_on_project_settings_changed() {
 		_offer_mesh_sdf();
 	}
 	nextgi_was_enabled = now_enabled;
+
+	// GodotNext: megalights_frame (#143). Offer to enable HWRT when enabling MegaLights with HWRT off.
+	const bool ml_now_enabled = ps->get_setting("rendering/megalights/enabled", false);
+	const int hwrt_setting = int(ps->get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0));
+	const bool ml_hwrt_offered = editor_settings && bool(editor_settings->get_project_metadata("megalights", "hwrt_offered", false));
+	const RenderingDevice *rd = RenderingDevice::get_singleton();
+	const bool supports_ray_query = rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY);
+	if (should_offer_megalights_hwrt(megalights_was_enabled, ml_now_enabled, now_enabled, hwrt_setting, ml_hwrt_offered, supports_ray_query)) {
+		_offer_megalights_hwrt();
+	}
+	megalights_was_enabled = ml_now_enabled;
 }
 
 void NextGIEditorPlugin::_offer_vulkan_switch() {
@@ -331,6 +344,83 @@ String NextGIEditorPlugin::get_upscaler_readout(RID p_viewport) {
 	return status.is_empty() ? String() : format_upscaler_readout(status);
 }
 
+// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+void NextGIEditorPlugin::_offer_megalights_hwrt() {
+	EditorSettings *editor_settings = EditorSettings::get_singleton();
+	if (editor_settings) {
+		editor_settings->set_project_metadata("megalights", "hwrt_offered", true);
+		editor_settings->save_project_metadata();
+	}
+	if (megalights_hwrt_dialog != nullptr) {
+		megalights_hwrt_dialog->popup_centered();
+	}
+}
+
+void NextGIEditorPlugin::_megalights_hwrt_confirmed() {
+	apply_megalights_hwrt_enable();
+}
+
+bool NextGIEditorPlugin::should_offer_megalights_hwrt(bool p_was_enabled, bool p_is_enabled, bool p_nextgi_enabled, int p_hwrt_setting, bool p_already_offered, bool p_supports_ray_query) {
+	const bool hwrt_disabled = !p_nextgi_enabled || p_hwrt_setting == 1;
+	return !p_was_enabled && p_is_enabled && hwrt_disabled && !p_already_offered && p_supports_ray_query;
+}
+
+void NextGIEditorPlugin::apply_megalights_hwrt_enable() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	ERR_FAIL_NULL(ps);
+	if (!bool(ps->get_setting("rendering/global_illumination/nextgi/enabled", false))) {
+		ps->set_setting("rendering/global_illumination/nextgi/enabled", true);
+	}
+	if (int(ps->get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1) {
+		ps->set_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0);
+	}
+	const Error err = ps->save();
+	ERR_FAIL_COND_MSG(err != OK, vformat("Couldn't save project.godot after enabling hardware ray tracing for MegaLights (error %d).", err));
+}
+
+String NextGIEditorPlugin::get_megalights_hwrt_dialog_title() {
+	return TTR("Enable Hardware Ray Tracing for MegaLights");
+}
+
+String NextGIEditorPlugin::get_megalights_hwrt_dialog_text() {
+	return TTR("MegaLights uses hardware ray tracing for direct-light visibility, but hardware ray tracing is currently disabled. Enable NextGI hardware ray tracing (Auto) so MegaLights can trace shadows on the GPU? Cancel leaves project settings unchanged.");
+}
+
+String NextGIEditorPlugin::format_megalights_status(const Dictionary &p_tier_info) {
+	if (p_tier_info.is_empty()) {
+		return String();
+	}
+	const String status_label = p_tier_info.get("status_label", String());
+	const String tier = p_tier_info.get("tier", String());
+	const String status_warning = p_tier_info.get("status_warning", String());
+	const String experimental_label = p_tier_info.get("experimental_label", String());
+	if (tier == "UNAVAILABLE" || status_label == "Unavailable") {
+		if (!status_warning.is_empty()) {
+			return vformat("MegaLights: Unavailable (%s)", status_warning);
+		}
+		return String("MegaLights: Unavailable (requires Forward+)");
+	}
+	if (bool(p_tier_info.get("experimental", false))) {
+		if (!experimental_label.is_empty()) {
+			return vformat("MegaLights: %s (%s)", experimental_label, tier);
+		}
+		return vformat("MegaLights: Experimental (%s)", tier);
+	}
+	if (!status_label.is_empty()) {
+		return vformat("MegaLights: %s (%s)", status_label, tier);
+	}
+	return vformat("MegaLights: %s", tier);
+}
+
+String NextGIEditorPlugin::get_megalights_status_readout() {
+	if (!GLOBAL_GET_CACHED(bool, "rendering/megalights/enabled")) {
+		return String();
+	}
+	RenderingServer *rs = RenderingServer::get_singleton();
+	ERR_FAIL_NULL_V(rs, String());
+	return format_megalights_status(rs->megalights_get_tier_info());
+}
+
 NextGIEditorPlugin::NextGIEditorPlugin() {
 	vulkan_switch_dialog = memnew(ConfirmationDialog);
 	vulkan_switch_dialog->set_title(get_vulkan_switch_dialog_title());
@@ -358,10 +448,25 @@ NextGIEditorPlugin::NextGIEditorPlugin() {
 	mesh_sdf_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIEditorPlugin::_mesh_sdf_confirmed));
 	add_child(mesh_sdf_dialog);
 
+	// GodotNext: megalights_frame (#143). Non-blocking HWRT enable prompt when enabling MegaLights.
+	megalights_hwrt_dialog = memnew(ConfirmationDialog);
+	megalights_hwrt_dialog->set_title(get_megalights_hwrt_dialog_title());
+	megalights_hwrt_dialog->set_text(get_megalights_hwrt_dialog_text());
+	megalights_hwrt_dialog->set_autowrap(true);
+	megalights_hwrt_dialog->set_min_size(Size2i(560, 180));
+	megalights_hwrt_dialog->set_ok_button_text(TTR("Enable Hardware RT"));
+	megalights_hwrt_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIEditorPlugin::_megalights_hwrt_confirmed));
+	add_child(megalights_hwrt_dialog);
+
 	// GodotNext: nextgi_user_surface
 	Ref<EditorInspectorPluginNextGI> inspector_plugin;
 	inspector_plugin.instantiate();
 	add_inspector_plugin(inspector_plugin);
+
+	// GodotNext: megalights_frame (#143).
+	Ref<EditorInspectorPluginMegaLights> ml_inspector_plugin;
+	ml_inspector_plugin.instantiate();
+	add_inspector_plugin(ml_inspector_plugin);
 }
 
 // GodotNext: nextgi_user_surface
@@ -399,6 +504,15 @@ public:
 		status->set_text(NextGIEditorPlugin::format_status_panel(RenderingServer::get_singleton()->nextgi_get_status()));
 		add_child(status);
 
+		// GodotNext: megalights_frame (#143). Show MegaLights status label when MegaLights is enabled.
+		const String ml_status = NextGIEditorPlugin::get_megalights_status_readout();
+		if (!ml_status.is_empty()) {
+			Label *ml_label = memnew(Label);
+			ml_label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+			ml_label->set_text(ml_status);
+			add_child(ml_label);
+		}
+
 		ProjectSettings *ps = ProjectSettings::get_singleton();
 		const String driver = ps ? String(ps->get_setting("rendering/rendering_device/driver.windows", "vulkan")) : String("vulkan");
 		const String host_os = OS::get_singleton() ? OS::get_singleton()->get_name() : String();
@@ -435,4 +549,21 @@ bool EditorInspectorPluginNextGI::can_handle(Object *p_object) {
 void EditorInspectorPluginNextGI::parse_begin(Object *p_object) {
 	ERR_FAIL_NULL(p_object);
 	add_custom_control(memnew(NextGIStatusPanel));
+}
+
+// GodotNext: megalights_frame (#143).
+bool EditorInspectorPluginMegaLights::can_handle(Object *p_object) {
+	return Object::cast_to<Light3D>(p_object) != nullptr;
+}
+
+void EditorInspectorPluginMegaLights::parse_begin(Object *p_object) {
+	ERR_FAIL_NULL(p_object);
+	const String ml_status = NextGIEditorPlugin::get_megalights_status_readout();
+	if (ml_status.is_empty()) {
+		return;
+	}
+	Label *label = memnew(Label);
+	label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+	label->set_text(ml_status);
+	add_custom_control(label);
 }

@@ -3622,10 +3622,14 @@
 		<member name="rendering/megalights/distant_screen_traces_length" type="float" setter="" getter="" default="4.0">
 			World-space Hi-Z screen-trace length (in meters) used by MegaLights for distant pixels beyond the near screen-trace band when [member rendering/megalights/screen_traces] is [code]true[/code]. Longer screen traces resolve distant occluders in screen space before falling back to ray queries.
 		</member>
-		<member name="rendering/megalights/downsample" type="int" setter="" getter="" default="1">
+		<member name="rendering/megalights/downsample" type="int" setter="" getter="" default="2">
 			Controls the sampling resolution for MegaLights light selection:
 			- [code]0[/code] ([b]Full[/b]): Samples every full-resolution pixel each frame.
-			- [code]1[/code] ([b]Half[/b], default): Samples one rotating pixel per 2x2 block each frame using a 4-frame 2x2 Bayer cycle to keep per-frame ray budgets low while visiting every pixel over 4 frames.
+			- [code]1[/code] ([b]Half[/b]): Samples one rotating pixel per 2x2 block each frame using a 4-frame 2x2 Bayer cycle to keep per-frame ray budgets low while visiting every pixel over 4 frames.
+			- [code]2[/code] ([b]Auto[/b], default): Selects the sampling resolution from the active NextGI quality preset (Half on Low, Medium, and High; Full on Epic).
+		</member>
+		<member name="rendering/megalights/enabled" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], enables MegaLights stochastic direct-lighting and shadow evaluation on Forward+ viewports. Off by default ([code]false[/code]); while disabled, MegaLights allocates zero buffers, runs zero passes, and leaves rendered frames byte-identical to standard Forward+. Supported as Production on Windows and Linux with hardware ray tracing, Experimental on Apple M2+ Metal (inline ray query only), and unavailable in the Mobile and Compatibility renderers.
 		</member>
 		<member name="rendering/megalights/falloff_cull_threshold" type="float" setter="" getter="" default="0.001">
 			Minimum distance-attenuation threshold below which MegaLights skips evaluating a candidate light during per-pixel sample generation. Higher values discard distant, negligible lights earlier for faster sampling; [code]0.0[/code] disables falloff early culling.
@@ -3636,8 +3640,8 @@
 		<member name="rendering/megalights/reference_mode" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables MegaLights exhaustive reference mode: instead of stochastic light sampling, every pixel evaluates all influencing lights with stochastic ray-traced visibility ([code]trace_shadow()[/code]) and accumulates an unbiased running mean across frames for ground-truth verification.
 		</member>
-		<member name="rendering/megalights/samples_per_pixel" type="int" setter="" getter="" default="4">
-			Number of weighted reservoir light samples generated per sampling pixel each frame by MegaLights (range [code]1[/code] to [code]16[/code]). Higher counts reduce direct-lighting variance at the cost of more visibility traces and sample buffer memory.
+		<member name="rendering/megalights/samples_per_pixel" type="int" setter="" getter="" default="0">
+			Number of weighted reservoir light samples generated per sampling pixel each frame by MegaLights (range [code]0[/code] to [code]16[/code]). [code]0[/code] (default, [b]Auto[/b]) selects the sample count from the active NextGI quality preset (Low=2, Medium=2, High=4, Epic=8). Explicit values from [code]1[/code] to [code]16[/code] override the preset; higher counts reduce direct-lighting variance at the cost of more visibility traces and sample buffer memory.
 		</member>
 		<member name="rendering/megalights/screen_traces" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], MegaLights marches a short Hi-Z depth screen-space trace before dispatching hardware ray queries or virtual shadow map lookups. Samples occluded in screen space write visibility [code]0[/code] and their hit distance immediately and are skipped by ray tracing; unresolved samples continue to the ray-traced or VSM pass.

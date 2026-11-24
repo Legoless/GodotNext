@@ -152,6 +152,20 @@ class MegaLightsViewData : public RenderBufferCustomDataRD {
 
 	uint32_t frame_index = 0;
 
+	// GodotNext: megalights_frame (#143, GM-9). Exact per-view allocated GPU byte accounting.
+	uint64_t sampling_bytes = 0;
+	uint64_t visibility_bytes = 0;
+	uint64_t retrace_bytes = 0;
+	uint64_t shade_bytes = 0;
+	uint64_t denoise_bytes = 0;
+	uint64_t denoise_debug_bytes = 0;
+	uint64_t reference_bytes = 0;
+	uint64_t verify_bytes = 0;
+	uint64_t transient_bytes = 0;
+	uint64_t tracked_total_bytes = 0;
+
+	void _update_memory_accounting();
+
 	void _free_sampling_buffers();
 	void _free_visibility_buffers();
 	void _free_shade_buffers();
@@ -284,6 +298,7 @@ public:
 	uint32_t get_frame_index() const { return frame_index; }
 	void set_frame_index(uint32_t p_frame) { frame_index = p_frame; }
 	void advance_frame_index() { frame_index++; }
+	uint64_t get_allocated_bytes() const { return tracked_total_bytes; }
 
 	MegaLightsViewData();
 	virtual ~MegaLightsViewData();
@@ -292,6 +307,8 @@ public:
 class MegaLights {
 public:
 	// Project settings keys (registered in RenderingServer, documented in ProjectSettings.xml).
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M1, M6, GM-9).
+	static constexpr const char *SETTING_ENABLED = "rendering/megalights/enabled";
 	static constexpr const char *SETTING_SAMPLES_PER_PIXEL = "rendering/megalights/samples_per_pixel";
 	static constexpr const char *SETTING_DOWNSAMPLE = "rendering/megalights/downsample";
 	static constexpr const char *SETTING_DIRECTIONAL_LIGHTS = "rendering/megalights/directional_lights";
@@ -308,6 +325,7 @@ public:
 	enum DownsampleMode : uint32_t {
 		DOWNSAMPLE_FULL = 0,
 		DOWNSAMPLE_HALF = 1,
+		DOWNSAMPLE_AUTO = 2,
 	};
 
 	enum DenoiserMode : uint32_t {
@@ -331,6 +349,7 @@ public:
 		VISIBILITY_TIER_SCREEN_ONLY = 4,
 	};
 
+	static constexpr bool DEFAULT_ENABLED = false;
 	static constexpr uint32_t DEFAULT_SAMPLES_PER_PIXEL = 4u;
 	static constexpr uint32_t MIN_SAMPLES_PER_PIXEL = 1u;
 	static constexpr uint32_t MAX_SAMPLES_PER_PIXEL = 16u;
@@ -404,9 +423,17 @@ public:
 		VIS_FLAG_USE_HIZ = 1u << 7u,
 	};
 
-	struct Settings {
+	struct QualityPreset {
 		uint32_t samples_per_pixel = DEFAULT_SAMPLES_PER_PIXEL;
 		DownsampleMode downsample = DEFAULT_DOWNSAMPLE;
+		uint32_t screen_trace_steps = 16u;
+	};
+
+	struct Settings {
+		bool enabled = DEFAULT_ENABLED;
+		uint32_t samples_per_pixel = DEFAULT_SAMPLES_PER_PIXEL;
+		DownsampleMode downsample = DEFAULT_DOWNSAMPLE;
+		uint32_t screen_trace_steps = 16u;
 		bool directional_lights = DEFAULT_DIRECTIONAL_LIGHTS;
 		float falloff_cull_threshold = DEFAULT_FALLOFF_CULL_THRESHOLD;
 		bool reference_mode = DEFAULT_REFERENCE_MODE;
@@ -478,6 +505,8 @@ public:
 		bool vsm_supported = false;
 		const char *tier_name = "UNAVAILABLE";
 		const char *backend = "none";
+		const char *status_label = "Unavailable";
+		const char *status_warning = "";
 		const char *experimental_label = "";
 		const char *reason = "";
 	};
@@ -575,6 +604,13 @@ public:
 
 	// --- Pure, device-free helpers (tested by CPU doctests) ---
 
+	static bool is_enabled();
+	static bool effective_directional_lights();
+	static int read_nextgi_quality_level();
+	static QualityPreset quality_preset_for_level(int p_quality_level);
+	static DownsampleMode downsample_for_quality_preset(int p_quality_level);
+	static bool light_uses_megalights(bool p_megalights_active, RSE::LightMegaLightsMode p_mode, RSE::LightType p_type, bool p_directional_lights_enabled);
+	static uint64_t get_total_allocated_bytes();
 	static Settings read_settings();
 	static Settings validate_settings(const Settings &p_settings);
 	// Provisional sample count per quality preset (Low=2, Medium=2, High=4, Epic=8; tuned in PQ).
@@ -664,6 +700,7 @@ public:
 	static bool has_pending_check();
 	static bool check_wants_far_field();
 	static bool check_wants_swrt();
+	static bool check_wants_directional_lights();
 	static Dictionary get_check_result();
 
 private:
@@ -713,6 +750,7 @@ public:
 	void render_reference(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb, bool p_force_visible_one = false);
 
 	// Per-frame entry point invoked by RenderForwardClustered after prepass & packed light grid build.
+	void render(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
 	void render_sampling(const FrameInputs &p_inputs, Ref<RenderSceneBuffersRD> p_rb);
 
 	void free_resources();

@@ -35,6 +35,8 @@
 #include "core/object/callable_mp.h"
 #include "core/os/mutex.h"
 #include "servers/rendering/renderer_geometry_instance.h"
+// GodotNext: megalights_frame (#143, GM-10).
+#include "servers/rendering/renderer_rd/effects/mega_lights.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
@@ -1330,6 +1332,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	last_directional = 0;
 	last_dynamic = 0;
 	last_static = 0;
+	last_megalights_lights = 0;
 	scheduled_pages.clear();
 	probe_rgb.clear();
 	mask_pages.clear();
@@ -1376,11 +1379,16 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		bool directional = false;
 		bool is_static = false;
 		bool has_shadow = false;
+		bool is_megalights = false;
+		bool megalights_virtual = false;
 		uint32_t caster_mask = 0xFFFFFFFFu; // GodotNext: nextgi_shadow_policy (#145)
 	};
 	LocalVector<CpuLight> cpu_lights;
 	LightFunctionAtlas *lf_atlas = LightFunctionAtlas::get_singleton();
 	bool any_light_function = false;
+	// GodotNext: megalights_frame (#143, GM-10). MegaLights interplay with NextGI SRC relight.
+	const bool ml_active = MegaLights::is_enabled() || MegaLights::has_pending_check();
+	const bool ml_dir_lights = MegaLights::effective_directional_lights();
 
 	auto add_light = [&](RID p_light_instance, bool p_directional, bool p_static) {
 		if (!light_storage->owns_light_instance(p_light_instance)) {
@@ -1446,6 +1454,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cpu.directional = p_directional;
 		cpu.is_static = p_static;
 		cpu.has_shadow = RSG::light_storage->light_has_shadow(light);
+		cpu.is_megalights = MegaLights::light_uses_megalights(ml_active, RSG::light_storage->light_get_megalights(light), type, ml_dir_lights);
+		cpu.megalights_virtual = RSG::light_storage->light_get_megalights_shadow_method(light) == RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_VIRTUAL;
 		cpu.caster_mask = RSG::light_storage->light_get_shadow_caster_mask(light); // GodotNext: nextgi_shadow_policy (#145)
 		cpu.gpu.color_energy[0] = color.r;
 		cpu.gpu.color_energy[1] = color.g;
@@ -1468,6 +1478,10 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		}
 		if (p_static) {
 			cpu.gpu.flags |= NEXTGI_LIGHT_FLAG_STATIC;
+		}
+		if (cpu.is_megalights) {
+			cpu.gpu.flags |= NEXTGI_LIGHT_FLAG_MEGALIGHTS;
+			last_megalights_lights++;
 		}
 		// GodotNext: light_function_atlas (#138, plan §21.3 contract M8).
 		if (lf_atlas != nullptr && lf_atlas->has_baked_atlas()) {
@@ -1524,6 +1538,12 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	const uint64_t scene_pass = RendererSceneRenderRD::get_singleton()->get_scene_pass();
 	for (CpuLight &cpu : cpu_lights) {
 		if (!cpu.has_shadow) {
+			continue;
+		}
+		if (cpu.is_megalights && !cpu.megalights_virtual) {
+			// GodotNext: megalights_frame (#143, GM-10). MegaLights lights (other than VIRTUAL VSM lights)
+			// have no shadow map to reuse; leave reuse = NEXTGI_LIGHT_REUSE_NONE so SRC cards trace
+			// ray-traced shadows within the R2 cap, rotating <= 2 shadowed lights per texel per frame.
 			continue;
 		}
 		const bool rendered = light_storage->light_instance_get_shadow_pass(cpu.instance) == scene_pass;
@@ -1672,8 +1692,14 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	flat_page_count = flat.size();
 	LocalVector<uint32_t> scheduled;
 	scheduled.resize(flat.size());
-	const uint32_t budget = nextgi_src_budget_for_quality(int(next_gi->get_resolved_quality()));
-	const uint32_t scheduled_count = flat.is_empty() ? 0 : nextgi_src_schedule_streams(work.ptr(), flat.size(), budget, budget, scheduled.ptr(), scheduled.size());
+	const NextGI::Quality resolved_quality = next_gi->get_resolved_quality();
+	const uint32_t budget = nextgi_src_budget_for_quality(int(resolved_quality));
+	uint32_t relight_ray_budget = NextGI::get_quality_params(resolved_quality).relight_shadow_rays;
+	if (ml_active && resolved_quality <= NextGI::QUALITY_HIGH) {
+		// GodotNext: megalights_frame (#143, GM-10, R2 cap). Keep SRC relight <= 256,000 rays/frame at High with MegaLights active.
+		relight_ray_budget = MIN(relight_ray_budget, uint32_t(NEXTGI_SRC_RELIGHT_MEGALIGHTS_HIGH_RAY_CAP));
+	}
+	const uint32_t scheduled_count = flat.is_empty() ? 0 : nextgi_src_schedule_streams(work.ptr(), flat.size(), budget, MIN(budget, relight_ray_budget), scheduled.ptr(), scheduled.size());
 	schedule_cursor = flat.is_empty() ? 0 : (schedule_cursor + scheduled_count) % flat.size();
 
 	LocalVector<NextGILight> gpu_lights;
@@ -1889,7 +1915,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	const float rt_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
 	NextGIRelightParamsGPU params;
 	params.frame = frame;
-	params.ray_budget = NextGI::get_singleton() != nullptr ? NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).relight_shadow_rays : uint32_t(NEXTGI_SRC_RELIGHT_RAY_CAP);
+	params.ray_budget = relight_ray_budget;
+	last_ray_budget = relight_ray_budget;
 	params.page_count = gpu_pages.size() + far_gpu_pages.size();
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
 	params.light_function_count = any_light_function ? cpu_lights.size() : 0u;
@@ -2415,6 +2442,9 @@ void NextGIRelight::fill_info(Dictionary &r_info) const {
 	r_info["src_light_directional_count"] = int64_t(last_directional);
 	r_info["src_light_dynamic_count"] = int64_t(last_dynamic);
 	r_info["src_light_static_count"] = int64_t(last_static);
+	// GodotNext: megalights_frame (#143, GM-10).
+	r_info["src_light_megalights_count"] = int64_t(last_megalights_lights);
+	r_info["src_relight_ray_budget"] = int64_t(last_ray_budget);
 	r_info["src_page_count"] = int64_t(flat_page_count);
 	r_info["src_page_alloc_failures"] = int64_t(alloc_failures);
 	// GodotNext: nextgi_src_page_levels (#247)

@@ -323,6 +323,7 @@ public:
 				uint32_t use_df_shadows : 1; // GodotNext: df_shadows (#214). The view samples half-res DF shadow mask.
 				uint32_t use_light_function : 1; // GodotNext: light_function_atlas (#138). Sample Light Function Atlas.
 				uint32_t use_rt_shadows : 1; // GodotNext: rt_shadows (#141). The view samples standalone RT shadow tiles.
+				uint32_t use_megalights : 1; // GodotNext: megalights_frame (#143). Composite MegaLights direct radiance and skip LIGHT_FLAG_MEGALIGHTS lights.
 			};
 		};
 

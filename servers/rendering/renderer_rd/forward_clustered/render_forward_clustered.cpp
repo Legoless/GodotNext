@@ -2139,7 +2139,7 @@ void RenderForwardClustered::setup_added_reflection_probe(const Transform3D &p_t
 	}
 }
 
-void RenderForwardClustered::setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index, float p_barn_door_angle_deg, float p_barn_door_length, float p_intensity) {
+void RenderForwardClustered::setup_added_light(const RSE::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size, uint32_t p_per_type_index, float p_barn_door_angle_deg, float p_barn_door_length, float p_intensity, bool p_megalights_handled) {
 	if (current_cluster_builder != nullptr) {
 		ClusterBuilderRD::LightType type;
 		if (p_type == RSE::LIGHT_SPOT) {
@@ -2150,9 +2150,9 @@ void RenderForwardClustered::setup_added_light(const RSE::LightType p_type, cons
 			type = ClusterBuilderRD::LIGHT_TYPE_AREA;
 		}
 
-		// GodotNext: light_grid (#139). Route lights into the packed grid when active; legacy bitmask stays untouched otherwise.
+		// GodotNext: light_grid (#139) / megalights_frame (#143). Route lights into the packed grid when active; legacy bitmask stays untouched otherwise.
 		if (current_cluster_builder->is_packed_grid_requested()) {
-			current_cluster_builder->add_packed_light(type, p_per_type_index, p_transform, p_radius, p_spot_aperture, p_area_size, p_barn_door_angle_deg, p_barn_door_length, p_intensity, false);
+			current_cluster_builder->add_packed_light(type, p_per_type_index, p_transform, p_radius, p_spot_aperture, p_area_size, p_barn_door_angle_deg, p_barn_door_length, p_intensity, p_megalights_handled);
 		} else {
 			current_cluster_builder->add_light(type, p_transform, p_radius, p_spot_aperture, p_area_size);
 		}
@@ -2890,9 +2890,13 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		}
 	}
 
-	// GodotNext: megalights_sampling (#142, M3) / megalights_visibility (#146, M4).
+	// GodotNext: megalights_sampling (#142, M3) / megalights_visibility (#146, M4) / megalights_frame (#143, M6).
 	// Runs after prepass, packed light grid, VSM raster/projection, and TLAS preparation, and before
-	// next_gi.compact_after_traces(), leaving Forward+ Set 1 untouched for #143.
+	// next_gi.compact_after_traces() and the Forward+ color pass composite.
+	megalights_composite_active = false;
+	ml_bind_diffuse = RID();
+	ml_bind_specular = RID();
+	ml_bind_material = RID();
 	if (megalights_view) {
 		const RID ml_depth = rb->get_depth_texture(0);
 		const RID ml_normal_roughness = (p_normal_roughness_slices != nullptr && p_normal_roughness_slices[0].is_valid()) ? p_normal_roughness_slices[0] : rb_data->get_normal_roughness(0);
@@ -2953,13 +2957,30 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			ml_inputs.vsm_blue_noise_texture = vsm_projection_blue_noise;
 			ml_inputs.vsm_sample_view = vsm_sample_view;
 			ml_inputs.surface_thickness = float(GLOBAL_GET("rendering/lights_and_shadows/contact_shadow/surface_thickness"));
-			ml_inputs.quality_level = int(vsm_storage != nullptr && vsm_storage->is_active() ? vsm_storage->get_quality() : RendererVirtualShadowMapStorage::read_quality());
+			// GodotNext: megalights_frame (#143). Follow NextGI quality preset (#55) for Auto spp/downsample/screen-trace steps.
+			ml_inputs.quality_level = RendererRD::MegaLights::read_nextgi_quality_level();
 			// GodotNext: megalights_denoiser (#135, plan §21.3 contract M5).
 			ml_inputs.velocity_enabled = rb->has_velocity_buffer(false);
 			ml_inputs.velocity_texture = ml_inputs.velocity_enabled ? rb->get_velocity_buffer(false) : RID();
 			ml_inputs.reset_temporal_history = view_reset_temporal_history;
 			ml_inputs.debug_draw = get_debug_draw_mode();
-			mega_lights->render_sampling(ml_inputs, rb);
+			mega_lights->render(ml_inputs, rb);
+			// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Bind denoised demodulated diffuse & specular
+			// radiance into Forward+ Set 1 (bindings 69..71) only when rendering/megalights/enabled is active
+			// (leaving #136/#142/#146/#135 check/debug-input paths non-invasive).
+			if (RendererRD::MegaLights::is_enabled() && !RendererRD::MegaLights::has_pending_check()) {
+				Ref<RendererRD::MegaLightsViewData> ml_view_data = RendererRD::MegaLights::get_view_data(rb.ptr());
+				if (ml_view_data.is_valid()) {
+					const RID diff_tex = ml_view_data->get_denoised_diffuse_texture();
+					const RID spec_tex = ml_view_data->get_denoised_specular_texture();
+					if (diff_tex.is_valid() && spec_tex.is_valid() && ml_material.is_valid()) {
+						megalights_composite_active = true;
+						ml_bind_diffuse = diff_tex;
+						ml_bind_specular = spec_tex;
+						ml_bind_material = ml_material;
+					}
+				}
+			}
 		}
 	}
 
@@ -6973,6 +6994,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			rb->ensure_megalights_inputs();
 		} else {
 			rb->free_megalights_inputs();
+			// GodotNext: megalights_frame (#143, GM-9). Free all MegaLights view buffers when disabled so memory_bytes == 0.
+			Ref<RendererRD::MegaLightsViewData> ml_view_data = RendererRD::MegaLights::get_view_data(rb.ptr());
+			if (ml_view_data.is_valid()) {
+				ml_view_data->free_data();
+			}
 		}
 	} else {
 		megalights_inputs_active = false;
@@ -7278,6 +7304,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	rt_bind_mask = RID();
 	rt_bind_lookup = RID();
 	rt_bind_hit_dist = RID();
+	// GodotNext: megalights_frame (#143). Clear composite bindings before the depth prepass so ml_material
+	// is never simultaneously bound as a sampled texture (Set 1 binding 71) and a depth-prepass color attachment.
+	megalights_composite_active = false;
+	ml_bind_diffuse = RID();
+	ml_bind_specular = RID();
+	ml_bind_material = RID();
 	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite/Nanite cull.
 	vsm_debug_view_marked = false;
 	vsm_debug_view_pairs = false;
@@ -7292,6 +7324,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	base_specialization.use_vsm = vsm_sample_view; // GodotNext: vsm_projection (#222)
 	base_specialization.use_df_shadows = df_shadows_view; // GodotNext: df_shadows (#214)
 	base_specialization.use_rt_shadows = rt_shadows_view; // GodotNext: rt_shadows (#141)
+	base_specialization.use_megalights = false; // GodotNext: megalights_frame (#143); enabled after _pre_opaque_render.
 
 	if (depth_pre_pass) { //depth pre pass
 		// GodotNext: megalights_decals (#136). The MegaLights input prepass runs the decal loop, but
@@ -7583,6 +7616,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: light_function_atlas (#138, plan §21.3 contract M8). Only enable atlas sampling in
 	// Forward+ shaders when this view has at least one active light function.
 	base_specialization.use_light_function = light_function_atlas.has_baked_atlas() && light_function_atlas.get_view_entry_count() > 0;
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Enable Forward+ direct-light composite only when
+	// MegaLights ran and produced valid denoised diffuse and specular targets for this view.
+	base_specialization.use_megalights = megalights_composite_active;
 	if (using_nextgi) {
 		_render_nextgi_front_layer(p_render_data, reverse_cull, screen_size, radiance_texture, samplers, base_specialization);
 	}
@@ -8082,6 +8118,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// GodotNext: light_function_atlas (#138). Forward transparents ignore the Light Function Atlas
 		// by default unless rendering/lights_and_shadows/light_function_atlas/translucent is enabled.
 		transparent_specialization.use_light_function = base_specialization.use_light_function && RendererRD::LightFunctionAtlas::read_translucent_enabled();
+		// GodotNext: megalights_frame (#143). Forward transparents keep full clustered shading (translucent MegaLights is #137).
+		transparent_specialization.use_megalights = false;
 		// GodotNext: avboit (#295, plan §21.2.1) & rd_readonly_depth (#301). With AVBOIT the alpha
 		// list is drawn in any order. Keep the depth attachment read-only when no transparent
 		// surface writes depth or stencil so TSR level 2 overlaps the transparent pass.
@@ -10079,6 +10117,15 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 	{
 		// GodotNext: spline_meshes (#161, plan §21.4 contract N12). Per-render-list spline deform SSBO.
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 68, scene_state.get_spline_deform_buffer(p_render_list)));
+	}
+	{
+		// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Denoised demodulated diffuse & specular direct
+		// radiance and M1 shading-model/fallback material texture (bindings 69..71; defaults when off or in depth prepass).
+		const bool bind_ml = p_render_data != nullptr && megalights_composite_active && ml_bind_diffuse.is_valid() && ml_bind_specular.is_valid() && ml_bind_material.is_valid();
+		const RID default_ml_black = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 69, bind_ml ? ml_bind_diffuse : default_ml_black));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 70, bind_ml ? ml_bind_specular : default_ml_black));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 71, bind_ml ? ml_bind_material : default_ml_black));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)

@@ -82,9 +82,13 @@ struct LightData { //this structure needs to be as packed as possible
 	// GodotNext: rt_shadows (#141). Tile-sparse lookup base (UINT32_MAX when unused) and packed screen-tile rect + flags.
 	uint rt_shadow_tile_base;
 	uint rt_shadow_flags;
-	uint rt_shadow_pad0;
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Per-light flags (shared with #137 volumetric fog).
+	uint light_flags;
 	uint rt_shadow_pad1;
 };
+
+#define LIGHT_FLAG_MEGALIGHTS (1u << 0u)
+#define LIGHT_FLAG_MEGALIGHTS_DISALLOW (1u << 1u)
 
 #define REFLECTION_AMBIENT_DISABLED 0
 #define REFLECTION_AMBIENT_ENVIRONMENT 1
@@ -154,6 +158,7 @@ struct DirectionalLightData {
 	// GodotNext: rt_shadows (#141, plan §21.3 contract M9). Standalone RT shadow tile lookup base and flags.
 	uint rt_shadow_tile_base;
 	uint rt_shadow_flags;
-	uint rt_shadow_pad0;
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Per-light flags (shared with #137 volumetric fog).
+	uint light_flags;
 	uint rt_shadow_pad1;
 };

@@ -42,11 +42,15 @@ class NextGIEditorPlugin : public EditorPlugin {
 	GDCLASS(NextGIEditorPlugin, EditorPlugin);
 
 	bool nextgi_was_enabled = false;
+	// GodotNext: megalights_frame (#143).
+	bool megalights_was_enabled = false;
 
 	ConfirmationDialog *vulkan_switch_dialog = nullptr;
 	ConfirmationDialog *restart_dialog = nullptr;
 	// GodotNext: mesh_sdf_offer
 	ConfirmationDialog *mesh_sdf_dialog = nullptr;
+	// GodotNext: megalights_frame (#143). Non-blocking HWRT enable prompt when enabling MegaLights with HWRT off.
+	ConfirmationDialog *megalights_hwrt_dialog = nullptr;
 
 	void _on_project_settings_changed();
 	void _offer_vulkan_switch();
@@ -55,6 +59,9 @@ class NextGIEditorPlugin : public EditorPlugin {
 	// GodotNext: mesh_sdf_offer
 	void _offer_mesh_sdf();
 	void _mesh_sdf_confirmed();
+	// GodotNext: megalights_frame (#143).
+	void _offer_megalights_hwrt();
+	void _megalights_hwrt_confirmed();
 
 protected:
 	void _notification(int p_what);
@@ -97,6 +104,17 @@ public:
 	static String format_upscaler_readout(const Dictionary &p_status);
 	static String get_upscaler_readout(RID p_viewport);
 
+	// GodotNext: megalights_frame (#143, plan §21.3 contract M6).
+	// True only on a false-to-true flip of rendering/megalights/enabled while HWRT is disabled
+	// (either nextgi/enabled is false or nextgi/hardware_ray_tracing is Off) on a ray-query-capable
+	// device and this project has not been offered before.
+	static bool should_offer_megalights_hwrt(bool p_was_enabled, bool p_is_enabled, bool p_nextgi_enabled, int p_hwrt_setting, bool p_already_offered, bool p_supports_ray_query);
+	static void apply_megalights_hwrt_enable();
+	static String get_megalights_hwrt_dialog_title();
+	static String get_megalights_hwrt_dialog_text();
+	static String format_megalights_status(const Dictionary &p_tier_info);
+	static String get_megalights_status_readout();
+
 	virtual String get_plugin_name() const override { return "NextGI"; }
 
 	NextGIEditorPlugin();
@@ -105,6 +123,15 @@ public:
 // GodotNext: nextgi_user_surface
 class EditorInspectorPluginNextGI : public EditorInspectorPlugin {
 	GDCLASS(EditorInspectorPluginNextGI, EditorInspectorPlugin);
+
+public:
+	virtual bool can_handle(Object *p_object) override;
+	virtual void parse_begin(Object *p_object) override;
+};
+
+// GodotNext: megalights_frame (#143). Displays MegaLights Production/Experimental/Unavailable status on Light3D.
+class EditorInspectorPluginMegaLights : public EditorInspectorPlugin {
+	GDCLASS(EditorInspectorPluginMegaLights, EditorInspectorPlugin);
 
 public:
 	virtual bool can_handle(Object *p_object) override;

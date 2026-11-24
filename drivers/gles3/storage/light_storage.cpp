@@ -313,6 +313,20 @@ RSE::LightShadowMethod LightStorage::light_get_shadow_method(RID p_light) const 
 	return light->shadow_method;
 }
 
+void LightStorage::light_set_megalights(RID p_light, RSE::LightMegaLightsMode p_mode) {
+	// GodotNext: megalights_frame (#143). Stored only in Compatibility renderer.
+	ERR_FAIL_INDEX(int(p_mode), int(RSE::LIGHT_MEGALIGHTS_MAX));
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	light->megalights_mode = p_mode;
+}
+
+RSE::LightMegaLightsMode LightStorage::light_get_megalights(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RSE::LIGHT_MEGALIGHTS_PROJECT);
+	return light->megalights_mode;
+}
+
 void LightStorage::light_set_megalights_shadow_method(RID p_light, RSE::LightMegaLightsShadowMethod p_method) {
 	// GodotNext: megalights_visibility (#146). Stored only in Compatibility renderer.
 	ERR_FAIL_INDEX(int(p_method), int(RSE::LIGHT_MEGALIGHTS_SHADOW_METHOD_MAX));

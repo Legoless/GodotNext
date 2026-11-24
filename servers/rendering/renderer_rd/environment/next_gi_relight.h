@@ -219,6 +219,9 @@ class NextGIRelight {
 	uint32_t last_directional = 0;
 	uint32_t last_dynamic = 0;
 	uint32_t last_static = 0;
+	// GodotNext: megalights_frame (#143, GM-10). MegaLights lights relighting SRC cards and active ray budget.
+	uint32_t last_megalights_lights = 0;
+	uint32_t last_ray_budget = 0;
 	uint32_t flat_page_count = 0;
 
 	PackedFloat32Array probe_rgb;
