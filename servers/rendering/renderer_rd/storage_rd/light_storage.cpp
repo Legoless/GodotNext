@@ -1368,8 +1368,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				}
 				light_data.shadow_bias *= MAX(light_data.soft_shadow_scale, 1.0f);
 			}
-			// GodotNext: vsm_projection (#222). No PCSS for a light the light loop samples through VSM: SMRT
-			// takes the penumbra from the light's size. Volumetric fog still reads this atlas data.
+			// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). No PCSS for a light the light loop
+			// samples through VSM: SMRT takes the penumbra from the light's size, and fog reads coarse pages.
 			if (vsm_shadow) {
 				light_data.soft_shadow_size = 0.0;
 			}

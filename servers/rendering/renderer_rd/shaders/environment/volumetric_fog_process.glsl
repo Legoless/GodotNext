@@ -221,6 +221,10 @@ layout(set = 0, binding = 15, std140) uniform Params {
 	mat4 to_prev_view;
 
 	mat3 radiance_inverse_xform;
+
+	// GodotNext: vsm_fog_translucency (#215). World-space camera origin for VSM coarse lookups and table capacity (0 when off).
+	vec3 vsm_cam_origin;
+	uint vsm_table_maps;
 }
 params;
 #ifndef MODE_COPY
@@ -250,6 +254,31 @@ layout(set = 0, binding = 20) uniform texture2D sky_texture;
 #endif // MODE_COPY
 
 layout(set = 0, binding = 21) uniform texture2D area_light_atlas;
+
+#ifdef MODE_DENSITY
+// GodotNext: vsm_fog_translucency (#215, plan §21.3 contract S6). Coarse-page VSM bindings for fog froxels.
+#include "../vsm_mark_inc.glsl"
+
+layout(set = 0, binding = 22) uniform utexture2DArray vsm_pool_tex;
+layout(set = 0, binding = 23, std430) buffer restrict readonly VSMPageTable {
+	uint entries[];
+}
+vsm_page_table;
+layout(set = 0, binding = 24, std430) buffer restrict readonly VSMMaps {
+	VSMMapData data[];
+}
+vsm_maps;
+layout(set = 0, binding = 25, std430) buffer restrict VSMCoarseMiss {
+	uint data[];
+}
+vsm_coarse_miss;
+layout(set = 0, binding = 26) uniform sampler vsm_nearest_sampler;
+
+#define VSM_COARSE_NEAREST_SAMPLER vsm_nearest_sampler
+#include "../vsm_page_table_inc.glsl"
+#include "../vsm_raster_inc.glsl"
+#include "../vsm_coarse_inc.glsl"
+#endif
 
 float get_depth_at_pos(float cell_depth_size, int z) {
 	float d = float(z) * cell_depth_size + cell_depth_size * 0.5; //center of voxels
@@ -425,41 +454,52 @@ void main() {
 	//compute directional lights
 
 	if (total_density > 0.00005) {
+		// GodotNext: vsm_fog_translucency (#215). World-space froxel position for VSM coarse-page lookups
+		// (cam_rotation holds only the camera basis; vsm_cam_origin adds the world translation).
+		vec3 froxel_world_pos = mat3(params.cam_rotation) * view_pos + params.vsm_cam_origin;
+
 		for (uint i = 0; i < params.directional_light_count; i++) {
 			if (directional_lights.data[i].volumetric_fog_energy > 0.001) {
 				vec3 shadow_attenuation = vec3(1.0);
 
 				if (directional_lights.data[i].shadow_opacity > 0.001) {
 					float depth_z = -view_pos.z;
+					float shadow = 1.0;
 
-					vec4 pssm_coord;
-					vec3 light_dir = directional_lights.data[i].direction;
-					vec4 v = vec4(view_pos, 1.0);
-					float z_range;
-
-					if (depth_z < directional_lights.data[i].shadow_split_offsets.x) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix1 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.x;
-
-					} else if (depth_z < directional_lights.data[i].shadow_split_offsets.y) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix2 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.y;
-
-					} else if (depth_z < directional_lights.data[i].shadow_split_offsets.z) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix3 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.z;
-
+					// GodotNext: vsm_fog_translucency (#215). VSM directional lights replace PSSM with one
+					// coarse-page lookup at the coarse mips marked by #219, keeping INV_FOG_FADE.
+					if (params.vsm_table_maps > 0u && (directional_lights.data[i].vsm_flags & VSM_LIGHT_FLAGS_SAMPLE) != 0u) {
+						shadow = vsm_fog_shadow_coarse_directional(params.vsm_table_maps, directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, froxel_world_pos, depth_z, INV_FOG_FADE);
 					} else {
-						pssm_coord = (directional_lights.data[i].shadow_matrix4 * v);
-						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.w;
-					}
+						vec4 pssm_coord;
+						vec3 light_dir = directional_lights.data[i].direction;
+						vec4 v = vec4(view_pos, 1.0);
+						float z_range;
 
-					float depth = texture(sampler2D(directional_shadow_atlas, linear_sampler), pssm_coord.xy).r;
-					float shadow = exp(min(0.0, (pssm_coord.z - depth)) * z_range * INV_FOG_FADE);
+						if (depth_z < directional_lights.data[i].shadow_split_offsets.x) {
+							pssm_coord = (directional_lights.data[i].shadow_matrix1 * v);
+							pssm_coord /= pssm_coord.w;
+							z_range = directional_lights.data[i].shadow_z_range.x;
+
+						} else if (depth_z < directional_lights.data[i].shadow_split_offsets.y) {
+							pssm_coord = (directional_lights.data[i].shadow_matrix2 * v);
+							pssm_coord /= pssm_coord.w;
+							z_range = directional_lights.data[i].shadow_z_range.y;
+
+						} else if (depth_z < directional_lights.data[i].shadow_split_offsets.z) {
+							pssm_coord = (directional_lights.data[i].shadow_matrix3 * v);
+							pssm_coord /= pssm_coord.w;
+							z_range = directional_lights.data[i].shadow_z_range.z;
+
+						} else {
+							pssm_coord = (directional_lights.data[i].shadow_matrix4 * v);
+							pssm_coord /= pssm_coord.w;
+							z_range = directional_lights.data[i].shadow_z_range.w;
+						}
+
+						float depth = texture(sampler2D(directional_shadow_atlas, linear_sampler), pssm_coord.xy).r;
+						shadow = exp(min(0.0, (pssm_coord.z - depth)) * z_range * INV_FOG_FADE);
+					}
 
 					shadow = mix(shadow, 1.0, smoothstep(directional_lights.data[i].fade_from, directional_lights.data[i].fade_to, view_pos.z)); //done with negative values for performance
 
@@ -527,30 +567,36 @@ void main() {
 						vec3 light = omni_lights.data[light_index].color;
 
 						if (omni_lights.data[light_index].shadow_opacity > 0.001) {
-							//has shadow
-							vec4 uv_rect = omni_lights.data[light_index].atlas_rect;
-							vec2 flip_offset = omni_lights.data[light_index].direction.xy;
+							// GodotNext: vsm_fog_translucency (#215). Coarse-page VSM lookup for omni lights in fog.
+							if (params.vsm_table_maps > 0u && (omni_lights.data[light_index].vsm_flags & VSM_LIGHT_FLAGS_SAMPLE) != 0u) {
+								float shadow = vsm_fog_shadow_coarse_local(params.vsm_table_maps, omni_lights.data[light_index].vsm_map_base, omni_lights.data[light_index].vsm_flags, froxel_world_pos, INV_FOG_FADE);
+								shadow_attenuation = mix(1.0 - omni_lights.data[light_index].shadow_opacity, 1.0, shadow);
+							} else {
+								//has shadow
+								vec4 uv_rect = omni_lights.data[light_index].atlas_rect;
+								vec2 flip_offset = omni_lights.data[light_index].direction.xy;
 
-							vec3 local_vert = (omni_lights.data[light_index].shadow_matrix * vec4(view_pos, 1.0)).xyz;
+								vec3 local_vert = (omni_lights.data[light_index].shadow_matrix * vec4(view_pos, 1.0)).xyz;
 
-							float shadow_len = length(local_vert); //need to remember shadow len from here
-							vec3 shadow_sample = safe_normalize(local_vert);
+								float shadow_len = length(local_vert); //need to remember shadow len from here
+								vec3 shadow_sample = safe_normalize(local_vert);
 
-							if (shadow_sample.z >= 0.0) {
-								uv_rect.xy += flip_offset;
+								if (shadow_sample.z >= 0.0) {
+									uv_rect.xy += flip_offset;
+								}
+
+								shadow_sample.z = 1.0 + abs(shadow_sample.z);
+								vec3 pos = vec3(shadow_sample.xy / shadow_sample.z, shadow_len - omni_lights.data[light_index].shadow_bias);
+								pos.z *= omni_lights.data[light_index].inv_radius;
+								pos.z = 1.0 - pos.z;
+
+								pos.xy = pos.xy * 0.5 + 0.5;
+								pos.xy = uv_rect.xy + pos.xy * uv_rect.zw;
+
+								float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
+
+								shadow_attenuation = mix(1.0 - omni_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / omni_lights.data[light_index].inv_radius * INV_FOG_FADE));
 							}
-
-							shadow_sample.z = 1.0 + abs(shadow_sample.z);
-							vec3 pos = vec3(shadow_sample.xy / shadow_sample.z, shadow_len - omni_lights.data[light_index].shadow_bias);
-							pos.z *= omni_lights.data[light_index].inv_radius;
-							pos.z = 1.0 - pos.z;
-
-							pos.xy = pos.xy * 0.5 + 0.5;
-							pos.xy = uv_rect.xy + pos.xy * uv_rect.zw;
-
-							float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
-
-							shadow_attenuation = mix(1.0 - omni_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / omni_lights.data[light_index].inv_radius * INV_FOG_FADE));
 						}
 						total_light += light * attenuation * shadow_attenuation * henyey_greenstein(dot(safe_normalize(light_pos - view_pos), safe_normalize(view_pos)), params.phase_g) * omni_lights.data[light_index].volumetric_fog_energy;
 					}
@@ -601,21 +647,27 @@ void main() {
 						vec3 light = spot_lights.data[light_index].color;
 
 						if (spot_lights.data[light_index].shadow_opacity > 0.001) {
-							//has shadow
-							vec4 uv_rect = spot_lights.data[light_index].atlas_rect;
+							// GodotNext: vsm_fog_translucency (#215). Coarse-page VSM lookup for spot lights in fog.
+							if (params.vsm_table_maps > 0u && (spot_lights.data[light_index].vsm_flags & VSM_LIGHT_FLAGS_SAMPLE) != 0u) {
+								float shadow = vsm_fog_shadow_coarse_local(params.vsm_table_maps, spot_lights.data[light_index].vsm_map_base, spot_lights.data[light_index].vsm_flags, froxel_world_pos, INV_FOG_FADE);
+								shadow_attenuation = mix(1.0 - spot_lights.data[light_index].shadow_opacity, 1.0, shadow);
+							} else {
+								//has shadow
+								vec4 uv_rect = spot_lights.data[light_index].atlas_rect;
 
-							vec4 v = vec4(view_pos, 1.0);
+								vec4 v = vec4(view_pos, 1.0);
 
-							vec4 splane = (spot_lights.data[light_index].shadow_matrix * v);
-							splane.z -= spot_lights.data[light_index].shadow_bias;
-							float safe_w = abs(splane.w) > 1e-6 ? splane.w : (splane.w >= 0.0 ? 1e-6 : -1e-6);
-							splane /= safe_w;
+								vec4 splane = (spot_lights.data[light_index].shadow_matrix * v);
+								splane.z -= spot_lights.data[light_index].shadow_bias;
+								float safe_w = abs(splane.w) > 1e-6 ? splane.w : (splane.w >= 0.0 ? 1e-6 : -1e-6);
+								splane /= safe_w;
 
-							vec3 pos = vec3(splane.xy * spot_lights.data[light_index].atlas_rect.zw + spot_lights.data[light_index].atlas_rect.xy, splane.z);
+								vec3 pos = vec3(splane.xy * spot_lights.data[light_index].atlas_rect.zw + spot_lights.data[light_index].atlas_rect.xy, splane.z);
 
-							float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
+								float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
 
-							shadow_attenuation = mix(1.0 - spot_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / spot_lights.data[light_index].inv_radius * INV_FOG_FADE));
+								shadow_attenuation = mix(1.0 - spot_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / spot_lights.data[light_index].inv_radius * INV_FOG_FADE));
+							}
 						}
 						total_light += light * attenuation * shadow_attenuation * henyey_greenstein(dot(safe_normalize(light_rel_vec), safe_normalize(view_pos)), params.phase_g) * spot_lights.data[light_index].volumetric_fog_energy;
 					}
@@ -698,25 +750,31 @@ void main() {
 							vec3 light_color = area_lights.data[light_index].color * texture_color;
 
 							if (area_lights.data[light_index].shadow_opacity > 0.001) {
-								//has shadow
-								vec4 uv_rect = area_lights.data[light_index].atlas_rect;
+								// GodotNext: vsm_fog_translucency (#215). Coarse-page VSM lookup for area lights in fog.
+								if (params.vsm_table_maps > 0u && (area_lights.data[light_index].vsm_flags & VSM_LIGHT_FLAGS_SAMPLE) != 0u) {
+									float shadow = vsm_fog_shadow_coarse_local(params.vsm_table_maps, area_lights.data[light_index].vsm_map_base, area_lights.data[light_index].vsm_flags, froxel_world_pos, INV_FOG_FADE);
+									shadow_attenuation = mix(1.0 - area_lights.data[light_index].shadow_opacity, 1.0, shadow);
+								} else {
+									//has shadow
+									vec4 uv_rect = area_lights.data[light_index].atlas_rect;
 
-								vec3 local_vert = (area_lights.data[light_index].shadow_matrix * vec4(view_pos, 1.0)).xyz;
+									vec3 local_vert = (area_lights.data[light_index].shadow_matrix * vec4(view_pos, 1.0)).xyz;
 
-								float shadow_len = length(local_vert); //need to remember shadow len from here
-								vec3 shadow_sample = normalize(local_vert);
+									float shadow_len = length(local_vert); //need to remember shadow len from here
+									vec3 shadow_sample = normalize(local_vert);
 
-								shadow_sample.z = 1.0 + abs(shadow_sample.z);
-								vec3 pos = vec3(shadow_sample.xy / shadow_sample.z, shadow_len - area_lights.data[light_index].shadow_bias);
-								pos.z *= inv_center_range;
-								pos.z = 1.0 - pos.z;
+									shadow_sample.z = 1.0 + abs(shadow_sample.z);
+									vec3 pos = vec3(shadow_sample.xy / shadow_sample.z, shadow_len - area_lights.data[light_index].shadow_bias);
+									pos.z *= inv_center_range;
+									pos.z = 1.0 - pos.z;
 
-								pos.xy = pos.xy * 0.5 + 0.5;
-								pos.xy = uv_rect.xy + pos.xy * uv_rect.zw;
+									pos.xy = pos.xy * 0.5 + 0.5;
+									pos.xy = uv_rect.xy + pos.xy * uv_rect.zw;
 
-								float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
+									float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
 
-								shadow_attenuation = mix(1.0 - area_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / inv_center_range * INV_FOG_FADE));
+									shadow_attenuation = mix(1.0 - area_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / inv_center_range * INV_FOG_FADE));
+								}
 							}
 							float cos_theta = 0.0;
 							if (dot(light_rel_vec, light_rel_vec) > EPSILON) {

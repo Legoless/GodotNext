@@ -539,10 +539,16 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #ifndef SHADOWS_DISABLED
 	// Omni light shadow.
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps has no atlas tile.
+	// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). A light the view samples through its
+	// virtual shadow maps has no atlas tile; forward transparents take one coarse-page tap when coarse mode is on.
 	const bool vsm_sampled = vsm_light_sampled(omni_lights.data[idx].vsm_flags);
 	if (vsm_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
-		float vsm_shadow = vsm_shadow_local(omni_lights.data[idx].vsm_map_base, omni_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(omni_lights.data[idx].position), omni_lights.data[idx].size, vec3(0.0), vec3(0.0), -vertex.z, vsm_pixel_noise());
+		float vsm_shadow;
+		if (sc_use_vsm_coarse()) {
+			vsm_shadow = vsm_shadow_coarse_local(vsm_projection.data.counts.x, omni_lights.data[idx].vsm_map_base, omni_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(omni_lights.data[idx].position));
+		} else {
+			vsm_shadow = vsm_shadow_local(omni_lights.data[idx].vsm_map_base, omni_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(omni_lights.data[idx].position), omni_lights.data[idx].size, vec3(0.0), vec3(0.0), -vertex.z, vsm_pixel_noise());
+		}
 		shadow = mix(half(1.0), half(vsm_shadow), half(omni_lights.data[idx].shadow_opacity));
 	}
 	if (!vsm_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
@@ -870,10 +876,16 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #ifndef SHADOWS_DISABLED
 	// Spot light shadow.
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps has no atlas tile.
+	// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). A light the view samples through its
+	// virtual shadow maps has no atlas tile; forward transparents take one coarse-page tap when coarse mode is on.
 	const bool vsm_sampled = vsm_light_sampled(spot_lights.data[idx].vsm_flags);
 	if (vsm_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
-		float vsm_shadow = vsm_shadow_local(spot_lights.data[idx].vsm_map_base, spot_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(spot_lights.data[idx].position), spot_lights.data[idx].size, vec3(0.0), vec3(0.0), -vertex.z, vsm_pixel_noise());
+		float vsm_shadow;
+		if (sc_use_vsm_coarse()) {
+			vsm_shadow = vsm_shadow_coarse_local(vsm_projection.data.counts.x, spot_lights.data[idx].vsm_map_base, spot_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(spot_lights.data[idx].position));
+		} else {
+			vsm_shadow = vsm_shadow_local(spot_lights.data[idx].vsm_map_base, spot_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(spot_lights.data[idx].position), spot_lights.data[idx].size, vec3(0.0), vec3(0.0), -vertex.z, vsm_pixel_noise());
+		}
 		shadow = mix(half(1.0), half(vsm_shadow), half(spot_lights.data[idx].shadow_opacity));
 	}
 	if (!vsm_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
@@ -1089,11 +1101,16 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #ifndef SHADOWS_DISABLED
 	// Area light shadow.
 #ifdef VSM_PROJECTION
-	// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps has no atlas
-	// tile. The penumbra comes from the light's rectangle.
+	// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). A light the view samples through its
+	// virtual shadow maps has no atlas tile; forward transparents take one coarse-page tap when coarse mode is on.
 	const bool vsm_sampled = vsm_light_sampled(area_lights.data[idx].vsm_flags);
 	if (vsm_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
-		float vsm_shadow = vsm_shadow_local(area_lights.data[idx].vsm_map_base, area_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(area_lights.data[idx].position), 0.0, vsm_world_vector(vec3(area_lights.data[idx].area_width)), vsm_world_vector(vec3(area_lights.data[idx].area_height)), -vertex.z, vsm_pixel_noise());
+		float vsm_shadow;
+		if (sc_use_vsm_coarse()) {
+			vsm_shadow = vsm_shadow_coarse_local(vsm_projection.data.counts.x, area_lights.data[idx].vsm_map_base, area_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(area_lights.data[idx].position));
+		} else {
+			vsm_shadow = vsm_shadow_local(area_lights.data[idx].vsm_map_base, area_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(area_lights.data[idx].position), 0.0, vsm_world_vector(vec3(area_lights.data[idx].area_width)), vsm_world_vector(vec3(area_lights.data[idx].area_height)), -vertex.z, vsm_pixel_noise());
+		}
 		shadow = mix(half(1.0), half(vsm_shadow), half(area_lights.data[idx].shadow_opacity));
 	}
 	if (!vsm_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {

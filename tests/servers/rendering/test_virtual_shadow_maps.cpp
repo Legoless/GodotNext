@@ -4558,3 +4558,282 @@ TEST_CASE("[VSM][SceneTree] shadow_cache_invalidation is bound and round-trips t
 	}
 	memdelete(node);
 }
+
+TEST_CASE("[VSM] Translucent quality setting default, clamping and coarse-miss defines (#215)") {
+	using VSM = RendererVirtualShadowMapStorage;
+	CHECK(VSM::DEFAULT_TRANSLUCENT_QUALITY == VSM::TRANSLUCENT_QUALITY_COARSE);
+	CHECK(uint32_t(VSM::TRANSLUCENT_QUALITY_COARSE) == 0u);
+	CHECK(uint32_t(VSM::TRANSLUCENT_QUALITY_SMRT) == 1u);
+	CHECK(VSM::clamp_translucent_quality(-1) == VSM::TRANSLUCENT_QUALITY_COARSE);
+	CHECK(VSM::clamp_translucent_quality(0) == VSM::TRANSLUCENT_QUALITY_COARSE);
+	CHECK(VSM::clamp_translucent_quality(1) == VSM::TRANSLUCENT_QUALITY_SMRT);
+	CHECK(VSM::clamp_translucent_quality(2) == VSM::TRANSLUCENT_QUALITY_COARSE);
+	CHECK(VSM::clamp_translucent_quality(999) == VSM::TRANSLUCENT_QUALITY_COARSE);
+
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings != nullptr) {
+		const StringName key = VSM::SETTING_TRANSLUCENT_QUALITY;
+		const bool had_key = settings->has_setting(key);
+		const Variant previous = had_key ? settings->get_setting(key) : Variant();
+		CHECK(VSM::read_translucent_quality() == VSM::TRANSLUCENT_QUALITY_COARSE);
+		settings->set_setting(key, int64_t(VSM::TRANSLUCENT_QUALITY_SMRT));
+		CHECK(VSM::read_translucent_quality() == VSM::TRANSLUCENT_QUALITY_SMRT);
+		settings->set_setting(key, int64_t(7));
+		CHECK(VSM::read_translucent_quality() == VSM::TRANSLUCENT_QUALITY_COARSE);
+		if (had_key) {
+			settings->set_setting(key, previous);
+		} else {
+			settings->set_setting(key, Variant());
+		}
+	}
+
+	const String defines = VSM::get_glsl_defines();
+	CHECK(defines.contains("#define VSM_COARSE_MISS_FOG_TOTAL 0u"));
+	CHECK(defines.contains("#define VSM_COARSE_MISS_TRANSLUCENT_TOTAL 1u"));
+	CHECK(defines.contains("#define VSM_COARSE_MISS_FOG_VIEW 2u"));
+	CHECK(defines.contains("#define VSM_COARSE_MISS_TRANSLUCENT_VIEW 3u"));
+	CHECK(defines.contains("#define VSM_COARSE_MISS_SINK 4u"));
+}
+
+TEST_CASE("[VSM] Directional coarse lookups for fog and translucency and missing-coarse-page counter (#215)") {
+	using namespace TestVirtualShadowMapProjection;
+	const uint32_t count = 4;
+	ProjectionScene scene;
+	scene.slab_half = 1.0f;
+	scene.slab_height = 1.0f;
+	scene.set_maps(sun_levels(count));
+	// Allocate ONLY the always-resident coarse mips (CLIPMAP_RESIDENT_MIP .. MIP_COUNT - 1) on every level.
+	for (uint32_t level = 0; level < count; level++) {
+		for (uint32_t mip = VSM::CLIPMAP_RESIDENT_MIP; mip < VSM::MIP_COUNT; mip++) {
+			scene.allocate(level, mip);
+		}
+	}
+	scene.fill();
+
+	const VSM::ProjectionInput in = scene.input();
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count) | VSM::LIGHT_FLAGS_SAMPLE;
+	const Vector3 up(0, 1, 0);
+	const float inv_fog_fade = 10.0f;
+	uint32_t misses = 0;
+
+	// Volumetric fog directional coarse lookup: exponential fade using stored - receiver_depth.
+	// Slab top is at y = 1.0 (depth = -1.0); ground is y = 0.0 (depth = 0.0), so stored - receiver = -1.0.
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), 5.0f, inv_fog_fade, &misses) == doctest::Approx(std::exp(-1.0f * inv_fog_fade)).epsilon(1e-3));
+	// Halfway below the slab (y = 0.8): stored - receiver = -0.2 -> exp(-2.0).
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.8f, 0.0f), 5.0f, inv_fog_fade, &misses) == doctest::Approx(std::exp(-0.2f * inv_fog_fade)).epsilon(1e-3));
+	// Above the slab and outside its footprint: lit (1.0).
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 1.5f, 0.0f), 5.0f, inv_fog_fade, &misses) == doctest::Approx(1.0f));
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(2.0f, 0.0f, 0.0f), 5.0f, inv_fog_fade, &misses) == doctest::Approx(1.0f));
+	CHECK(misses == 0u);
+
+	// Forward transparent directional coarse lookup: shadowed under slab, lit outside and on slab top.
+	CHECK(VSM::shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 5.0f, &misses) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_coarse_directional(in, 0, flags, Vector3(2.0f, 0.0f, 0.0f), up, 5.0f, &misses) == doctest::Approx(1.0f));
+	CHECK(VSM::shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, 5.0f, &misses) == doctest::Approx(1.0f));
+	CHECK(misses == 0u);
+
+	// Last clipmap level far strip: shift the last level's origin so its far edge falls outside mip 4's window
+	// (only in-window at mip < CLIPMAP_RESIDENT_MIP).
+	{
+		ProjectionScene far_scene;
+		far_scene.slab_half = 40.0f;
+		far_scene.slab_height = 2.0f;
+		const Vector2i far_origin(-33, -33); // -33 mod 16 == 15 -> mip 4 window covers window pages [0, 49).
+		LocalVector<VSM::MapData> far_maps;
+		far_maps.push_back(VSM::map_data_clipmap(down_sun(), 0, far_origin, 100.0f));
+		far_scene.set_maps(far_maps);
+		// Window page 60 has (15 + 60) >= 64 -> outside mip 4 (and mip 3), inside mip 2.
+		const float far_x = float((far_origin.x + 60) * int32_t(VSM::PAGE_SIZE) + 32) * std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT);
+		const Vector3 far_pt(far_x, 0.0f, far_x);
+		const Vector2i texel0 = VSM::clipmap_texel0(far_scene.maps[0], far_pt);
+		REQUIRE(VSM::clipmap_in_window(far_origin, texel0, 0));
+		REQUIRE_FALSE(VSM::clipmap_in_window(far_origin, texel0, VSM::CLIPMAP_RESIDENT_MIP));
+		uint32_t resident = 0;
+		while (resident + 1 < VSM::CLIPMAP_RESIDENT_MIP && VSM::clipmap_in_window(far_origin, texel0, resident + 1)) {
+			resident++;
+		}
+		// Unmapped far strip inside domain -> returns 1.0 and increments missing-coarse-page counter.
+		uint32_t far_misses = 0;
+		CHECK(VSM::fog_shadow_coarse_directional(far_scene.input(), 0, VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 1), far_pt, 10.0f, inv_fog_fade, &far_misses) == doctest::Approx(1.0f));
+		CHECK(far_misses == 1u);
+		// Allocate the far-strip resident mip -> finds it, shadows, and records 0 new misses.
+		far_scene.allocate(0, resident);
+		far_scene.fill();
+		uint32_t found_level = 99;
+		bool in_domain = false;
+		const VSM::LookupResult far_lookup = VSM::clipmap_coarse_sample_level(far_scene.table.ptr(), 1, far_scene.maps.ptr(), 0, 1, texel0, found_level, in_domain);
+		CHECK(far_lookup.valid);
+		CHECK(in_domain);
+		CHECK(found_level == 0u);
+		CHECK(far_lookup.mip == resident);
+		CHECK(VSM::shadow_coarse_directional(far_scene.input(), 0, VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 1), far_pt, up, 10.0f, &far_misses) == doctest::Approx(0.0f));
+		CHECK(far_misses == 1u);
+	}
+
+	// Empty page table: misses inside domain increment counter and return 1.0; points past max_distance or
+	// outside all clipmap levels return 1.0 without incrementing the counter.
+	for (uint32_t &entry : scene.table) {
+		entry = 0u;
+	}
+	uint32_t empty_misses = 0;
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), 5.0f, inv_fog_fade, &empty_misses) == doctest::Approx(1.0f));
+	CHECK(empty_misses == 1u);
+	CHECK(VSM::shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 5.0f, &empty_misses) == doctest::Approx(1.0f));
+	CHECK(empty_misses == 2u);
+	// Past max_distance (1000.0): no miss increment.
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), 1500.0f, inv_fog_fade, &empty_misses) == doctest::Approx(1.0f));
+	CHECK(VSM::shadow_coarse_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 1500.0f, &empty_misses) == doctest::Approx(1.0f));
+	CHECK(empty_misses == 2u);
+	// Outside every clipmap level's window (level 3 extent is 32 m): no miss increment.
+	CHECK(VSM::fog_shadow_coarse_directional(in, 0, flags, Vector3(500.0f, 0.0f, 500.0f), 5.0f, inv_fog_fade, &empty_misses) == doctest::Approx(1.0f));
+	CHECK(VSM::shadow_coarse_directional(in, 0, flags, Vector3(500.0f, 0.0f, 500.0f), up, 5.0f, &empty_misses) == doctest::Approx(1.0f));
+	CHECK(empty_misses == 2u);
+}
+
+TEST_CASE("[VSM] Local (spot, omni, area) coarse lookups for fog and translucency and missing-coarse-page counter (#215)") {
+	using namespace TestVirtualShadowMapProjection;
+	const float inv_fog_fade = 10.0f;
+	const Vector3 up(0, 1, 0);
+	const Transform3D spot_xform(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 4.0f, 0));
+
+	// Spot light: allocate coarse mips (COARSE_FIRST_MIP and root MIP_COUNT - 1) only.
+	{
+		ProjectionScene scene;
+		scene.light_position = spot_xform.origin;
+		scene.slab_half = 1.0f;
+		scene.slab_height = 1.0f;
+		LocalVector<VSM::MapData> maps;
+		maps.push_back(VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xform, 12.0f, 45.0f));
+		scene.set_maps(maps);
+		for (uint32_t mip = VSM::COARSE_FIRST_MIP; mip < VSM::MIP_COUNT; mip++) {
+			scene.allocate(0, mip);
+		}
+		scene.fill();
+
+		const VSM::ProjectionInput in = scene.input();
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1) | VSM::LIGHT_FLAGS_SAMPLE;
+		uint32_t misses = 0;
+
+		// Light at y=4, slab at y=1 (stored w=3.0), receiver at y=0 (w=4.0) -> stored - w = -1.0.
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(std::exp(-1.0f * inv_fog_fade)).epsilon(1e-3));
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.8f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(std::exp(-0.2f * inv_fog_fade)).epsilon(1e-3));
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(2.2f, 0.0f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(1.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(0.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(2.2f, 0.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(1.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(1.0f));
+		CHECK(misses == 0u);
+
+		// Evict COARSE_FIRST_MIP leaving only the always-resident root mip (MIP_COUNT - 1): fallback stays valid with 0 misses.
+		const uint32_t side = VSM::PAGES_PER_SIDE >> VSM::COARSE_FIRST_MIP;
+		for (uint32_t y = 0; y < side; y++) {
+			for (uint32_t x = 0; x < side; x++) {
+				scene.table[VSM::entry_index(0, VSM::COARSE_FIRST_MIP, x, y)] = 0u;
+			}
+		}
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), inv_fog_fade, &misses) < 0.01f);
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(0.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(1.0f));
+		CHECK(misses == 0u);
+
+		// Evict root mip too -> inside face returns 1.0 and increments missing-coarse-page counter; outside cone does not.
+		scene.table[VSM::entry_index(0, VSM::MIP_COUNT - 1, 0, 0)] = 0u;
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(1.0f));
+		CHECK(misses == 1u);
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(1.0f));
+		CHECK(misses == 2u);
+		// Outside the 45-degree spot cone or behind the light: MAP_NONE -> 1.0 with no miss increment.
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(10.0f, 0.0f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(1.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 6.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(1.0f));
+		CHECK(misses == 2u);
+	}
+
+	// Omni (6 faces) and Area (5 front-hemisphere faces) coarse lookups.
+	for (VSM::MapKind kind : { VSM::MAP_KIND_OMNI, VSM::MAP_KIND_AREA }) {
+		const uint32_t face_count = VSM::map_kind_map_count(kind, 1);
+		ProjectionScene scene;
+		scene.light_position = spot_xform.origin;
+		scene.slab_half = 1.0f;
+		scene.slab_height = 1.0f;
+		LocalVector<VSM::MapData> maps;
+		for (uint32_t face = 0; face < face_count; face++) {
+			maps.push_back(VSM::map_data_face(kind, face, spot_xform, 12.0f, 45.0f));
+		}
+		scene.set_maps(maps);
+		for (uint32_t face = 0; face < face_count; face++) {
+			scene.allocate(face, VSM::MIP_COUNT - 1);
+		}
+		scene.fill();
+
+		const VSM::ProjectionInput in = scene.input();
+		const uint32_t flags = VSM::light_flags(kind, face_count) | VSM::LIGHT_FLAGS_SAMPLE;
+		uint32_t misses = 0;
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), inv_fog_fade, &misses) < 0.01f);
+		CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(2.2f, 0.0f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(1.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(0.0f));
+		CHECK(VSM::shadow_coarse_local(in, 0, flags, Vector3(2.2f, 0.0f, 0.0f), up, scene.light_position, &misses) == doctest::Approx(1.0f));
+		CHECK(misses == 0u);
+		if (kind == VSM::MAP_KIND_AREA) {
+			// Behind the area light's front hemisphere: MAP_NONE -> lit with 0 misses even on an empty table.
+			for (uint32_t &entry : scene.table) {
+				entry = 0u;
+			}
+			CHECK(VSM::fog_shadow_coarse_local(in, 0, flags, Vector3(0.0f, 8.0f, 0.0f), inv_fog_fade, &misses) == doctest::Approx(1.0f));
+			CHECK(misses == 0u);
+		}
+	}
+}
+
+TEST_CASE("[VSM] Resident-mip-first resolution scales bias and SMRT reach to coarse pages (#215)") {
+	using namespace TestVirtualShadowMapProjection;
+	const Vector3 up(0, 1, 0);
+
+	// Directional light with fine mips 0..3 unmapped and only coarse mip 4 resident, small footprint requesting mip 0.
+	{
+		const uint32_t count = 4;
+		ProjectionScene scene;
+		scene.slab_half = 1.0f;
+		scene.slab_height = 1.0f;
+		scene.set_maps(sun_levels(count));
+		for (uint32_t level = 0; level < count; level++) {
+			scene.allocate(level, VSM::CLIPMAP_RESIDENT_MIP);
+		}
+		scene.fill();
+
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = 0.001f; // Requests fine mip 0, which is unmapped -> resolves to coarse mip 4 first.
+		in.rays = 8;
+		in.steps = 6;
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+		const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(1.0f)));
+		CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, tan_half) < 0.05f);
+		CHECK(VSM::shadow_directional(in, 0, flags, Vector3(2.2f, 0.0f, 0.0f), up, tan_half) > 0.95f);
+		CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, tan_half) > 0.95f);
+		// Hard tap (rays = 0) also resolves to coarse mip 4 cleanly.
+		in.rays = 0;
+		CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(0.0f));
+		CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, 0.0f) == doctest::Approx(1.0f));
+	}
+
+	// Local spot light with fine mips 0..5 unmapped and only root mip 6 resident.
+	{
+		const Transform3D spot_xform(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 4.0f, 0));
+		ProjectionScene scene;
+		scene.light_position = spot_xform.origin;
+		scene.slab_half = 1.0f;
+		scene.slab_height = 1.0f;
+		LocalVector<VSM::MapData> maps;
+		maps.push_back(VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xform, 12.0f, 45.0f));
+		scene.set_maps(maps);
+		scene.allocate(0, VSM::MIP_COUNT - 1);
+		scene.fill();
+
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = 0.001f; // Requests fine mip 0 -> resolves to resident root mip 6 first.
+		in.rays = 8;
+		in.steps = 6;
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+		CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, scene.light_position, 0.05f) < 0.05f);
+		CHECK(VSM::shadow_local(in, 0, flags, Vector3(2.2f, 0.0f, 0.0f), up, scene.light_position, 0.05f) > 0.95f);
+		CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.0f, 1.0f, 0.0f), up, scene.light_position, 0.05f) > 0.95f);
+	}
+}

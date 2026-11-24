@@ -440,6 +440,9 @@ public:
 	// finest level whose mip-CLIPMAP_RESIDENT_MIP window holds the point, or, in the last level's far
 	// strip outside that window, the coarsest mip (< CLIPMAP_RESIDENT_MIP) whose window holds it.
 	static LookupResult clipmap_coarse_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0);
+	// As clipmap_coarse_sample(), also reporting the clipmap level found and whether any level's mip 0
+	// window holds p_texel0 (so callers only count missing coarse pages inside the clipmap's domain).
+	static LookupResult clipmap_coarse_sample_level(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t &r_level, bool &r_in_domain);
 	// The fine requests of a pixel (or the coarse ones of a fog point) in one local light's maps.
 	// p_map_bias holds each map's overflow bias state (bits 0-7 the bias), or is null. r_sample, when
 	// set, looks up every fine or coarse request.
@@ -897,6 +900,40 @@ public:
 	// light, on p_level and p_mip (CPU model of vsm_prefiltered_distant()).
 	static float prefiltered_distant(const ProjectionInput &p_in, uint32_t p_first, uint32_t p_count, const Vector2 &p_t, float p_depth, uint32_t p_level, uint32_t p_mip);
 	static float shadow_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, float p_radius, const Vector3 &p_area_a = Vector3(), const Vector3 &p_area_b = Vector3());
+
+	/* VOLUMETRIC FOG AND FORWARD TRANSLUCENCY COARSE LOOKUPS (#215, plan §21.3 contract S6, GV-7) */
+
+	// GodotNext: vsm_fog_translucency (#215). rendering/lights_and_shadows/virtual_shadows/translucent_quality:
+	// 0 samples coarse pages with one tap (no SMRT); 1 runs full SMRT on transparent receivers.
+	enum TranslucentQuality : uint32_t {
+		TRANSLUCENT_QUALITY_COARSE = 0,
+		TRANSLUCENT_QUALITY_SMRT = 1,
+		TRANSLUCENT_QUALITY_MAX,
+	};
+	static constexpr TranslucentQuality DEFAULT_TRANSLUCENT_QUALITY = TRANSLUCENT_QUALITY_COARSE;
+	static const char *const SETTING_TRANSLUCENT_QUALITY;
+	static TranslucentQuality clamp_translucent_quality(int64_t p_value);
+	static TranslucentQuality read_translucent_quality();
+
+	// Dedicated missing-coarse-page atomic counter buffer layout (uints, std430).
+	// Incremented when a coarse lookup inside a light map's valid domain finds no resident coarse page
+	// and falls back to unshadowed (1.0).
+	enum CoarseMissIndex : uint32_t {
+		COARSE_MISS_FOG_TOTAL = 0,
+		COARSE_MISS_TRANSLUCENT_TOTAL = 1,
+		COARSE_MISS_FOG_VIEW = 2,
+		COARSE_MISS_TRANSLUCENT_VIEW = 3,
+		COARSE_MISS_SINK = 4, // Written only by impossible atomic results (#277).
+		COARSE_MISS_WORDS = 8,
+	};
+
+	// CPU models of vsm_coarse_inc.glsl: one-tap coarse lookups for volumetric fog (with exponential
+	// depth fade) and forward transparent receivers (normal/depth biased by the resolved coarse mip).
+	// When r_missing_coarse_pages is non-null, a miss inside a map's valid domain increments it.
+	static float fog_shadow_coarse_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_view_depth, float p_inv_fog_fade, uint32_t *r_missing_coarse_pages = nullptr);
+	static float fog_shadow_coarse_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_inv_fog_fade, uint32_t *r_missing_coarse_pages = nullptr);
+	static float shadow_coarse_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, float p_view_depth, uint32_t *r_missing_coarse_pages = nullptr);
+	static float shadow_coarse_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, uint32_t *r_missing_coarse_pages = nullptr);
 
 private:
 	struct FreeRange {

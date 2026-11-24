@@ -189,7 +189,11 @@ private:
 			float cam_rotation[12];
 			float to_prev_view[16];
 			float radiance_inverse_xform[12];
+			// GodotNext: vsm_fog_translucency (#215). World-space camera origin for VSM coarse lookups and table capacity (0 when off).
+			float vsm_cam_origin[3];
+			uint32_t vsm_table_maps;
 		};
+		static_assert(sizeof(ParamsUBO) % 16 == 0, "VolumetricFogShader::ParamsUBO must stay 16-byte aligned for std140.");
 
 		VolumetricFogProcessShaderRD process_shader;
 
@@ -332,6 +336,14 @@ public:
 		RID nextgi_density_uniform_set;
 		RID sky_uniform_set;
 
+		// GodotNext: vsm_fog_translucency (#215). Last bound VSM and shadow-atlas RIDs for uniform-set invalidation.
+		RID bound_vsm_pool_tex;
+		RID bound_vsm_page_table;
+		RID bound_vsm_map_data;
+		RID bound_vsm_coarse_miss;
+		RID bound_shadow_atlas_depth;
+		RID bound_directional_shadow_depth;
+
 		int last_shadow_filter = -1;
 
 		// If the device doesn't support image atomics, use storage buffers instead.
@@ -379,6 +391,13 @@ public:
 		Ref<GI::RenderBuffersGI> rbgi;
 		RID env;
 		SkyRD *sky;
+
+		// GodotNext: vsm_fog_translucency (#215). VSM coarse-page bindings (defaults when VSM is off).
+		RID vsm_pool_tex;
+		RID vsm_page_table;
+		RID vsm_map_data;
+		RID vsm_coarse_miss;
+		uint32_t vsm_table_maps = 0;
 	};
 	void volumetric_fog_update(const VolumetricFogSettings &p_settings, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes);
 };

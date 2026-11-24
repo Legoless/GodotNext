@@ -1172,10 +1172,13 @@ private:
 	static_assert(sizeof(VSMProjectionParams) == 64, "VSMProjectionParams must match scene_forward_clustered_inc.glsl.");
 	// Whether the view being rendered samples virtual shadow maps (set in _render_scene()).
 	bool vsm_sample_view = false;
+	// GodotNext: vsm_fog_translucency (#215). True when rendering/lights_and_shadows/virtual_shadows/translucent_quality == 0.
+	bool vsm_translucent_coarse = true;
 	RID vsm_projection_params_buffer;
 	RID vsm_projection_blue_noise; // #54's 64 x 64 RG8 blue-noise tile.
 	RID vsm_projection_default_pool; // A 1 x 1 R32_UINT array of two layers, bound while VSM is off.
 	RID vsm_projection_default_buffer; // Bound for the page table, maps and map state while VSM is off.
+	RID vsm_projection_default_miss_buffer; // Separate writable fallback for vsm_coarse_miss while VSM is off (#215).
 	void _ensure_vsm_projection_resources();
 	void _free_vsm_projection_resources();
 	// Fills the params buffer for the view after its pages are marked.

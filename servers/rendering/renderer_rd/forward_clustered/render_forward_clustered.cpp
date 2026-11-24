@@ -1961,6 +1961,20 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.sky = &sky;
 		settings.gi = &gi;
 
+		// GodotNext: vsm_fog_translucency (#215). Pass VSM coarse-page buffers when this view samples VSM,
+		// or safe zeroed fallback resources when VSM is off so legacy fog stays byte-identical.
+		_ensure_vsm_projection_resources();
+		RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+		const bool vsm_ready = vsm_sample_view && vsm != nullptr && vsm->is_active() &&
+				vsm->get_table_capacity() > 0 && vsm->get_map_buffers_capacity() == vsm->get_table_capacity() &&
+				vsm->get_pool_texture().is_valid() && vsm->get_page_table_buffer().is_valid() &&
+				vsm->get_map_data_buffer().is_valid() && vsm->get_coarse_miss_buffer().is_valid();
+		settings.vsm_pool_tex = vsm_ready ? vsm->get_pool_texture() : vsm_projection_default_pool;
+		settings.vsm_page_table = vsm_ready ? vsm->get_page_table_buffer() : vsm_projection_default_buffer;
+		settings.vsm_map_data = vsm_ready ? vsm->get_map_data_buffer() : vsm_projection_default_buffer;
+		settings.vsm_coarse_miss = vsm_ready ? vsm->get_coarse_miss_buffer() : vsm_projection_default_miss_buffer;
+		settings.vsm_table_maps = vsm_ready ? vsm->get_table_capacity() : 0u;
+
 		RendererRD::Fog::get_singleton()->volumetric_fog_update(settings, p_cam_projection, p_cam_transform, p_prev_cam_inv_transform, p_shadow_atlas, p_directional_light_count, p_use_directional_shadows, p_positional_light_count, p_voxel_gi_count, p_fog_volumes);
 	}
 }
@@ -2641,10 +2655,11 @@ bool RenderForwardClustered::vsm_view_samples(const Ref<RenderSceneBuffers> &p_r
 }
 
 bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const {
-	// GodotNext: vsm_projection (#222, issue step 7). A shadowed light that already holds virtual maps is
-	// sampled through them by a view that samples VSM (the maps it gets in its first frame are drawn and
-	// sampled in that frame, after its atlas pass). Volumetric fog still samples the shadow atlas (#215 moves
-	// it to coarse pages), so a light the fog shows keeps its atlas pass.
+	// GodotNext: vsm_projection (#222, issue step 7) / vsm_fog_translucency (#215). A shadowed light that
+	// already holds virtual maps is sampled through them by a view that samples VSM (including volumetric fog
+	// and forward transparents via coarse pages; the maps it gets in its first frame are drawn and sampled in
+	// that frame, after its atlas pass).
+	(void)p_environment;
 	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
 	if (vsm == nullptr || !vsm->is_active() || vsm->map_get(p_light_instance) == nullptr) {
 		return false;
@@ -2663,16 +2678,14 @@ bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_e
 	if (!RendererVirtualShadowMapStorage::light_uses_vsm(light_storage->light_get_shadow_method(base))) {
 		return false;
 	}
-	if (p_environment.is_valid() && environment_get_volumetric_fog_enabled(p_environment) && light_storage->light_get_param(base, RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY) > 0.0f) {
-		return false;
-	}
 	// Keep this light's map range from being LRU-evicted by another light before update_light_buffers() runs.
 	vsm->map_touch(p_light_instance);
 	return true;
 }
 
-// GodotNext: vsm_projection (#222). Shared readiness check for _vsm_update_projection() and
-// _setup_render_pass_uniform_set() so counts.x is nonzero only when every bound VSM resource is valid and sized.
+// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). Shared readiness check for
+// _vsm_update_projection() and _setup_render_pass_uniform_set() so counts.x is nonzero only when every bound
+// VSM resource is valid and sized.
 static bool _vsm_projection_buffers_ready(const RendererRD::VirtualShadowMapStorage *p_vsm) {
 	if (p_vsm == nullptr || !p_vsm->is_active()) {
 		return false;
@@ -2680,7 +2693,8 @@ static bool _vsm_projection_buffers_ready(const RendererRD::VirtualShadowMapStor
 	const uint32_t table_maps = p_vsm->get_table_capacity();
 	return table_maps > 0 && p_vsm->get_map_buffers_capacity() == table_maps &&
 			p_vsm->get_pool_texture().is_valid() && p_vsm->get_page_table_buffer().is_valid() &&
-			p_vsm->get_map_data_buffer().is_valid() && p_vsm->get_map_state_buffer().is_valid();
+			p_vsm->get_map_data_buffer().is_valid() && p_vsm->get_map_state_buffer().is_valid() &&
+			p_vsm->get_coarse_miss_buffer().is_valid();
 }
 
 bool RenderForwardClustered::vsm_raster_check_armed() const {
@@ -2726,6 +2740,14 @@ void RenderForwardClustered::_ensure_vsm_projection_resources() {
 		rd->set_resource_name(vsm_projection_default_buffer, "VSM Projection Default Buffer");
 		rd->buffer_clear(vsm_projection_default_buffer, 0, 256);
 	}
+	if (vsm_projection_default_miss_buffer.is_null()) {
+		// GodotNext: vsm_fog_translucency (#215). Separate writable fallback so SyncVal never sees the same
+		// fallback buffer bound both readonly (page table/maps) and read-write (coarse miss counters).
+		const uint32_t miss_bytes = RendererVirtualShadowMapStorage::COARSE_MISS_WORDS * uint32_t(sizeof(uint32_t));
+		vsm_projection_default_miss_buffer = rd->storage_buffer_create(miss_bytes);
+		rd->set_resource_name(vsm_projection_default_miss_buffer, "VSM Projection Default Coarse Miss");
+		rd->buffer_clear(vsm_projection_default_miss_buffer, 0, miss_bytes);
+	}
 	if (vsm_projection_default_pool.is_null()) {
 		RD::TextureFormat format;
 		format.format = RD::DATA_FORMAT_R32_UINT;
@@ -2762,7 +2784,7 @@ void RenderForwardClustered::_ensure_vsm_projection_resources() {
 void RenderForwardClustered::_free_vsm_projection_resources() {
 	// GodotNext: vsm_projection (#222).
 	RenderingDevice *rd = RD::get_singleton();
-	for (RID *rid : { &vsm_projection_params_buffer, &vsm_projection_default_buffer, &vsm_projection_default_pool, &vsm_projection_blue_noise }) {
+	for (RID *rid : { &vsm_projection_params_buffer, &vsm_projection_default_buffer, &vsm_projection_default_miss_buffer, &vsm_projection_default_pool, &vsm_projection_blue_noise }) {
 		if (rd != nullptr && rid->is_valid()) {
 			rd->free_rid(*rid);
 		}
@@ -2771,10 +2793,12 @@ void RenderForwardClustered::_free_vsm_projection_resources() {
 }
 
 void RenderForwardClustered::_vsm_update_projection(const RenderDataRD *p_render_data) {
-	// GodotNext: vsm_projection (#222). The light loop of this view reads these to sample the maps.
+	// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). The light loop and volumetric fog
+	// read these to sample the maps.
 	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
 	ERR_FAIL_NULL(vsm);
 	_ensure_vsm_projection_resources();
+	vsm->clear_view_coarse_miss_counters();
 	VSMProjectionParams params;
 	const Size2i size = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_internal_size() : Size2i(1, 1);
 	_vsm_pixel_footprint(p_render_data->scene_data, size, params.footprint[0], params.footprint[1]);
@@ -2788,8 +2812,10 @@ void RenderForwardClustered::_vsm_update_projection(const RenderDataRD *p_render
 	params.counts[2] = VSM::smrt_setting(int64_t(_vsm_setting("smrt_rays_directional", -1)), VSM::smrt_preset_rays(quality), VSM::SMRT_MAX_RAYS);
 	params.counts[3] = MAX(VSM::smrt_setting(int64_t(_vsm_setting("smrt_steps", -1)), VSM::smrt_preset_steps(quality), VSM::SMRT_MAX_STEPS), 1u);
 	params.misc[0] = bool(_vsm_setting("prefiltered_distant", false)) ? 1u : 0u;
+	const VSM::TranslucentQuality translucent_quality = VSM::read_translucent_quality();
+	vsm_translucent_coarse = (translucent_quality == VSM::TRANSLUCENT_QUALITY_COARSE);
 	RD::get_singleton()->buffer_update(vsm_projection_params_buffer, 0, sizeof(VSMProjectionParams), &params);
-	vsm->set_projection_params(params.counts[1], params.counts[2], params.counts[3], params.misc[0] != 0u);
+	vsm->set_projection_params(params.counts[1], params.counts[2], params.counts[3], params.misc[0] != 0u, uint32_t(translucent_quality));
 }
 
 void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
@@ -6866,11 +6892,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_RR_GUIDES);
 
 		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
+		// GodotNext: vsm_fog_translucency (#215). Forward transparents take one coarse-page tap when
+		// rendering/lights_and_shadows/virtual_shadows/translucent_quality == 0.
+		SceneShaderForwardClustered::ShaderSpecialization transparent_specialization = base_specialization;
+		transparent_specialization.use_vsm_coarse = vsm_sample_view && vsm_translucent_coarse;
 		// GodotNext: avboit (#295, plan §21.2.1) & rd_readonly_depth (#301). With AVBOIT the alpha
 		// list is drawn in any order. Keep the depth attachment read-only when no transparent
 		// surface writes depth or stencil so TSR level 2 overlaps the transparent pass.
-		if (!(_avboit_view_active(p_render_data, use_msaa, is_reflection_probe) && _render_avboit(p_render_data, alpha_framebuffer, transparent_color_pass_flags, transparent_pass_uniform_buffer_index, screen_size, p_default_bg_color, reverse_cull, radiance_texture, samplers, base_specialization, alpha_depth_scan))) {
-			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+		if (!(_avboit_view_active(p_render_data, use_msaa, is_reflection_probe) && _render_avboit(p_render_data, alpha_framebuffer, transparent_color_pass_flags, transparent_pass_uniform_buffer_index, screen_size, p_default_bg_color, reverse_cull, radiance_texture, samplers, transparent_specialization, alpha_depth_scan))) {
+			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, transparent_specialization, !is_reflection_probe);
 			render_list_params.use_nextgeo_proxy = is_reflection_probe;
 			const BitField<RD::DrawFlags> transparent_draw_flags = alpha_depth_scan.transparent_pass_read_only_depth() ? BitField<RD::DrawFlags>(RD::DRAW_READ_ONLY_DEPTH) : BitField<RD::DrawFlags>(RD::DRAW_DEFAULT_ALL);
 			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, transparent_draw_flags, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
@@ -8809,6 +8839,8 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 54, vsm_ready ? vsm->get_map_state_buffer() : vsm_projection_default_buffer));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 55, vsm_projection_params_buffer));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 56, vsm_projection_blue_noise));
+		// GodotNext: vsm_fog_translucency (#215). Missing-coarse-page atomic counters for transparent coarse lookups.
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 57, vsm_ready ? vsm->get_coarse_miss_buffer() : vsm_projection_default_miss_buffer));
 	}
 
 	// GodotNext: nextgeo_shading_bins (#158)
@@ -10729,9 +10761,12 @@ RenderForwardClustered::RenderForwardClustered() {
 			defines += "\n#define USE_DOUBLE_PRECISION \n";
 		}
 #endif
-		// GodotNext: vsm_projection (#222). Every variant: the light loop samples the maps and the VSM
-		// raster variant (#218) draws them.
+		// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). Every variant: the light loop samples
+		// the maps and the VSM raster variant (#218) draws them.
 		defines += RendererVirtualShadowMapStorage::get_glsl_defines();
+		if (!RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT)) {
+			defines += "\n#define VSM_NO_COARSE_MISS_ATOMICS\n";
+		}
 
 		scene_shader.init(defines);
 	}

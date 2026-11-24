@@ -594,7 +594,7 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 	if (!last_nanite_stats.is_empty()) {
 		info["nanite"] = last_nanite_stats;
 	}
-	// GodotNext: vsm_projection (#222). The last view whose light loop sampled the maps.
+	// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). The last view whose light loop sampled the maps.
 	{
 		Dictionary projection;
 		projection["views"] = int64_t(projection_views);
@@ -605,6 +605,27 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 		projection["rays_directional"] = int64_t(last_projection.rays_directional);
 		projection["steps"] = int64_t(last_projection.steps);
 		projection["prefiltered_distant"] = last_projection.prefiltered_distant;
+		projection["translucent_quality"] = int64_t(last_projection.translucent_quality);
+		uint64_t miss_fog_total = 0;
+		uint64_t miss_translucent_total = 0;
+		uint64_t miss_fog_view = 0;
+		uint64_t miss_translucent_view = 0;
+		if (coarse_miss_buffer.is_valid() && RD::get_singleton() != nullptr) {
+			const Vector<uint8_t> miss_bytes = RD::get_singleton()->buffer_get_data(coarse_miss_buffer, 0, COARSE_MISS_WORDS * uint32_t(sizeof(uint32_t)));
+			if (uint32_t(miss_bytes.size()) == COARSE_MISS_WORDS * sizeof(uint32_t)) {
+				const uint32_t *miss = reinterpret_cast<const uint32_t *>(miss_bytes.ptr());
+				miss_fog_total = miss[COARSE_MISS_FOG_TOTAL];
+				miss_translucent_total = miss[COARSE_MISS_TRANSLUCENT_TOTAL];
+				miss_fog_view = miss[COARSE_MISS_FOG_VIEW];
+				miss_translucent_view = miss[COARSE_MISS_TRANSLUCENT_VIEW];
+			}
+		}
+		projection["missing_coarse_pages_fog"] = int64_t(miss_fog_total);
+		projection["missing_coarse_pages_translucent"] = int64_t(miss_translucent_total);
+		projection["missing_coarse_pages"] = int64_t(miss_fog_total + miss_translucent_total);
+		projection["view_missing_coarse_pages_fog"] = int64_t(miss_fog_view);
+		projection["view_missing_coarse_pages_translucent"] = int64_t(miss_translucent_view);
+		projection["view_missing_coarse_pages"] = int64_t(miss_fog_view + miss_translucent_view);
 		info["projection"] = projection;
 	}
 	if (state_buffer.is_valid() && RD::get_singleton() != nullptr) {
@@ -1430,8 +1451,32 @@ void VirtualShadowMapStorage::_upload_map_data() {
 	}
 }
 
+void VirtualShadowMapStorage::ensure_coarse_miss_buffer() {
+	// GodotNext: vsm_fog_translucency (#215).
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || coarse_miss_buffer.is_valid()) {
+		return;
+	}
+	const uint32_t bytes = COARSE_MISS_WORDS * uint32_t(sizeof(uint32_t));
+	coarse_miss_buffer = rd->storage_buffer_create(bytes);
+	if (coarse_miss_buffer.is_valid()) {
+		rd->set_resource_name(coarse_miss_buffer, "VSM Coarse Miss Counters");
+		rd->buffer_clear(coarse_miss_buffer, 0, bytes);
+	}
+}
+
+void VirtualShadowMapStorage::clear_view_coarse_miss_counters() {
+	// GodotNext: vsm_fog_translucency (#215). Reset per-view counters while preserving cumulative totals.
+	ensure_coarse_miss_buffer();
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && coarse_miss_buffer.is_valid()) {
+		rd->buffer_clear(coarse_miss_buffer, COARSE_MISS_FOG_VIEW * uint32_t(sizeof(uint32_t)), 2u * uint32_t(sizeof(uint32_t)));
+	}
+}
+
 void VirtualShadowMapStorage::_ensure_page_buffers() {
 	RenderingDevice *rd = RD::get_singleton();
+	ensure_coarse_miss_buffer();
 	const uint32_t page_count = get_pool_page_count();
 	if (state_buffer.is_null()) {
 		state_buffer = rd->storage_buffer_create(STATE_SIZE * uint32_t(sizeof(uint32_t)));
@@ -1485,7 +1530,7 @@ void VirtualShadowMapStorage::_free_marking_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	for (RID *buffer : { &pages_buffer, &free_list_buffer, &dirty_buffer, &request_buffer, &page_coverage_buffer, &state_buffer, &view_buffer, &indirect_buffer, &box_buffer, &invalidation_box_buffer, &invalidation_map_buffer, &capture_depth_buffer }) {
+	for (RID *buffer : { &pages_buffer, &free_list_buffer, &dirty_buffer, &request_buffer, &page_coverage_buffer, &state_buffer, &view_buffer, &indirect_buffer, &box_buffer, &coarse_miss_buffer, &invalidation_box_buffer, &invalidation_map_buffer, &capture_depth_buffer }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 		}

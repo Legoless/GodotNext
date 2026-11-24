@@ -379,6 +379,12 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_PREFILTERED_DISTANT_TAPS " + itos(PREFILTERED_DISTANT_TAPS) + "u\n";
 	defines += "#define VSM_PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS " + vformat("%.6f", PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS) + "\n";
 	defines += "#define VSM_PREFILTERED_DISTANT_BLEED " + vformat("%.6f", PREFILTERED_DISTANT_BLEED) + "\n";
+	// GodotNext: vsm_fog_translucency (#215).
+	defines += "#define VSM_COARSE_MISS_FOG_TOTAL " + itos(COARSE_MISS_FOG_TOTAL) + "u\n";
+	defines += "#define VSM_COARSE_MISS_TRANSLUCENT_TOTAL " + itos(COARSE_MISS_TRANSLUCENT_TOTAL) + "u\n";
+	defines += "#define VSM_COARSE_MISS_FOG_VIEW " + itos(COARSE_MISS_FOG_VIEW) + "u\n";
+	defines += "#define VSM_COARSE_MISS_TRANSLUCENT_VIEW " + itos(COARSE_MISS_TRANSLUCENT_VIEW) + "u\n";
+	defines += "#define VSM_COARSE_MISS_SINK " + itos(COARSE_MISS_SINK) + "u\n";
 	return defines;
 }
 
@@ -918,15 +924,22 @@ static uint32_t _clipmap_coarse_entry(const RendererVirtualShadowMapStorage::Map
 	return UINT32_MAX;
 }
 
-RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::clipmap_coarse_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0) {
+RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::clipmap_coarse_sample_level(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t &r_level, bool &r_in_domain) {
+	r_level = 0;
+	r_in_domain = false;
 	for (uint32_t level = 0; level < p_count; level++) {
 		const uint32_t map = p_first + level;
 		if (map >= p_table_maps) {
 			break;
 		}
 		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
-		const LookupResult result = lookup_clipmap(p_table, p_table_maps, map, origin, clipmap_level_texel(p_texel0, level), CLIPMAP_RESIDENT_MIP, true);
+		const Vector2i level_texel = clipmap_level_texel(p_texel0, level);
+		if (clipmap_in_window(origin, level_texel, 0)) {
+			r_in_domain = true;
+		}
+		const LookupResult result = lookup_clipmap(p_table, p_table_maps, map, origin, level_texel, CLIPMAP_RESIDENT_MIP, true);
 		if (result.valid) {
+			r_level = level;
 			return result;
 		}
 	}
@@ -936,14 +949,22 @@ RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::c
 		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
 		const Vector2i level_texel = clipmap_level_texel(p_texel0, last);
 		if (clipmap_in_window(origin, level_texel, 0) && !clipmap_in_window(origin, level_texel, CLIPMAP_RESIDENT_MIP)) {
+			r_in_domain = true;
 			uint32_t resident = 0;
 			while (resident + 1 < CLIPMAP_RESIDENT_MIP && clipmap_in_window(origin, level_texel, resident + 1)) {
 				resident++;
 			}
+			r_level = last;
 			return lookup_clipmap(p_table, p_table_maps, map, origin, level_texel, resident, false);
 		}
 	}
 	return LookupResult();
+}
+
+RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::clipmap_coarse_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0) {
+	uint32_t level = 0;
+	bool in_domain = false;
+	return clipmap_coarse_sample_level(p_table, p_table_maps, p_maps, p_first, p_count, p_texel0, level, in_domain);
 }
 
 void RendererVirtualShadowMapStorage::mark_resident(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, LocalVector<uint64_t> &r_requests) {
@@ -2523,11 +2544,21 @@ float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput 
 		return 1.0f;
 	}
 	const MapData &level0 = p_in.maps[first];
+	const Vector2i initial_texel0 = clipmap_texel0(level0, p_world);
 	uint32_t level = 0;
 	uint32_t mip = 0;
-	if (!clipmap_projection_select(p_in.maps, p_in.table_maps, p_in.map_bias, first, count, clipmap_texel0(level0, p_world), p_in.footprint, p_in.lod_bias, level, mip)) {
+	if (!clipmap_projection_select(p_in.maps, p_in.table_maps, p_in.map_bias, first, count, initial_texel0, p_in.footprint, p_in.lod_bias, level, mip)) {
 		return 1.0f;
 	}
+	// GodotNext: vsm_fog_translucency (#215). Resolve the resident page first so normal bias, PCF spacing
+	// and SMRT reach scale to the actual resident mip (e.g. coarse pages under translucent SMRT or overflow).
+	uint32_t resident_level = level;
+	const LookupResult probe = clipmap_sample_level(p_in.table, p_in.table_maps, p_in.maps, first, count, initial_texel0, level, mip, resident_level);
+	if (!probe.valid) {
+		return 1.0f;
+	}
+	level = resident_level;
+	mip = probe.mip;
 	const float texel = std::ldexp(1.0f, int32_t(level + mip) + CLIPMAP_TEXEL0_EXPONENT);
 	// Row 2 is minus the light's Z axis: the light shines along it, and the light lies along -row 2.
 	const Vector3 toward(-level0.rows[2][0], -level0.rows[2][1], -level0.rows[2][2]);
@@ -2679,7 +2710,15 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 	const MapData &face = p_in.maps[map];
 	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, as mark_local_point().
 	const int32_t bias = p_in.lod_bias + face.lod_bias + (p_in.map_bias != nullptr ? int32_t(overflow_bias(p_in.map_bias[map])) : 0);
-	const uint32_t mip = biased_mip(int32_t(face_mip(w * face.texel_scale, p_in.footprint)), bias);
+	uint32_t mip = biased_mip(int32_t(face_mip(w * face.texel_scale, p_in.footprint)), bias);
+	// GodotNext: vsm_fog_translucency (#215). Resolve the resident mip first so normal bias, PCF spacing
+	// and SMRT reach scale to the actual resident mip (e.g. coarse pages under translucent SMRT or overflow).
+	const Vector2 initial_uv(row_dot(face.rows[0], p_world) / w * 0.5f + 0.5f, row_dot(face.rows[1], p_world) / w * 0.5f + 0.5f);
+	const LookupResult probe = lookup(p_in.table, p_in.table_maps, map, initial_uv, mip, true);
+	if (!probe.valid) {
+		return 1.0f;
+	}
+	mip = probe.mip;
 	const float texel = face.texel_scale * w * float(1u << mip);
 	const Vector3 to_light = p_light_position - p_world;
 	const float distance = float(to_light.length());
@@ -2763,4 +2802,160 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 		lit += occluded ? 0u : 1u;
 	}
 	return float(lit) / float(rays);
+}
+
+/* VOLUMETRIC FOG AND FORWARD TRANSLUCENCY COARSE LOOKUPS (#215) */
+
+// GodotNext: vsm_fog_translucency (#215, plan §21.3 contract S6, GV-7). CPU models of vsm_coarse_inc.glsl.
+const char *const RendererVirtualShadowMapStorage::SETTING_TRANSLUCENT_QUALITY = "rendering/lights_and_shadows/virtual_shadows/translucent_quality";
+
+static_assert(RendererVirtualShadowMapStorage::COARSE_MISS_SINK < RendererVirtualShadowMapStorage::COARSE_MISS_WORDS, "Coarse miss counters and sink fit the buffer.");
+
+RendererVirtualShadowMapStorage::TranslucentQuality RendererVirtualShadowMapStorage::clamp_translucent_quality(int64_t p_value) {
+	return (p_value >= 0 && p_value < int64_t(TRANSLUCENT_QUALITY_MAX)) ? TranslucentQuality(p_value) : DEFAULT_TRANSLUCENT_QUALITY;
+}
+
+RendererVirtualShadowMapStorage::TranslucentQuality RendererVirtualShadowMapStorage::read_translucent_quality() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName name = SETTING_TRANSLUCENT_QUALITY;
+	if (settings == nullptr || !settings->has_setting(name)) {
+		return DEFAULT_TRANSLUCENT_QUALITY;
+	}
+	return clamp_translucent_quality(int64_t(settings->get_setting_with_override(name)));
+}
+
+float RendererVirtualShadowMapStorage::fog_shadow_coarse_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_view_depth, float p_inv_fog_fade, uint32_t *r_missing_coarse_pages) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+	if (p_in.table == nullptr || p_in.maps == nullptr || first >= p_in.table_maps || p_in.maps[first].kind != MAP_KIND_DIRECTIONAL) {
+		return 1.0f;
+	}
+	const MapData &level0 = p_in.maps[first];
+	if (p_view_depth > level0.max_distance) {
+		return 1.0f;
+	}
+	uint32_t found_level = 0;
+	bool in_domain = false;
+	const LookupResult result = clipmap_coarse_sample_level(p_in.table, p_in.table_maps, p_in.maps, first, count, clipmap_texel0(level0, p_world), found_level, in_domain);
+	if (!result.valid) {
+		if (in_domain && r_missing_coarse_pages != nullptr) {
+			(*r_missing_coarse_pages)++;
+		}
+		return 1.0f;
+	}
+	const float stored = pool_depth(p_in, result.texel_x, result.texel_y);
+	if (!(stored < 1.0e30f)) {
+		return 1.0f;
+	}
+	const float receiver_depth = row_dot(level0.rows[2], p_world);
+	return std::exp(MIN(0.0f, stored - receiver_depth) * p_inv_fog_fade);
+}
+
+float RendererVirtualShadowMapStorage::fog_shadow_coarse_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_inv_fog_fade, uint32_t *r_missing_coarse_pages) {
+	if (p_in.table == nullptr || p_in.maps == nullptr) {
+		return 1.0f;
+	}
+	float w = 0.0f;
+	const uint32_t map = face_projection_select(p_in.maps, p_in.table_maps, p_map_base, p_light_flags, p_world, w);
+	if (map == MAP_NONE) {
+		return 1.0f;
+	}
+	const MapData &face = p_in.maps[map];
+	const Vector2 uv(row_dot(face.rows[0], p_world) / w * 0.5f + 0.5f, row_dot(face.rows[1], p_world) / w * 0.5f + 0.5f);
+	const LookupResult result = lookup(p_in.table, p_in.table_maps, map, uv, COARSE_FIRST_MIP, true);
+	if (!result.valid) {
+		if (r_missing_coarse_pages != nullptr) {
+			(*r_missing_coarse_pages)++;
+		}
+		return 1.0f;
+	}
+	const float stored = pool_depth(p_in, result.texel_x, result.texel_y);
+	if (!(stored < 1.0e30f)) {
+		return 1.0f;
+	}
+	return std::exp(MIN(0.0f, stored - w) * p_inv_fog_fade);
+}
+
+float RendererVirtualShadowMapStorage::shadow_coarse_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, float p_view_depth, uint32_t *r_missing_coarse_pages) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+	if (p_in.table == nullptr || p_in.maps == nullptr || first >= p_in.table_maps || p_in.maps[first].kind != MAP_KIND_DIRECTIONAL) {
+		return 1.0f;
+	}
+	const MapData &level0 = p_in.maps[first];
+	if (p_view_depth > level0.max_distance) {
+		return 1.0f;
+	}
+	uint32_t found_level = 0;
+	bool in_domain = false;
+	const LookupResult initial = clipmap_coarse_sample_level(p_in.table, p_in.table_maps, p_in.maps, first, count, clipmap_texel0(level0, p_world), found_level, in_domain);
+	if (!initial.valid) {
+		if (in_domain && r_missing_coarse_pages != nullptr) {
+			(*r_missing_coarse_pages)++;
+		}
+		return 1.0f;
+	}
+	const float texel = std::ldexp(1.0f, int32_t(found_level + initial.mip) + CLIPMAP_TEXEL0_EXPONENT);
+	const Vector3 toward(-level0.rows[2][0], -level0.rows[2][1], -level0.rows[2][2]);
+	const float n_dot_l = CLAMP(float(p_normal.dot(toward)), -1.0f, 1.0f);
+	const float offset = texel * SMRT_NORMAL_BIAS_TEXELS * std::sqrt(MAX(1.0f - n_dot_l * n_dot_l, 0.0f));
+	const Vector3 receiver = p_world + p_normal * offset;
+	uint32_t sample_level = found_level;
+	bool sample_in_domain = false;
+	LookupResult sample = clipmap_coarse_sample_level(p_in.table, p_in.table_maps, p_in.maps, first, count, clipmap_texel0(level0, receiver), sample_level, sample_in_domain);
+	if (!sample.valid) {
+		sample = initial;
+		sample_level = found_level;
+	}
+	const float sample_texel = std::ldexp(1.0f, int32_t(sample_level + sample.mip) + CLIPMAP_TEXEL0_EXPONENT);
+	const float receiver_depth = row_dot(level0.rows[2], receiver);
+	const float stored = pool_depth(p_in, sample.texel_x, sample.texel_y);
+	return stored < receiver_depth - sample_texel * SMRT_DEPTH_BIAS_TEXELS ? 0.0f : 1.0f;
+}
+
+float RendererVirtualShadowMapStorage::shadow_coarse_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, uint32_t *r_missing_coarse_pages) {
+	if (p_in.table == nullptr || p_in.maps == nullptr) {
+		return 1.0f;
+	}
+	float w = 0.0f;
+	const uint32_t map = face_projection_select(p_in.maps, p_in.table_maps, p_map_base, p_light_flags, p_world, w);
+	if (map == MAP_NONE) {
+		return 1.0f;
+	}
+	const MapData &face = p_in.maps[map];
+	const Vector2 uv(row_dot(face.rows[0], p_world) / w * 0.5f + 0.5f, row_dot(face.rows[1], p_world) / w * 0.5f + 0.5f);
+	const LookupResult initial = lookup(p_in.table, p_in.table_maps, map, uv, COARSE_FIRST_MIP, true);
+	if (!initial.valid) {
+		if (r_missing_coarse_pages != nullptr) {
+			(*r_missing_coarse_pages)++;
+		}
+		return 1.0f;
+	}
+	const Vector3 to_light = p_light_position - p_world;
+	const float distance = float(to_light.length());
+	if (!(distance > 0.0f)) {
+		return 1.0f;
+	}
+	const float texel = face.texel_scale * w * float(1u << initial.mip);
+	const Vector3 light_dir = to_light / distance;
+	const float n_dot_l = CLAMP(float(p_normal.dot(light_dir)), -1.0f, 1.0f);
+	const float offset = texel * SMRT_NORMAL_BIAS_TEXELS * std::sqrt(MAX(1.0f - n_dot_l * n_dot_l, 0.0f));
+	const Vector3 receiver = p_world + p_normal * offset;
+	float rx = 0.0f;
+	float ry = 0.0f;
+	float rw = 0.0f;
+	uint32_t receiver_map = _smrt_face(p_in, p_map_base, p_light_flags, map, receiver, rx, ry, rw);
+	LookupResult sample;
+	if (receiver_map != MAP_NONE) {
+		const Vector2 sample_uv(rx / rw * 0.5f + 0.5f, ry / rw * 0.5f + 0.5f);
+		sample = lookup(p_in.table, p_in.table_maps, receiver_map, sample_uv, COARSE_FIRST_MIP, true);
+	}
+	if (receiver_map == MAP_NONE || !sample.valid) {
+		sample = initial;
+		receiver_map = map;
+		rw = w;
+	}
+	const float sample_texel = p_in.maps[receiver_map].texel_scale * rw * float(1u << sample.mip);
+	const float stored = pool_depth(p_in, sample.texel_x, sample.texel_y);
+	return stored < rw - sample_texel * SMRT_DEPTH_BIAS_TEXELS ? 0.0f : 1.0f;
 }

@@ -197,6 +197,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	RID view_buffer;
 	RID indirect_buffer;
 	RID box_buffer;
+	RID coarse_miss_buffer; // GodotNext: vsm_fog_translucency (#215). Missing-coarse-page atomic counters.
 	RID invalidation_box_buffer; // GodotNext: vsm_caching (#212).
 	uint32_t invalidation_box_capacity = 0;
 	RID invalidation_map_buffer;
@@ -323,6 +324,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		uint32_t rays_directional = 0;
 		uint32_t steps = 0;
 		bool prefiltered_distant = false;
+		uint32_t translucent_quality = DEFAULT_TRANSLUCENT_QUALITY; // GodotNext: vsm_fog_translucency (#215).
 	};
 	ProjectionStats pending_projection;
 	ProjectionStats last_projection;
@@ -393,14 +395,19 @@ public:
 		pending_projection.atlas_passes = p_atlas_passes;
 		pending_projection.atlas_passes_skipped = p_atlas_passes_skipped;
 	}
-	void set_projection_params(uint32_t p_rays_local, uint32_t p_rays_directional, uint32_t p_steps, bool p_prefiltered_distant) {
+	void set_projection_params(uint32_t p_rays_local, uint32_t p_rays_directional, uint32_t p_steps, bool p_prefiltered_distant, uint32_t p_translucent_quality = DEFAULT_TRANSLUCENT_QUALITY) {
 		pending_projection.rays_local = p_rays_local;
 		pending_projection.rays_directional = p_rays_directional;
 		pending_projection.steps = p_steps;
 		pending_projection.prefiltered_distant = p_prefiltered_distant;
+		pending_projection.translucent_quality = p_translucent_quality;
 		last_projection = pending_projection;
 		projection_views++;
 	}
+	// GodotNext: vsm_fog_translucency (#215). Dedicated missing-coarse-page atomic counter buffer.
+	void ensure_coarse_miss_buffer();
+	void clear_view_coarse_miss_counters();
+	RID get_coarse_miss_buffer() const { return coarse_miss_buffer; }
 	RID get_pool_texture() const { return pool_texture; }
 	RID get_page_table_buffer() const { return table_buffer; }
 	// GodotNext: vsm_non_nanite (#218). Read-only access to the marking/allocation outputs for raster passes.

@@ -185,6 +185,12 @@ bool sc_use_vsm() {
 	return ((sc_packed_1() >> 11) & 1U) != 0;
 }
 
+// GodotNext: vsm_fog_translucency (#215). Forward transparent pass uses one coarse-page VSM tap (no SMRT)
+// when rendering/lights_and_shadows/virtual_shadows/translucent_quality == 0.
+bool sc_use_vsm_coarse() {
+	return ((sc_packed_1() >> 12) & 1U) != 0;
+}
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
@@ -607,10 +613,24 @@ layout(set = 1, binding = 55, std430) buffer restrict readonly VSMProjection {
 }
 vsm_projection;
 layout(set = 1, binding = 56) uniform texture2D vsm_blue_noise;
+// GodotNext: vsm_fog_translucency (#215). Atomic missing-coarse-page counters for forward translucent coarse lookups.
+#ifdef VSM_NO_COARSE_MISS_ATOMICS
+layout(set = 1, binding = 57, std430) buffer restrict readonly VSMCoarseMiss {
+	uint data[];
+}
+vsm_coarse_miss;
+#else
+layout(set = 1, binding = 57, std430) buffer restrict VSMCoarseMiss {
+	uint data[];
+}
+vsm_coarse_miss;
+#endif
 
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #define VSM_PROJECTION
+#define VSM_COARSE_NEAREST_SAMPLER SAMPLER_NEAREST_CLAMP
 #include "../vsm_page_table_inc.glsl"
+#include "../vsm_coarse_inc.glsl"
 #include "../vsm_smrt_inc.glsl"
 #endif
 

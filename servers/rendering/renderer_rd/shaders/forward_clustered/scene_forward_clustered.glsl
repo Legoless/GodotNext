@@ -3117,11 +3117,15 @@ void fragment_shader(in SceneData scene_data) {
 	m_var.xyz += normal_bias;
 
 #ifdef VSM_PROJECTION
-					// GodotNext: vsm_projection (#222). The light's virtual shadow maps replace its cascades; its
-					// angular size gives the penumbra (directional size is 1 - cos of the angular diameter).
+					// GodotNext: vsm_projection (#222) / vsm_fog_translucency (#215). The light's virtual shadow maps
+					// replace its cascades; forward transparents take one coarse-page tap when translucent_quality == 0.
 					if (vsm_light_sampled(directional_lights.data[i].vsm_flags)) {
-						float vsm_size = clamp(directional_lights.data[i].size, 0.0, 1.0);
-						shadow = vsm_shadow_directional(directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), sqrt(vsm_size / (2.0 - vsm_size)), depth_z, vsm_pixel_noise());
+						if (sc_use_vsm_coarse()) {
+							shadow = vsm_shadow_coarse_directional(vsm_projection.data.counts.x, directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), depth_z);
+						} else {
+							float vsm_size = clamp(directional_lights.data[i].size, 0.0, 1.0);
+							shadow = vsm_shadow_directional(directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), sqrt(vsm_size / (2.0 - vsm_size)), depth_z, vsm_pixel_noise());
+						}
 					} else if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
 #else
 				//version with soft shadows, more expensive

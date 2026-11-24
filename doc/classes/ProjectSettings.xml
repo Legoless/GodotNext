@@ -3417,7 +3417,7 @@
 			How lights with [member Light3D.shadow_method] set to Project cast shadows. [b]Atlas[/b] renders them into the directional shadow map and the positional shadow atlas. [b]Virtual[/b] uses virtual shadow maps: a pool of 64×64-texel pages, mapped from large virtual shadow maps per light (clipmap levels for directional lights), so each pixel gets about one shadow texel and unchanged pages stay cached between frames. The pool and its resolution follow [member rendering/lights_and_shadows/virtual_shadows/quality].
 			Virtual shadow maps need the Forward+ renderer on a device with 32-bit image atomics and indirect-count draws. Below that, lights use the atlas and one line names the reason (see [method RenderingServer.virtual_shadow_maps_get_tier_info]); the Mobile and Compatibility renderers always use the atlas. Existing and new projects use the atlas for now.
 			[b]Note:[/b] This property is only read when the project starts.
-			[b]Note:[/b] Lights whose method resolves to Virtual shade from their virtual maps: the Forward+ light loop samples them with Shadow Map Ray Tracing (see [member rendering/lights_and_shadows/virtual_shadows/smrt_rays_local]) and those lights skip their shadow-atlas pass. A light that volumetric fog shows keeps its atlas pass for the fog. Lights that resolve to Atlas keep the shadow atlas.
+			[b]Note:[/b] Lights whose method resolves to Virtual shade from their virtual maps: the Forward+ light loop samples them with Shadow Map Ray Tracing (see [member rendering/lights_and_shadows/virtual_shadows/smrt_rays_local]), volumetric fog and forward transparent surfaces sample their coarse pages (see [member rendering/lights_and_shadows/virtual_shadows/translucent_quality]), and those lights skip their shadow-atlas pass. Lights that resolve to Atlas keep the shadow atlas.
 		</member>
 		<member name="rendering/lights_and_shadows/tighter_shadow_caster_culling" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], items that cannot cast shadows into the view frustum will not be rendered into shadow maps.
@@ -3509,6 +3509,10 @@
 		</member>
 		<member name="rendering/lights_and_shadows/virtual_shadows/smrt_steps" type="int" setter="" getter="" default="-1">
 			The number of samples Shadow Map Ray Tracing (SMRT) takes along each ray through the virtual shadow map, for every light sampled through virtual shadow maps. More samples resolve the penumbra of distant occluders better and cost more. [code]-1[/code] uses the value of the active [member rendering/lights_and_shadows/virtual_shadows/quality] preset: 4 at Low and Medium, and 6 at High and Epic. The preset values are provisional until the penumbra measurements of the final test phase set them.
+			[b]Note:[/b] Virtual shadow maps are only used with the Forward+ renderer.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/translucent_quality" type="int" setter="" getter="" default="0">
+			How forward transparent surfaces sample virtual shadow maps. [b]Coarse[/b] ([code]0[/code], default) takes one depth tap from the coarse pages kept resident for transparent objects, with no Shadow Map Ray Tracing (SMRT). [b]Full SMRT[/b] ([code]1[/code]) runs the full SMRT filter on transparent receivers, matching opaque surfaces at higher shading cost.
 			[b]Note:[/b] Virtual shadow maps are only used with the Forward+ renderer.
 		</member>
 		<member name="rendering/limits/cluster_builder/max_clustered_elements" type="float" setter="" getter="" default="512">

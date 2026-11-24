@@ -65,13 +65,6 @@ uint vsm_projection_overflow_bias(uint p_map) {
 	return vsm_map_state.data[VSM_MAP_STATE_BIAS * vsm_projection.data.counts.x + p_map] & 0xFFu;
 }
 
-// The nearest depth of a pool texel: the larger packed value of the static and dynamic layers.
-float vsm_pool_depth(uvec2 p_texel) {
-	uint static_depth = texelFetch(usampler2DArray(vsm_pool_tex, SAMPLER_NEAREST_CLAMP), ivec3(ivec2(p_texel), 0), 0).r;
-	uint dynamic_depth = texelFetch(usampler2DArray(vsm_pool_tex, SAMPLER_NEAREST_CLAMP), ivec3(ivec2(p_texel), 1), 0).r;
-	return vsm_depth_unpack(max(static_depth, dynamic_depth));
-}
-
 // RendererVirtualShadowMapStorage::clipmap_projection_select(): the marking pass's fine request.
 bool vsm_clipmap_projection_select(uint p_first, uint p_count, ivec2 p_texel0, float p_footprint, out uint r_level, out uint r_mip) {
 	uint table_maps = vsm_projection.data.counts.x;
@@ -194,12 +187,22 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 		return 1.0;
 	}
 	VSMMapData level0 = vsm_maps.data[first];
+	ivec2 initial_texel0 = vsm_clipmap_texel0(level0, p_world);
 	float footprint = p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y;
 	uint level;
 	uint mip;
-	if (!vsm_clipmap_projection_select(first, count, vsm_clipmap_texel0(level0, p_world), footprint, level, mip)) {
+	if (!vsm_clipmap_projection_select(first, count, initial_texel0, footprint, level, mip)) {
 		return 1.0;
 	}
+	// GodotNext: vsm_fog_translucency (#215). Resolve the resident page first so normal bias, PCF spacing
+	// and SMRT reach scale to the actual resident mip (e.g. coarse pages under translucent SMRT or overflow).
+	uint resident_level;
+	VSMLookup probe = vsm_clipmap_sample_level(first, count, initial_texel0, level, mip, resident_level);
+	if (!probe.valid) {
+		return 1.0;
+	}
+	level = resident_level;
+	mip = probe.mip;
 	float texel = exp2(float(int(level + mip) + VSM_CLIPMAP_TEXEL0_EXPONENT));
 	// Row 2 is minus the light's Z axis: the light shines along it, and the light lies along -row 2.
 	vec3 toward = -level0.row2.xyz;
@@ -258,47 +261,13 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 // RendererVirtualShadowMapStorage::face_projection_select(): the face that holds p_world, the one with the
 // largest w where faces overlap.
 uint vsm_face_projection_select(uint p_map_base, uint p_light_flags, vec3 p_world, out float r_w) {
-	uint table_maps = vsm_projection.data.counts.x;
-	uint count = (p_light_flags >> VSM_LIGHT_FLAGS_COUNT_SHIFT) & VSM_LIGHT_FLAGS_COUNT_MASK;
-	uint best = VSM_MAP_NONE;
-	r_w = 0.0;
-	for (uint face = 0u; face < count; face++) {
-		uint map = vsm_light_map(p_map_base, p_light_flags, face);
-		if (map >= table_maps || vsm_maps.data[map].kind == VSM_MAP_KIND_NONE || vsm_maps.data[map].kind == VSM_MAP_KIND_DIRECTIONAL) {
-			continue;
-		}
-		float w;
-		uvec2 texel;
-		if (vsm_face_texel(vsm_maps.data[map], p_world, w, texel) && (best == VSM_MAP_NONE || w > r_w)) {
-			best = map;
-			r_w = w;
-		}
-	}
-	return best;
+	return vsm_face_select(vsm_projection.data.counts.x, p_map_base, p_light_flags, p_world, r_w);
 }
 
 // _smrt_face(): the face of a sample point (p_map when it holds the point, else for omni and area lights
 // the face with the largest w), or VSM_MAP_NONE.
 uint vsm_smrt_face(uint p_map_base, uint p_light_flags, uint p_map, vec3 p_point, out float r_x, out float r_y, out float r_w) {
-	VSMMapData data = vsm_maps.data[p_map];
-	r_x = vsm_row(data.row0, p_point);
-	r_y = vsm_row(data.row1, p_point);
-	r_w = vsm_row(data.row3, p_point);
-	if (r_w > data.near_w && abs(r_x) <= r_w && abs(r_y) <= r_w) {
-		return p_map;
-	}
-	if ((p_light_flags & VSM_LIGHT_FLAGS_KIND_MASK) == VSM_MAP_KIND_SPOT) {
-		return VSM_MAP_NONE;
-	}
-	float w;
-	uint map = vsm_face_projection_select(p_map_base, p_light_flags, p_point, w);
-	if (map != VSM_MAP_NONE) {
-		VSMMapData other = vsm_maps.data[map];
-		r_x = vsm_row(other.row0, p_point);
-		r_y = vsm_row(other.row1, p_point);
-		r_w = w;
-	}
-	return map;
+	return vsm_face_select_hint(vsm_projection.data.counts.x, p_map_base, p_light_flags, p_map, p_point, r_x, r_y, r_w);
 }
 
 // _smrt_face_occluded(): whether a face point (depth w) lies behind the stored depth.
@@ -326,6 +295,14 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, as the marking pass.
 	int bias = vsm_projection.data.bias.y + face.lod_bias + int(vsm_projection_overflow_bias(map));
 	uint mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint)), bias);
+	// GodotNext: vsm_fog_translucency (#215). Resolve the resident mip first so normal bias, PCF spacing
+	// and SMRT reach scale to the actual resident mip (e.g. coarse pages under translucent SMRT or overflow).
+	vec2 initial_uv = vec2(vsm_row(face.row0, p_world) / w * 0.5 + 0.5, vsm_row(face.row1, p_world) / w * 0.5 + 0.5);
+	VSMLookup probe = vsm_lookup(vsm_projection.data.counts.x, map, initial_uv, mip);
+	if (!probe.valid) {
+		return 1.0;
+	}
+	mip = probe.mip;
 	float texel = face.texel_scale * w * float(1u << mip);
 	vec3 to_light = p_light_position - p_world;
 	float light_distance = length(to_light);
@@ -422,13 +399,23 @@ float vsm_transmittance_directional(uint p_map_base, uint p_light_flags, vec3 p_
 	}
 	VSMMapData level0 = vsm_maps.data[first];
 	ivec2 texel0 = vsm_clipmap_texel0(level0, p_world);
-	uint level;
-	uint mip;
-	if (!vsm_clipmap_projection_select(first, count, texel0, p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y, level, mip)) {
-		return -1.0;
+	VSMLookup result;
+	if (sc_use_vsm_coarse()) {
+		if (p_view_depth > level0.max_distance) {
+			return -1.0;
+		}
+		uint found_level;
+		bool in_domain;
+		result = vsm_clipmap_coarse_sample(table_maps, first, count, texel0, found_level, in_domain);
+	} else {
+		uint level;
+		uint mip;
+		if (!vsm_clipmap_projection_select(first, count, texel0, p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y, level, mip)) {
+			return -1.0;
+		}
+		uint found_level;
+		result = vsm_clipmap_sample_level(first, count, texel0, level, mip, found_level);
 	}
-	uint found_level;
-	VSMLookup result = vsm_clipmap_sample_level(first, count, texel0, level, mip, found_level);
 	if (!result.valid) {
 		return -1.0;
 	}
@@ -444,8 +431,11 @@ float vsm_transmittance_local(uint p_map_base, uint p_light_flags, vec3 p_world,
 		return -1.0;
 	}
 	VSMMapData face = vsm_maps.data[map];
-	float footprint = p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y;
-	uint mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint)), vsm_projection.data.bias.y + face.lod_bias + int(vsm_projection_overflow_bias(map)));
+	uint mip = VSM_COARSE_FIRST_MIP;
+	if (!sc_use_vsm_coarse()) {
+		float footprint = p_view_depth * vsm_projection.data.footprint.x + vsm_projection.data.footprint.y;
+		mip = vsm_biased_mip(int(vsm_face_mip(w * face.texel_scale, footprint)), vsm_projection.data.bias.y + face.lod_bias + int(vsm_projection_overflow_bias(map)));
+	}
 	vec2 uv = vec2(vsm_row(face.row0, p_world) / w * 0.5 + 0.5, vsm_row(face.row1, p_world) / w * 0.5 + 0.5);
 	VSMLookup result = vsm_lookup(vsm_projection.data.counts.x, map, uv, mip);
 	if (!result.valid) {

@@ -35,6 +35,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_default.h"
+// GodotNext: vsm_fog_translucency (#215).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 using namespace RendererRD;
 
@@ -306,6 +308,8 @@ ALBEDO = vec3(1.0);
 		if (p_is_using_radiance_octmap_array) {
 			defines += "\n#define USE_RADIANCE_OCTMAP_ARRAY \n";
 		}
+		// GodotNext: vsm_fog_translucency (#215). VSM page-table and coarse-lookup constants.
+		defines += RendererVirtualShadowMapStorage::get_glsl_defines();
 		Vector<ShaderRD::VariantDefine> volumetric_fog_modes;
 		int shader_group = 0;
 		for (int vk_memory_model = 0; vk_memory_model < 2; vk_memory_model++) {
@@ -434,27 +438,37 @@ Fog::FogShaderData::~FogShaderData() {
 
 bool Fog::VolumetricFog::sync_gi_dependent_sets_validity(bool p_ensure_freed) {
 	bool null = gi_dependent_sets.process_uniform_set_density.is_null();
-	bool valid = !null && RD::get_singleton()->uniform_set_is_valid(gi_dependent_sets.process_uniform_set_density);
+	bool valid_density = !null && RD::get_singleton()->uniform_set_is_valid(gi_dependent_sets.process_uniform_set_density);
+	bool valid_fog = !gi_dependent_sets.process_uniform_set.is_null() && RD::get_singleton()->uniform_set_is_valid(gi_dependent_sets.process_uniform_set);
+	bool valid_fog2 = !gi_dependent_sets.process_uniform_set2.is_null() && RD::get_singleton()->uniform_set_is_valid(gi_dependent_sets.process_uniform_set2);
 
 #ifdef DEV_ENABLED
 	// It's all-or-nothing, or something else has changed that requires dev attention.
+	// Note: process_uniform_set_density also binds VSM resources (#215) which may be recreated independently.
 	DEV_ASSERT(null == gi_dependent_sets.process_uniform_set.is_null());
 	DEV_ASSERT(null == gi_dependent_sets.process_uniform_set2.is_null());
-	DEV_ASSERT(valid == RD::get_singleton()->uniform_set_is_valid(gi_dependent_sets.process_uniform_set));
-	DEV_ASSERT(valid == RD::get_singleton()->uniform_set_is_valid(gi_dependent_sets.process_uniform_set2));
+	DEV_ASSERT(valid_fog == valid_fog2);
 #endif
 
-	if (valid) {
-		if (p_ensure_freed) {
+	bool valid = valid_density && valid_fog && valid_fog2;
+	if (!valid || p_ensure_freed) {
+		if (valid_density) {
 			RD::get_singleton()->free_rid(gi_dependent_sets.process_uniform_set_density);
-			RD::get_singleton()->free_rid(gi_dependent_sets.process_uniform_set);
-			RD::get_singleton()->free_rid(gi_dependent_sets.process_uniform_set2);
-			valid = false;
 		}
-	}
-
-	if (!valid && !null) {
+		if (valid_fog) {
+			RD::get_singleton()->free_rid(gi_dependent_sets.process_uniform_set);
+		}
+		if (valid_fog2) {
+			RD::get_singleton()->free_rid(gi_dependent_sets.process_uniform_set2);
+		}
 		gi_dependent_sets = {};
+		bound_vsm_pool_tex = RID();
+		bound_vsm_page_table = RID();
+		bound_vsm_map_data = RID();
+		bound_vsm_coarse_miss = RID();
+		bound_shadow_atlas_depth = RID();
+		bound_directional_shadow_depth = RID();
+		valid = false;
 	}
 
 	return valid;
@@ -802,7 +816,15 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 		RD::get_singleton()->compute_list_end();
 	}
 
-	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity();
+	// GodotNext: vsm_fog_translucency (#215). Rebuild density sets when VSM or shadow-atlas resources change
+	// (e.g. VSM activation/resize, or lazy shadow-atlas allocation when a positional/directional light appears).
+	const bool shadow_bindings_changed = fog->bound_vsm_pool_tex != p_settings.vsm_pool_tex ||
+			fog->bound_vsm_page_table != p_settings.vsm_page_table ||
+			fog->bound_vsm_map_data != p_settings.vsm_map_data ||
+			fog->bound_vsm_coarse_miss != p_settings.vsm_coarse_miss ||
+			fog->bound_shadow_atlas_depth != p_settings.shadow_atlas_depth ||
+			fog->bound_directional_shadow_depth != p_settings.directional_shadow_depth;
+	bool gi_dependent_sets_valid = fog->sync_gi_dependent_sets_validity(shadow_bindings_changed);
 	if (!fog->copy_uniform_set.is_null() && !RD::get_singleton()->uniform_set_is_valid(fog->copy_uniform_set)) {
 		fog->copy_uniform_set = RID();
 	}
@@ -1035,6 +1057,48 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 
 			uniforms.remove_at(9);
 			uniforms.write[8].set_id(0, aux8);
+			// GodotNext: vsm_fog_translucency (#215). Bindings 22..26 are MODE_DENSITY-only VSM coarse-page resources.
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+				u.binding = 22;
+				u.append_id(p_settings.vsm_pool_tex);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 23;
+				u.append_id(p_settings.vsm_page_table);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 24;
+				u.append_id(p_settings.vsm_map_data);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 25;
+				u.append_id(p_settings.vsm_coarse_miss);
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+				u.binding = 26;
+				u.append_id(material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+				uniforms.push_back(u);
+			}
+			fog->bound_vsm_pool_tex = p_settings.vsm_pool_tex;
+			fog->bound_vsm_page_table = p_settings.vsm_page_table;
+			fog->bound_vsm_map_data = p_settings.vsm_map_data;
+			fog->bound_vsm_coarse_miss = p_settings.vsm_coarse_miss;
+			fog->bound_shadow_atlas_depth = p_settings.shadow_atlas_depth;
+			fog->bound_directional_shadow_depth = p_settings.directional_shadow_depth;
 			fog->gi_dependent_sets.process_uniform_set_density = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY)), 0);
 			if (fog->nextgi_density_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(fog->nextgi_density_uniform_set)) {
 				RD::get_singleton()->free_rid(fog->nextgi_density_uniform_set);
@@ -1210,6 +1274,12 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 	Basis sky_transform = RendererSceneRenderRD::get_singleton()->environment_get_sky_orientation(p_settings.env);
 	sky_transform = sky_transform.inverse() * p_cam_transform.basis;
 	RendererRD::MaterialStorage::store_transform_3x3(sky_transform, params.radiance_inverse_xform);
+
+	// GodotNext: vsm_fog_translucency (#215). World-space camera origin for VSM coarse lookups and table capacity.
+	params.vsm_cam_origin[0] = float(p_cam_transform.origin.x);
+	params.vsm_cam_origin[1] = float(p_cam_transform.origin.y);
+	params.vsm_cam_origin[2] = float(p_cam_transform.origin.z);
+	params.vsm_table_maps = p_settings.vsm_table_maps;
 
 	RD::get_singleton()->draw_command_begin_label("Render Volumetric Fog");
 
