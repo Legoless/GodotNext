@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
+import os
+
 Import("env")
 Import("env_modules")
 
@@ -19,6 +21,9 @@ else:
     env_oidn.Prepend(CPPPATH=[env["oidn_resolved_include"]])
     env_oidn.add_source_files(module_obj, "oidn_denoiser_real.cpp")
     env.Append(LIBPATH=[env["oidn_resolved_libpath"]])
-    env.Append(LIBS=["OpenImageDenoise.lib" if env.msvc else "OpenImageDenoise"])
+    if env.msvc:
+        env.Append(LIBS=[env.File(os.path.join(env["oidn_resolved_libpath"], "OpenImageDenoise.lib"))])
+    else:
+        env.Append(LIBS=["OpenImageDenoise"])
 
 env.modules_sources += module_obj

@@ -121,8 +121,7 @@ if env["dlss_backend"] == "ngx":
         if env.msvc:
             # Delay-load sl.interposer.dll so runs with FG and Reflex disabled never load Streamline (#209).
             # Ignore LNK4199 so auxiliary targets cloned from env (console wrapper, test stub DLL) link cleanly under /WX.
-            env.Append(LIBS=["delayimp.lib"])
-            env.Append(LINKFLAGS=["/DELAYLOAD:sl.interposer.dll", "/IGNORE:4199"])
+            env.Append(LINKFLAGS=["delayimp.lib", "/DELAYLOAD:sl.interposer.dll", "/IGNORE:4199"])
 
     # Copy runtime libraries unmodified into #bin/ and write bin/dlss_runtime.json.
     sdk_root = env["dlss_resolved_sdk"]
