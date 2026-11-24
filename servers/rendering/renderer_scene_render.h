@@ -386,6 +386,9 @@ public:
 		uint32_t nextgi_dynamic_light_count = 0;
 		const RID *nextgi_static_light_instances = nullptr;
 		uint32_t nextgi_static_light_count = 0;
+		// GodotNext: path_tracer_lights_camera (#169). Visible non-directional LIGHT_BAKE_DISABLED lights.
+		const RID *nextgi_disabled_light_instances = nullptr;
+		uint32_t nextgi_disabled_light_count = 0;
 
 		// GodotNext: nextgi_rt_feed
 		const LocalVector<NextGIRTInstance> *nextgi_rt_instances = nullptr;

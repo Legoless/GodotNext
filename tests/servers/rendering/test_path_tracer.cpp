@@ -715,4 +715,334 @@ TEST_CASE("[PathTracer] OIDN backend hook registration, dispatch and view info r
 	CHECK_EQ(String(info["oidn_backend"]), original_name);
 }
 
+// GodotNext: path_tracer_lights_camera (#169).
+
+TEST_CASE("[PathTracer] Scenario light ordering, deduplication and bake-disabled inclusion (R14)") {
+	CHECK_EQ(sizeof(PathTracerGPULight), size_t(144));
+	CHECK_EQ(sizeof(PathTracerGPUFogVolume), size_t(128));
+
+	PathTracerLightEntry raw[7];
+	// Intentionally unsorted types, duplicate rid_id, invalid rid_id=0, and bake_disabled lights.
+	raw[0] = { PATH_TRACER_LIGHT_AREA, 50, RID(), false };
+	raw[1] = { PATH_TRACER_LIGHT_OMNI, 20, RID(), true }; // bake-disabled must be kept!
+	raw[2] = { PATH_TRACER_LIGHT_DIRECTIONAL, 99, RID(), false };
+	raw[3] = { PATH_TRACER_LIGHT_SPOT, 10, RID(), true }; // bake-disabled spot
+	raw[4] = { PATH_TRACER_LIGHT_OMNI, 20, RID(), false }; // duplicate rid_id=20
+	raw[5] = { PATH_TRACER_LIGHT_OMNI, 5, RID(), false };
+	raw[6] = { PATH_TRACER_LIGHT_SPOT, 0, RID(), false }; // invalid rid_id=0 dropped
+
+	LocalVector<PathTracerLightEntry> sorted;
+	path_tracer_collect_and_sort_lights(raw, 7, sorted);
+	REQUIRE_EQ(sorted.size(), 5u);
+
+	// Deterministic order: (type ascending, rid_id ascending).
+	CHECK_EQ(sorted[0].type, uint32_t(PATH_TRACER_LIGHT_DIRECTIONAL));
+	CHECK_EQ(sorted[0].rid_id, 99ull);
+	CHECK_EQ(sorted[1].type, uint32_t(PATH_TRACER_LIGHT_OMNI));
+	CHECK_EQ(sorted[1].rid_id, 5ull);
+	CHECK_EQ(sorted[2].type, uint32_t(PATH_TRACER_LIGHT_OMNI));
+	CHECK_EQ(sorted[2].rid_id, 20ull);
+	CHECK_EQ(sorted[3].type, uint32_t(PATH_TRACER_LIGHT_SPOT));
+	CHECK_EQ(sorted[3].rid_id, 10ull);
+	CHECK(sorted[3].bake_disabled);
+	CHECK_EQ(sorted[4].type, uint32_t(PATH_TRACER_LIGHT_AREA));
+	CHECK_EQ(sorted[4].rid_id, 50ull);
+
+	// Order is invariant under input permutation.
+	PathTracerLightEntry reversed[7];
+	for (int i = 0; i < 7; i++) {
+		reversed[i] = raw[6 - i];
+	}
+	LocalVector<PathTracerLightEntry> sorted_rev;
+	path_tracer_collect_and_sort_lights(reversed, 7, sorted_rev);
+	REQUIRE_EQ(sorted_rev.size(), sorted.size());
+	for (uint32_t i = 0; i < sorted.size(); i++) {
+		CHECK_EQ(sorted_rev[i].type, sorted[i].type);
+		CHECK_EQ(sorted_rev[i].rid_id, sorted[i].rid_id);
+	}
+}
+
+TEST_CASE("[PathTracer] NEE/MIS balance heuristic and solid-angle light PDFs") {
+	// Partition of unity: w(a, b) + w(b, a) == 1 for all positive PDFs.
+	const float pairs[4][2] = { { 1.0f, 1.0f }, { 0.25f, 3.75f }, { 100.0f, 0.01f }, { 1e-4f, 1e-3f } };
+	for (const auto &p : pairs) {
+		const float wa = path_tracer_mis_balance_weight(p[0], p[1]);
+		const float wb = path_tracer_mis_balance_weight(p[1], p[0]);
+		CHECK(Math::is_equal_approx(wa + wb, 1.0f));
+		CHECK(wa > 0.0f);
+		CHECK(wb > 0.0f);
+	}
+	// Delta light (pdf_b == 0 -> w = 1), invalid/zero pdf_a -> 0.
+	CHECK(Math::is_equal_approx(path_tracer_mis_balance_weight(2.0f, 0.0f), 1.0f));
+	CHECK_EQ(path_tracer_mis_balance_weight(0.0f, 2.0f), 0.0f);
+	CHECK_EQ(path_tracer_mis_balance_weight(-1.0f, 2.0f), 0.0f);
+	CHECK_EQ(path_tracer_mis_balance_weight(std::numeric_limits<float>::quiet_NaN(), 1.0f), 0.0f);
+
+	// Cone solid angle: 2*pi*(1 - cos_max).
+	CHECK(Math::is_equal_approx(path_tracer_cone_solid_angle(1.0f), 0.0f));
+	CHECK(Math::is_equal_approx(path_tracer_cone_solid_angle(0.0f), float(Math::TAU)));
+	CHECK(Math::is_equal_approx(path_tracer_cone_solid_angle(-1.0f), float(4.0 * Math::PI)));
+
+	// Area light solid-angle PDF: dist^2 / (area * cos_light).
+	CHECK(Math::is_equal_approx(path_tracer_area_light_pdf_omega(4.0f, 2.0f, 0.5f), 4.0f));
+	CHECK_EQ(path_tracer_area_light_pdf_omega(4.0f, 2.0f, 0.0f), 0.0f);
+	CHECK_EQ(path_tracer_area_light_pdf_omega(4.0f, 0.0f, 1.0f), 0.0f);
+}
+
+TEST_CASE("[PathTracer] Sky octahedral Jacobian and 2D CDF importance sampling") {
+	// Octahedral encode/decode round-trip across all 8 octants and axes.
+	const Vector3 dirs[] = {
+		Vector3(1, 0, 0),
+		Vector3(-1, 0, 0),
+		Vector3(0, 1, 0),
+		Vector3(0, -1, 0),
+		Vector3(0, 0, 1),
+		Vector3(0, 0, -1),
+		Vector3(1, 2, 3).normalized(),
+		Vector3(-2, 1, -3).normalized(),
+		Vector3(1, -3, -1).normalized(),
+		Vector3(-1, -1, 2).normalized(),
+	};
+	for (const Vector3 &d : dirs) {
+		const Vector2 uv = path_tracer_sky_dir_to_oct(d);
+		const Vector3 rt = path_tracer_sky_oct_to_dir(uv);
+		CHECK(d.dot(rt) > 0.9999f);
+	}
+
+	// Numerical integration of octahedral Jacobian over [0, 1]^2 must equal 4*pi.
+	const uint32_t qn = 64;
+	double solid_angle_sum = 0.0;
+	for (uint32_t y = 0; y < qn; y++) {
+		for (uint32_t x = 0; x < qn; x++) {
+			const Vector2 uv((float(x) + 0.5f) / float(qn), (float(y) + 0.5f) / float(qn));
+			solid_angle_sum += double(path_tracer_sky_oct_jacobian(path_tracer_sky_oct_to_dir(uv))) / double(qn * qn);
+		}
+	}
+	CHECK(Math::abs(solid_angle_sum - 4.0 * Math::PI) < 0.02);
+
+	// 2D sky CDF: bright localized sun patch in upper hemisphere vs dim ambient sky.
+	const uint32_t dim = 32;
+	LocalVector<float> lum;
+	lum.resize(dim * dim);
+	double exact_integral = 0.0;
+	const Vector3 sun_dir = Vector3(0.3f, 0.8f, 0.5f).normalized();
+	for (uint32_t y = 0; y < dim; y++) {
+		for (uint32_t x = 0; x < dim; x++) {
+			const Vector2 uv((float(x) + 0.5f) / float(dim), (float(y) + 0.5f) / float(dim));
+			const Vector3 d = path_tracer_sky_oct_to_dir(uv);
+			const float val = (d.dot(sun_dir) > 0.92f) ? 50.0f : 0.1f;
+			lum[y * dim + x] = val;
+			exact_integral += double(val) * double(path_tracer_sky_oct_jacobian(d)) / double(dim * dim);
+		}
+	}
+
+	PathTracerSkyCdfCPU cdf;
+	path_tracer_build_sky_cdf_cpu(lum.ptr(), dim, cdf);
+	CHECK(cdf.total_weight > 0.0f);
+	CHECK(Math::is_equal_approx(cdf.marginal[dim - 1], 1.0f));
+
+	// Monte Carlo estimator E[L(d) / pdf(d)] via 2D CDF sampling must match exact_integral and concentrate on sun.
+	uint32_t rng = 0x12345678u;
+	auto rnd = [&rng]() -> float {
+		rng = rng * 747796405u + 2891336453u;
+		uint32_t w = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u;
+		w = (w >> 22u) ^ w;
+		return float(w & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+	};
+	const uint32_t samples = 8192;
+	double mc_sum = 0.0;
+	uint32_t sun_hits = 0;
+	for (uint32_t i = 0; i < samples; i++) {
+		Vector3 d;
+		float pdf = 0.0f;
+		path_tracer_sample_sky_cdf_cpu(cdf, Vector2(rnd(), rnd()), d, pdf);
+		REQUIRE(pdf > 0.0f);
+		// Consistency between sampled PDF and lookup PDF for MIS.
+		const float lookup_pdf = path_tracer_sky_cdf_pdf_cpu(cdf, d);
+		CHECK(Math::abs(lookup_pdf - pdf) <= pdf * 0.05f + 1e-4f);
+		const Vector2 uv = path_tracer_sky_dir_to_oct(d);
+		const uint32_t ix = MIN(uint32_t(CLAMP(uv.x, 0.0f, 0.999999f) * float(dim)), dim - 1);
+		const uint32_t iy = MIN(uint32_t(CLAMP(uv.y, 0.0f, 0.999999f) * float(dim)), dim - 1);
+		const float lval = lum[iy * dim + ix];
+		if (lval > 10.0f) {
+			sun_hits++;
+		}
+		mc_sum += double(lval) / double(pdf);
+	}
+	const double mc_est = mc_sum / double(samples);
+	CHECK(sun_hits > samples / 2); // Importance sampling concentrates majority of samples on bright sun patch.
+	CHECK(Math::abs(mc_est - exact_integral) / exact_integral < 0.03);
+}
+
+static float _test_sigma_const(float p_t, void *p_ctx) {
+	(void)p_t;
+	return *static_cast<const float *>(p_ctx);
+}
+
+static float _test_sigma_ramp(float p_t, void *p_ctx) {
+	const float *params = static_cast<const float *>(p_ctx); // [peak, length]
+	const float u = CLAMP(p_t / params[1], 0.0f, 1.0f);
+	return params[0] * (1.0f - u);
+}
+
+TEST_CASE("[PathTracer] Volumetric fog SDFs, Henyey-Greenstein phase and delta/ratio tracking unbiasedness") {
+	// Analytic SDF signs for all 5 Godot FogVolume shapes.
+	const Vector3 hs(1.0f, 1.0f, 1.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(0, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_ELLIPSOID)) < 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(2, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_ELLIPSOID)) > 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(0, -0.5f, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_CONE)) < 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(2, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_CONE)) > 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(0, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_CYLINDER)) < 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(2, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_CYLINDER)) > 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(0, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_BOX)) < 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(2, 0, 0), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_BOX)) > 0.0f);
+	CHECK(path_tracer_fog_volume_sdf(Vector3(100, 100, 100), hs, uint32_t(RSE::FOG_VOLUME_SHAPE_WORLD)) < 0.0f);
+
+	// Henyey-Greenstein phase function and importance sampler.
+	CHECK(Math::is_equal_approx(path_tracer_hg_phase(0.5f, 0.0f), float(1.0 / (4.0 * Math::PI))));
+	CHECK(path_tracer_hg_phase(1.0f, 0.7f) > path_tracer_hg_phase(-1.0f, 0.7f));
+	CHECK(path_tracer_hg_phase(-1.0f, -0.7f) > path_tracer_hg_phase(1.0f, -0.7f));
+	{
+		uint32_t rng = 0xCAFEBABEu;
+		auto rnd = [&rng]() -> float {
+			rng = rng * 747796405u + 2891336453u;
+			uint32_t w = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u;
+			w = (w >> 22u) ^ w;
+			return float(w & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+		};
+		const float g = 0.65f;
+		const Vector3 fwd(0.0f, 0.0f, -1.0f);
+		double cos_sum = 0.0;
+		const uint32_t n = 4096;
+		for (uint32_t i = 0; i < n; i++) {
+			float pdf = 0.0f;
+			const Vector3 s = path_tracer_sample_hg(fwd, g, Vector2(rnd(), rnd()), pdf);
+			CHECK(pdf > 0.0f);
+			cos_sum += double(fwd.dot(s));
+		}
+		// Mean cosine of Henyey-Greenstein phase equals g.
+		CHECK(Math::abs(cos_sum / double(n) - double(g)) < 0.03);
+	}
+
+	// Unbiased Woodcock delta tracking and ratio tracking on homogeneous and heterogeneous media.
+	{
+		float sigma = 0.4f;
+		const float seg_len = 3.0f;
+		const double exact = Math::exp(-double(sigma) * double(seg_len));
+		uint32_t rng_d = 0x11112222u;
+		uint32_t rng_r = 0x33334444u;
+		double sum_d = 0.0;
+		double sum_r = 0.0;
+		const uint32_t trials = 16384;
+		// Use majorant > sigma (2.5x) to exercise null collisions heavily.
+		for (uint32_t i = 0; i < trials; i++) {
+			sum_d += double(path_tracer_delta_tracking_transmittance_cpu(seg_len, 1.0f, &_test_sigma_const, &sigma, rng_d));
+			sum_r += double(path_tracer_ratio_tracking_transmittance_cpu(seg_len, 1.0f, &_test_sigma_const, &sigma, rng_r));
+		}
+		CHECK(Math::abs(sum_d / double(trials) - exact) < 0.015);
+		CHECK(Math::abs(sum_r / double(trials) - exact) < 0.015);
+	}
+	{
+		float ramp[2] = { 0.8f, 3.0f }; // integral_0^3 0.8*(1 - t/3) dt = 1.2
+		const double exact = Math::exp(-1.2);
+		uint32_t rng_d = 0x55556666u;
+		uint32_t rng_r = 0x77778888u;
+		double sum_d = 0.0;
+		double sum_r = 0.0;
+		const uint32_t trials = 16384;
+		for (uint32_t i = 0; i < trials; i++) {
+			sum_d += double(path_tracer_delta_tracking_transmittance_cpu(ramp[1], 1.2f, &_test_sigma_ramp, ramp, rng_d));
+			sum_r += double(path_tracer_ratio_tracking_transmittance_cpu(ramp[1], 1.2f, &_test_sigma_ramp, ramp, rng_r));
+		}
+		CHECK(Math::abs(sum_d / double(trials) - exact) < 0.015);
+		CHECK(Math::abs(sum_r / double(trials) - exact) < 0.015);
+	}
+}
+
+TEST_CASE("[PathTracer] Thin-lens DOF parameter mapping and focal-plane ray convergence") {
+	const float fov = Math::deg_to_rad(60.0f);
+	// Disabled when orthogonal, zero blur, or neither near/far enabled.
+	CHECK_FALSE(path_tracer_compute_dof_params(true, 5.0f, 2.0f, false, 1.0f, 1.0f, 0.2f, fov, 512, true).enabled);
+	CHECK_FALSE(path_tracer_compute_dof_params(true, 5.0f, 2.0f, false, 1.0f, 1.0f, 0.0f, fov, 512, false).enabled);
+	CHECK_FALSE(path_tracer_compute_dof_params(false, 5.0f, 2.0f, false, 1.0f, 1.0f, 0.2f, fov, 512, false).enabled);
+
+	// Practical far DOF scales aperture monotonically with blur_amount.
+	const PathTracerDOFParams low = path_tracer_compute_dof_params(true, 5.0f, 2.0f, false, 1.0f, 1.0f, 0.1f, fov, 512, false);
+	const PathTracerDOFParams high = path_tracer_compute_dof_params(true, 5.0f, 2.0f, false, 1.0f, 1.0f, 0.4f, fov, 512, false);
+	CHECK(low.enabled);
+	CHECK(high.enabled);
+	CHECK(Math::is_equal_approx(low.focus_distance, 5.0f));
+	CHECK(high.aperture_radius > low.aperture_radius);
+
+	// Concentric disk maps [0, 1]^2 inside unit disk, center -> (0, 0).
+	CHECK(path_tracer_sample_concentric_disk(Vector2(0.5f, 0.5f)).length() < 1e-6f);
+	for (int y = 0; y <= 8; y++) {
+		for (int x = 0; x <= 8; x++) {
+			const Vector2 d = path_tracer_sample_concentric_disk(Vector2(float(x) / 8.0f, float(y) / 8.0f));
+			CHECK(d.length() <= 1.0001f);
+		}
+	}
+
+	// All thin-lens rays for a pixel must intersect at the exact focal plane point (zero CoC in focus),
+	// while spreading apart at an out-of-focus plane.
+	const Vector3 cam_origin(0.0f, 1.5f, 0.0f);
+	const Vector3 cam_fwd(0.0f, 0.0f, -1.0f);
+	const Vector3 cam_right(1.0f, 0.0f, 0.0f);
+	const Vector3 cam_up(0.0f, 1.0f, 0.0f);
+	const Vector3 pinhole_dir = Vector3(0.2f, -0.1f, -1.0f).normalized();
+	const Vector3 expected_focus = cam_origin + pinhole_dir * (high.focus_distance / pinhole_dir.dot(cam_fwd));
+
+	Vector3 far_min(1e9f, 1e9f, 1e9f);
+	Vector3 far_max(-1e9f, -1e9f, -1e9f);
+	const Vector2 lens_samples[5] = { Vector2(0.1f, 0.2f), Vector2(0.9f, 0.2f), Vector2(0.1f, 0.9f), Vector2(0.9f, 0.9f), Vector2(0.5f, 0.5f) };
+	for (const Vector2 &u : lens_samples) {
+		Vector3 ro;
+		Vector3 rd;
+		path_tracer_apply_thin_lens(cam_origin, pinhole_dir, cam_fwd, cam_right, cam_up, high, u, ro, rd);
+		// Intersect focal plane (z = -focus_distance).
+		const float t_focus = (expected_focus.z - ro.z) / rd.z;
+		const Vector3 hit_focus = ro + rd * t_focus;
+		CHECK(hit_focus.distance_to(expected_focus) < 1e-4f);
+		// Intersect out-of-focus plane at z = -2 * focus_distance.
+		const float t_far = (-2.0f * high.focus_distance - ro.z) / rd.z;
+		const Vector3 hit_far = ro + rd * t_far;
+		far_min = far_min.min(hit_far);
+		far_max = far_max.max(hit_far);
+	}
+	CHECK((far_max - far_min).length() > high.aperture_radius * 0.5f);
+}
+
+TEST_CASE("[PathTracer] Motion blur transform interpolation and shutter interval sampling") {
+	Transform3D prev(Basis(Vector3(0, 1, 0), 0.0f).scaled(Vector3(1.0f, 1.0f, 1.0f)), Vector3(0.0f, 0.0f, 0.0f));
+	Transform3D curr(Basis(Vector3(0, 1, 0), float(Math::PI * 0.5)).scaled(Vector3(2.0f, 2.0f, 2.0f)), Vector3(4.0f, 2.0f, -6.0f));
+
+	const Transform3D at0 = path_tracer_interpolate_transform(prev, curr, 0.0f);
+	const Transform3D at1 = path_tracer_interpolate_transform(prev, curr, 1.0f);
+	const Transform3D mid = path_tracer_interpolate_transform(prev, curr, 0.5f);
+
+	CHECK(at0.origin.is_equal_approx(prev.origin));
+	CHECK(at1.origin.is_equal_approx(curr.origin));
+	CHECK(mid.origin.is_equal_approx(Vector3(2.0f, 1.0f, -3.0f)));
+	CHECK(mid.basis.get_scale().is_equal_approx(Vector3(1.5f, 1.5f, 1.5f)));
+	// Midpoint rotation of 0 -> 90 deg around Y must be 45 deg around Y.
+	const Vector3 rotated_x = mid.basis.orthonormalized().xform(Vector3(1.0f, 0.0f, 0.0f));
+	const Vector3 expected_x(Math::cos(float(Math::PI * 0.25)), 0.0f, -Math::sin(float(Math::PI * 0.25)));
+	CHECK(rotated_x.is_equal_approx(expected_x));
+
+	// Shutter time helper: shutter=0 pins to 1.0; shutter=1 spans [0, 1] strictly increasing across slices.
+	CHECK(Math::is_equal_approx(path_tracer_shutter_time(0, 3, 8, 0.0f), 1.0f));
+	float prev_t = -1.0f;
+	for (uint32_t s = 0; s < PATH_TRACER_MOTION_SLICES; s++) {
+		const float t = path_tracer_shutter_time(0, s, PATH_TRACER_MOTION_SLICES, 1.0f);
+		CHECK(t >= 0.0f);
+		CHECK(t <= 1.0f);
+		CHECK(t > prev_t);
+		prev_t = t;
+	}
+	// Sample index jitters sub-slice shutter time deterministically.
+	CHECK_FALSE(Math::is_equal_approx(
+			path_tracer_shutter_time(0, 2, PATH_TRACER_MOTION_SLICES, 1.0f),
+			path_tracer_shutter_time(1, 2, PATH_TRACER_MOTION_SLICES, 1.0f)));
+}
+
 } // namespace TestPathTracer

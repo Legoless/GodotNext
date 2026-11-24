@@ -1976,6 +1976,12 @@ void RendererSceneCull::_nextgi_sync_positional_light(Scenario *p_scenario, RID 
 	}
 	const bool was_listed = _nextgi_rid_list_has(p_scenario->nextgi_dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
 	RendererRD::nextgi_sync_positional_light(p_scenario->nextgi_dynamic_lights, p_scenario->static_lights, p_light_instance, RendererRD::nextgi_positional_light_list(p_visible, true, p_directional, p_bake));
+	// GodotNext: path_tracer_lights_camera (#169). Track visible non-directional bake-disabled lights separately so
+	// the path tracer sees all scenario lights (R14) while NextGI SRC/WRC keep skipping bake-disabled lights.
+	p_scenario->nextgi_disabled_lights.erase(p_light_instance);
+	if (p_visible && !p_directional && p_bake == RSE::LIGHT_BAKE_DISABLED) {
+		p_scenario->nextgi_disabled_lights.push_back(p_light_instance);
+	}
 	const bool now_listed = _nextgi_rid_list_has(p_scenario->nextgi_dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
 	const RendererRD::NextGILightBake bake = _nextgi_light_bake(p_bake);
 	if (was_listed && !now_listed) {
@@ -4844,6 +4850,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_dynamic_light_count = scenario->nextgi_dynamic_lights.size();
 			sdfgi_update_data.nextgi_static_light_instances = scenario->static_lights.ptr();
 			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
+			// GodotNext: path_tracer_lights_camera (#169).
+			sdfgi_update_data.nextgi_disabled_light_instances = scenario->nextgi_disabled_lights.ptr();
+			sdfgi_update_data.nextgi_disabled_light_count = scenario->nextgi_disabled_lights.size();
 			// GodotNext: vsm_non_nanite (#218), vsm_caching (#212), vsm_local_lights (#216).
 			sdfgi_update_data.vsm_shadows = vsm_shadow_data.is_empty() ? nullptr : vsm_shadow_data.ptr();
 			sdfgi_update_data.vsm_shadow_count = vsm_shadow_data.size();

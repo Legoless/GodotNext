@@ -791,6 +791,9 @@ private:
 		virtual void set_transform(const Transform3D &p_transform, const AABB &p_aabb, const AABB &p_transformed_aabb) override;
 		virtual void reset_motion_vectors() override;
 		virtual void set_spline_deform(bool p_active, const SplineDeformPose &p_pose, uint64_t p_generation) override;
+		// GodotNext: path_tracer_lights_camera (#169). Per-instance previous transform for shutter motion blur.
+		virtual Transform3D get_prev_transform() const override { return prev_transform; }
+		virtual bool has_prev_transform() const override { return transform_status == TransformStatus::MOVED && prev_transform != transform; }
 		virtual void set_use_lightmap(RID p_lightmap_instance, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice_index) override;
 		virtual void set_lightmap_capture(const Color *p_sh9) override;
 

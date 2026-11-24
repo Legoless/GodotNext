@@ -166,9 +166,9 @@ struct NextGIHitLightTrace {
 	float time = 0.0f;
 };
 
-// GodotNext: path_tracer (#167), path_tracer_denoise (#168). One path tracer sample per pixel through the hit
-// pipeline: the view's RGBA32F history, first-hit albedo and normal guides, the params (PathTracerGPUParams) and
-// the D16 light and material tables (path_tracer_hit.glsl).
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169). One path tracer
+// sample per pixel through the hit pipeline: the view's RGBA32F history, first-hit albedo and normal guides,
+// the params (PathTracerGPUParams), the light/material tables, sky octmap + CDF, FogVolumes, and light atlases.
 struct NextGIHitPathTrace {
 	RID accumulation;
 	RID guide_albedo;
@@ -176,6 +176,16 @@ struct NextGIHitPathTrace {
 	RID params;
 	RID lights;
 	RID materials;
+	// GodotNext: path_tracer_lights_camera (#169).
+	RID sky_cdf;
+	RID fog_volumes;
+	RID ies_atlas;
+	RID area_atlas;
+	RID projector_atlas;
+	RID sky_octmap;
+	RID tlas_override;
+	RID records_override;
+	uint32_t record_count_override = 0;
 	uint32_t width = 0;
 	uint32_t height = 0;
 	float time = 0.0f;

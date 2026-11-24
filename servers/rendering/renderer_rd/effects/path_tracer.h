@@ -34,8 +34,10 @@
 #include "core/math/color.h"
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
+#include "core/math/vector2.h"
 #include "core/math/vector2i.h"
 #include "core/math/vector3.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
@@ -290,6 +292,112 @@ struct PathTracerTables {
 static constexpr uint32_t PATH_TRACER_MAX_LIGHTS = 8;
 static constexpr uint32_t PATH_TRACER_LIGHT_FLOATS = 12;
 
+// GodotNext: path_tracer_lights_camera (#169). Product light table (all Godot light types, scenario-wide
+// deterministic order including bake-disabled lights), sky 2D CDF, FogVolumes, thin-lens DOF, and motion blur.
+enum PathTracerLightType : uint32_t {
+	PATH_TRACER_LIGHT_DIRECTIONAL = 0u,
+	PATH_TRACER_LIGHT_OMNI = 1u,
+	PATH_TRACER_LIGHT_SPOT = 2u,
+	PATH_TRACER_LIGHT_AREA = 3u,
+};
+
+enum PathTracerLightFlags : uint32_t {
+	PATH_TRACER_LIGHT_FLAG_CAST_SHADOW = 1u << 0,
+	PATH_TRACER_LIGHT_FLAG_HAS_PROJECTOR = 1u << 1,
+	PATH_TRACER_LIGHT_FLAG_HAS_AREA_TEX = 1u << 2,
+	PATH_TRACER_LIGHT_FLAG_NEGATIVE = 1u << 3,
+	PATH_TRACER_LIGHT_FLAG_IES = 1u << 4,
+};
+
+static constexpr uint32_t PATH_TRACER_PRODUCT_LIGHT_VEC4S = 9;
+static constexpr uint32_t PATH_TRACER_PRODUCT_LIGHT_FLOATS = PATH_TRACER_PRODUCT_LIGHT_VEC4S * 4;
+static constexpr uint32_t PATH_TRACER_SKY_CDF_DIM = 128;
+static constexpr uint32_t PATH_TRACER_SKY_CDF_FLOATS = PATH_TRACER_SKY_CDF_DIM + PATH_TRACER_SKY_CDF_DIM * PATH_TRACER_SKY_CDF_DIM * 2 + 4;
+static constexpr uint32_t PATH_TRACER_FOG_VOLUME_VEC4S = 8;
+static constexpr uint32_t PATH_TRACER_MOTION_SLICES = 8;
+
+// One product light entry (9 vec4s = 144 bytes, packed into lights.data[] in std430).
+struct PathTracerGPULight {
+	float pos_dir_range[4] = {}; // xyz: world pos (omni/spot/area) or unit dir TO light (directional); w: range or cos(angular_radius)
+	float color_spec[4] = {}; // rgb: unexposed linear color * energy; w: specular_amount (2 * param_specular)
+	float dir_decay[4] = {}; // xyz: unit emission dir (-Z); w: attenuation decay
+	float right_size[4] = {}; // xyz: unit right (+X); w: radius (omni/spot), half_width (area), angular_radius_rad (dir)
+	float up_param[4] = {}; // xyz: unit up (+Y); w: half_height (area) or cos_spot_angle (spot)
+	float spot_barn_ies[4] = {}; // x: inv_spot_atten, y: barn_door_angle_rad, z: barn_door_length, w: ies_scale
+	float tex_rect[4] = {}; // atlas rect (x, y, w, h) in decal_atlas_srgb (omni/spot) or area_light_atlas (area)
+	uint32_t type = 0; // PathTracerLightType
+	uint32_t flags = 0; // PathTracerLightFlags
+	uint32_t ies_layer = 0xFFFFFFFFu;
+	float inv_range = 0.0f;
+	float shadow_extra[4] = {}; // x: shadow_opacity, y: sin_angular_radius, z: tan_spot_angle, w: reserved
+};
+static_assert(sizeof(PathTracerGPULight) == 144, "PathTracerGPULight must be 9 vec4s (144 bytes).");
+
+// One active FogVolume entry (8 vec4s = 128 bytes, packed into pt_fog_volumes.data[] in std430).
+struct PathTracerGPUFogVolume {
+	float inv_xform_row0[4] = {};
+	float inv_xform_row1[4] = {};
+	float inv_xform_row2[4] = {};
+	float half_size_shape[4] = {}; // xyz: size * 0.5, w: float(RSE::FogVolumeShape)
+	float albedo_density[4] = {}; // rgb: linear albedo, w: density (can be negative)
+	float emission_falloff[4] = {}; // rgb: linear emission, w: height_falloff
+	float origin_edge[4] = {}; // xyz: world origin, w: edge_fade
+	float bounds_scale[4] = {}; // x: max(density, 0), y: 2 / min(size.x, size.y, size.z), z: 0, w: 0
+};
+static_assert(sizeof(PathTracerGPUFogVolume) == 128, "PathTracerGPUFogVolume must be 8 vec4s (128 bytes).");
+
+// Pure device-free light ordering helper (R14): deduplicates by rid_id and sorts deterministically by (type, rid_id).
+struct PathTracerLightEntry {
+	uint32_t type = 0;
+	uint64_t rid_id = 0;
+	RID instance;
+	bool bake_disabled = false;
+};
+void path_tracer_collect_and_sort_lights(const PathTracerLightEntry *p_entries, uint32_t p_count, LocalVector<PathTracerLightEntry> &r_sorted);
+
+// Pure NEE/MIS balance heuristic & solid-angle PDF helpers.
+float path_tracer_mis_balance_weight(float p_pdf_a, float p_pdf_b);
+float path_tracer_cone_solid_angle(float p_cos_max);
+float path_tracer_area_light_pdf_omega(float p_dist_sq, float p_clipped_area, float p_cos_light);
+
+// Pure octahedral mapping, solid-angle Jacobian (4 * ||d||_1^3), and CPU 2D sky CDF helpers (mirror path_tracer_sky_cdf.glsl).
+Vector3 path_tracer_sky_oct_to_dir(const Vector2 &p_uv);
+Vector2 path_tracer_sky_dir_to_oct(const Vector3 &p_dir);
+float path_tracer_sky_oct_jacobian(const Vector3 &p_dir);
+
+struct PathTracerSkyCdfCPU {
+	uint32_t dim = 0;
+	LocalVector<float> marginal;
+	LocalVector<float> conditional;
+	LocalVector<float> cell_pdf;
+	float total_weight = 0.0f;
+};
+void path_tracer_build_sky_cdf_cpu(const float *p_luminance, uint32_t p_dim, PathTracerSkyCdfCPU &r_cdf);
+void path_tracer_sample_sky_cdf_cpu(const PathTracerSkyCdfCPU &p_cdf, const Vector2 &p_u, Vector3 &r_dir, float &r_pdf_omega);
+float path_tracer_sky_cdf_pdf_cpu(const PathTracerSkyCdfCPU &p_cdf, const Vector3 &p_dir);
+
+// Pure volumetric fog / FogVolume / Henyey-Greenstein / Woodcock delta & ratio tracking helpers.
+float path_tracer_hg_phase(float p_cos_theta, float p_g);
+Vector3 path_tracer_sample_hg(const Vector3 &p_dir, float p_g, const Vector2 &p_u, float &r_pdf);
+float path_tracer_fog_volume_sdf(const Vector3 &p_local_pos, const Vector3 &p_half_size, uint32_t p_shape);
+float path_tracer_delta_tracking_transmittance_cpu(float p_segment_length, float p_majorant, float (*p_sigma_fn)(float p_t, void *p_ctx), void *p_ctx, uint32_t &r_rng);
+float path_tracer_ratio_tracking_transmittance_cpu(float p_segment_length, float p_majorant, float (*p_sigma_fn)(float p_t, void *p_ctx), void *p_ctx, uint32_t &r_rng);
+
+// Pure thin-lens DOF helpers (CameraAttributesPractical & CameraAttributesPhysical).
+struct PathTracerDOFParams {
+	float focus_distance = 10.0f;
+	float aperture_radius = 0.0f;
+	float near_plane_dist = 0.05f;
+	bool enabled = false;
+};
+PathTracerDOFParams path_tracer_compute_dof_params(bool p_far_enabled, float p_far_distance, float p_far_transition, bool p_near_enabled, float p_near_distance, float p_near_transition, float p_blur_amount, float p_fov_y_rad, int p_viewport_height, bool p_orthogonal);
+Vector2 path_tracer_sample_concentric_disk(const Vector2 &p_u);
+void path_tracer_apply_thin_lens(const Vector3 &p_origin, const Vector3 &p_dir, const Vector3 &p_cam_forward, const Vector3 &p_cam_right, const Vector3 &p_cam_up, const PathTracerDOFParams &p_dof, const Vector2 &p_lens_u, Vector3 &r_origin, Vector3 &r_dir);
+
+// Pure motion blur transform interpolation (SLERP rotation + LERP scale + LERP origin) and shutter time helpers.
+Transform3D path_tracer_interpolate_transform(const Transform3D &p_prev, const Transform3D &p_curr, float p_t);
+float path_tracer_shutter_time(uint32_t p_sample_index, uint32_t p_slice, uint32_t p_slice_count, float p_shutter);
+
 // The camera block both estimator shaders read (the first 64 bytes of their params).
 struct PathTracerGPUCamera {
 	float cam_origin_fov[4] = {};
@@ -357,6 +465,14 @@ public:
 	float read_denoised_mean = 0.0f;
 	uint32_t read_denoised_nonfinite = 0;
 	uint64_t read_denoised_hash = 0;
+	// GodotNext: path_tracer_lights_camera (#169). Per-view diagnostics for #169 features.
+	uint32_t light_count = 0;
+	uint32_t fog_volume_count = 0;
+	bool sky_importance_active = false;
+	bool volumetric_fog_active = false;
+	bool dof_active = false;
+	bool motion_blur_active = false;
+	uint32_t motion_moving_instances = 0;
 
 	void clear_history();
 	void fill_info(Dictionary &r_info) const;
@@ -374,16 +490,38 @@ class PathTracer {
 	RID dummy_buffer;
 	RID material_buffer;
 	RID light_buffer;
+	// GodotNext: path_tracer_lights_camera (#169). Sky CDF, FogVolume table, and shutter motion TLAS.
+	RID sky_cdf_buffer;
+	RID fog_volume_buffer;
+	RID motion_tlas;
+	RID motion_record_buffer;
 	uint32_t material_capacity = 0;
 	uint32_t light_capacity = 0;
+	uint32_t fog_volume_capacity = 0;
+	uint32_t motion_record_capacity = 0;
+	uint64_t sky_cdf_key = 0;
+	bool sky_cdf_valid = false;
+	// Tracks consecutive frames each instance moved so single-frame jumps stay sharp while continuous motion blurs.
+	struct MotionStreak {
+		uint64_t last_frame = 0;
+		uint32_t streak = 0;
+	};
+	HashMap<uint64_t, MotionStreak> motion_streaks;
+	uint64_t motion_streaks_frame = UINT64_MAX;
 	bool logged_compile_failure = false;
 	bool logged_denoise_compile_failure = false;
+	bool logged_sky_cdf_compile_failure = false;
 	bool logged_oidn_fallback = false;
 
 	bool _ensure_shader();
 	bool _ensure_denoise_shader();
+	bool _ensure_sky_cdf_shader();
 	void _upload_tables(const PathTracerTables &p_tables);
-	void _trace_inline(PathTracerView *p_view, NextGIRTScene *p_rt_scene);
+	void _upload_fog_volumes(const LocalVector<PathTracerGPUFogVolume> &p_volumes);
+	bool _update_sky_cdf(RID p_sky_octmap, float p_border_pad, float p_border_scale, float p_radiance_scale, uint64_t p_key, bool p_force_rebuild);
+	uint32_t _update_motion_streaks(const NextGIRTScene *p_rt_scene, uint64_t p_frame, float p_shutter);
+	bool _build_motion_tlas(const NextGIRTScene *p_rt_scene, uint64_t p_frame, uint32_t p_sample_index, float p_shutter, uint32_t &r_record_count, uint32_t &r_moving_count);
+	void _trace_inline(PathTracerView *p_view, NextGIRTScene *p_rt_scene, RID p_tlas, RID p_records, RID p_sky_octmap, RID p_ies_atlas, RID p_area_atlas, RID p_projector_atlas);
 	void _update_denoise(PathTracerView *p_view);
 	bool _denoise_builtin(PathTracerView *p_view);
 	bool _denoise_oidn(PathTracerView *p_view);
@@ -397,6 +535,9 @@ public:
 	static const char *get_oidn_backend_name();
 	static Error run_oidn_denoise(const PathTracerOIDNInput &p_input, String &r_error);
 	static Vector<String> get_denoise_shader_variant_defines();
+	// GodotNext: path_tracer_lights_camera (#169). Sky CDF compute shader variants and compositing check.
+	static Vector<String> get_sky_cdf_shader_variant_defines();
+	static bool is_compositing(RenderSceneBuffersRD *p_render_buffers);
 	// The D16 reference's tables (NextGIReference, debug/reference_mode): the fed instances' parts that enter the
 	// TLAS, walked as #27 and #263 walk them, so the reference images stay what the harness captured.
 	static void build_reference_tables(const RenderDataRD *p_render_data, PathTracerTables &r_tables);

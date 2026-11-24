@@ -34,6 +34,7 @@
 #include "core/io/image.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
+#include "servers/rendering/renderer_rd/effects/path_tracer.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -499,6 +500,12 @@ void RendererSceneRenderRD::_render_buffers_post_process_and_tonemap(const Rende
 	bool dest_is_msaa_2d = rb->get_view_count() == 1 && texture_storage->render_target_get_msaa(render_target) != RSE::VIEWPORT_MSAA_DISABLED;
 
 	bool using_dof = RSG::camera_attributes->camera_attributes_uses_dof(p_render_data->camera_attributes);
+
+	// GodotNext: path_tracer_lights_camera (#169). The product path tracer evaluates thin-lens DOF directly on
+	// camera rays, so skip raster BokehDOF when the path-traced image replaced the HDR color buffer.
+	if (using_dof && RendererRD::PathTracer::is_compositing(rb.ptr())) {
+		using_dof = false;
+	}
 
 	if (using_dof && p_render_data->transparent_bg) {
 		WARN_PRINT_ONCE("Depth of field is not supported in viewports with a transparent background. Disabling DoF in transparent viewport.");

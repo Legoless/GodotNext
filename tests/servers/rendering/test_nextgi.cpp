@@ -279,23 +279,23 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141).
-	REQUIRE(versions.size() == 15);
+	// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141), path_tracer_lights_camera (#169).
+	REQUIRE(versions.size() == 16);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	const char *expected[15] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+	const char *expected[16] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
 		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD",
-		"PathTracerShaderRD", "PathTracerDenoiseShaderRD", "NextgiRtShadowAllocShaderRD", "NextgiRtShadowsShaderRD", "NextgiDenoiseShadowShaderRD" };
-	for (int i = 0; i < 15; i++) {
+		"PathTracerShaderRD", "PathTracerDenoiseShaderRD", "NextgiRtShadowAllocShaderRD", "NextgiRtShadowsShaderRD", "NextgiDenoiseShadowShaderRD", "PathTracerSkyCdfShaderRD" };
+	for (int i = 0; i < 16; i++) {
 		CHECK_EQ(names[i], String(expected[i]));
 	}
 	// The hardware instances and the self-test need ray query; the software siblings, path-tracer denoiser,
-	// and RT-shadow alloc/denoise passes bake everywhere (#261, #168, #141).
-	for (int i = 0; i < 15; i++) {
-		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14;
+	// RT-shadow alloc/denoise passes, and sky CDF builder bake everywhere (#261, #168, #141, #169).
+	for (int i = 0; i < 16; i++) {
+		const bool no_ray_query = (i >= 5 && i <= 8) || i == 11 || i == 12 || i == 14 || i == 15;
 		CHECK_EQ(versions[i].first->requires_ray_query(), !no_ray_query);
 	}
 

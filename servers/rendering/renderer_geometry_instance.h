@@ -67,6 +67,9 @@ public:
 
 	virtual Transform3D get_transform() = 0;
 	virtual AABB get_aabb() = 0;
+	// GodotNext: path_tracer_lights_camera (#169). Per-instance previous transform for shutter motion blur.
+	virtual Transform3D get_prev_transform() const { return Transform3D(); }
+	virtual bool has_prev_transform() const { return false; }
 
 	virtual void clear_light_instances() = 0;
 	virtual void pair_light_instance(const RID p_light_instance, RSE::LightType light_type, uint32_t placement_idx) = 0;

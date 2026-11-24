@@ -36,10 +36,11 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
-// GodotNext: path_tracer (#167), path_tracer_denoise (#168), rt_shadows (#141)
+// GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169), rt_shadows (#141)
 #include "servers/rendering/renderer_rd/effects/denoise.h"
 #include "servers/rendering/renderer_rd/effects/path_tracer.h"
 #include "servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/path_tracer_sky_cdf.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
@@ -76,6 +77,8 @@ struct NextGIBakeShaders::Instances {
 	NextgiRtShadowAllocShaderRD rt_shadow_alloc;
 	NextgiRtShadowsShaderRD rt_shadows;
 	NextgiDenoiseShadowShaderRD denoise_shadow;
+	// GodotNext: path_tracer_lights_camera (#169). Sky 2D CDF importance sampling builder (plain compute, no ray query).
+	PathTracerSkyCdfShaderRD path_tracer_sky_cdf;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
@@ -107,6 +110,7 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->rt_shadow_alloc, NextGIRTShadows::get_alloc_shader_variant_defines()); // GodotNext: rt_shadows (#141)
 	_add(instances->rt_shadows, NextGIRTShadows::get_trace_shader_variant_defines()); // GodotNext: rt_shadows (#141)
 	_add(instances->denoise_shadow, NextGIDenoise::get_shadow_shader_variant_defines()); // GodotNext: rt_shadows (#141)
+	_add(instances->path_tracer_sky_cdf, PathTracer::get_sky_cdf_shader_variant_defines()); // GodotNext: path_tracer_lights_camera (#169)
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {

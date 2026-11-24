@@ -2289,6 +2289,12 @@ void NextGIRTScene::_finish_surface_sources(const LocalVector<NextGIInstanceReco
 		const uint32_t words[3] = { surface.vertex_offset, surface.index_offset, surface.triangle_count };
 		mix(words, sizeof(words));
 	}
+	// GodotNext: path_tracer_lights_camera (#169). Sync final records (card_set / page_table assigned after push) into motion_instances.
+	for (MotionInstance &mi : motion_instances) {
+		if (mi.record.tlas_index < p_records.size()) {
+			mi.record = p_records[mi.record.tlas_index];
+		}
+	}
 	records_hash = hash;
 	surface_sources_valid = true;
 }
@@ -2332,8 +2338,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		NextGIRelight::get_singleton()->begin_record_pass();
 	}
 	pending_pages.clear(); // GodotNext: nextgi_src_page_levels (#247)
-	// GodotNext: path_tracer (#167). This frame's sources come from this phase, or none.
+	// GodotNext: path_tracer (#167), path_tracer_lights_camera (#169). This frame's sources come from this phase, or none.
 	surface_sources.clear();
+	motion_instances.clear();
 	surface_sources_valid = false;
 	records_hash = 0;
 	ERR_FAIL_NULL(p_render_data);
@@ -2684,6 +2691,20 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					tlas_instance.blas = part->blas;
 					_check_shadow_word(tlas_instance.id + 1); // GodotNext: nextgi_shadow_policy (#145)
 					tlas_instances.push_back(tlas_instance);
+					// GodotNext: path_tracer_lights_camera (#169).
+					if (surface_sources_wanted) {
+						MotionInstance mi;
+						mi.instance = geometry_instance;
+						mi.blas = tlas_instance.blas;
+						mi.transform = instance_transform;
+						mi.has_prev_transform = fed.element_index == UINT32_MAX && geometry_instance->has_prev_transform();
+						mi.prev_transform = mi.has_prev_transform ? geometry_instance->get_prev_transform() : instance_transform;
+						mi.record = record;
+						mi.tlas_mask = tlas_instance.mask;
+						mi.tlas_flags = tlas_instance.flags;
+						mi.hit_sbt_range = tlas_instance.hit_sbt_range;
+						motion_instances.push_back(mi);
+					}
 					skinned_gi_entered = true;
 				}
 			}
@@ -3398,6 +3419,20 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			tlas_instance.blas = part.blas;
 			_check_shadow_word(tlas_instance.id + 1); // GodotNext: nextgi_shadow_policy (#145)
 			tlas_instances.push_back(tlas_instance);
+			// GodotNext: path_tracer_lights_camera (#169).
+			if (surface_sources_wanted && !override_translucent) {
+				MotionInstance mi;
+				mi.instance = geometry_instance;
+				mi.blas = tlas_instance.blas;
+				mi.transform = transform;
+				mi.has_prev_transform = fed.element_index == UINT32_MAX && geometry_instance->has_prev_transform();
+				mi.prev_transform = mi.has_prev_transform ? geometry_instance->get_prev_transform() : transform;
+				mi.record = record;
+				mi.tlas_mask = tlas_instance.mask;
+				mi.tlas_flags = tlas_instance.flags;
+				mi.hit_sbt_range = tlas_instance.hit_sbt_range;
+				motion_instances.push_back(mi);
+			}
 
 			if (geometry_instance->nextgi_record_index == UINT32_MAX) {
 				geometry_instance->nextgi_record_index = record_index;

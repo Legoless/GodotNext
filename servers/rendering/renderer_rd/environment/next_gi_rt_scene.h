@@ -730,9 +730,23 @@ public:
 		RID mesh;
 		uint32_t surface = UINT32_MAX;
 	};
+	// GodotNext: path_tracer_lights_camera (#169). Per-TLAS-instance data captured while a path tracer wants
+	// surface sources so PathTracer can build a shutter-interpolated motion TLAS when any GI instance moves.
+	struct MotionInstance {
+		RenderGeometryInstance *instance = nullptr;
+		RID blas;
+		Transform3D transform;
+		Transform3D prev_transform;
+		NextGIInstanceRecord record;
+		uint32_t tlas_mask = 0;
+		uint32_t tlas_flags = 0;
+		int64_t hit_sbt_range = 0;
+		bool has_prev_transform = false;
+	};
 
 private:
 	LocalVector<SurfaceSource> surface_sources;
+	LocalVector<MotionInstance> motion_instances;
 	uint64_t records_hash = 0;
 	bool surface_sources_wanted = false;
 	bool surface_sources_valid = false;
@@ -826,6 +840,7 @@ public:
 	void set_surface_sources_wanted(bool p_wanted) { surface_sources_wanted = p_wanted; }
 	bool has_surface_sources() const { return surface_sources_valid; }
 	const LocalVector<SurfaceSource> &get_surface_sources() const { return surface_sources; }
+	const LocalVector<MotionInstance> &get_motion_instances() const { return motion_instances; }
 	uint64_t get_records_hash() const { return records_hash; }
 	void set_as_budget_bytes(uint64_t p_bytes) { as_budget_bytes = p_bytes; }
 	// GodotNext: nextgi_hit_lighting (#129).

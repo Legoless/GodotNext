@@ -302,6 +302,19 @@ public:
 		return fvi->transform.get_origin();
 	}
 
+	// GodotNext: path_tracer_lights_camera (#169).
+	Transform3D fog_volume_instance_get_transform(RID p_fog_volume_instance) const {
+		Fog::FogVolumeInstance *fvi = fog_volume_instance_owner.get_or_null(p_fog_volume_instance);
+		ERR_FAIL_NULL_V(fvi, Transform3D());
+		return fvi->transform;
+	}
+
+	bool fog_volume_instance_is_active(RID p_fog_volume_instance) const {
+		Fog::FogVolumeInstance *fvi = fog_volume_instance_owner.get_or_null(p_fog_volume_instance);
+		ERR_FAIL_NULL_V(fvi, false);
+		return fvi->active;
+	}
+
 	/* Volumetric FOG */
 	class VolumetricFog : public RenderBufferCustomDataRD {
 		GDCLASS(VolumetricFog, RenderBufferCustomDataRD)

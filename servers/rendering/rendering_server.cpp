@@ -4483,6 +4483,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/path_tracer_reference_match", false);
 	// GodotNext: path_tracer_denoise (#168). Default path tracer denoiser (Off, Builtin JNLM, or optional OIDN module).
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/path_tracing_denoiser", PROPERTY_HINT_ENUM, "Off,Builtin,OIDN"), RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN);
+	// GodotNext: path_tracer_lights_camera (#169). Camera shutter fraction for per-instance motion blur in the path tracer (0 disables).
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/path_tracing_motion_blur_shutter", PROPERTY_HINT_RANGE, "0.0,1.0,0.01"), 1.0f);
 
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);

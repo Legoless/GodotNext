@@ -66,3 +66,18 @@ How it was used: `Viewport.path_tracing_samples` and `path_tracing_max_bounces` 
 | Copied files | None |
 
 How it was used: `modules/oidn` is disabled by default and compiles `oidn_denoiser_real.cpp` only when a developer enables `module_oidn_enabled=yes oidn_backend=oidn oidn_sdk_path=<external SDK>`. Official builds and CI use either the default build (OIDN disabled) or `oidn_backend=mock`. The built-in screen-space JNLM denoiser (`servers/rendering/renderer_rd/shaders/effects/path_tracer_denoise.glsl`) is adapted from Godot's existing `modules/lightmapper_rd/lm_compute.glsl` (`MODE_DENOISE`, MIT).
+
+### Multiple Importance Sampling (Veach 1997), Concentric Disk Mapping (Shirley & Chiu 1997), Delta/Ratio Tracking (Woodcock et al. 1965; Novák et al. 2014), and Henyey-Greenstein Phase Function (1941)
+
+| Field | Value |
+|---|---|
+| What | Standard textbook Monte Carlo rendering formulas: balance-heuristic MIS, concentric square-to-disk thin-lens mapping, octahedral solid-angle Jacobian (`4 * (|x|+|y|+|z|)^3`) for 2D marginal/conditional sky CDF importance sampling, Woodcock delta tracking and ratio tracking for heterogeneous participating media, and Henyey-Greenstein phase function sampling |
+| Upstream | Standard public graphics literature (Veach PhD thesis 1997; Shirley & Chiu, Journal of Graphics Tools 1997; Novák, Selle & Jarosz, ACM TOG / SIGGRAPH Asia 2014; Pharr, Jakob & Humphreys, *Physically Based Rendering*) |
+| Version | Published mathematical formulations; no source file was copied into the tree |
+| License | Standard published algorithms. No third-party code copied. |
+| Read on | 2026-11-24, for issue #169 |
+| Consulted by | The #169 implementer |
+| Used in | `servers/rendering/renderer_rd/effects/path_tracer.{h,cpp}`, `servers/rendering/renderer_rd/shaders/environment/path_tracer_inc.glsl`, `servers/rendering/renderer_rd/shaders/effects/path_tracer_sky_cdf.glsl`, `tests/servers/rendering/test_path_tracer.cpp` |
+| Copied files | None |
+
+How it was used: Light evaluation (directional angular cone, omni/spot sphere cap, projectors, AreaLight3D barn-door clipped quads + area textures, and #140 IES profiles), sky octmap UV-border lookups, FogVolume analytic SDFs, and `CameraAttributesPractical` DOF scaling match Godot's existing Forward+ shaders in this repository. Balance-heuristic MIS combines NEE light and 2D sky-CDF sampling with BSDF sampling. Unbiased Woodcock delta tracking and ratio tracking handle homogeneous volumetric fog and `FogVolume` media with Henyey-Greenstein phase sampling. Per-instance motion blur interpolates `RenderGeometryInstance` previous/current transforms across an 8-slice masked TLAS over the camera shutter interval.

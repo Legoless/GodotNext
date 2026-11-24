@@ -381,6 +381,9 @@ public:
 		// in the scenario. dynamic_lights keeps upstream's bookkeeping, because SDFGI lights from it (#265).
 		LocalVector<RID> nextgi_dynamic_lights;
 		LocalVector<RID> static_lights;
+		// GodotNext: path_tracer_lights_camera (#169). Visible non-directional LIGHT_BAKE_DISABLED lights in the
+		// scenario so the product path tracer builds its light set from the full scenario without camera culling (R14).
+		LocalVector<RID> nextgi_disabled_lights;
 		// GodotNext: nextgi_rt_registry
 		// One selection per scenario per frame, shared by every view. The first view of the frame is the anchor.
 		uint64_t nextgi_rt_selection_frame = UINT64_MAX;

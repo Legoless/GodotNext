@@ -1973,6 +1973,16 @@ static void _nextgi_hit_append_hit_lighting_dummies(RID p_dummy_buffer, RID p_bl
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 54, p_dummy_rgba16f));
 }
 
+// GodotNext: path_tracer_lights_camera (#169). Stand-in bindings 55..60 for stages other than path_tracer_hit.
+static void _nextgi_hit_append_pt_extra_dummies(RID p_dummy_buffer, RID p_black_texture, RID p_white_2d_array, LocalVector<RD::Uniform> &r_uniforms) {
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 55, p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 56, p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 57, p_white_2d_array));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 58, p_black_texture));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 59, p_black_texture));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 60, p_black_texture));
+}
+
 void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, float p_time) {
 	Internal &in = *internal;
 	if (!has_current_records() || p_rt_scene == nullptr || p_src == nullptr || !p_rt_scene->is_tlas_traceable()) {
@@ -2046,7 +2056,9 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
 	// GodotNext: nextgi_hit_lighting (#129). Stand-ins for hit-lighting bindings 37..54.
 	const RID check_black = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID check_white_array = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, check_black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
+	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, check_black, check_white_array, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 
 	struct PushConstant {
@@ -2129,11 +2141,13 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	TextureStorage *texture_storage = TextureStorage::get_singleton();
 	const RID black = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
-	const RID records = p_rt_scene->get_instance_record_buffer();
+	const RID white_array = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+	const RID tlas = p_trace.tlas_override.is_valid() ? p_trace.tlas_override : p_rt_scene->get_tlas();
+	const RID records = p_trace.records_override.is_valid() ? p_trace.records_override : p_rt_scene->get_instance_record_buffer();
 	const RID surface_records = p_rt_scene->get_surface_record_buffer();
 
 	LocalVector<RD::Uniform> uniforms;
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_rt_scene->get_tlas()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, records.is_valid() ? records : in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, surface_records.is_valid() ? surface_records : in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, in.hit_surface_buffer));
@@ -2163,6 +2177,13 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, p_trace.guide_normal.is_valid() ? p_trace.guide_normal : in.path_tracer_dummy_image));
 	// GodotNext: nextgi_hit_lighting (#129). Stand-ins for hit-lighting bindings 37..54.
 	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
+	// GodotNext: path_tracer_lights_camera (#169). Sky CDF, FogVolumes, IES/area/projector atlases and sky octmap.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 55, p_trace.sky_cdf.is_valid() ? p_trace.sky_cdf : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 56, p_trace.fog_volumes.is_valid() ? p_trace.fog_volumes : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 57, p_trace.ies_atlas.is_valid() ? p_trace.ies_atlas : white_array));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 58, p_trace.area_atlas.is_valid() ? p_trace.area_atlas : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 59, p_trace.projector_atlas.is_valid() ? p_trace.projector_atlas : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 60, p_trace.sky_octmap.is_valid() ? p_trace.sky_octmap : black));
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2180,7 +2201,7 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	PushConstant push = {};
 	push.time = p_trace.time;
 	// The CPU-fed instances only: GPU-written ones (custom index past them) have no record.
-	push.record_count = in.record_count;
+	push.record_count = p_trace.record_count_override > 0 ? p_trace.record_count_override : in.record_count;
 	push.material_count = in.material_index_count;
 
 	rd->draw_command_begin_label("Path Tracer (hit groups)");
@@ -2227,7 +2248,9 @@ bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_r
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
 	// GodotNext: nextgi_hit_lighting (#129). Stand-ins for hit-lighting bindings 37..54.
 	const RID check_black = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID check_white_array = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, check_black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
+	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, check_black, check_white_array, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2348,6 +2371,9 @@ bool NextGIHitMaterials::trace_hit_lighting(NextGIRTScene *p_rt_scene, const Nex
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 52, p_trace.reflection_out));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 53, p_trace.hit_distance_out.is_valid() ? p_trace.hit_distance_out : in.dummy_r16f_image));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 54, p_trace.debug_out.is_valid() ? p_trace.debug_out : in.dummy_rgba16f_image));
+	// GodotNext: path_tracer_lights_camera (#169). Stand-ins for bindings 55..60.
+	const RID white_array = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, black, white_array, uniforms);
 
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);

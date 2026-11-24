@@ -37,6 +37,14 @@ layout(location = 0) rayPayloadEXT NextGIHitPayload payload;
 #define chunk2 hit_chunk2
 #define chunk3 hit_chunk3
 #define PATH_TRACER_TABLE(s) hit_pt_materials.data[s]
+// GodotNext: path_tracer_lights_camera (#169).
+#define pt_sky_cdf hit_pt_sky_cdf
+#define pt_fog_volumes hit_pt_fog_volumes
+#define pt_ies_atlas hit_pt_ies_atlas
+#define pt_area_atlas hit_pt_area_atlas
+#define pt_projector_atlas hit_pt_projector_atlas
+#define pt_sky_octmap hit_pt_sky_octmap
+#define pt_linear_sampler SAMPLER_LINEAR_CLAMP
 
 // The material of the current path vertex, as its hit group evaluated it (or its D16 table entry).
 NextGIPTMaterial path_tracer_material;
