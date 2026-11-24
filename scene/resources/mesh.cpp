@@ -2416,6 +2416,7 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 		desc.page_size = uint32_t(MAX(virtual_geometry->get_page_size(), 0));
 		desc.page_count = uint32_t(MAX(virtual_geometry->get_page_count(), 0));
 		desc.rt_proxy_positions = virtual_geometry->get_rt_proxy_positions();
+		desc.rt_proxy_uvs = virtual_geometry->get_rt_proxy_uvs();
 		desc.rt_proxy_indices = virtual_geometry->get_rt_proxy_indices();
 		desc.rt_proxy_parts = virtual_geometry->get_rt_proxy_parts();
 		desc.rt_proxy_surface_ranges = virtual_geometry->get_rt_proxy_surface_ranges();

@@ -145,6 +145,8 @@ struct VirtualGeometryDesc {
 	Vector<Array> coarse_surfaces;
 	// GodotNext: nextgeo_in_nextgi (#77). Fixed RT proxy and Stage-2 SRC card descriptors.
 	PackedFloat32Array rt_proxy_positions;
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Float32 UV0 pairs parallel to rt_proxy_positions.
+	PackedFloat32Array rt_proxy_uvs;
 	PackedByteArray rt_proxy_indices;
 	PackedInt32Array rt_proxy_parts;
 	PackedInt32Array rt_proxy_surface_ranges;

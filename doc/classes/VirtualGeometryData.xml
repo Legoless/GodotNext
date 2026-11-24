@@ -70,6 +70,9 @@
 		<member name="rt_proxy_triangle_groups" type="PackedByteArray" setter="set_rt_proxy_triangle_groups" getter="get_rt_proxy_triangle_groups" default="PackedByteArray()">
 			Little-endian unsigned 16-bit cluster-group identifiers for each triangle of the ray-tracing proxy, two bytes per triangle in part and surface order.
 		</member>
+		<member name="rt_proxy_uvs" type="PackedFloat32Array" setter="set_rt_proxy_uvs" getter="get_rt_proxy_uvs" default="PackedFloat32Array()">
+			Primary UV coordinates of the ray-tracing proxy, tightly packed 32-bit pairs parallel to [member rt_proxy_positions], including in double-precision builds.
+		</member>
 		<member name="skin_influences" type="int" setter="set_skin_influences" getter="get_skin_influences" default="0">
 			Bone influences stored per vertex in the page file skinning section: 0 for an unskinned mesh, otherwise 4 or 8.
 		</member>

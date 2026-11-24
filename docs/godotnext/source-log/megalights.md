@@ -83,6 +83,17 @@ Contract decisions for M8:
   always, forward transparents gated on `rendering/lights_and_shadows/light_function_atlas/translucent`),
   Volumetric Fog (`MODE_DENSITY`, Set 0 bindings 27/28), and NextGI SRC relight (Set 0 bindings 29/30),
   and is ready for #141 RT shadows and #142 MegaLights.
+### Alpha-tested NextGeo RT shadows (#303), 2026-11-24
+
+Written from the plan (§21.3 M4, D17), issue #303 and GodotNext's own #68/#77 VGD RT proxies, #153 masked
+NextGeo eligibility, #156 native NextGeo RT, #130 attribute streams / material hit groups and #145 RT shadow
+visibility policy. No outside paper, article or code was consulted. VGD RT proxies carry parallel float32 UV0s
+(`VirtualGeometryData::rt_proxy_uvs`, preserving UV seams via vertex-key welding), emit shadow-only proxy parts
+for alpha-excluded surfaces (D17), pack lazy #130 attribute streams on demand for alpha-tested NextGeo proxy parts
+only (leaving opaque NextGeo RT proxies unchanged), and extract #130 attribute streams in `rt_cut_extract.glsl`
+for #156 native NextGeo BLASes when an instance carries an alpha-tested effective material. Alpha-tested NextGeo
+TLAS instances register in the #145 alpha table, set `FORCE_NO_OPAQUE`, and bind #130 hit groups for Full HWRT
+material retrace.
 
 ## Contract decisions
 

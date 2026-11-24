@@ -63,6 +63,8 @@ struct ProxyTriangle {
 	uint32_t surface;
 	uint16_t group;
 	float position[9];
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). UV0 pairs for each triangle corner.
+	float uv0[6];
 };
 
 struct CardBin {
@@ -160,24 +162,33 @@ bool triangles_overlap_uv_interior(const float p_a_u[3], const float p_a_v[3], c
 	return had_valid_edge;
 }
 
-// Exact float32 bit equality: +0 and -0 stay distinct weld keys.
-struct PositionKey {
-	uint32_t bits[3];
+// Exact float32 bit equality on position and (when present) UV0: +0 and -0 stay distinct weld keys,
+// and vertices across a UV seam remain separate so alpha-tested shadow rays keep exact UVs (#303).
+struct VertexKey {
+	uint32_t bits[5];
 
 	uint32_t hash() const {
 		uint32_t h = hash_murmur3_one_32(bits[0]);
 		h = hash_murmur3_one_32(bits[1], h);
-		return hash_murmur3_one_32(bits[2], h);
+		h = hash_murmur3_one_32(bits[2], h);
+		h = hash_murmur3_one_32(bits[3], h);
+		return hash_murmur3_one_32(bits[4], h);
 	}
 
-	bool operator==(const PositionKey &p_other) const {
-		return bits[0] == p_other.bits[0] && bits[1] == p_other.bits[1] && bits[2] == p_other.bits[2];
+	bool operator==(const VertexKey &p_other) const {
+		return bits[0] == p_other.bits[0] && bits[1] == p_other.bits[1] && bits[2] == p_other.bits[2] && bits[3] == p_other.bits[3] && bits[4] == p_other.bits[4];
 	}
 };
 
-PositionKey position_key(const float *p_position) {
-	PositionKey key;
-	memcpy(key.bits, p_position, sizeof(key.bits));
+VertexKey vertex_key(const float *p_position, const float *p_uv0) {
+	VertexKey key;
+	memcpy(key.bits, p_position, sizeof(uint32_t) * 3);
+	if (p_uv0 != nullptr) {
+		memcpy(key.bits + 3, p_uv0, sizeof(uint32_t) * 2);
+	} else {
+		key.bits[3] = 0;
+		key.bits[4] = 0;
+	}
 	return key;
 }
 
@@ -642,8 +653,9 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 	}
 
 	// Per part: gather triangles, stable-sort them by surface (counting sort,
-	// so BLAS geometry index = surface), weld positions in first-occurrence
+	// so BLAS geometry index = surface), weld vertices in first-occurrence
 	// order of that final triangle order, and emit part-local indices.
+	const bool has_uv0 = (p_dag.vertex_layout & NEXTGEO_VERTEX_UV0) != 0 && stride >= NEXTGEO_VERTEX_OFFSET_UV0 + 2u;
 	LocalVector<uint32_t> surface_triangle_count;
 	LocalVector<uint32_t> surface_cursor;
 	for (const PartSpan &span : part_spans) {
@@ -663,10 +675,19 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 				triangle.group = uint16_t(base_group + ordered_tri_layer[tri_offset + t]);
 				for (uint32_t k = 0; k < 3; k++) {
 					const uint8_t local = cluster_triangles[t * 3 + k];
-					const float *position = vertices + uint64_t(local) * stride + NEXTGEO_VERTEX_OFFSET_POSITION;
+					const float *vertex_base = vertices + uint64_t(local) * stride;
+					const float *position = vertex_base + NEXTGEO_VERTEX_OFFSET_POSITION;
 					triangle.position[k * 3 + 0] = position[0];
 					triangle.position[k * 3 + 1] = position[1];
 					triangle.position[k * 3 + 2] = position[2];
+					if (has_uv0) {
+						const float *uv0 = vertex_base + NEXTGEO_VERTEX_OFFSET_UV0;
+						triangle.uv0[k * 2 + 0] = uv0[0];
+						triangle.uv0[k * 2 + 1] = uv0[1];
+					} else {
+						triangle.uv0[k * 2 + 0] = 0.0f;
+						triangle.uv0[k * 2 + 1] = 0.0f;
+					}
 				}
 				triangles.push_back(triangle);
 			}
@@ -692,14 +713,15 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 
 		const uint64_t part_vertex_offset = uint64_t(r_proxy.positions.size() / 3);
 		const uint64_t part_index_offset = uint64_t(r_proxy.indices.size() / 4);
-		HashMap<PositionKey, uint32_t> welded;
+		HashMap<VertexKey, uint32_t> welded;
 		uint32_t part_vertex_count = 0;
 		for (const ProxyTriangle &triangle : sorted_triangles) {
 			append_u16_le(r_proxy.triangle_groups, triangle.group);
 			for (uint32_t k = 0; k < 3; k++) {
 				const float *position = &triangle.position[k * 3];
-				const PositionKey key = position_key(position);
-				const HashMap<PositionKey, uint32_t>::Iterator found = welded.find(key);
+				const float *uv0 = has_uv0 ? &triangle.uv0[k * 2] : nullptr;
+				const VertexKey key = vertex_key(position, uv0);
+				const HashMap<VertexKey, uint32_t>::Iterator found = welded.find(key);
 				uint32_t index = 0;
 				if (found != welded.end()) {
 					index = found->value;
@@ -709,6 +731,10 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 					r_proxy.positions.push_back(position[0]);
 					r_proxy.positions.push_back(position[1]);
 					r_proxy.positions.push_back(position[2]);
+					if (has_uv0) {
+						r_proxy.uvs.push_back(uv0[0]);
+						r_proxy.uvs.push_back(uv0[1]);
+					}
 				}
 				append_index_le(r_proxy.indices, index);
 			}
@@ -772,6 +798,7 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 Error nextgeo_fill_vgd_rt_proxy(const NextGeoRTProxy &p_proxy, const Ref<VirtualGeometryData> &p_data) {
 	ERR_FAIL_COND_V(p_data.is_null(), ERR_INVALID_PARAMETER);
 	p_data->set_rt_proxy_positions(p_proxy.positions);
+	p_data->set_rt_proxy_uvs(p_proxy.uvs);
 	p_data->set_rt_proxy_indices(p_proxy.indices);
 	p_data->set_rt_proxy_parts(p_proxy.parts);
 	p_data->set_rt_proxy_surface_ranges(p_proxy.surface_ranges);

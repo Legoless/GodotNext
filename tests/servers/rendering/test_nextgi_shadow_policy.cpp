@@ -820,4 +820,161 @@ TEST_CASE("[NextGIShadow][Skinned] Policy routes alpha-tested and translucent sk
 	CHECK(nextgi_shadow_model_occluded(mode, 1u << 2, combined, 2));
 }
 
+TEST_CASE("[NextGIShadow] NextGeo proxy UVs pack into #130 stream and plan shadow-only parts without altering opaque proxies (#303)") {
+	// 1. Proxy UV0 packing into #130 attribute stream (header ranges + smooth CW normal + UV0 round-trip).
+	const float positions[9] = {
+		0.0f, 0.0f, 0.0f,
+		1.0f, 0.0f, 0.0f,
+		0.0f, 0.0f, 1.0f,
+	};
+	// CW winding from +Y: (c - a) x (b - a) = (0,0,1) x (1,0,0) = (0, +1, 0).
+	const uint32_t indices[3] = { 0, 1, 2 };
+	const float uvs[6] = { -0.5f, 0.25f, 1.5f, 0.25f, -0.5f, 2.25f };
+	Vector<uint8_t> stream;
+	REQUIRE(nextgi_hit_pack_proxy_uvs(uvs, 3, positions, indices, 3, stream));
+	REQUIRE_EQ(uint32_t(stream.size()), nextgi_hit_stream_size(3));
+
+	NextGIHitStreamHeader header;
+	memcpy(&header, stream.ptr(), sizeof(header));
+	CHECK(header.uv_min[0] == doctest::Approx(-0.5f));
+	CHECK(header.uv_min[1] == doctest::Approx(0.25f));
+	CHECK(header.uv_extent[0] == doctest::Approx(2.0f));
+	CHECK(header.uv_extent[1] == doctest::Approx(2.0f));
+	for (uint32_t v = 0; v < 3; v++) {
+		NextGIHitAttributes attr;
+		memcpy(&attr, stream.ptr() + NEXTGI_HIT_ATTRIBUTE_HEADER + v * NEXTGI_HIT_ATTRIBUTE_STRIDE, sizeof(attr));
+		const Vector2 decoded_uv = nextgi_hit_unpack_uv0(header, attr);
+		CHECK(decoded_uv.x == doctest::Approx(uvs[v * 2 + 0]).epsilon(1e-3));
+		CHECK(decoded_uv.y == doctest::Approx(uvs[v * 2 + 1]).epsilon(1e-3));
+		Vector3 nrm;
+		Vector3 tan;
+		float sign = 0.0f;
+		nextgi_hit_unpack_tbn(attr, nrm, tan, sign);
+		CHECK(nrm.y == doctest::Approx(1.0f).epsilon(1e-2));
+	}
+
+	// Without positions/indices, normals default to +Z while UV0s still unpack cleanly.
+	Vector<uint8_t> uv_only_stream;
+	REQUIRE(nextgi_hit_pack_proxy_uvs(uvs, 3, nullptr, nullptr, 0, uv_only_stream));
+	NextGIHitAttributes attr0;
+	memcpy(&attr0, uv_only_stream.ptr() + NEXTGI_HIT_ATTRIBUTE_HEADER, sizeof(attr0));
+	Vector3 nrm0;
+	Vector3 tan0;
+	float sign0 = 0.0f;
+	nextgi_hit_unpack_tbn(attr0, nrm0, tan0, sign0);
+	CHECK(nrm0.z == doctest::Approx(1.0f).epsilon(1e-2));
+
+	// Reject malformed inputs.
+	CHECK_FALSE(nextgi_hit_pack_proxy_uvs(nullptr, 3, nullptr, nullptr, 0, stream));
+	CHECK_FALSE(nextgi_hit_pack_proxy_uvs(uvs, 0, nullptr, nullptr, 0, stream));
+
+	// 2. nextgi_rt_plan_vgd_proxy(): 2 virtual surfaces in 1 VGD part (surface 0 = 1 tri, surface 1 = 1 tri).
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	desc.eligible_surface_mask = 0x3u;
+	desc.rt_proxy_eps = 0.01f;
+	desc.rt_proxy_positions = PackedFloat32Array({
+			0.0f, 0.0f, 0.0f,
+			1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f,
+			2.0f, 0.0f, 0.0f,
+			3.0f, 0.0f, 0.0f,
+			2.0f, 0.0f, 1.0f,
+	});
+	desc.rt_proxy_uvs = PackedFloat32Array({
+			0.0f, 0.0f,
+			1.0f, 0.0f,
+			0.0f, 1.0f,
+			0.0f, 0.0f,
+			1.0f, 0.0f,
+			0.0f, 1.0f,
+	});
+	desc.rt_proxy_indices.resize(6 * 4);
+	for (uint32_t i = 0; i < 6; i++) {
+		memcpy(desc.rt_proxy_indices.ptrw() + i * 4, &i, sizeof(uint32_t));
+	}
+	desc.rt_proxy_parts = PackedInt32Array({ 0, 6, 0, 6 });
+	desc.rt_proxy_surface_ranges = PackedInt32Array({ 0, 3, 3, 3 });
+	desc.card_descriptors.resize(32);
+	desc.rt_proxy_triangle_groups.resize(4);
+
+	// 2a. Opaque-only NextGeo mesh: shadow_uploads stays empty and GI upload payload/allocation are byte-identical.
+	{
+		const uint8_t none_alpha[2] = { 0, 0 };
+		NextGIArenaAllocator alloc_a(65536);
+		LocalVector<NextGIRTProxyPartUpload> gi_a;
+		uint32_t excluded_a = 0;
+		REQUIRE(nextgi_rt_plan_vgd_proxy(true, true, 1, desc, 2, none_alpha, nullptr, alloc_a, gi_a, excluded_a, nullptr));
+
+		NextGIArenaAllocator alloc_b(65536);
+		LocalVector<NextGIRTProxyPartUpload> gi_b;
+		LocalVector<NextGIRTProxyPartUpload> shadow_b;
+		uint32_t excluded_b = 0;
+		REQUIRE(nextgi_rt_plan_vgd_proxy(true, true, 1, desc, 2, none_alpha, nullptr, alloc_b, gi_b, excluded_b, &shadow_b));
+
+		CHECK_EQ(excluded_a, 0u);
+		CHECK_EQ(excluded_b, 0u);
+		CHECK(shadow_b.is_empty());
+		REQUIRE_EQ(gi_a.size(), 1u);
+		REQUIRE_EQ(gi_b.size(), 1u);
+		CHECK_EQ(alloc_a.get_allocated_bytes(), alloc_b.get_allocated_bytes());
+		CHECK(gi_a[0].payload == gi_b[0].payload);
+		CHECK_EQ(gi_b[0].proxy_vertex_offset, 0u);
+		CHECK_EQ(gi_b[0].proxy_vertex_count, 6u);
+	}
+
+	// 2b. Mixed mesh (surface 0 opaque, surface 1 alpha-tested): surface 0 stays in GI with cards; surface 1 goes to shadow-only without cards.
+	{
+		const uint8_t mixed_alpha[2] = { 0, 1 };
+		NextGIArenaAllocator alloc(65536);
+		LocalVector<NextGIRTProxyPartUpload> gi_uploads;
+		LocalVector<NextGIRTProxyPartUpload> shadow_uploads;
+		uint32_t excluded = 0;
+		REQUIRE(nextgi_rt_plan_vgd_proxy(true, true, 1, desc, 2, mixed_alpha, nullptr, alloc, gi_uploads, excluded, &shadow_uploads));
+		CHECK_EQ(excluded, 1u);
+		REQUIRE_EQ(gi_uploads.size(), 1u);
+		REQUIRE_EQ(gi_uploads[0].geometries.size(), 1u);
+		CHECK_EQ(gi_uploads[0].geometries[0].surface, 0u);
+		CHECK(gi_uploads[0].geometries[0].has_stage2_cards);
+		CHECK_FALSE(gi_uploads[0].geometries[0].is_legacy_surface);
+
+		REQUIRE_EQ(shadow_uploads.size(), 1u);
+		REQUIRE_EQ(shadow_uploads[0].geometries.size(), 1u);
+		CHECK_EQ(shadow_uploads[0].geometries[0].surface, 1u);
+		CHECK_EQ(shadow_uploads[0].geometries[0].triangle_count, 1u);
+		CHECK(shadow_uploads[0].geometries[0].is_proxy_surface);
+		CHECK_FALSE(shadow_uploads[0].geometries[0].is_legacy_surface);
+		CHECK_FALSE(shadow_uploads[0].geometries[0].has_stage2_cards);
+		CHECK_EQ(shadow_uploads[0].proxy_vertex_offset, 0u);
+		CHECK_EQ(shadow_uploads[0].proxy_vertex_count, 6u);
+		// Compacted shadow index buffer holds the 3 indices of surface 1: {3, 4, 5}.
+		const uint32_t rel_idx = shadow_uploads[0].geometries[0].index_offset - shadow_uploads[0].allocation.offset;
+		REQUIRE(rel_idx + 12u <= uint32_t(shadow_uploads[0].payload.size()));
+		uint32_t shadow_tri[3] = {};
+		memcpy(shadow_tri, shadow_uploads[0].payload.ptr() + rel_idx, sizeof(shadow_tri));
+		CHECK_EQ(shadow_tri[0], 3u);
+		CHECK_EQ(shadow_tri[1], 4u);
+		CHECK_EQ(shadow_tri[2], 5u);
+	}
+
+	// 2c. All-alpha VGD mesh: GI uploads stay empty (D17), shadow uploads carry both alpha-tested surfaces.
+	{
+		const uint8_t all_alpha[2] = { 1, 1 };
+		NextGIArenaAllocator alloc(65536);
+		LocalVector<NextGIRTProxyPartUpload> gi_uploads;
+		LocalVector<NextGIRTProxyPartUpload> shadow_uploads;
+		uint32_t excluded = 0;
+		// Without shadow output, returns false (backwards-compatible) and frees nothing leaked.
+		CHECK_FALSE(nextgi_rt_plan_vgd_proxy(true, true, 1, desc, 2, all_alpha, nullptr, alloc, gi_uploads, excluded, nullptr));
+		CHECK_EQ(excluded, 2u);
+		CHECK_EQ(alloc.get_allocated_bytes(), 0u);
+
+		REQUIRE(nextgi_rt_plan_vgd_proxy(true, true, 1, desc, 2, all_alpha, nullptr, alloc, gi_uploads, excluded, &shadow_uploads));
+		CHECK_EQ(excluded, 2u);
+		CHECK(gi_uploads.is_empty());
+		REQUIRE_EQ(shadow_uploads.size(), 1u);
+		CHECK_EQ(shadow_uploads[0].geometries.size(), 2u);
+		CHECK_EQ(shadow_uploads[0].triangle_count, 2u);
+	}
+}
+
 } // namespace TestNextGIShadowPolicy

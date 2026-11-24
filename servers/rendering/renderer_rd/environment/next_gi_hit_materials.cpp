@@ -280,6 +280,58 @@ bool nextgi_hit_pack_arrays(const Array &p_arrays, uint32_t p_vertex_count, Vect
 	return true;
 }
 
+// GodotNext: nextgi_nextgeo_alpha_shadows (#303).
+bool nextgi_hit_pack_proxy_uvs(const float *p_uvs, uint32_t p_vertex_count, const float *p_positions, const uint32_t *p_indices, uint32_t p_index_count, Vector<uint8_t> &r_stream) {
+	r_stream.clear();
+	if (p_uvs == nullptr || p_vertex_count == 0) {
+		return false;
+	}
+	NextGIHitStreamHeader header;
+	Vector2 lo(p_uvs[0], p_uvs[1]);
+	Vector2 hi = lo;
+	for (uint32_t i = 1; i < p_vertex_count; i++) {
+		const Vector2 uv(p_uvs[uint64_t(i) * 2u + 0], p_uvs[uint64_t(i) * 2u + 1]);
+		lo = lo.min(uv);
+		hi = hi.max(uv);
+	}
+	header.uv_min[0] = lo.x;
+	header.uv_min[1] = lo.y;
+	header.uv_extent[0] = hi.x - lo.x;
+	header.uv_extent[1] = hi.y - lo.y;
+
+	LocalVector<Vector3> normals;
+	if (p_positions != nullptr && p_indices != nullptr && p_index_count >= 3u) {
+		normals.resize_initialized(p_vertex_count);
+		const uint32_t tri_count = p_index_count / 3u;
+		for (uint32_t t = 0; t < tri_count; t++) {
+			const uint32_t ia = p_indices[uint64_t(t) * 3u + 0];
+			const uint32_t ib = p_indices[uint64_t(t) * 3u + 1];
+			const uint32_t ic = p_indices[uint64_t(t) * 3u + 2];
+			if (ia >= p_vertex_count || ib >= p_vertex_count || ic >= p_vertex_count) {
+				continue;
+			}
+			const Vector3 a(p_positions[uint64_t(ia) * 3u + 0], p_positions[uint64_t(ia) * 3u + 1], p_positions[uint64_t(ia) * 3u + 2]);
+			const Vector3 b(p_positions[uint64_t(ib) * 3u + 0], p_positions[uint64_t(ib) * 3u + 1], p_positions[uint64_t(ib) * 3u + 2]);
+			const Vector3 c(p_positions[uint64_t(ic) * 3u + 0], p_positions[uint64_t(ic) * 3u + 1], p_positions[uint64_t(ic) * 3u + 2]);
+			// Godot front faces wind clockwise: (c - a) x (b - a) points outward.
+			const Vector3 fn = (c - a).cross(b - a);
+			normals[ia] += fn;
+			normals[ib] += fn;
+			normals[ic] += fn;
+		}
+	}
+
+	r_stream.resize(nextgi_hit_stream_size(p_vertex_count));
+	memcpy(r_stream.ptrw(), &header, sizeof(header));
+	NextGIHitAttributes *out = reinterpret_cast<NextGIHitAttributes *>(r_stream.ptrw() + NEXTGI_HIT_ATTRIBUTE_HEADER);
+	for (uint32_t i = 0; i < p_vertex_count; i++) {
+		const Vector3 normal = (!normals.is_empty() && normals[i].length_squared() > 1e-12f) ? normals[i].normalized() : Vector3(0, 0, 1);
+		const Vector2 uv(p_uvs[uint64_t(i) * 2u + 0], p_uvs[uint64_t(i) * 2u + 1]);
+		nextgi_hit_pack_vertex(header, normal, Vector3(1, 0, 0), 1.0f, uv, Vector2(), Color(1, 1, 1, 1), out[i]);
+	}
+	return true;
+}
+
 NextGIHitSourceLayout nextgi_hit_source_layout(uint64_t p_format, uint32_t p_vertex_count) {
 	NextGIHitSourceLayout layout;
 	if ((p_format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) || (p_format & RSE::ARRAY_FLAG_USE_2D_VERTICES) || !(p_format & RSE::ARRAY_FORMAT_VERTEX)) {

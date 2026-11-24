@@ -102,6 +102,7 @@ Ref<VirtualGeometryData> filled_data() {
 	data->set_surface_eligibility(PackedByteArray({ 1, 0 }));
 	data->set_surface_fallback_reasons(PackedInt32Array({ 0, 0 }));
 	data->set_rt_proxy_positions(PackedFloat32Array({ 1.0f, 2.0f, 3.0f }));
+	data->set_rt_proxy_uvs(PackedFloat32Array({ 0.25f, 0.75f }));
 	data->set_rt_proxy_indices(PackedByteArray({ 4, 0, 0, 0 }));
 	data->set_rt_proxy_triangle_groups(PackedByteArray({ 7, 0 }));
 	data->set_rt_proxy_eps(0.25f);
@@ -196,6 +197,7 @@ TEST_CASE("[NextGeo][VGD] Loading surfaces keeps the data, and a saved mesh relo
 		CHECK(loaded_data->get_surface_fallback_reasons() == data->get_surface_fallback_reasons());
 		CHECK(loaded_data->get_surface_fallback_reasons()[0] == 0);
 		CHECK(loaded_data->get_rt_proxy_positions() == data->get_rt_proxy_positions());
+		CHECK(loaded_data->get_rt_proxy_uvs() == data->get_rt_proxy_uvs());
 		CHECK(loaded_data->get_rt_proxy_indices() == data->get_rt_proxy_indices());
 		CHECK(loaded_data->get_rt_proxy_triangle_groups() == data->get_rt_proxy_triangle_groups());
 		CHECK(loaded_data->get_rt_proxy_eps() == doctest::Approx(0.25f));

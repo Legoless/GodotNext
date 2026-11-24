@@ -374,6 +374,14 @@ protected:
 			part.triangle_count = MIN(left, part_max_triangles);
 			part.chunk = 0;
 			part.allocation_size = 16;
+			NextGIRTPartGeometry geom;
+			geom.is_proxy_surface = true;
+			geom.triangle_count = part.triangle_count;
+			if (r_state.want_attributes) {
+				geom.attribute_chunk = 0;
+				geom.attribute_offset = 64;
+			}
+			part.geometries.push_back(geom);
 			left -= part.triangle_count;
 			r_set.parts.push_back(part);
 			live_ranges++;
@@ -600,10 +608,28 @@ TEST_CASE("[NextGI][NativeRT] Parts keep whole clusters under the cap and run pe
 	REQUIRE(layout.run_group_offsets.size() == 2);
 	CHECK(layout.run_group_offsets[0] == 192); // 128 + 5 * 12 = 188, aligned.
 	CHECK(layout.run_group_offsets[1] == 208); // 192 + 3 * 2 = 198, aligned.
+	CHECK(layout.attribute_offset == UINT32_MAX);
+	CHECK(layout.attribute_scratch_offset == UINT32_MAX);
 	CHECK(layout.size == 224); // 208 + 2 * 2 = 212, aligned.
 	for (uint32_t offset : layout.run_group_offsets) {
 		CHECK((offset % 16) == 0); // The surface record keeps it in bits 4-31.
 	}
+
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). With attributes requested, the #130 attribute stream
+	// and its 32-byte UV reduction scratch follow the card groups, 16-byte aligned.
+	NextGeoRTNativePartLayout attr_layout;
+	nextgeo_rt_native_part_layout(plan, attr_layout, true);
+	CHECK(attr_layout.index_offset == layout.index_offset);
+	REQUIRE(attr_layout.run_group_offsets.size() == layout.run_group_offsets.size());
+	for (uint32_t i = 0; i < layout.run_group_offsets.size(); i++) {
+		CHECK(attr_layout.run_group_offsets[i] == layout.run_group_offsets[i]);
+	}
+	CHECK(attr_layout.attribute_offset == 224);
+	CHECK((attr_layout.attribute_offset % 16) == 0);
+	// 10 vertices -> 32 + 10 * 20 = 232 bytes -> aligned to 240 -> scratch at 224 + 240 = 464, total 496.
+	CHECK(attr_layout.attribute_scratch_offset == 464);
+	CHECK((attr_layout.attribute_scratch_offset % 16) == 0);
+	CHECK(attr_layout.size == 496);
 }
 
 TEST_CASE("[NextGI][NativeRT] Stage-2 cards: DAG-keyed cards map directly, others by bounds, walks stop at the proxy level") {
@@ -1278,6 +1304,63 @@ TEST_CASE("[NextGI][NativeRT] Sets: the ray origin eps is the band's target or t
 	CHECK(traces[1].eps == doctest::Approx(0.015f));
 	CHECK(traces[2].eps == doctest::Approx(0.02f));
 	CHECK(sets.get_stats().shared_buckets == 1);
+}
+
+TEST_CASE("[NextGI][NativeRT] Sets: request_mesh_attributes re-extracts with attributes and releases after hysteresis (#303)") {
+	using namespace RendererRD;
+	using namespace TestNextGIRTNative;
+	FakeNativeSets sets;
+	const RID mesh = RID::from_uint64(0x1567);
+	FakeNativeSets::FakeMesh &script = sets.add_mesh(mesh);
+	// Tight MN4 cap (proxy_bytes = 1000 -> cap = 2000; band 1 = 1500): cannot hold both attribute-less and
+	// attribute-bearing sets simultaneously, so MN4 reclaim must swap them cleanly.
+	script.proxy_bytes = 1000;
+	LocalVector<FakeNativeSets::Trace> traces;
+	traces.push_back(fake_trace(mesh, 1, 5.0f)); // Band 1: 1500 triangles.
+
+	// 1. Opaque mesh builds without attributes.
+	const AABB bounds(Vector3(-0.5f, -0.5f, -0.5f), Vector3(1.0f, 1.0f, 1.0f));
+	const Vector3 camera(5.5f, 0.0f, 0.0f);
+	sets.step(traces);
+	sets.step(traces);
+	REQUIRE(traces[0].native);
+	float eps = 0.0f;
+	const LocalVector<NextGeoRTNativeSets::Part> *parts = sets.select(mesh, 1, bounds, Transform3D(), camera, NEXTGEO_RT_NATIVE_INCLUDED, eps);
+	REQUIRE(parts != nullptr);
+	REQUIRE(!parts->is_empty());
+	REQUIRE(!(*parts)[0].geometries.is_empty());
+	CHECK((*parts)[0].geometries[0].attribute_chunk == UINT32_MAX);
+
+	// 2. Request attributes (e.g. alpha-tested material override): reclaims stale attribute-less set and swaps in attribute-bearing set.
+	sets.request_mesh_attributes(mesh);
+	sets.build(NEXTGEO_RT_NATIVE_REBUILD_TRIANGLE_CAP);
+	for (int i = 0; i < 3; i++) {
+		sets.frame_number++;
+		sets.begin_frame_sets(sets.frame_number, 0.001f, false);
+		parts = sets.select(mesh, 1, bounds, Transform3D(), camera, NEXTGEO_RT_NATIVE_INCLUDED, eps);
+		sets.request_mesh_attributes(mesh);
+		sets.build(NEXTGEO_RT_NATIVE_REBUILD_TRIANGLE_CAP);
+	}
+	REQUIRE(parts != nullptr);
+	REQUIRE(!parts->is_empty());
+	REQUIRE(!(*parts)[0].geometries.is_empty());
+	CHECK((*parts)[0].geometries[0].attribute_chunk == 0u);
+	CHECK((*parts)[0].geometries[0].attribute_offset == 64u);
+
+	// 3. Stop requesting attributes: held during hysteresis, then returns to attribute-less after hysteresis expires.
+	for (int i = 0; i < int(NEXTGI_SHADOW_HYSTERESIS_FRAMES) + 4; i++) {
+		sets.frame_number++;
+		sets.begin_frame_sets(sets.frame_number, 0.001f, false);
+		parts = sets.select(mesh, 1, bounds, Transform3D(), camera, NEXTGEO_RT_NATIVE_INCLUDED, eps);
+		sets.build(NEXTGEO_RT_NATIVE_REBUILD_TRIANGLE_CAP);
+	}
+	REQUIRE(parts != nullptr);
+	REQUIRE(!parts->is_empty());
+	REQUIRE(!(*parts)[0].geometries.is_empty());
+	CHECK((*parts)[0].geometries[0].attribute_chunk == UINT32_MAX);
+	sets.release_all();
+	CHECK(sets.live_blases == 0);
+	CHECK(sets.live_ranges == 0);
 }
 
 #endif // !_3D_DISABLED && RD_ENABLED

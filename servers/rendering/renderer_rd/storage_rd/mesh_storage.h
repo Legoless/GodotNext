@@ -79,6 +79,15 @@ public:
 		uint32_t chunk = UINT32_MAX;
 		uint32_t allocation_offset = 0;
 		uint32_t allocation_size = 0;
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Optional #130 attribute stream allocated on demand
+		// for alpha-tested VGD RT proxy parts (never allocated for opaque NextGeo proxies).
+		uint32_t attr_chunk = UINT32_MAX;
+		uint32_t attr_offset = 0;
+		uint32_t attr_size = 0;
+		uint32_t proxy_vertex_offset = UINT32_MAX;
+		uint32_t proxy_vertex_count = 0;
+		uint32_t proxy_index_offset = 0;
+		uint32_t proxy_index_count = 0;
 		uint64_t uncompacted_bytes = 0;
 		uint32_t first_surface = 0;
 		uint32_t surface_count = 0;
@@ -249,6 +258,9 @@ private:
 		LocalVector<NextGIRTPart> nextgi_shadow_parts;
 		bool nextgi_blas_dirty = false;
 		bool nextgi_proxy_uploaded = false;
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). True when an instance overrides a VGD proxy
+		// surface with an alpha-tested material so its GI proxy parts also carry a #130 attribute stream.
+		bool nextgi_proxy_attributes_requested = false;
 		bool nextgi_skip_rt_arena = false;
 		uint64_t nextgi_proxy_generation = 0;
 		uint32_t nextgi_proxy_alpha_excluded = 0;
@@ -366,6 +378,10 @@ private:
 	void _mesh_nextgi_hit_add_attributes(Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data);
 	void _mesh_nextgi_hit_free_attributes(Mesh::Surface *p_surface);
 	void _mesh_nextgi_hit_patch_attributes(Mesh::Surface *p_surface, bool p_attribute_region, uint32_t p_offset, const Vector<uint8_t> &p_data);
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Lazy #130 attribute streams for alpha-tested VGD proxy parts.
+	void _mesh_nextgi_ensure_proxy_attributes(RID p_mesh_rid, Mesh *p_mesh);
+	void _mesh_nextgi_free_part_attributes(NextGIRTPart &r_part);
+	void _mesh_nextgi_free_proxy_attributes(Mesh *p_mesh);
 	void _mesh_nextgi_rt_clear_parts(Mesh *p_mesh);
 	void _mesh_nextgi_release_empty_chunks();
 	RID _mesh_nextgi_rt_ensure_chunk(uint32_t p_chunk);
@@ -635,6 +651,9 @@ public:
 	// while it is off.
 	void mesh_nextgi_set_hit_attributes(bool p_enabled);
 	bool mesh_nextgi_get_hit_attributes() const { return nextgi_hit_attributes_enabled; }
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Requests #130 attribute streams on a VGD mesh's proxy
+	// parts (for alpha-tested instance overrides or shadow-only proxy parts). No-op for opaque-only meshes.
+	void mesh_nextgi_rt_request_proxy_attributes(RID p_mesh);
 	// GodotNext: nextgi_skinned_actors (#59). True when a surface is bone-driven, so the mesh has
 	// no static BLAS parts and its cards come from the bind-pose CPU copy.
 	bool mesh_nextgi_rt_is_skinned(RID p_mesh) const;

@@ -34,6 +34,7 @@
 #include "core/math/math_funcs.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/hashfuncs.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/rt_cut_extract.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
@@ -278,7 +279,7 @@ static uint64_t _native_align16(uint64_t p_value) {
 	return (p_value + 15u) & ~uint64_t(15u);
 }
 
-void nextgeo_rt_native_part_layout(const NextGeoRTNativePartPlan &p_part, NextGeoRTNativePartLayout &r_layout) {
+void nextgeo_rt_native_part_layout(const NextGeoRTNativePartPlan &p_part, NextGeoRTNativePartLayout &r_layout, bool p_with_attributes) {
 	uint64_t cursor = _native_align16(uint64_t(p_part.vertex_count) * 3u * sizeof(float));
 	r_layout.index_offset = uint32_t(cursor);
 	cursor = _native_align16(cursor + uint64_t(p_part.triangle_count) * 3u * sizeof(uint32_t));
@@ -286,6 +287,15 @@ void nextgeo_rt_native_part_layout(const NextGeoRTNativePartPlan &p_part, NextGe
 	for (const NextGeoRTNativeRun &run : p_part.runs) {
 		r_layout.run_group_offsets.push_back(uint32_t(cursor));
 		cursor = _native_align16(cursor + uint64_t(run.triangle_count) * sizeof(uint16_t));
+	}
+	if (p_with_attributes && p_part.vertex_count > 0) {
+		r_layout.attribute_offset = uint32_t(cursor);
+		cursor = _native_align16(cursor + uint64_t(nextgi_hit_stream_size(p_part.vertex_count)));
+		r_layout.attribute_scratch_offset = uint32_t(cursor);
+		cursor = _native_align16(cursor + 8u * sizeof(uint32_t));
+	} else {
+		r_layout.attribute_offset = UINT32_MAX;
+		r_layout.attribute_scratch_offset = UINT32_MAX;
 	}
 	r_layout.size = uint32_t(cursor);
 }
@@ -597,7 +607,8 @@ uint64_t NextGeoRTNativeSets::_reclaimable_bytes(MeshState &r_state, uint64_t p_
 	uint64_t bytes = 0;
 	for (KeyValue<uint64_t, Set> &entry : r_state.sets) {
 		Set &set = entry.value;
-		if (entry.key == p_exclude_hash || !set.ready() || set.reclaim || set.last_band_use_frame == frame) {
+		const bool attributes_stale = set.has_attributes != r_state.want_attributes;
+		if (entry.key == p_exclude_hash || !set.ready() || set.reclaim || (set.last_band_use_frame == frame && !attributes_stale)) {
 			continue;
 		}
 		// A built set some bucket waits to swap in is about to be traced as its band's set.
@@ -775,6 +786,9 @@ void NextGeoRTNativeSets::begin_frame_sets(uint64_t p_frame, float p_error_per_m
 			gone.push_back(entry.key);
 			continue;
 		}
+		if (state.want_attributes && state.last_attributes_frame + NEXTGI_SHADOW_HYSTERESIS_FRAMES < frame) {
+			state.want_attributes = false;
+		}
 		for (Bucket &bucket : state.buckets) {
 			// Sets MN4 reclaimed for another set of the mesh leave before that set is admitted (see
 			// nextgeo_rt_native_reclaim_makes_room); their buckets cut again when next demanded.
@@ -896,6 +910,16 @@ const LocalVector<NextGeoRTNativeSets::Part> *NextGeoRTNativeSets::select(RID p_
 	return &traced->parts;
 }
 
+// GodotNext: nextgi_nextgeo_alpha_shadows (#303).
+void NextGeoRTNativeSets::request_mesh_attributes(RID p_mesh) {
+	MeshState *state = meshes.getptr(p_mesh);
+	if (state == nullptr) {
+		return;
+	}
+	state->want_attributes = true;
+	state->last_attributes_frame = frame;
+}
+
 void NextGeoRTNativeSets::build(uint32_t p_triangle_budget) {
 	struct Work {
 		MeshState *state = nullptr;
@@ -947,7 +971,7 @@ void NextGeoRTNativeSets::build(uint32_t p_triangle_budget) {
 			bucket.refused = false;
 			bucket.target_error = -1.0f; // The cap has room for the refused set now: cut again.
 		}
-		if (bucket.target_error == error && bucket.generation == generation) {
+		if (bucket.target_error == error && bucket.generation == generation && bucket.attributes == state.want_attributes) {
 			if (bucket.coarse) {
 				stats.coarse_buckets++;
 			}
@@ -960,8 +984,14 @@ void NextGeoRTNativeSets::build(uint32_t p_triangle_budget) {
 		if (!_mesh_cut(state.mesh, error, cut)) {
 			continue;
 		}
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Distinguish sets with #130 attribute streams from
+		// attribute-less sets in the per-mesh pool so toggling alpha overrides swaps cleanly.
+		if (state.want_attributes) {
+			cut.hash ^= 0xA77B1B07E5000001ull;
+		}
 		bucket.target_error = error;
 		bucket.generation = generation;
+		bucket.attributes = state.want_attributes;
 		bucket.coarse = !nextgeo_rt_native_cut_usable(cut, eps);
 		if (bucket.coarse) {
 			// Pages the cut needs are not resident. A built set stays (it was taken from pages that
@@ -1006,6 +1036,7 @@ void NextGeoRTNativeSets::build(uint32_t p_triangle_budget) {
 			continue;
 		}
 		set.hash = cut.hash;
+		set.has_attributes = state.want_attributes;
 		set.max_error = cut.max_error;
 		set.triangles = cut.triangle_count;
 		set.refs = 1;
@@ -1606,9 +1637,11 @@ bool NextGIRTNative::_set_extract(MeshState &r_mesh, const NextGeoRTNativeCut &p
 			}
 		}
 	}
+	const bool want_attributes = r_mesh.want_attributes;
 	for (const NextGeoRTNativePartPlan &plan : plans) {
 		NextGeoRTNativePartLayout layout;
-		nextgeo_rt_native_part_layout(plan, layout);
+		nextgeo_rt_native_part_layout(plan, layout, want_attributes);
+		const bool with_attributes = want_attributes && layout.attribute_offset != UINT32_MAX && layout.attribute_scratch_offset != UINT32_MAX;
 		const NextGIArenaAllocator::Allocation allocation = mesh_storage->mesh_nextgi_rt_arena_allocate(layout.size);
 		const RID chunk_buffer = allocation.is_valid() ? mesh_storage->mesh_nextgi_rt_get_chunk_buffer(allocation.chunk) : RID();
 		if (chunk_buffer.is_null()) {
@@ -1664,7 +1697,7 @@ bool NextGIRTNative::_set_extract(MeshState &r_mesh, const NextGeoRTNativeCut &p
 			uint32_t *job = words + k * 8;
 			job[0] = desc.pos_word_offset;
 			job[1] = desc.tri_byte_offset;
-			job[2] = desc.stride_and_counts & 0x00FFFFFFu;
+			job[2] = desc.stride_and_counts; // Keep bits 24..31 (vertex_layout) for attribute extraction (#303).
 			job[3] = 0;
 			job[4] = (allocation.offset + vertex_base * 3u * uint32_t(sizeof(float))) / 4u;
 			job[5] = (allocation.offset + layout.index_offset + triangle_base * 3u * uint32_t(sizeof(uint32_t))) / 4u;
@@ -1702,16 +1735,28 @@ bool NextGIRTNative::_set_extract(MeshState &r_mesh, const NextGeoRTNativeCut &p
 			geometry.first_triangle = 0;
 			geometry.triangle_count = plan_run.triangle_count;
 			geometry.is_proxy_surface = true;
+			geometry.is_legacy_surface = false;
 			geometry.has_stage2_cards = with_cards;
 			geometry.vertex_offset = allocation.offset;
 			geometry.vertex_count = plan.vertex_count;
 			geometry.index_offset = allocation.offset + layout.index_offset + plan_run.first_triangle * 3u * uint32_t(sizeof(uint32_t));
 			geometry.group_offset = with_cards ? allocation.offset + layout.run_group_offsets[r] : 0u;
+			if (with_attributes) {
+				geometry.attribute_chunk = allocation.chunk;
+				geometry.attribute_offset = allocation.offset + layout.attribute_offset;
+			}
 			// The cut's own error; select() gives each bucket's ray origin eps (it may share the set).
 			geometry.eps = p_cut.max_error;
 			part.geometries.push_back(geometry);
 		}
 
+		if (with_attributes) {
+			const uint32_t init_scratch[8] = {
+				0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u,
+				0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u,
+			};
+			rd->buffer_update(chunk_buffer, allocation.offset + layout.attribute_scratch_offset, sizeof(init_scratch), init_scratch);
+		}
 		const RID word_buffer = rd->storage_buffer_create(word_bytes.size(), word_bytes);
 		RD::Uniform u_pages(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, page_buffer);
 		RD::Uniform u_words(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, word_buffer);
@@ -1733,11 +1778,13 @@ bool NextGIRTNative::_set_extract(MeshState &r_mesh, const NextGeoRTNativeCut &p
 		rd->compute_list_bind_compute_pipeline(list, extractor->pipeline);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		uint32_t push_constants[12] = {};
+		const uint32_t scratch_word = with_attributes ? (allocation.offset + layout.attribute_scratch_offset) / 4u : 0u;
 		for (uint32_t offset = 0; offset < plan.cluster_count; offset += NEXTGEO_RT_NATIVE_MAX_JOBS_PER_DISPATCH) {
 			const uint32_t count = MIN(plan.cluster_count - offset, uint32_t(NEXTGEO_RT_NATIVE_MAX_JOBS_PER_DISPATCH));
 			push_constants[0] = 0u; // Extract.
 			push_constants[1] = offset;
 			push_constants[2] = count;
+			push_constants[3] = scratch_word;
 			rd->compute_list_set_push_constant(list, push_constants, sizeof(push_constants));
 			rd->compute_list_dispatch(list, count, 1, 1);
 		}
@@ -1765,6 +1812,22 @@ bool NextGIRTNative::_set_extract(MeshState &r_mesh, const NextGeoRTNativeCut &p
 				push_constants[11] = 0u;
 				rd->compute_list_set_push_constant(list, push_constants, sizeof(push_constants));
 				rd->compute_list_dispatch(list, (word_total + 63u) / 64u, 1, 1);
+			}
+		}
+		if (with_attributes) {
+			// Order after Mode 0's UV scratch writes (and any Mode 1 arena writes) before packing #130 attributes.
+			rd->compute_list_add_barrier(list);
+			const uint32_t attr_word = (allocation.offset + layout.attribute_offset) / 4u;
+			memset(push_constants, 0, sizeof(push_constants));
+			for (uint32_t offset = 0; offset < plan.cluster_count; offset += NEXTGEO_RT_NATIVE_MAX_JOBS_PER_DISPATCH) {
+				const uint32_t count = MIN(plan.cluster_count - offset, uint32_t(NEXTGEO_RT_NATIVE_MAX_JOBS_PER_DISPATCH));
+				push_constants[0] = 2u; // Attributes (#303).
+				push_constants[1] = offset;
+				push_constants[2] = count;
+				push_constants[3] = scratch_word;
+				push_constants[4] = attr_word;
+				rd->compute_list_set_push_constant(list, push_constants, sizeof(push_constants));
+				rd->compute_list_dispatch(list, count, 1, 1);
 			}
 		}
 		rd->compute_list_end();

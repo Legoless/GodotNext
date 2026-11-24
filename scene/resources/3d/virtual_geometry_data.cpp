@@ -95,6 +95,15 @@ PackedFloat32Array VirtualGeometryData::get_rt_proxy_positions() const {
 	return rt_proxy_positions;
 }
 
+void VirtualGeometryData::set_rt_proxy_uvs(const PackedFloat32Array &p_uvs) {
+	rt_proxy_uvs = p_uvs;
+	emit_changed();
+}
+
+PackedFloat32Array VirtualGeometryData::get_rt_proxy_uvs() const {
+	return rt_proxy_uvs;
+}
+
 void VirtualGeometryData::set_rt_proxy_indices(const PackedByteArray &p_indices) {
 	rt_proxy_indices = p_indices;
 	emit_changed();
@@ -278,6 +287,7 @@ void VirtualGeometryData::reset_state() {
 	surface_eligibility.clear();
 	surface_fallback_reasons.clear();
 	rt_proxy_positions.clear();
+	rt_proxy_uvs.clear();
 	rt_proxy_indices.clear();
 	rt_proxy_parts.clear();
 	rt_proxy_surface_ranges.clear();
@@ -315,6 +325,8 @@ void VirtualGeometryData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_surface_fallback_reasons"), &VirtualGeometryData::get_surface_fallback_reasons);
 	ClassDB::bind_method(D_METHOD("set_rt_proxy_positions", "positions"), &VirtualGeometryData::set_rt_proxy_positions);
 	ClassDB::bind_method(D_METHOD("get_rt_proxy_positions"), &VirtualGeometryData::get_rt_proxy_positions);
+	ClassDB::bind_method(D_METHOD("set_rt_proxy_uvs", "uvs"), &VirtualGeometryData::set_rt_proxy_uvs);
+	ClassDB::bind_method(D_METHOD("get_rt_proxy_uvs"), &VirtualGeometryData::get_rt_proxy_uvs);
 	ClassDB::bind_method(D_METHOD("set_rt_proxy_indices", "indices"), &VirtualGeometryData::set_rt_proxy_indices);
 	ClassDB::bind_method(D_METHOD("get_rt_proxy_indices"), &VirtualGeometryData::get_rt_proxy_indices);
 	ClassDB::bind_method(D_METHOD("set_rt_proxy_parts", "parts"), &VirtualGeometryData::set_rt_proxy_parts);
@@ -359,6 +371,7 @@ void VirtualGeometryData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "surface_eligibility", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_surface_eligibility", "get_surface_eligibility");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "surface_fallback_reasons", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_surface_fallback_reasons", "get_surface_fallback_reasons");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "rt_proxy_positions", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_positions", "get_rt_proxy_positions");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_FLOAT32_ARRAY, "rt_proxy_uvs", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_uvs", "get_rt_proxy_uvs");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "rt_proxy_indices", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_indices", "get_rt_proxy_indices");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "rt_proxy_parts", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_parts", "get_rt_proxy_parts");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "rt_proxy_surface_ranges", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_surface_ranges", "get_rt_proxy_surface_ranges");

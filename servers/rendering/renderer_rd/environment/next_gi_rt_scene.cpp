@@ -233,8 +233,12 @@ bool nextgi_rt_plan_vgd_proxy(
 		const NextGIRTLegacySurfaceInput *p_legacy_surfaces,
 		NextGIArenaAllocator &r_allocator,
 		LocalVector<NextGIRTProxyPartUpload> &r_uploads,
-		uint32_t &r_alpha_excluded_count) {
+		uint32_t &r_alpha_excluded_count,
+		LocalVector<NextGIRTProxyPartUpload> *r_shadow_uploads) {
 	r_uploads.clear();
+	if (r_shadow_uploads != nullptr) {
+		r_shadow_uploads->clear();
+	}
 	r_alpha_excluded_count = 0;
 	if (!p_hwrt_tier_active || !p_has_ray_query || p_live_instances == 0) {
 		return false;
@@ -254,6 +258,7 @@ bool nextgi_rt_plan_vgd_proxy(
 		uint32_t triangle_count = 0;
 	};
 	LocalVector<LegacySlice> legacy_queue;
+	LocalVector<LegacySlice> shadow_legacy_queue;
 	for (uint32_t s = 0; s < p_mesh_surface_count; s++) {
 		const bool is_alpha = p_alpha_excluded_surfaces != nullptr && p_alpha_excluded_surfaces[s] != 0;
 		const bool is_virtual = s < 32u && ((p_desc.eligible_surface_mask & (1u << s)) != 0u);
@@ -269,6 +274,17 @@ bool nextgi_rt_plan_vgd_proxy(
 			}
 			if (!is_virtual && p_legacy_surfaces != nullptr && p_legacy_surfaces[s].index_count >= 3) {
 				had_tris = true;
+				if (r_shadow_uploads != nullptr) {
+					const NextGIRTLegacySurfaceInput &leg = p_legacy_surfaces[s];
+					const uint32_t leg_tris = leg.index_count / 3;
+					if (leg.positions != nullptr && leg.vertex_count > 0 && leg.indices != nullptr && leg_tris > 0) {
+						LegacySlice slice;
+						slice.surface = s;
+						slice.first_triangle = 0;
+						slice.triangle_count = leg_tris;
+						shadow_legacy_queue.push_back(slice);
+					}
+				}
 			}
 			if (had_tris) {
 				r_alpha_excluded_count++;
@@ -289,6 +305,7 @@ bool nextgi_rt_plan_vgd_proxy(
 	}
 
 	uint32_t legacy_head = 0;
+	uint32_t shadow_legacy_head = 0;
 	struct ProxyRange {
 		uint32_t surface = 0;
 		uint32_t first_triangle = 0;
@@ -296,16 +313,23 @@ bool nextgi_rt_plan_vgd_proxy(
 		uint32_t group_rel = 0;
 	};
 
-	auto emit_part = [&](uint32_t p_v_off, uint32_t p_v_cnt, uint32_t p_i_off, uint32_t p_i_cnt, LocalVector<ProxyRange> &p_proxy_ranges, const LocalVector<LegacySlice> &p_legacy_slices) -> bool {
+	auto emit_part = [&](uint32_t p_v_off, uint32_t p_v_cnt, uint32_t p_i_off, uint32_t p_i_cnt, LocalVector<ProxyRange> &p_proxy_ranges, const LocalVector<LegacySlice> &p_legacy_slices, bool p_with_cards, bool p_compact_proxy_indices, LocalVector<NextGIRTProxyPartUpload> &p_target) -> bool {
 		uint32_t cursor = 0;
 		uint32_t proxy_pos_rel = 0;
 		uint32_t proxy_idx_rel = 0;
+		uint32_t packed_proxy_indices = p_i_cnt;
 		if (!p_proxy_ranges.is_empty()) {
+			if (p_compact_proxy_indices) {
+				packed_proxy_indices = 0;
+				for (const ProxyRange &range : p_proxy_ranges) {
+					packed_proxy_indices += range.triangle_count * 3u;
+				}
+			}
 			proxy_pos_rel = 0;
 			cursor = _nextgi_align16(p_v_cnt * sizeof(float) * 3u);
 			proxy_idx_rel = cursor;
-			cursor = _nextgi_align16(proxy_idx_rel + p_i_cnt * sizeof(uint32_t));
-			if (has_cards && has_group_table) {
+			cursor = _nextgi_align16(proxy_idx_rel + packed_proxy_indices * sizeof(uint32_t));
+			if (p_with_cards && has_cards && has_group_table) {
 				for (ProxyRange &range : p_proxy_ranges) {
 					range.group_rel = cursor;
 					cursor = _nextgi_align16(cursor + range.triangle_count * sizeof(uint16_t));
@@ -353,11 +377,25 @@ bool nextgi_rt_plan_vgd_proxy(
 		uint32_t min_surf = UINT32_MAX;
 		uint32_t max_surf = 0;
 		if (!p_proxy_ranges.is_empty()) {
+			upload.proxy_vertex_offset = p_v_off;
+			upload.proxy_vertex_count = p_v_cnt;
+			upload.proxy_index_offset = p_i_off;
+			upload.proxy_index_count = p_i_cnt;
 			memcpy(dst + proxy_pos_rel, p_desc.rt_proxy_positions.ptr() + uint64_t(p_v_off) * 3u, uint64_t(p_v_cnt) * sizeof(float) * 3u);
-			memcpy(dst + proxy_idx_rel, p_desc.rt_proxy_indices.ptr() + uint64_t(p_i_off) * 4u, uint64_t(p_i_cnt) * sizeof(uint32_t));
+			if (!p_compact_proxy_indices) {
+				memcpy(dst + proxy_idx_rel, p_desc.rt_proxy_indices.ptr() + uint64_t(p_i_off) * 4u, uint64_t(p_i_cnt) * sizeof(uint32_t));
+			}
 			const uint32_t part_first_tri_global = p_i_off / 3u;
+			uint32_t packed_tri_cursor = 0;
 			for (const ProxyRange &range : p_proxy_ranges) {
-				if (has_cards && has_group_table) {
+				uint32_t range_idx_rel = proxy_idx_rel + range.first_triangle * 3u * sizeof(uint32_t);
+				if (p_compact_proxy_indices) {
+					range_idx_rel = proxy_idx_rel + packed_tri_cursor * 3u * sizeof(uint32_t);
+					memcpy(dst + range_idx_rel, p_desc.rt_proxy_indices.ptr() + uint64_t(p_i_off + range.first_triangle * 3u) * 4u, uint64_t(range.triangle_count) * 3u * sizeof(uint32_t));
+					packed_tri_cursor += range.triangle_count;
+				}
+				const bool write_cards = p_with_cards && has_cards && has_group_table;
+				if (write_cards) {
 					memcpy(dst + range.group_rel, p_desc.rt_proxy_triangle_groups.ptr() + uint64_t(part_first_tri_global + range.first_triangle) * sizeof(uint16_t), uint64_t(range.triangle_count) * sizeof(uint16_t));
 				}
 				NextGIRTPartGeometry geom;
@@ -365,10 +403,11 @@ bool nextgi_rt_plan_vgd_proxy(
 				geom.first_triangle = 0;
 				geom.triangle_count = range.triangle_count;
 				geom.is_proxy_surface = true;
-				geom.has_stage2_cards = has_cards && has_group_table;
+				geom.is_legacy_surface = false;
+				geom.has_stage2_cards = write_cards;
 				geom.vertex_offset = alloc.offset + proxy_pos_rel;
 				geom.vertex_count = p_v_cnt;
-				geom.index_offset = alloc.offset + proxy_idx_rel + range.first_triangle * 3u * sizeof(uint32_t);
+				geom.index_offset = alloc.offset + range_idx_rel;
 				geom.group_offset = geom.has_stage2_cards ? (alloc.offset + range.group_rel) : 0u;
 				geom.eps = p_desc.rt_proxy_eps;
 				upload.geometries.push_back(geom);
@@ -392,6 +431,7 @@ bool nextgi_rt_plan_vgd_proxy(
 			geom.first_triangle = 0;
 			geom.triangle_count = slice.triangle_count;
 			geom.is_proxy_surface = true;
+			geom.is_legacy_surface = true;
 			geom.has_stage2_cards = false;
 			geom.vertex_offset = alloc.offset + leg_layouts[l].pos_rel;
 			geom.vertex_count = leg.vertex_count;
@@ -408,7 +448,7 @@ bool nextgi_rt_plan_vgd_proxy(
 			upload.first_surface = min_surf;
 			upload.surface_count = max_surf - min_surf + 1u;
 		}
-		r_uploads.push_back(upload);
+		p_target.push_back(upload);
 		return true;
 	};
 
@@ -417,7 +457,35 @@ bool nextgi_rt_plan_vgd_proxy(
 			r_allocator.free_range(u.allocation);
 		}
 		r_uploads.clear();
+		if (r_shadow_uploads != nullptr) {
+			for (const NextGIRTProxyPartUpload &u : *r_shadow_uploads) {
+				r_allocator.free_range(u.allocation);
+			}
+			r_shadow_uploads->clear();
+		}
 		return false;
+	};
+
+	auto take_legacy_slices = [](LocalVector<LegacySlice> &r_queue, uint32_t &r_head, uint32_t &r_part_tris, LocalVector<LegacySlice> &r_out) {
+		while (r_head < r_queue.size() && r_part_tris < NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+			LegacySlice &front = r_queue[r_head];
+			// Keep a legacy surface whole if it fits a fresh part alone and would overflow the part.
+			if (r_part_tris > 0 && front.first_triangle == 0 && front.triangle_count <= NEXTGI_RT_MAX_TRIANGLES_PER_BLAS && r_part_tris + front.triangle_count > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+				break;
+			}
+			const uint32_t take = MIN(front.triangle_count, uint32_t(NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) - r_part_tris);
+			LegacySlice slice;
+			slice.surface = front.surface;
+			slice.first_triangle = front.first_triangle;
+			slice.triangle_count = take;
+			r_out.push_back(slice);
+			r_part_tris += take;
+			front.first_triangle += take;
+			front.triangle_count -= take;
+			if (front.triangle_count == 0) {
+				r_head++;
+			}
+		}
 	};
 
 	const uint32_t map_surfaces = MIN(vgd_surface_count, p_mesh_surface_count);
@@ -438,9 +506,12 @@ bool nextgi_rt_plan_vgd_proxy(
 		}
 
 		LocalVector<ProxyRange> proxy_ranges;
+		LocalVector<ProxyRange> shadow_proxy_ranges;
 		uint32_t part_tris = 0;
+		uint32_t shadow_part_tris = 0;
 		for (uint32_t s = 0; s < map_surfaces; s++) {
-			if (p_alpha_excluded_surfaces != nullptr && p_alpha_excluded_surfaces[s] != 0) {
+			const bool is_alpha = p_alpha_excluded_surfaces != nullptr && p_alpha_excluded_surfaces[s] != 0;
+			if (is_alpha && r_shadow_uploads == nullptr) {
 				continue;
 			}
 			const int32_t raw_first = p_desc.rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 0];
@@ -457,10 +528,15 @@ bool nextgi_rt_plan_vgd_proxy(
 			range.surface = s;
 			range.first_triangle = first_idx / 3u;
 			range.triangle_count = idx_cnt / 3u;
-			proxy_ranges.push_back(range);
-			part_tris += range.triangle_count;
+			if (is_alpha) {
+				shadow_proxy_ranges.push_back(range);
+				shadow_part_tris += range.triangle_count;
+			} else {
+				proxy_ranges.push_back(range);
+				part_tris += range.triangle_count;
+			}
 		}
-		if (part_tris > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+		if (part_tris > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS || shadow_part_tris > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
 			return rollback();
 		}
 
@@ -468,32 +544,27 @@ bool nextgi_rt_plan_vgd_proxy(
 		// Outside-mask surfaces append as extra geometries of the first part (#77 step 2),
 		// bounded by NEXTGI_RT_MAX_TRIANGLES_PER_BLAS.
 		if (r_uploads.is_empty()) {
-			while (legacy_head < legacy_queue.size() && part_tris < NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
-				LegacySlice &front = legacy_queue[legacy_head];
-				// Keep a legacy surface whole if it fits a fresh part alone and would overflow part 0.
-				if (part_tris > 0 && front.first_triangle == 0 && front.triangle_count <= NEXTGI_RT_MAX_TRIANGLES_PER_BLAS && part_tris + front.triangle_count > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
-					break;
-				}
-				const uint32_t take = MIN(front.triangle_count, uint32_t(NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) - part_tris);
-				LegacySlice slice;
-				slice.surface = front.surface;
-				slice.first_triangle = front.first_triangle;
-				slice.triangle_count = take;
-				part_legacy.push_back(slice);
-				part_tris += take;
-				front.first_triangle += take;
-				front.triangle_count -= take;
-				if (front.triangle_count == 0) {
-					legacy_head++;
-				}
+			take_legacy_slices(legacy_queue, legacy_head, part_tris, part_legacy);
+		}
+
+		if (!proxy_ranges.is_empty() || !part_legacy.is_empty()) {
+			if (!emit_part(v_off, v_cnt, i_off, i_cnt, proxy_ranges, part_legacy, true, false, r_uploads)) {
+				return rollback();
 			}
 		}
 
-		if (proxy_ranges.is_empty() && part_legacy.is_empty()) {
-			continue;
-		}
-		if (!emit_part(v_off, v_cnt, i_off, i_cnt, proxy_ranges, part_legacy)) {
-			return rollback();
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Alpha-tested and blended virtual surfaces stay
+		// out of GI (D17) and emit shadow-only proxy parts so RT shadow rays still trace them.
+		if (r_shadow_uploads != nullptr) {
+			LocalVector<LegacySlice> shadow_part_legacy;
+			if (r_shadow_uploads->is_empty()) {
+				take_legacy_slices(shadow_legacy_queue, shadow_legacy_head, shadow_part_tris, shadow_part_legacy);
+			}
+			if (!shadow_proxy_ranges.is_empty() || !shadow_part_legacy.is_empty()) {
+				if (!emit_part(v_off, v_cnt, i_off, i_cnt, shadow_proxy_ranges, shadow_part_legacy, false, true, *r_shadow_uploads)) {
+					return rollback();
+				}
+			}
 		}
 	}
 
@@ -502,30 +573,24 @@ bool nextgi_rt_plan_vgd_proxy(
 		LocalVector<ProxyRange> empty_proxy;
 		LocalVector<LegacySlice> part_legacy;
 		uint32_t part_tris = 0;
-		while (legacy_head < legacy_queue.size() && part_tris < NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
-			LegacySlice &front = legacy_queue[legacy_head];
-			if (part_tris > 0 && front.first_triangle == 0 && front.triangle_count <= NEXTGI_RT_MAX_TRIANGLES_PER_BLAS && part_tris + front.triangle_count > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
-				break;
-			}
-			const uint32_t take = MIN(front.triangle_count, uint32_t(NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) - part_tris);
-			LegacySlice slice;
-			slice.surface = front.surface;
-			slice.first_triangle = front.first_triangle;
-			slice.triangle_count = take;
-			part_legacy.push_back(slice);
-			part_tris += take;
-			front.first_triangle += take;
-			front.triangle_count -= take;
-			if (front.triangle_count == 0) {
-				legacy_head++;
-			}
-		}
-		if (!emit_part(0, 0, 0, 0, empty_proxy, part_legacy)) {
+		take_legacy_slices(legacy_queue, legacy_head, part_tris, part_legacy);
+		if (!emit_part(0, 0, 0, 0, empty_proxy, part_legacy, true, false, r_uploads)) {
 			return rollback();
 		}
 	}
+	if (r_shadow_uploads != nullptr) {
+		while (shadow_legacy_head < shadow_legacy_queue.size()) {
+			LocalVector<ProxyRange> empty_proxy;
+			LocalVector<LegacySlice> shadow_part_legacy;
+			uint32_t shadow_part_tris = 0;
+			take_legacy_slices(shadow_legacy_queue, shadow_legacy_head, shadow_part_tris, shadow_part_legacy);
+			if (!emit_part(0, 0, 0, 0, empty_proxy, shadow_part_legacy, false, true, *r_shadow_uploads)) {
+				return rollback();
+			}
+		}
+	}
 
-	return !r_uploads.is_empty();
+	return !r_uploads.is_empty() || (r_shadow_uploads != nullptr && !r_shadow_uploads->is_empty());
 }
 
 void nextgi_rt_split_parts(const uint32_t *p_triangle_counts, const uint32_t *p_chunks, uint32_t p_surface_count, uint32_t p_max_triangles_per_part, LocalVector<NextGIRTPartPlan> &r_parts) {
@@ -1049,11 +1114,11 @@ void NextGIRTScene::_push_shadow_word(uint32_t p_layers, uint32_t p_alpha_base) 
 	shadow_words.push_back(alpha ? p_alpha_base : 0u);
 }
 
-uint32_t NextGIRTScene::_push_shadow_alpha(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, bool p_retrace) {
+uint32_t NextGIRTScene::_push_shadow_alpha(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, bool p_retrace, uint32_t p_part_chunk, bool p_native_parts) {
 	const RenderGeometryInstanceBase *instance = static_cast<const RenderGeometryInstanceBase *>(p_instance);
 	bool alpha = false;
 	for (const NextGIRTPartGeometry &geometry : p_geometries) {
-		if (!geometry.is_proxy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(instance, p_mesh, geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+		if (_nextgi_shadow_class(_nextgi_shadow_effective_material(instance, p_mesh, geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
 			alpha = true;
 			break;
 		}
@@ -1061,13 +1126,24 @@ uint32_t NextGIRTScene::_push_shadow_alpha(RenderGeometryInstance *p_instance, R
 	if (!alpha || (p_layers & NEXTGI_SHADOW_LAYER_MASK) == 0) {
 		return UINT32_MAX;
 	}
+	bool has_proxy_uvs = false;
+	if (!p_native_parts && RSG::virtual_mesh_storage != nullptr && p_mesh.is_valid()) {
+		const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh);
+		has_proxy_uvs = desc != nullptr && !desc->rt_proxy_uvs.is_empty();
+	}
 	const uint32_t base = shadow_alpha.size();
 	for (const NextGIRTPartGeometry &geometry : p_geometries) {
 		NextGIShadowAlphaEntry entry;
-		if (!geometry.is_proxy_surface) {
-			const RID material = _nextgi_shadow_effective_material(instance, p_mesh, geometry.surface);
-			entry.flags = _nextgi_shadow_class(material);
-			if (entry.flags == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+		const RID material = _nextgi_shadow_effective_material(instance, p_mesh, geometry.surface);
+		entry.flags = _nextgi_shadow_class(material);
+		if (entry.flags == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+			if (geometry.is_proxy_surface) {
+				// GodotNext: nextgi_nextgeo_alpha_shadows (#303). VGD RT proxy parts (with rt_proxy_uvs) and
+				// #156 native NextGeo parts carry their own #130 attribute stream and arena index offsets.
+				const bool can_have_stream = !geometry.is_legacy_surface && (p_native_parts || has_proxy_uvs);
+				const bool geom_retrace = p_retrace && can_have_stream && p_part_chunk < NEXTGI_HIT_ARENA_CHUNKS;
+				_fill_shadow_alpha_entry(material, p_mesh, geometry.surface, 0, geom_retrace, entry, p_part_chunk, geometry.index_offset, true, geometry.attribute_chunk, geometry.attribute_offset, can_have_stream);
+			} else {
 				_fill_shadow_alpha_entry(material, p_mesh, geometry.surface, geometry.first_triangle, p_retrace, entry);
 			}
 		}
@@ -1076,8 +1152,8 @@ uint32_t NextGIRTScene::_push_shadow_alpha(RenderGeometryInstance *p_instance, R
 	return base;
 }
 
-uint32_t NextGIRTScene::_push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers) {
-	const uint32_t base = _push_shadow_alpha(p_instance, p_mesh, p_geometries, p_layers, true);
+uint32_t NextGIRTScene::_push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, uint32_t p_part_chunk, bool p_native_parts) {
+	const uint32_t base = _push_shadow_alpha(p_instance, p_mesh, p_geometries, p_layers, true, p_part_chunk, p_native_parts);
 	_push_shadow_word(p_layers, base);
 	return base;
 }
@@ -1202,7 +1278,7 @@ void NextGIRTScene::_release_shadow_texture_slots() {
 }
 
 // The bindless-texture path for BaseMaterial3D's alpha; any other alpha-tested material is left to the retrace.
-void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry, uint32_t p_index_chunk, uint32_t p_index_offset) {
+void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry, uint32_t p_index_chunk, uint32_t p_index_offset, bool p_override_attributes, uint32_t p_attribute_chunk, uint32_t p_attribute_offset, bool p_can_have_stream) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (material_storage == nullptr || mesh_storage == nullptr || p_material.is_null()) {
@@ -1279,17 +1355,38 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 	}
 	// The bindless path reads the UV from the surface's attribute stream: NextGI keeps the streams while a caster
 	// needs one. Until it can sample, the geometry shadows as opaque.
-	shadow_streams_wanted = true;
-	MeshStorage::NextGIRTSurfaceInfo info;
-	if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, p_surface, info) || info.attribute_chunk == UINT32_MAX) {
+	if (p_can_have_stream) {
+		shadow_streams_wanted = true;
+	}
+	uint32_t attribute_chunk = UINT32_MAX;
+	uint32_t attribute_offset = 0;
+	uint32_t index_chunk = p_index_chunk;
+	uint32_t index_offset = p_index_offset;
+	if (p_override_attributes) {
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). VGD proxy and #156 native parts supply their own
+		// #130 attribute stream and arena index offsets.
+		attribute_chunk = p_attribute_chunk;
+		attribute_offset = p_attribute_offset;
+	} else {
+		MeshStorage::NextGIRTSurfaceInfo info;
+		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, p_surface, info)) {
+			stats.shadow_opaque_alpha_entries++;
+			return;
+		}
+		attribute_chunk = info.attribute_chunk;
+		attribute_offset = info.attribute_offset;
+		// GodotNext: nextgi_skinned_alpha_shadows (#302). Posed skinned slots hold their indices in the slot chunk while
+		// reusing the mesh surface's static attribute stream.
+		if (index_chunk == UINT32_MAX) {
+			index_chunk = info.chunk;
+			index_offset = info.index_offset + p_first_triangle * 3 * sizeof(uint32_t);
+		}
+	}
+	if (attribute_chunk == UINT32_MAX || index_chunk == UINT32_MAX) {
 		stats.shadow_opaque_alpha_entries++;
 		return; // Opaque until the surface has its stream.
 	}
-	// GodotNext: nextgi_skinned_alpha_shadows (#302). Posed skinned slots hold their indices in the slot chunk while
-	// reusing the mesh surface's static attribute stream.
-	const uint32_t index_chunk = p_index_chunk != UINT32_MAX ? p_index_chunk : info.chunk;
-	const uint32_t index_offset = p_index_chunk != UINT32_MAX ? p_index_offset : info.index_offset + p_first_triangle * 3 * sizeof(uint32_t);
-	if (info.attribute_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS || index_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS) {
+	if (attribute_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS || index_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS) {
 		stats.shadow_opaque_alpha_entries++;
 		return; // The shaders bind the first chunks only: opaque.
 	}
@@ -1302,8 +1399,8 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 	}
 	r_entry.flags |= NEXTGI_SHADOW_ALPHA_TEXTURE | (known->hash ? uint32_t(NEXTGI_SHADOW_ALPHA_HASH) : 0u) | known->sampler_flags;
 	r_entry.texture_slot = slot;
-	r_entry.attribute_chunk = info.attribute_chunk;
-	r_entry.attribute_offset = info.attribute_offset;
+	r_entry.attribute_chunk = attribute_chunk;
+	r_entry.attribute_offset = attribute_offset;
 	r_entry.index_chunk = index_chunk;
 	r_entry.index_offset = index_offset;
 	stats.shadow_texture_entries++;
@@ -1520,12 +1617,12 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
 }
 
-void NextGIRTScene::_build_proxy_part(RID p_mesh, uint32_t p_part_index) {
+void NextGIRTScene::_build_proxy_part(RID p_mesh, uint32_t p_part_index, bool p_is_shadow_part) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh) || RD::get_singleton() == nullptr) {
 		return;
 	}
-	LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	LocalVector<MeshStorage::NextGIRTPart> *parts = p_is_shadow_part ? mesh_storage->mesh_nextgi_rt_get_shadow_parts(p_mesh) : mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
 	if (parts == nullptr || p_part_index >= parts->size()) {
 		return;
 	}
@@ -1553,7 +1650,10 @@ void NextGIRTScene::_build_proxy_part(RID p_mesh, uint32_t p_part_index) {
 		geometries.push_back(geometry);
 	}
 
-	const BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT | RD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT;
+	BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT;
+	if (!p_is_shadow_part) {
+		flags = flags | RD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT;
+	}
 	part.blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(geometries.ptr(), geometries.size()), flags);
 	if (part.blas.is_valid()) {
 		RD::get_singleton()->blas_build(part.blas);
@@ -1561,19 +1661,33 @@ void NextGIRTScene::_build_proxy_part(RID p_mesh, uint32_t p_part_index) {
 		part.compacted = false;
 		stats.blas_build_count++;
 		stats.blas_build_triangles += part.triangle_count;
-		PendingCompact pending;
-		pending.blas = part.blas;
-		pending.mesh = p_mesh;
-		pending.part_index = p_part_index;
-		pending.triangles = part.triangle_count;
-		pending_compactions.push_back(pending);
+		if (!p_is_shadow_part) {
+			PendingCompact pending;
+			pending.blas = part.blas;
+			pending.mesh = p_mesh;
+			pending.part_index = p_part_index;
+			pending.triangles = part.triangle_count;
+			pending_compactions.push_back(pending);
+		}
 	}
 
 	bool all_built = true;
-	for (const MeshStorage::NextGIRTPart &check : *parts) {
-		if (!check.geometries.is_empty() && check.blas.is_null()) {
-			all_built = false;
-			break;
+	if (const LocalVector<MeshStorage::NextGIRTPart> *gi_parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh)) {
+		for (const MeshStorage::NextGIRTPart &check : *gi_parts) {
+			if (!check.geometries.is_empty() && check.blas.is_null()) {
+				all_built = false;
+				break;
+			}
+		}
+	}
+	if (all_built) {
+		if (const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(p_mesh)) {
+			for (const MeshStorage::NextGIRTPart &check : *shadow_parts) {
+				if (!check.geometries.is_empty() && check.blas.is_null()) {
+					all_built = false;
+					break;
+				}
+			}
 		}
 	}
 	if (all_built) {
@@ -2277,6 +2391,27 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				record.card_set = NextGISRC::get_mesh_card_set(mesh);
 			}
 
+			// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Request #130 attribute streams lazily only when
+			// a proxy/native NextGeo part actually carries an alpha-tested effective material; opaque NextGeo
+			// proxies keep zero attribute stream overhead and use fallback hit records as before.
+			bool part_has_alpha_proxy = false;
+			if (part.is_proxy && (fed.shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0) {
+				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+					if (part_geometry.is_proxy_surface && !part_geometry.is_legacy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(geometry_instance, mesh, part_geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+						part_has_alpha_proxy = true;
+						break;
+					}
+				}
+			}
+			if (part_has_alpha_proxy) {
+				if (native != nullptr) {
+					native->request_mesh_attributes(mesh);
+				}
+				if (!native_parts) {
+					mesh_storage->mesh_nextgi_rt_request_proxy_attributes(mesh);
+				}
+			}
+
 			float eps_rt = 0.0f;
 			uint32_t first_vertex_offset = 0;
 			bool have_first_vertex_offset = false;
@@ -2299,6 +2434,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					} else {
 						surface_record.flags = 0;
 					}
+					hit_attribute_chunk = part_geometry.attribute_chunk;
+					hit_attribute_offset = part_geometry.attribute_offset;
+					hit_arena_chunk = part.chunk;
 				} else {
 					MeshStorage::NextGIRTSurfaceInfo info;
 					if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, part_geometry.surface, info)) {
@@ -2324,10 +2462,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				if (surface_sources_wanted) {
 					surface_sources.push_back({ geometry_instance, mesh, part_geometry.surface });
 				}
-				// GodotNext: nextgi_hit_groups (#130). A proxy part has no attribute stream yet (PN writes it).
+				// GodotNext: nextgi_hit_groups (#130) / nextgi_nextgeo_alpha_shadows (#303). Bind material hit groups
+				// on alpha-tested NextGeo geometries that carry an attribute stream; opaque proxies keep fallback.
 				if (hit_records) {
 					if (part_geometry.is_proxy_surface) {
-						hit_materials->add_fallback_surfaces(1);
+						const bool proxy_alpha = part_has_alpha_proxy && !part_geometry.is_legacy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(geometry_instance, mesh, part_geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+						if (proxy_alpha && hit_attribute_chunk != UINT32_MAX) {
+							hit_materials->add_geometry(geometry_instance, mesh, part_geometry.surface, hit_arena_chunk, true, hit_attribute_chunk, hit_attribute_offset, fed.element_index != UINT32_MAX);
+						} else {
+							hit_materials->add_fallback_surfaces(1);
+						}
 					} else {
 						hit_materials->add_geometry(geometry_instance, mesh, part_geometry.surface, hit_arena_chunk, hit_attribute_chunk != UINT32_MAX, hit_attribute_chunk, hit_attribute_offset, fed.element_index != UINT32_MAX);
 					}
@@ -2347,7 +2491,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			// GodotNext: nextgi_shadow_policy (#145). GI sees the part as before. For shadow rays its geometries follow
 			// the instance's materials: with an alpha-tested one the instance is non-opaque (GI rays force opacity), and
 			// its geometries' alpha table entries tell the candidate loop which to test.
-			const uint32_t shadow_alpha_base = _push_shadow_part(geometry_instance, mesh, part.geometries, fed.shadow_layers);
+			const uint32_t shadow_alpha_base = _push_shadow_part(geometry_instance, mesh, part.geometries, fed.shadow_layers, part.chunk, native_parts);
 			tlas_instance.mask = nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
 			stats.shadow_unallocated_instances += (tlas_instance.mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
 			if (shadow_alpha_base != UINT32_MAX) {
@@ -2564,17 +2708,49 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			record.rt_flags = NEXTGI_RT_FLAG_STATIC;
 			record.tlas_index = record_index;
 			// No card set and no relight pages: GI never hits it.
+			// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Ensure proxy shadow parts carry #130 attribute
+			// streams when an alpha-tested NextGeo surface needs them.
+			bool shadow_proxy_has_alpha = false;
+			if (part.is_proxy) {
+				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+					if (part_geometry.is_proxy_surface && !part_geometry.is_legacy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(deferred.instance, deferred.mesh, part_geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+						shadow_proxy_has_alpha = true;
+						break;
+					}
+				}
+				if (shadow_proxy_has_alpha) {
+					mesh_storage->mesh_nextgi_rt_request_proxy_attributes(deferred.mesh);
+				}
+			}
 			float eps_rt = 0.0f;
 			for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
 				NextGISurfaceRecord surface_record;
-				MeshStorage::NextGIRTSurfaceInfo info;
-				if (mesh_storage->mesh_nextgi_rt_get_surface_info(deferred.mesh, part_geometry.surface, info)) {
-					record.arena_chunk = info.chunk;
-					eps_rt = MAX(eps_rt, info.eps);
-					surface_record.vertex_offset = info.vertex_offset;
-					surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
+				uint32_t hit_arena_chunk = UINT32_MAX;
+				uint32_t hit_attribute_chunk = UINT32_MAX;
+				uint32_t hit_attribute_offset = 0;
+				if (part_geometry.is_proxy_surface) {
+					record.arena_chunk = part.chunk;
+					eps_rt = MAX(eps_rt, part_geometry.eps);
+					surface_record.vertex_offset = part_geometry.vertex_offset;
+					surface_record.index_offset = part_geometry.index_offset;
 					surface_record.triangle_count = part_geometry.triangle_count;
 					surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
+					hit_arena_chunk = part.chunk;
+					hit_attribute_chunk = part_geometry.attribute_chunk;
+					hit_attribute_offset = part_geometry.attribute_offset;
+				} else {
+					MeshStorage::NextGIRTSurfaceInfo info;
+					if (mesh_storage->mesh_nextgi_rt_get_surface_info(deferred.mesh, part_geometry.surface, info)) {
+						record.arena_chunk = info.chunk;
+						eps_rt = MAX(eps_rt, info.eps);
+						surface_record.vertex_offset = info.vertex_offset;
+						surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
+						surface_record.triangle_count = part_geometry.triangle_count;
+						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
+						hit_arena_chunk = info.chunk;
+						hit_attribute_chunk = info.attribute_chunk;
+						hit_attribute_offset = info.attribute_offset;
+					}
 				}
 				surface_records.push_back(surface_record);
 				// GodotNext: path_tracer (#167). The path tracer never reaches a shadow-only surface (no GI bit): its
@@ -2583,7 +2759,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					surface_sources.push_back(SurfaceSource());
 				}
 				if (hit_records) {
-					hit_materials->add_geometry(deferred.instance, deferred.mesh, part_geometry.surface, info.chunk, info.attribute_chunk != UINT32_MAX, info.attribute_chunk, info.attribute_offset, deferred.multimesh_element);
+					if (part_geometry.is_proxy_surface) {
+						const bool proxy_alpha = shadow_proxy_has_alpha && !part_geometry.is_legacy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(deferred.instance, deferred.mesh, part_geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+						if (proxy_alpha && hit_attribute_chunk != UINT32_MAX) {
+							hit_materials->add_geometry(deferred.instance, deferred.mesh, part_geometry.surface, hit_arena_chunk, true, hit_attribute_chunk, hit_attribute_offset, deferred.multimesh_element);
+						} else {
+							hit_materials->add_fallback_surfaces(1);
+						}
+					} else {
+						hit_materials->add_geometry(deferred.instance, deferred.mesh, part_geometry.surface, hit_arena_chunk, hit_attribute_chunk != UINT32_MAX, hit_attribute_chunk, hit_attribute_offset, deferred.multimesh_element);
+					}
 				}
 			}
 			record.origin_offset = nextgi_rt_origin_offset(eps_rt, deferred.max_scale);
@@ -2592,7 +2777,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			if (RSG::rasterizer != nullptr) {
 				mesh_last_tlas_frame[deferred.mesh] = RSG::rasterizer->get_frame_number();
 			}
-			const uint32_t shadow_alpha_base = _push_shadow_part(deferred.instance, deferred.mesh, part.geometries, deferred.layers);
+			const uint32_t shadow_alpha_base = _push_shadow_part(deferred.instance, deferred.mesh, part.geometries, deferred.layers, part.chunk, false);
 			RD::AccelerationStructureInstance tlas_instance;
 			tlas_instance.transform = deferred.transform;
 			tlas_instance.id = record_index;
@@ -2789,7 +2974,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				if (const LocalVector<MeshStorage::NextGIRTPart> *gi_parts = mesh_storage->mesh_nextgi_rt_get_parts(source.mesh)) {
 					gi_part = source.part_index < gi_parts->size() ? &(*gi_parts)[source.part_index] : nullptr;
 				}
-				const uint32_t alpha_base = gi_part != nullptr && source.instance != nullptr ? _push_shadow_alpha(source.instance, source.mesh, gi_part->geometries, source.shadow_layers, false) : UINT32_MAX;
+				if (gi_part != nullptr && gi_part->is_proxy && source.instance != nullptr && (source.shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0) {
+					const RenderGeometryInstanceBase *inst_base = static_cast<const RenderGeometryInstanceBase *>(source.instance);
+					for (const NextGIRTPartGeometry &geom : gi_part->geometries) {
+						if (geom.is_proxy_surface && !geom.is_legacy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(inst_base, source.mesh, geom.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+							mesh_storage->mesh_nextgi_rt_request_proxy_attributes(source.mesh);
+							break;
+						}
+					}
+				}
+				const uint32_t alpha_base = gi_part != nullptr && source.instance != nullptr ? _push_shadow_alpha(source.instance, source.mesh, gi_part->geometries, source.shadow_layers, false, gi_part->chunk, false) : UINT32_MAX;
 				const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, source.blas, cursor, alpha_base != UINT32_MAX ? no_opaque_flags : 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset, source.count_buffer, shadow_mask);
 				if (encoded == 0) {
 					shadow_alpha.resize(alpha_base != UINT32_MAX ? alpha_base : shadow_alpha.size());
@@ -2830,7 +3024,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					if (!part.blas.is_valid() || part.geometries.is_empty() || cursor + source.count > NEXTGI_RT_TLAS_CAPACITY) {
 						continue;
 					}
-					const uint32_t alpha_base = _push_shadow_alpha(source.instance, source.mesh, part.geometries, source.shadow_layers, false);
+					if (part.is_proxy) {
+						const RenderGeometryInstanceBase *inst_base = static_cast<const RenderGeometryInstanceBase *>(source.instance);
+						for (const NextGIRTPartGeometry &geom : part.geometries) {
+							if (geom.is_proxy_surface && !geom.is_legacy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(inst_base, source.mesh, geom.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+								mesh_storage->mesh_nextgi_rt_request_proxy_attributes(source.mesh);
+								break;
+							}
+						}
+					}
+					const uint32_t alpha_base = _push_shadow_alpha(source.instance, source.mesh, part.geometries, source.shadow_layers, false, part.chunk, false);
 					const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, part.blas, cursor, alpha_base != UINT32_MAX ? no_opaque_flags : 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset, source.count_buffer, shadow_mask);
 					if (encoded == 0) {
 						shadow_alpha.resize(alpha_base != UINT32_MAX ? alpha_base : shadow_alpha.size());
@@ -2911,6 +3114,7 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 	struct BuildTarget {
 		RID mesh;
 		uint32_t part_index = UINT32_MAX; // UINT32_MAX = legacy whole-mesh build; else single VGD proxy part.
+		bool is_shadow_part = false;
 	};
 	HashMap<RID, float> max_angular;
 	LocalVector<RID> dirty_meshes;
@@ -2946,26 +3150,35 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 	for (const RID &mesh : dirty_meshes) {
 		const float angular = max_angular[mesh];
 		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
-		const bool is_proxy_mesh = parts != nullptr && !parts->is_empty() && (*parts)[0].is_proxy;
+		const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(mesh);
+		const bool is_proxy_mesh = (parts != nullptr && !parts->is_empty() && (*parts)[0].is_proxy) || (shadow_parts != nullptr && !shadow_parts->is_empty() && (*shadow_parts)[0].is_proxy);
 		if (is_proxy_mesh) {
 			bool any_pending_part = false;
-			for (uint32_t p = 0; p < parts->size(); p++) {
-				const MeshStorage::NextGIRTPart &part = (*parts)[p];
-				if (part.geometries.is_empty() || part.blas.is_valid()) {
-					continue;
+			auto enqueue_proxy_parts = [&](const LocalVector<MeshStorage::NextGIRTPart> *p_list, bool p_shadow) {
+				if (p_list == nullptr) {
+					return;
 				}
-				any_pending_part = true;
-				NextGIBuildItem item;
-				item.id = targets.size();
-				item.triangles = part.triangle_count;
-				item.angular_radius = angular;
-				item.is_new = true;
-				BuildTarget target;
-				target.mesh = mesh;
-				target.part_index = p;
-				targets.push_back(target);
-				items.push_back(item);
-			}
+				for (uint32_t p = 0; p < p_list->size(); p++) {
+					const MeshStorage::NextGIRTPart &part = (*p_list)[p];
+					if (part.geometries.is_empty() || part.blas.is_valid()) {
+						continue;
+					}
+					any_pending_part = true;
+					NextGIBuildItem item;
+					item.id = targets.size();
+					item.triangles = part.triangle_count;
+					item.angular_radius = angular;
+					item.is_new = true;
+					BuildTarget target;
+					target.mesh = mesh;
+					target.part_index = p;
+					target.is_shadow_part = p_shadow;
+					targets.push_back(target);
+					items.push_back(item);
+				}
+			};
+			enqueue_proxy_parts(parts, false);
+			enqueue_proxy_parts(shadow_parts, true);
 			if (!any_pending_part) {
 				mesh_storage->mesh_nextgi_rt_set_blas_dirty(mesh, false);
 			}
@@ -3001,7 +3214,7 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 	for (uint32_t i = 0; i < accepted_count; i++) {
 		const BuildTarget &target = targets[accepted_ids[i]];
 		if (target.part_index != UINT32_MAX) {
-			_build_proxy_part(target.mesh, target.part_index);
+			_build_proxy_part(target.mesh, target.part_index, target.is_shadow_part);
 		} else {
 			_build_dirty_mesh_parts(target.mesh);
 			// Rebuilding a BLAS that this frame's TLAS already references invalidates that TLAS.

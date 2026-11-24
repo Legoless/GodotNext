@@ -287,6 +287,12 @@ Vector2 nextgi_hit_unpack_uv1(const NextGIHitStreamHeader &p_header, const NextG
 // p_vertex_count vertices.
 bool nextgi_hit_pack_arrays(const Array &p_arrays, uint32_t p_vertex_count, Vector<uint8_t> &r_stream);
 
+// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Packs float32 UV0 pairs of a VGD RT proxy part (2 floats per
+// vertex) into a #130 attribute stream (32-byte UV-range header + 20 bytes per vertex). When positions and
+// part-local triangle indices are provided, computes smooth face-averaged vertex normals (Godot CW front face);
+// otherwise normals default to +Z. Returns false when p_uvs is null or p_vertex_count is 0.
+bool nextgi_hit_pack_proxy_uvs(const float *p_uvs, uint32_t p_vertex_count, const float *p_positions, const uint32_t *p_indices, uint32_t p_index_count, Vector<uint8_t> &r_stream);
+
 // Where the stream's inputs sit in an uncompressed surface's vertex and attribute buffers.
 struct NextGIHitSourceLayout {
 	bool valid = false; // False for compressed or 2D surfaces: their region updates leave the stream stale.

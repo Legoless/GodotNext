@@ -53,6 +53,7 @@ private:
 	PackedByteArray surface_eligibility;
 	PackedInt32Array surface_fallback_reasons;
 	PackedFloat32Array rt_proxy_positions;
+	PackedFloat32Array rt_proxy_uvs;
 	PackedByteArray rt_proxy_indices;
 	PackedInt32Array rt_proxy_parts;
 	PackedInt32Array rt_proxy_surface_ranges;
@@ -108,6 +109,10 @@ public:
 	// Float32 xyz, tightly packed, including in double-precision builds.
 	void set_rt_proxy_positions(const PackedFloat32Array &p_positions);
 	PackedFloat32Array get_rt_proxy_positions() const;
+
+	// Float32 uv0 pairs parallel to rt_proxy_positions, tightly packed, including in double-precision builds.
+	void set_rt_proxy_uvs(const PackedFloat32Array &p_uvs);
+	PackedFloat32Array get_rt_proxy_uvs() const;
 
 	// Little-endian uint32 indices, 4 bytes each.
 	void set_rt_proxy_indices(const PackedByteArray &p_indices);

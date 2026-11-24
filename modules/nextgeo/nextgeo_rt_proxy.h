@@ -61,12 +61,16 @@ static_assert(sizeof(NextGeoCardDescriptor) == 32, "NextGeoCardDescriptor must s
 
 // One fixed, view-independent RT proxy of a mesh, in the exact layout of the
 // `VirtualGeometryData` RT proxy fields. Positions are float32 xyz (including
-// in double-precision builds) and indices are little-endian uint32, part-local.
+// in double-precision builds), UVs are float32 uv0 pairs parallel to positions
+// (when the DAG carries UV0), and indices are little-endian uint32, part-local.
 // Vertex and index offsets and counts are in elements, not bytes or floats:
-// a part's vertices start at `positions[vertex_offset * 3]` and its indices at
-// byte `index_offset * 4` of `indices`.
+// a part's vertices start at `positions[vertex_offset * 3]` (and
+// `uvs[vertex_offset * 2]`) and its indices at byte `index_offset * 4` of
+// `indices`.
 struct NextGeoRTProxy {
 	PackedFloat32Array positions;
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Float32 UV0 pairs, tightly packed 2 floats per vertex.
+	PackedFloat32Array uvs;
 	PackedByteArray indices; // Little-endian uint32, 4 bytes per index.
 	// Groups of 4 per BLAS part: vertex_offset, vertex_count, index_offset, index_count.
 	PackedInt32Array parts;

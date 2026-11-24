@@ -238,11 +238,18 @@ struct NextGIRTPartGeometry {
 	// GodotNext: nextgeo_nextgi (#77). Self-contained arena offsets for VGD proxy parts and any
 	// outside-mask legacy surfaces packed into the proxy part allocation.
 	bool is_proxy_surface = false;
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). True for an outside-mask legacy surface packed
+	// into a proxy part (its vertices come from the legacy surface, not the VGD proxy vertex stream).
+	bool is_legacy_surface = false;
 	bool has_stage2_cards = false;
 	uint32_t vertex_offset = 0;
 	uint32_t vertex_count = 0;
 	uint32_t index_offset = 0;
 	uint32_t group_offset = 0;
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Optional per-geometry #130 attribute stream
+	// (VGD proxy parts and #156 native NextGeo parts); UINT32_MAX when no stream is attached.
+	uint32_t attribute_chunk = UINT32_MAX;
+	uint32_t attribute_offset = 0;
 	float eps = 0.0f;
 };
 
@@ -261,6 +268,12 @@ struct NextGIRTProxyPartUpload {
 	uint32_t triangle_count = 0;
 	uint32_t first_surface = 0;
 	uint32_t surface_count = 0;
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Source VGD proxy vertex/index slice for lazy
+	// #130 attribute stream packing (UINT32_MAX when the part carries outside-mask legacy slices only).
+	uint32_t proxy_vertex_offset = UINT32_MAX;
+	uint32_t proxy_vertex_count = 0;
+	uint32_t proxy_index_offset = 0;
+	uint32_t proxy_index_count = 0;
 	LocalVector<NextGIRTPartGeometry> geometries;
 	Vector<uint8_t> payload;
 };
@@ -275,7 +288,8 @@ bool nextgi_rt_plan_vgd_proxy(
 		const NextGIRTLegacySurfaceInput *p_legacy_surfaces,
 		NextGIArenaAllocator &r_allocator,
 		LocalVector<NextGIRTProxyPartUpload> &r_uploads,
-		uint32_t &r_alpha_excluded_count);
+		uint32_t &r_alpha_excluded_count,
+		LocalVector<NextGIRTProxyPartUpload> *r_shadow_uploads = nullptr);
 
 // A planned BLAS part. Whole surfaces are packed first; a surface alone over the cap is split by
 // triangles, never coarsened (D13). A part never spans arena chunks, so its instance record can
@@ -640,18 +654,19 @@ private:
 	uint32_t _shadow_texture_slot(RID p_rd_texture);
 	void _release_shadow_texture_slots();
 	// p_retrace: the instance has hit records, so shader-code alpha can go to the retrace (not a GPU-written one).
-	// p_index_chunk != UINT32_MAX overrides the surface's static index location (used by posed skinned slots, #302).
-	void _fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry, uint32_t p_index_chunk = UINT32_MAX, uint32_t p_index_offset = 0);
+	// p_index_chunk != UINT32_MAX overrides the surface's static index location (posed skinned slots #302, NextGeo #303).
+	// p_override_attributes uses p_attribute_chunk/p_attribute_offset instead of MeshStorage's per-surface stream (#303).
+	void _fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry, uint32_t p_index_chunk = UINT32_MAX, uint32_t p_index_offset = 0, bool p_override_attributes = false, uint32_t p_attribute_chunk = UINT32_MAX, uint32_t p_attribute_offset = 0, bool p_can_have_stream = true);
 	void _update_shadow_allocation(const ::RenderDataRD *p_render_data);
 	// One shadow instance word per TLAS instance, in TLAS order. p_alpha_base is the first alpha table entry of a
 	// non-opaque instance, or UINT32_MAX.
 	void _push_shadow_word(uint32_t p_layers, uint32_t p_alpha_base);
 	// The alpha table entries of a part's geometries when one is alpha-tested (for the instance's effective
 	// materials). Returns the first entry, or UINT32_MAX for an opaque instance (nothing is pushed).
-	uint32_t _push_shadow_alpha(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, bool p_retrace);
+	uint32_t _push_shadow_alpha(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, bool p_retrace, uint32_t p_part_chunk = UINT32_MAX, bool p_native_parts = false);
 	// The word of a part's TLAS instance, and its alpha table entries when a geometry is alpha-tested. Returns the
 	// first entry, or UINT32_MAX for an opaque instance.
-	uint32_t _push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers);
+	uint32_t _push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, uint32_t p_part_chunk = UINT32_MAX, bool p_native_parts = false);
 	// GodotNext: nextgi_skinned_alpha_shadows (#302). Shadow word and optional alpha entry for a posed skinned slot.
 	uint32_t _push_shadow_skinned(RenderGeometryInstance *p_instance, RID p_mesh, uint32_t p_surface, uint32_t p_slot_chunk, uint32_t p_slot_index_offset, uint32_t p_layers);
 	void _push_shadow_check_source(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, const Transform3D &p_transform, uint32_t p_layers);
@@ -674,7 +689,7 @@ private:
 	void _finish_surface_sources(const LocalVector<NextGIInstanceRecord> &p_records, const LocalVector<NextGISurfaceRecord> &p_surfaces);
 
 	void _build_dirty_mesh_parts(RID p_mesh);
-	void _build_proxy_part(RID p_mesh, uint32_t p_part_index);
+	void _build_proxy_part(RID p_mesh, uint32_t p_part_index, bool p_is_shadow_part = false);
 	void _ensure_record_buffers(uint32_t p_instance_count, uint32_t p_surface_count);
 	uint32_t _mesh_triangle_count(RID p_mesh) const;
 	void _apply_as_budget(uint64_t p_frame);

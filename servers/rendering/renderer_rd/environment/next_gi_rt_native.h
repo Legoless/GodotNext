@@ -219,15 +219,18 @@ struct NextGeoRTNativePartPlan {
 void nextgeo_rt_native_split_parts(const uint32_t *p_triangles, const uint32_t *p_vertices, const uint32_t *p_surfaces, uint32_t p_count, uint32_t p_max_triangles, LocalVector<NextGeoRTNativePartPlan> &r_parts);
 
 // RT-arena layout of a part: float3 positions, then uint32 indices, then a u16 Stage-2 card group
-// per triangle for each run, every block 16-byte aligned (the surface record keeps the group
-// table's offset in its upper 28 bits, plan §6.3).
+// per triangle for each run, and (when p_with_attributes is true, #303) the #130 attribute stream
+// followed by a 32-byte UV-range reduction scratch, every block 16-byte aligned (the surface record
+// keeps the group table's offset in its upper 28 bits, plan §6.3).
 struct NextGeoRTNativePartLayout {
 	uint32_t index_offset = 0;
 	LocalVector<uint32_t> run_group_offsets;
+	uint32_t attribute_offset = UINT32_MAX;
+	uint32_t attribute_scratch_offset = UINT32_MAX;
 	uint32_t size = 0;
 };
 
-void nextgeo_rt_native_part_layout(const NextGeoRTNativePartPlan &p_part, NextGeoRTNativePartLayout &r_layout);
+void nextgeo_rt_native_part_layout(const NextGeoRTNativePartPlan &p_part, NextGeoRTNativePartLayout &r_layout, bool p_with_attributes = false);
 
 // Stage-2 card groups (#77). The proxy's cards are keyed by the group of the proxy cut; when no
 // group needed depth layers those keys are the DAG group indices themselves (direct).
@@ -346,6 +349,8 @@ protected:
 		uint64_t bytes = 0; // Build size of every part, reserved at admission.
 		bool admitted = false;
 		bool reclaim = false; // MN4 released it for another set of the mesh: it leaves at the next TLAS phase.
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). True when the set extracted #130 attribute streams.
+		bool has_attributes = false;
 		uint32_t refs = 0; // Buckets holding it as current or pending.
 		uint64_t last_band_use_frame = 0; // Some instance traced it as its own band's set.
 		uint64_t no_card_triangles = 0;
@@ -366,6 +371,7 @@ protected:
 		float target_error = -1.0f;
 		uint64_t generation = UINT64_MAX;
 		bool coarse = false;
+		bool attributes = false; // GodotNext: nextgi_nextgeo_alpha_shadows (#303)
 		// The cap refused (or released) this bucket's cut: it is cut again only once the cap has room
 		// for refused_bytes, or when the cut changes.
 		bool refused = false;
@@ -380,6 +386,10 @@ protected:
 		Bucket buckets[NEXTGEO_RT_NATIVE_BAND_COUNT];
 		HashMap<uint64_t, Set> sets;
 		uint64_t last_demand_frame = 0;
+		// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Held for NEXTGI_SHADOW_HYSTERESIS_FRAMES while
+		// an instance of this mesh has an alpha-tested effective material; opaque meshes keep this false.
+		bool want_attributes = false;
+		uint64_t last_attributes_frame = 0;
 		// The largest proxy build size seen while the mesh has native state: the MN4 base keeps it while
 		// the proxy is rebuilt (dirty, defragmented), so a rebuild does not release native sets.
 		uint64_t proxy_build_bytes = 0;
@@ -450,6 +460,9 @@ public:
 	// parts the instance traces this frame, or nullptr to keep the proxy. r_eps is the ray origin
 	// eps of those parts for this instance's bucket.
 	const LocalVector<Part> *select(RID p_mesh, uint64_t p_instance_key, const AABB &p_world_bounds, const Transform3D &p_transform, const Vector3 &p_camera, NextGeoRTNativeExclusion p_exclusion, float &r_eps);
+	// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Requests #130 attribute streams on p_mesh's native
+	// sets while an instance carries an alpha-tested effective material (held for NEXTGI_SHADOW_HYSTERESIS_FRAMES).
+	void request_mesh_attributes(RID p_mesh);
 	// The builds phase (line 1b): cuts again where the residency or the band's target changed,
 	// extracts new sets, admits them against the cap and builds their parts within p_triangle_budget.
 	void build(uint32_t p_triangle_budget);

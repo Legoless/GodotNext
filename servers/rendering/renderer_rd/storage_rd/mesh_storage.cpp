@@ -908,6 +908,107 @@ void MeshStorage::_mesh_nextgi_hit_patch_attributes(Mesh::Surface *p_surface, bo
 	RD::get_singleton()->buffer_update(nextgi_rt_chunks[p_surface->rt_attr_chunk].buffer, p_surface->rt_attr_offset + begin, end - begin, p_surface->rt_attr_cpu.ptr() + begin);
 }
 
+void MeshStorage::_mesh_nextgi_free_part_attributes(NextGIRTPart &r_part) {
+	if (r_part.attr_chunk != UINT32_MAX && r_part.attr_size > 0) {
+		NextGIArenaAllocator::Allocation allocation;
+		allocation.chunk = r_part.attr_chunk;
+		allocation.offset = r_part.attr_offset;
+		allocation.size = r_part.attr_size;
+		nextgi_rt_allocator.free_range(allocation);
+		nextgi_hit_attribute_bytes = nextgi_hit_attribute_bytes >= r_part.attr_size ? nextgi_hit_attribute_bytes - r_part.attr_size : 0;
+	}
+	r_part.attr_chunk = UINT32_MAX;
+	r_part.attr_offset = 0;
+	r_part.attr_size = 0;
+	for (NextGIRTPartGeometry &geom : r_part.geometries) {
+		if (geom.is_proxy_surface && !geom.is_legacy_surface) {
+			geom.attribute_chunk = UINT32_MAX;
+			geom.attribute_offset = 0;
+		}
+	}
+}
+
+void MeshStorage::_mesh_nextgi_free_proxy_attributes(Mesh *p_mesh) {
+	if (p_mesh == nullptr) {
+		return;
+	}
+	for (NextGIRTPart &part : p_mesh->nextgi_parts) {
+		_mesh_nextgi_free_part_attributes(part);
+	}
+	for (NextGIRTPart &part : p_mesh->nextgi_shadow_parts) {
+		_mesh_nextgi_free_part_attributes(part);
+	}
+	p_mesh->nextgi_proxy_attributes_requested = false;
+}
+
+// GodotNext: nextgi_nextgeo_alpha_shadows (#303). Packs VGD proxy UV0s (and smooth face-averaged normals) into
+// #130 attribute streams for alpha-tested NextGeo proxy parts only. Opaque NextGeo proxies allocate nothing.
+void MeshStorage::_mesh_nextgi_ensure_proxy_attributes(RID p_mesh_rid, Mesh *p_mesh) {
+	if (!nextgi_hit_attributes_enabled || !nextgi_rt_enabled || p_mesh == nullptr || !p_mesh->nextgi_proxy_uploaded || RD::get_singleton() == nullptr) {
+		return;
+	}
+	const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage != nullptr ? RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh_rid) : nullptr;
+	if (desc == nullptr || desc->rt_proxy_uvs.is_empty()) {
+		return;
+	}
+	const uint64_t total_uv_verts = uint64_t(desc->rt_proxy_uvs.size() / 2);
+	const uint64_t total_pos_verts = uint64_t(desc->rt_proxy_positions.size() / 3);
+	const uint64_t total_indices = uint64_t(desc->rt_proxy_indices.size() / 4);
+	auto ensure_list = [&](LocalVector<NextGIRTPart> &p_parts) {
+		for (NextGIRTPart &part : p_parts) {
+			if (!part.is_proxy || part.attr_chunk != UINT32_MAX || part.proxy_vertex_offset == UINT32_MAX || part.proxy_vertex_count == 0) {
+				continue;
+			}
+			if (uint64_t(part.proxy_vertex_offset) + part.proxy_vertex_count > total_uv_verts) {
+				continue;
+			}
+			const float *uv_ptr = desc->rt_proxy_uvs.ptr() + uint64_t(part.proxy_vertex_offset) * 2u;
+			const float *pos_ptr = (uint64_t(part.proxy_vertex_offset) + part.proxy_vertex_count <= total_pos_verts) ? (desc->rt_proxy_positions.ptr() + uint64_t(part.proxy_vertex_offset) * 3u) : nullptr;
+			const uint32_t *idx_ptr = (pos_ptr != nullptr && part.proxy_index_count >= 3u && uint64_t(part.proxy_index_offset) + part.proxy_index_count <= total_indices) ? (reinterpret_cast<const uint32_t *>(desc->rt_proxy_indices.ptr()) + part.proxy_index_offset) : nullptr;
+			const uint32_t idx_cnt = idx_ptr != nullptr ? part.proxy_index_count : 0u;
+			Vector<uint8_t> stream;
+			if (!nextgi_hit_pack_proxy_uvs(uv_ptr, part.proxy_vertex_count, pos_ptr, idx_ptr, idx_cnt, stream) || stream.is_empty()) {
+				continue;
+			}
+			const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(uint32_t(stream.size()));
+			if (!allocation.is_valid()) {
+				continue;
+			}
+			const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(allocation.chunk);
+			if (chunk_buffer.is_null()) {
+				nextgi_rt_allocator.free_range(allocation);
+				continue;
+			}
+			RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset, uint32_t(stream.size()), stream.ptr());
+			part.attr_chunk = allocation.chunk;
+			part.attr_offset = allocation.offset;
+			part.attr_size = allocation.size;
+			nextgi_hit_attribute_bytes += allocation.size;
+			for (NextGIRTPartGeometry &geom : part.geometries) {
+				if (geom.is_proxy_surface && !geom.is_legacy_surface) {
+					geom.attribute_chunk = allocation.chunk;
+					geom.attribute_offset = allocation.offset;
+				}
+			}
+		}
+	};
+	ensure_list(p_mesh->nextgi_shadow_parts);
+	if (p_mesh->nextgi_proxy_attributes_requested) {
+		ensure_list(p_mesh->nextgi_parts);
+	}
+}
+
+void MeshStorage::mesh_nextgi_rt_request_proxy_attributes(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	if (mesh == nullptr || mesh->nextgi_skip_rt_arena) {
+		return;
+	}
+	mesh->nextgi_proxy_attributes_requested = true;
+	if (nextgi_hit_attributes_enabled && mesh->nextgi_proxy_uploaded) {
+		_mesh_nextgi_ensure_proxy_attributes(p_mesh, mesh);
+	}
+}
+
 void MeshStorage::mesh_nextgi_set_hit_attributes(bool p_enabled) {
 	if (nextgi_hit_attributes_enabled == p_enabled) {
 		return;
@@ -918,6 +1019,11 @@ void MeshStorage::mesh_nextgi_set_hit_attributes(bool p_enabled) {
 		Mesh *mesh = mesh_owner.get_or_null(mesh_rid);
 		if (mesh == nullptr) {
 			continue;
+		}
+		if (!p_enabled) {
+			_mesh_nextgi_free_proxy_attributes(mesh);
+		} else if (mesh->nextgi_proxy_uploaded && (mesh->nextgi_proxy_attributes_requested || !mesh->nextgi_shadow_parts.is_empty())) {
+			_mesh_nextgi_ensure_proxy_attributes(mesh_rid, mesh);
 		}
 		for (uint32_t i = 0; i < mesh->surface_count; i++) {
 			Mesh::Surface *surface = mesh->surfaces[i];
@@ -985,30 +1091,29 @@ void MeshStorage::_mesh_nextgi_release_empty_chunks() {
 }
 
 void MeshStorage::_mesh_nextgi_rt_clear_parts(Mesh *p_mesh) {
-	for (NextGIRTPart &part : p_mesh->nextgi_parts) {
-		if (part.blas.is_valid()) {
-			RD::get_singleton()->free_rid(part.blas);
-			part.blas = RID();
+	auto clear_list = [&](LocalVector<NextGIRTPart> &p_parts) {
+		for (NextGIRTPart &part : p_parts) {
+			if (part.blas.is_valid()) {
+				RD::get_singleton()->free_rid(part.blas);
+				part.blas = RID();
+			}
+			_mesh_nextgi_free_part_attributes(part);
+			if (part.allocation_size > 0 && part.chunk != UINT32_MAX) {
+				NextGIArenaAllocator::Allocation allocation;
+				allocation.chunk = part.chunk;
+				allocation.offset = part.allocation_offset;
+				allocation.size = part.allocation_size;
+				nextgi_rt_allocator.free_range(allocation);
+				part.chunk = UINT32_MAX;
+				part.allocation_size = 0;
+			}
 		}
-		if (part.allocation_size > 0 && part.chunk != UINT32_MAX) {
-			NextGIArenaAllocator::Allocation allocation;
-			allocation.chunk = part.chunk;
-			allocation.offset = part.allocation_offset;
-			allocation.size = part.allocation_size;
-			nextgi_rt_allocator.free_range(allocation);
-			part.chunk = UINT32_MAX;
-			part.allocation_size = 0;
-		}
-	}
-	p_mesh->nextgi_parts.clear();
-	// GodotNext: nextgi_shadow_policy (#145). Shadow parts own no arena range.
-	for (NextGIRTPart &part : p_mesh->nextgi_shadow_parts) {
-		if (part.blas.is_valid()) {
-			RD::get_singleton()->free_rid(part.blas);
-			part.blas = RID();
-		}
-	}
-	p_mesh->nextgi_shadow_parts.clear();
+		p_parts.clear();
+	};
+	clear_list(p_mesh->nextgi_parts);
+	// GodotNext: nextgi_shadow_policy (#145) / nextgi_nextgeo_alpha_shadows (#303). Non-proxy shadow parts own
+	// no arena range (allocation_size == 0); proxy shadow parts own their arena and attribute ranges.
+	clear_list(p_mesh->nextgi_shadow_parts);
 	p_mesh->nextgi_proxy_uploaded = false;
 	p_mesh->nextgi_proxy_alpha_excluded = 0;
 	_mesh_nextgi_release_empty_chunks();
@@ -1706,7 +1811,8 @@ void MeshStorage::mesh_nextgi_sync_vgd_proxy(RID p_mesh) {
 	const uint32_t live_instances = has_vg ? RSG::virtual_mesh_storage->mesh_get_live_instance_count(p_mesh) : 0u;
 	const bool want_proxy = nextgi_rt_enabled && nextgi_hwrt_tier_active && has_ray_query && has_vg && live_instances > 0;
 	if (!want_proxy) {
-		if (mesh->nextgi_proxy_uploaded || (!has_vg && !mesh->nextgi_parts.is_empty() && mesh->nextgi_parts[0].is_proxy)) {
+		const bool has_proxy_parts = (!mesh->nextgi_parts.is_empty() && mesh->nextgi_parts[0].is_proxy) || (!mesh->nextgi_shadow_parts.is_empty() && mesh->nextgi_shadow_parts[0].is_proxy);
+		if (mesh->nextgi_proxy_uploaded || (!has_vg && has_proxy_parts)) {
 			_mesh_nextgi_rt_clear_parts(mesh);
 			mesh->nextgi_blas_dirty = false;
 		} else if (has_vg) {
@@ -1748,6 +1854,7 @@ void MeshStorage::mesh_nextgi_sync_vgd_proxy(RID p_mesh) {
 	}
 
 	LocalVector<NextGIRTProxyPartUpload> uploads;
+	LocalVector<NextGIRTProxyPartUpload> shadow_uploads;
 	uint32_t alpha_excluded_count = 0;
 	if (!nextgi_rt_plan_vgd_proxy(
 				nextgi_hwrt_tier_active,
@@ -1759,40 +1866,60 @@ void MeshStorage::mesh_nextgi_sync_vgd_proxy(RID p_mesh) {
 				legacy_surfaces.ptr(),
 				nextgi_rt_allocator,
 				uploads,
-				alpha_excluded_count)) {
+				alpha_excluded_count,
+				&shadow_uploads)) {
+		mesh->nextgi_proxy_alpha_excluded = alpha_excluded_count;
 		_mesh_nextgi_release_empty_chunks();
 		mesh->nextgi_blas_dirty = false;
 		return;
 	}
 
 	mesh->nextgi_proxy_alpha_excluded = alpha_excluded_count;
-	for (uint32_t u = 0; u < uploads.size(); u++) {
-		const NextGIRTProxyPartUpload &upload = uploads[u];
-		const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(upload.allocation.chunk);
-		if (chunk_buffer.is_null()) {
-			for (uint32_t rem = u; rem < uploads.size(); rem++) {
-				nextgi_rt_allocator.free_range(uploads[rem].allocation);
+	auto upload_parts = [&](const LocalVector<NextGIRTProxyPartUpload> &p_src, LocalVector<NextGIRTPart> &r_dst, const LocalVector<NextGIRTProxyPartUpload> *p_remaining_other) -> bool {
+		for (uint32_t u = 0; u < p_src.size(); u++) {
+			const NextGIRTProxyPartUpload &upload = p_src[u];
+			const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(upload.allocation.chunk);
+			if (chunk_buffer.is_null()) {
+				for (uint32_t rem = u; rem < p_src.size(); rem++) {
+					nextgi_rt_allocator.free_range(p_src[rem].allocation);
+				}
+				if (p_remaining_other != nullptr) {
+					for (const NextGIRTProxyPartUpload &other : *p_remaining_other) {
+						nextgi_rt_allocator.free_range(other.allocation);
+					}
+				}
+				_mesh_nextgi_rt_clear_parts(mesh);
+				mesh->nextgi_blas_dirty = false;
+				return false;
 			}
-			_mesh_nextgi_rt_clear_parts(mesh);
-			mesh->nextgi_blas_dirty = false;
-			return;
+			if (!upload.payload.is_empty()) {
+				RD::get_singleton()->buffer_update(chunk_buffer, upload.allocation.offset, upload.payload.size(), upload.payload.ptr());
+			}
+			NextGIRTPart part;
+			part.is_proxy = true;
+			part.chunk = upload.allocation.chunk;
+			part.allocation_offset = upload.allocation.offset;
+			part.allocation_size = upload.allocation.size;
+			part.proxy_vertex_offset = upload.proxy_vertex_offset;
+			part.proxy_vertex_count = upload.proxy_vertex_count;
+			part.proxy_index_offset = upload.proxy_index_offset;
+			part.proxy_index_count = upload.proxy_index_count;
+			part.first_surface = upload.first_surface;
+			part.surface_count = upload.surface_count;
+			part.triangle_count = upload.triangle_count;
+			part.geometries = upload.geometries;
+			r_dst.push_back(part);
 		}
-		if (!upload.payload.is_empty()) {
-			RD::get_singleton()->buffer_update(chunk_buffer, upload.allocation.offset, upload.payload.size(), upload.payload.ptr());
-		}
-		NextGIRTPart part;
-		part.is_proxy = true;
-		part.chunk = upload.allocation.chunk;
-		part.allocation_offset = upload.allocation.offset;
-		part.allocation_size = upload.allocation.size;
-		part.first_surface = upload.first_surface;
-		part.surface_count = upload.surface_count;
-		part.triangle_count = upload.triangle_count;
-		part.geometries = upload.geometries;
-		mesh->nextgi_parts.push_back(part);
+		return true;
+	};
+	if (!upload_parts(uploads, mesh->nextgi_parts, &shadow_uploads) || !upload_parts(shadow_uploads, mesh->nextgi_shadow_parts, nullptr)) {
+		return;
 	}
 	mesh->nextgi_proxy_uploaded = true;
-	mesh->nextgi_blas_dirty = !mesh->nextgi_parts.is_empty();
+	mesh->nextgi_blas_dirty = !mesh->nextgi_parts.is_empty() || !mesh->nextgi_shadow_parts.is_empty();
+	if (nextgi_hit_attributes_enabled && (mesh->nextgi_proxy_attributes_requested || !mesh->nextgi_shadow_parts.is_empty())) {
+		_mesh_nextgi_ensure_proxy_attributes(p_mesh, mesh);
+	}
 	_mesh_nextgi_release_empty_chunks();
 }
 
@@ -1873,11 +2000,17 @@ MeshStorage::NextGIRTStats MeshStorage::mesh_nextgi_get_rt_stats() const {
 		}
 		// GodotNext: nextgi_shadow_policy (#145). The shadow parts (never compacted) count as uncompacted BLAS bytes.
 		for (const NextGIRTPart &part : mesh->nextgi_shadow_parts) {
+			if (part.attr_chunk != UINT32_MAX) {
+				out.rt_attribute_surfaces++;
+			}
 			if (rd != nullptr && part.blas.is_valid()) {
 				out.blas_bytes_uncompacted += part.uncompacted_bytes > 0 ? part.uncompacted_bytes : rd->acceleration_structure_get_size_bytes(part.blas);
 			}
 		}
 		for (const NextGIRTPart &part : mesh->nextgi_parts) {
+			if (part.attr_chunk != UINT32_MAX) {
+				out.rt_attribute_surfaces++;
+			}
 			const uint64_t current_bytes = (rd != nullptr && part.blas.is_valid()) ? rd->acceleration_structure_get_size_bytes(part.blas) : 0;
 			const uint64_t uncompacted = part.uncompacted_bytes > 0 ? part.uncompacted_bytes : current_bytes;
 			out.blas_bytes_uncompacted += uncompacted;

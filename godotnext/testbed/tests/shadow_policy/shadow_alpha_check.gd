@@ -25,6 +25,15 @@ extends Node3D
 ##   skinned_shader_hole   ShaderMaterial alpha scissor as an instance override (GI-visible + FORCE_NO_OPAQUE, Full
 ##                         HWRT material retrace; shadows as opaque without the retrace or on the fallback sun)
 ##   skinned_opaque        opaque skinned control (unaffected, solid shadow)
+## GodotNext: nextgi_nextgeo_alpha_shadows (#303). Four virtualized NextGeo casters on a ground behind the main ground:
+##   nextgeo_texture_hole      BaseMaterial3D alpha scissor mesh material (#153 eligible; shadow-only proxy part per
+##                             D17 with proxy UV0 #130 stream, bindless inline alpha path)
+##   nextgeo_texture_override  opaque virtualized mesh with BaseMaterial3D alpha scissor instance override (GI-visible
+##                             proxy or #156 native NextGeo BLAS + FORCE_NO_OPAQUE, bindless inline alpha path)
+##   nextgeo_shader_hole       opaque virtualized mesh with ShaderMaterial instance override (GI-visible proxy or #156
+##                             native NextGeo BLAS + FORCE_NO_OPAQUE, Full HWRT material retrace)
+##   nextgeo_opaque            opaque virtualized control (unchanged proxy/native BLAS, solid shadow)
+## Pass "-- --native-nextgeo" to also exercise #156 native NextGeo RT BLASes (rendering/nextgeo/ray_tracing_mode = 1).
 ## With rendering/global_illumination/nextgi/debug/read_shadow_mask on, the ground card's shadow mask must match the
 ## expected footprint of every caster, away from the footprint and hole edges (one mask texel: every ground texel is
 ## traced straight up from the texel the mask records), in the holes and in the rings around them, for every
@@ -55,6 +64,7 @@ extends Node3D
 ## Prints one "GODOTNEXT_RESULT" line and exits 0 when every check passes, 1 otherwise.
 
 const MASK_SETTING := "rendering/global_illumination/nextgi/debug/read_shadow_mask"
+const NEXTGEO_RT_MODE_SETTING := "rendering/nextgeo/ray_tracing_mode"
 const PLATE := 4.8
 const HOLE := 1.2 ## Half the hole's width: the middle half of the plate.
 const PLATE_Y := 1.5
@@ -65,7 +75,7 @@ const SUN_MASKS := [3, 5, 9, 17, 33, 65, 129, 3]
 const FALLBACK_SUN := 6
 const HOLD_FRAMES := 60
 const LONG_HIDE_FRAMES := 200
-const REFUSED_POSITION := Vector3(0.0, 1.5, -16.0) ## Off the ground: it shadows nothing the mask check reads.
+const REFUSED_POSITION := Vector3(-18.0, 1.5, -16.0) ## Off every ground: it shadows nothing the mask check reads.
 ## GodotNext: nextgi_hit_discard (#304). The discard hole's ground (center x, z, and size): beside the main ground, and
 ## near enough to the camera that its card keeps mask texels for the hole and the ring.
 const MAIN_GROUND_HALF := 10.0
@@ -76,6 +86,10 @@ const DISCARD_GROUND_SIZE := 9.0
 const SKINNED_GROUND_CENTER := Vector2(-17.5, 3.0)
 const SKINNED_GROUND_SIZE := 14.0
 const SKINNED_BIND_OFFSET := Vector3(0.0, 0.0, -3.0)
+## GodotNext: nextgi_nextgeo_alpha_shadows (#303). The virtualized NextGeo casters' ground behind the main ground.
+const NEXTGEO_GROUND_CENTER := Vector2(0.0, -17.5)
+const NEXTGEO_GROUND_SIZE := 14.0
+const NEXTGEO_SUBDIV := 8
 const GPU_WRITTEN_ELEMENTS := 10 ## --gpu-written: five single-plate MultiMeshes and the five-plate stack.
 const SETTLE_FRAMES := 120 ## Without the retrace: frames the mask gets once the alpha paths are ready.
 
@@ -99,8 +113,15 @@ const SKINNED_CASTERS := [
 	["skinned_shader_hole", Vector2(-20.8, 6.2), "hole"],
 	["skinned_opaque", Vector2(-14.2, -0.2), "shadow"],
 ]
+## GodotNext: nextgi_nextgeo_alpha_shadows (#303). Virtualized NextGeo casters on the NextGeo ground.
+const NEXTGEO_CASTERS := [
+	["nextgeo_texture_hole", Vector2(-3.3, -14.3), "hole"],
+	["nextgeo_shader_hole", Vector2(3.3, -14.3), "hole"],
+	["nextgeo_opaque", Vector2(-3.3, -20.7), "shadow"],
+	["nextgeo_texture_override", Vector2(3.3, -20.7), "hole"],
+]
 ## Casters whose alpha comes from shader code: without the retrace they shadow as opaque.
-const SHADER_ALPHA_HOLES := ["shader_hole", "discard_hole", "skinned_shader_hole"]
+const SHADER_ALPHA_HOLES := ["shader_hole", "discard_hole", "skinned_shader_hole", "nextgeo_shader_hole"]
 
 var _failures := PackedStringArray()
 var _result := {}
@@ -110,6 +131,8 @@ var _suns := 1
 var _fallback_slot := -1
 var _plates := {}
 var _gpu_written := false
+var _native_nextgeo := false
+var _temp_files := PackedStringArray()
 var _multimeshes: Array[MultiMesh] = []
 var _first_transforms: Array[Transform3D] = []
 
@@ -122,6 +145,8 @@ func _ready() -> void:
 			_suns = clampi(int(arg.trim_prefix("--suns=")), 1, SUN_MASKS.size())
 		elif arg == "--gpu-written":
 			_gpu_written = true
+		elif arg == "--native-nextgeo":
+			_native_nextgeo = true
 		elif arg == "--expect=inline":
 			_expect_mode = "INLINE"
 			_expect_retrace = false
@@ -129,7 +154,10 @@ func _ready() -> void:
 			_expect_mode = "SIMPLIFIED_MATERIAL"
 			_expect_retrace = false
 	_result["gpu_written"] = _gpu_written
+	_result["native_nextgeo"] = _native_nextgeo
 	ProjectSettings.set_setting(MASK_SETTING, true)
+	if _native_nextgeo:
+		ProjectSettings.set_setting(NEXTGEO_RT_MODE_SETTING, 1)
 	_build()
 	_run()
 
@@ -248,6 +276,19 @@ void fragment() {
 		_add_skinned_plate("skinned_texture_hole", texture_material, false)
 		_add_skinned_plate("skinned_shader_hole", shader_material, true)
 		_add_skinned_plate("skinned_opaque", StandardMaterial3D.new(), false)
+
+		# GodotNext: nextgi_nextgeo_alpha_shadows (#303). Virtualized NextGeo ground + masked, override and opaque casters.
+		var nextgeo_ground := MeshInstance3D.new()
+		nextgeo_ground.name = "nextgeo_ground"
+		var nextgeo_ground_mesh := BoxMesh.new()
+		nextgeo_ground_mesh.size = Vector3(NEXTGEO_GROUND_SIZE, 0.2, NEXTGEO_GROUND_SIZE)
+		nextgeo_ground.mesh = nextgeo_ground_mesh
+		nextgeo_ground.position = Vector3(NEXTGEO_GROUND_CENTER.x, -0.1, NEXTGEO_GROUND_CENTER.y)
+		add_child(nextgeo_ground, true)
+		_add_nextgeo_plate("nextgeo_texture_hole", texture_material, false)
+		_add_nextgeo_plate("nextgeo_shader_hole", shader_material, true)
+		_add_nextgeo_plate("nextgeo_opaque", StandardMaterial3D.new(), false)
+		_add_nextgeo_plate("nextgeo_texture_override", texture_material, true)
 
 	for i in _suns:
 		var sun := DirectionalLight3D.new()
@@ -391,6 +432,68 @@ func _add_skinned_plate(p_name: String, p_material: Material, p_override: bool) 
 	_plates[p_name] = mi
 
 
+## GodotNext: nextgi_nextgeo_alpha_shadows (#303). A virtualized NextGeo plate built through ImporterMesh so its
+## VirtualGeometryData carries rt_proxy_uvs and (for masked mesh materials) #153 masked eligibility.
+func _add_nextgeo_plate(p_name: String, p_material: Material, p_override: bool) -> void:
+	var center := Vector2.ZERO
+	for caster in NEXTGEO_CASTERS:
+		if caster[0] == p_name:
+			center = caster[1]
+	var half := PLATE * 0.5
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	for iz in NEXTGEO_SUBDIV + 1:
+		var v := float(iz) / float(NEXTGEO_SUBDIV)
+		var z := lerpf(-half, half, v)
+		for ix in NEXTGEO_SUBDIV + 1:
+			var u := float(ix) / float(NEXTGEO_SUBDIV)
+			var x := lerpf(-half, half, u)
+			verts.append(Vector3(x, 0.0, z))
+			norms.append(Vector3.UP)
+			uvs.append(Vector2(u, v))
+	var row := NEXTGEO_SUBDIV + 1
+	for iz in NEXTGEO_SUBDIV:
+		for ix in NEXTGEO_SUBDIV:
+			var i0 := iz * row + ix
+			var i1 := i0 + 1
+			var i2 := i0 + row
+			var i3 := i2 + 1
+			indices.append(i0)
+			indices.append(i1)
+			indices.append(i3)
+			indices.append(i0)
+			indices.append(i3)
+			indices.append(i2)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var importer := ImporterMesh.new()
+	var mesh_material: Material = StandardMaterial3D.new() if p_override else p_material
+	importer.add_surface(Mesh.PRIMITIVE_TRIANGLES, arrays, [] as Array[Array], {}, mesh_material)
+	var ngm_path := "user://shadow_alpha_nextgeo_%s.ngm" % p_name
+	_temp_files.append(ngm_path)
+	var err := importer.build_virtual_geometry(ngm_path)
+	var mesh := importer.get_mesh()
+	var vg := mesh.get_virtual_geometry() if mesh != null else null
+	_check(err == OK and vg != null and not vg.rt_proxy_uvs.is_empty(), "%s: virtualized NextGeo mesh carries rt_proxy_uvs (err=%d)" % [p_name, err])
+
+	var mi := MeshInstance3D.new()
+	mi.name = p_name
+	mi.mesh = mesh
+	mi.position = Vector3(center.x, PLATE_Y, center.y)
+	mi.gi_mode = GeometryInstance3D.GI_MODE_STATIC
+	if p_override:
+		mi.material_override = p_material
+	add_child(mi, true)
+	_plates[p_name] = mi
+
+
 ## One updated element per frame keeps a MultiMesh in the RT dynamic class, so the GPU writes its TLAS instances
 ## (as tests/nextgi_dynamic_rt does).
 func _process(_delta: float) -> void:
@@ -409,19 +512,23 @@ func _run() -> void:
 	_check(_result["hardware_ray_tracing_mode"] == _expect_mode, "the Hardware Ray Tracing Mode is %s (%s)" % [_expect_mode, _result["hardware_ray_tracing_mode"]])
 	for key in ["shadow_alpha_instances", "shadow_only_instances", "shadow_texture_entries", "shadow_cut_entries", "shadow_retrace_entries", "shadow_opaque_alpha_entries", "shadow_word_misaligned", "shadow_allocation", "rt_gpu_written_instances", "hit_groups_linked", "hit_groups_pending", "hit_fallback_geometries", "hit_shadow_retrace_dispatches", "hit_materials_created"]:
 		_result[key] = counters.get(key, -1)
-	for key in ["src_shadow_alpha_variant", "src_shadow_relight_variant", "src_shadow_retrace_capacity", "src_shadow_retrace_frames", "src_shadow_retrace_appended", "src_shadow_retrace_occluded", "src_shadow_retrace_clear", "src_shadow_rays", "src_max_shadowed_lights", "rt_skinned_instances"]:
+	for key in ["src_shadow_alpha_variant", "src_shadow_relight_variant", "src_shadow_retrace_capacity", "src_shadow_retrace_frames", "src_shadow_retrace_appended", "src_shadow_retrace_occluded", "src_shadow_retrace_clear", "src_shadow_rays", "src_max_shadowed_lights", "rt_skinned_instances", "nextgeo_ray_tracing_mode", "rt_native_instances", "rt_native_current_sets"]:
 		_result[key] = info.get(key, -1)
 	_check(int(counters.get("shadow_alpha_instances", 0)) > 0, "non-opaque (alpha-tested) TLAS instances")
 	_check(int(counters.get("shadow_only_instances", 0)) > 0, "shadow-only TLAS instances (surfaces GI does not see)")
-	# Exactly the fixture's alpha entries: the texture hole and skinned texture hole are sampled (a detector that
-	# missed BaseMaterial3D's texture alpha would send them to the retrace), the constant cut and the five stack
-	# plates are constants (the stack's GPU-written elements share their MultiMesh's one entry).
-	var texture_entries := 1 if _gpu_written else 2
+	# Exactly the fixture's alpha entries: the texture hole, skinned texture hole, NextGeo masked mesh and NextGeo
+	# texture override are sampled (a detector that missed BaseMaterial3D's texture alpha would send them to the
+	# retrace), the constant cut and the five stack plates are constants (the stack's GPU-written elements share their
+	# MultiMesh's one entry).
+	var texture_entries := 1 if _gpu_written else 4
 	var cut_entries := 2 if _gpu_written else 6
 	_check(int(counters.get("shadow_texture_entries", 0)) == texture_entries, "%d sampled-texture alpha entries (%d)" % [texture_entries, int(counters.get("shadow_texture_entries", 0))])
 	_check(int(counters.get("shadow_cut_entries", 0)) == cut_entries, "%d constant-alpha entries, the constant cut and the stack (%d)" % [cut_entries, int(counters.get("shadow_cut_entries", 0))])
 	if not _gpu_written:
 		_check(int(info.get("rt_skinned_instances", 0)) == SKINNED_CASTERS.size(), "%d posed skinned casters in the RT scene (%d)" % [SKINNED_CASTERS.size(), int(info.get("rt_skinned_instances", 0))])
+		if _native_nextgeo:
+			_check(String(info.get("nextgeo_ray_tracing_mode", "")) == "native", "native NextGeo RT mode is active (%s)" % String(info.get("nextgeo_ray_tracing_mode", "")))
+			_check(int(info.get("rt_native_instances", 0)) == 3, "three GI-visible NextGeo casters trace native BLASes (%d)" % int(info.get("rt_native_instances", 0)))
 	if _gpu_written:
 		_check(int(counters.get("rt_gpu_written_instances", 0)) == GPU_WRITTEN_ELEMENTS, "the GPU wrote the casters' %d TLAS instances (%d)" % [GPU_WRITTEN_ELEMENTS, int(counters.get("rt_gpu_written_instances", 0))])
 		# No hit record: the shader hole cannot be retraced and shadows as opaque.
@@ -433,20 +540,20 @@ func _run() -> void:
 	if _gpu_written:
 		pass
 	elif _expect_retrace:
-		# The shader hole, the discard hole (#304) and the skinned shader hole (#302) go to the retrace; the refused
-		# plate's shader is refused by the hit groups, so once its verdict is known it shadows as opaque.
-		_check(int(counters.get("shadow_retrace_entries", 0)) == 3, "three retrace entries, the shader hole, the discard hole and the skinned shader hole (%d)" % int(counters.get("shadow_retrace_entries", 0)))
+		# The shader hole, discard hole (#304), skinned shader hole (#302) and NextGeo shader hole (#303) go to the
+		# retrace; the refused plate's shader is refused by the hit groups, so once its verdict is known it shadows as opaque.
+		_check(int(counters.get("shadow_retrace_entries", 0)) == 4, "four retrace entries, the shader, discard, skinned shader and NextGeo shader holes (%d)" % int(counters.get("shadow_retrace_entries", 0)))
 		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 1, "one opaque alpha entry, the refused plate (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
 		_check(int(info.get("src_shadow_retrace_appended", 0)) > 0, "the relight appended retrace records")
 		_check(int(info.get("src_shadow_retrace_occluded", 0)) > 0, "the retrace found occluded rays")
 		_check(int(info.get("src_shadow_retrace_clear", 0)) > 0, "the retrace found clear rays")
 	elif _expect_mode != "FULL":
-		# GodotNext: nextgi_hwrt_mode (#286). No material hit group exists in this mode: the shader hole, the discard
-		# hole, the refused plate and the skinned shader hole are opaque entries, the material retrace reports the mode
-		# and the relight leaves it nothing.
+		# GodotNext: nextgi_hwrt_mode (#286). No material hit group exists in this mode: the shader hole, discard hole,
+		# refused plate, skinned shader hole and NextGeo shader hole are opaque entries, the material retrace reports
+		# the mode and the relight leaves it nothing.
 		_check(_result["material_retrace"] == "HWRT_MODE_" + _expect_mode, "the material retrace reports HWRT_MODE_%s (%s)" % [_expect_mode, _result["material_retrace"]])
 		_check(int(counters.get("shadow_retrace_entries", -1)) == 0, "no retrace entry in %s (%d)" % [_expect_mode, int(counters.get("shadow_retrace_entries", -1))])
-		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 4, "four opaque alpha entries, the shader hole, the discard hole, the refused plate and the skinned shader hole (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
+		_check(int(counters.get("shadow_opaque_alpha_entries", 0)) == 5, "five opaque alpha entries, the shader, discard, refused, skinned shader and NextGeo shader casters (%d)" % int(counters.get("shadow_opaque_alpha_entries", 0)))
 		_check(int(info.get("src_shadow_retrace_capacity", -1)) == 0, "the relight leaves the retrace no record (capacity %d)" % int(info.get("src_shadow_retrace_capacity", -1)))
 		_check(not bool(counters.get("shadow_wants_retrace", true)), "nothing asks for the retrace")
 	else:
@@ -457,6 +564,7 @@ func _run() -> void:
 	if not _gpu_written:
 		_check_mask(info, "", "discard")
 		_check_mask(info, "", "skinned")
+		_check_mask(info, "", "nextgeo")
 	if _suns == 1 and _expect_retrace and not _gpu_written:
 		await _check_hold()
 	_finish()
@@ -485,6 +593,8 @@ func _wait_for_retrace() -> Dictionary:
 		var paths_ready := int(info.get("src_shadow_relight_variant", -1)) == 1
 		if _gpu_written:
 			paths_ready = paths_ready and int(counters.get("rt_gpu_written_instances", 0)) == GPU_WRITTEN_ELEMENTS
+		elif _native_nextgeo:
+			paths_ready = paths_ready and int(info.get("rt_native_instances", 0)) == 3 and int(counters.get("shadow_texture_entries", 0)) == 4
 		if not retrace:
 			if ready_frame < 0:
 				if paths_ready:
@@ -526,7 +636,7 @@ func _find_fallback_slot(p_counters: Dictionary) -> void:
 
 
 func _set_holes_visible(p_visible: bool) -> void:
-	for plate_name in ["texture_hole", "shader_hole", "discard_hole", "skinned_texture_hole", "skinned_shader_hole"]:
+	for plate_name in ["texture_hole", "shader_hole", "discard_hole", "skinned_texture_hole", "skinned_shader_hole", "nextgeo_texture_hole", "nextgeo_texture_override", "nextgeo_shader_hole"]:
 		if _plates.has(plate_name):
 			(_plates[plate_name] as Node3D).visible = p_visible
 
@@ -574,11 +684,12 @@ func _check_hold() -> void:
 	_result["shown_created"] = int(counters.get("hit_materials_created", -1))
 	_check(int(counters.get("hit_materials_created", -1)) == created + 1, "showing the holes again makes the hit groups once more (%d after %d)" % [int(counters.get("hit_materials_created", -1)), created])
 	_check(int(info.get("src_shadow_relight_variant", -1)) == 1, "the relight runs its alpha variant again (%d)" % int(info.get("src_shadow_relight_variant", -1)))
-	_check(int(counters.get("shadow_retrace_entries", 0)) == 3 and int(counters.get("shadow_texture_entries", 0)) == 2, "the alpha entries are back (retrace %d, texture %d)" % [int(counters.get("shadow_retrace_entries", 0)), int(counters.get("shadow_texture_entries", 0))])
+	_check(int(counters.get("shadow_retrace_entries", 0)) == 4 and int(counters.get("shadow_texture_entries", 0)) == 4, "the alpha entries are back (retrace %d, texture %d)" % [int(counters.get("shadow_retrace_entries", 0)), int(counters.get("shadow_texture_entries", 0))])
 	_check(int(counters.get("shadow_word_misaligned", -1)) == 0, "the shadow instance words stay in step (%d)" % int(counters.get("shadow_word_misaligned", -1)))
 	_check_mask(info, "shown again: ")
 	_check_mask(info, "shown again: ", "discard")
 	_check_mask(info, "shown again: ", "skinned")
+	_check_mask(info, "shown again: ", "nextgeo")
 
 
 func _expected_lit(p_world: Vector3, p_margin: float, p_slot: int, p_casters: Array = CASTERS) -> int:
@@ -629,6 +740,12 @@ func _check_mask(p_info: Dictionary, p_prefix: String, p_ground := "") -> void:
 		casters = SKINNED_CASTERS
 		key = "skinned_"
 		prefix = p_prefix + "skinned ground: "
+	elif p_ground == "nextgeo":
+		ground_center = NEXTGEO_GROUND_CENTER
+		ground_half = NEXTGEO_GROUND_SIZE * 0.5
+		casters = NEXTGEO_CASTERS
+		key = "nextgeo_"
+		prefix = p_prefix + "nextgeo ground: "
 	var pages: Array = p_info.get("src_mask_pages", [])
 	_check(not pages.is_empty(), prefix + "shadow mask readback")
 	var page: Dictionary = {}
@@ -739,6 +856,12 @@ func _check(p_condition: bool, p_message: String) -> void:
 
 func _finish() -> void:
 	ProjectSettings.set_setting(MASK_SETTING, false)
+	if _native_nextgeo:
+		ProjectSettings.set_setting(NEXTGEO_RT_MODE_SETTING, 0)
+	for path in _temp_files:
+		var abs_path := ProjectSettings.globalize_path(path)
+		if FileAccess.file_exists(abs_path):
+			DirAccess.remove_absolute(abs_path)
 	_result["pass"] = _failures.is_empty()
 	_result["failures"] = _failures
 	print("GODOTNEXT_RESULT " + JSON.stringify(_result))

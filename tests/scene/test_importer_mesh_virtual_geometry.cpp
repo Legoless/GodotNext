@@ -273,6 +273,7 @@ void expect_same_geometry(const Ref<VirtualGeometryData> &p_a, const Ref<Virtual
 	CHECK(p_a->get_ngm_sha256() == p_b->get_ngm_sha256());
 	CHECK(p_a->get_ngm_sha256().size() == 32);
 	CHECK(p_a->get_rt_proxy_positions() == p_b->get_rt_proxy_positions());
+	CHECK(p_a->get_rt_proxy_uvs() == p_b->get_rt_proxy_uvs());
 	CHECK(p_a->get_rt_proxy_indices() == p_b->get_rt_proxy_indices());
 	CHECK(p_a->get_rt_proxy_parts() == p_b->get_rt_proxy_parts());
 	CHECK(p_a->get_rt_proxy_surface_ranges() == p_b->get_rt_proxy_surface_ranges());
@@ -301,6 +302,7 @@ void check_filled_proxy(const Ref<VirtualGeometryData> &p_data, float p_max_exte
 	CHECK(p_data->get_card_descriptors().size() % 32 == 0);
 	CHECK(p_data->get_rt_proxy_triangle_groups().size() == (p_data->get_rt_proxy_indices().size() / 12) * 2);
 	CHECK(p_data->get_rt_proxy_positions().size() % 3 == 0);
+	CHECK(p_data->get_rt_proxy_uvs().size() == (p_data->get_rt_proxy_positions().size() / 3) * 2);
 	CHECK(p_data->get_rt_proxy_indices().size() % 4 == 0);
 	CHECK(p_data->get_rt_proxy_eps() == doctest::Approx(expected_proxy_eps(p_max_extent)));
 	CHECK(p_data->get_rt_proxy_error() <= p_data->get_rt_proxy_eps());

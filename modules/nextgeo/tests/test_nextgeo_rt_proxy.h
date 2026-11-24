@@ -404,6 +404,8 @@ TEST_CASE("[NextGeo][RTProxy] Two builds are byte-identical and fill VirtualGeom
 	REQUIRE(nextgeo_build_rt_proxy(dag, aabb, 0.02f, 1, first) == OK);
 	REQUIRE(nextgeo_build_rt_proxy(dag, aabb, 0.02f, 1, second) == OK);
 	CHECK(first.positions == second.positions);
+	CHECK(first.uvs == second.uvs);
+	CHECK(first.uvs.size() == (first.positions.size() / 3) * 2);
 	CHECK(first.indices == second.indices);
 	CHECK(first.parts == second.parts);
 	CHECK(first.surface_ranges == second.surface_ranges);
@@ -418,6 +420,7 @@ TEST_CASE("[NextGeo][RTProxy] Two builds are byte-identical and fill VirtualGeom
 	data.instantiate();
 	REQUIRE(nextgeo_fill_vgd_rt_proxy(first, data) == OK);
 	CHECK(data->get_rt_proxy_positions() == first.positions);
+	CHECK(data->get_rt_proxy_uvs() == first.uvs);
 	CHECK(data->get_rt_proxy_indices() == first.indices);
 	CHECK(data->get_rt_proxy_parts() == first.parts);
 	CHECK(data->get_rt_proxy_surface_ranges() == first.surface_ranges);
@@ -519,6 +522,61 @@ TEST_CASE("[NextGeo][RTProxy] A 40 m mesh keeps its 10 cm walls under eps_rt = r
 		}
 	}
 	CHECK_MESSAGE(bad_rays == 0, "Every ray hits the proxy twice, 10 cm +- 2*eps_rt apart (worst deviation ", worst_deviation, ").");
+}
+
+TEST_CASE("[NextGeo][RTProxy] UV0s are carried on proxy vertices and UV seams are preserved (#303)") {
+	// Two triangles meeting along x = 0.5 with distinct UVs on each side of the seam (u=0.25 vs u=0.75).
+	NextGeoSurfaceInput surface;
+	surface.positions.push_back(Vector3(0.0f, 0.0f, 0.0f));
+	surface.positions.push_back(Vector3(0.5f, 0.0f, 0.0f));
+	surface.positions.push_back(Vector3(0.5f, 0.0f, 1.0f));
+	surface.positions.push_back(Vector3(0.5f, 0.0f, 0.0f));
+	surface.positions.push_back(Vector3(1.0f, 0.0f, 0.0f));
+	surface.positions.push_back(Vector3(0.5f, 0.0f, 1.0f));
+	for (int i = 0; i < 6; i++) {
+		surface.normals.push_back(Vector3(0.0f, 1.0f, 0.0f));
+	}
+	surface.uv0.push_back(Vector2(0.0f, 0.0f));
+	surface.uv0.push_back(Vector2(0.25f, 0.0f));
+	surface.uv0.push_back(Vector2(0.25f, 1.0f));
+	surface.uv0.push_back(Vector2(0.75f, 0.0f));
+	surface.uv0.push_back(Vector2(1.0f, 0.0f));
+	surface.uv0.push_back(Vector2(0.75f, 1.0f));
+	for (uint32_t i = 0; i < 6; i++) {
+		surface.indices.push_back(i);
+	}
+	NextGeoBuildInput input;
+	input.surfaces.push_back(surface);
+	input.page_size = TEST_PAGE_SIZE;
+	input.use_threads = false;
+	NextGeoBuildOutput dag;
+	REQUIRE(nextgeo_build_dag(input, dag) == OK);
+
+	NextGeoRTProxy proxy;
+	REQUIRE(nextgeo_build_rt_proxy(dag, input_aabb(input), 0.02f, 1, proxy) == OK);
+	REQUIRE(proxy.part_count() == 1);
+	const uint32_t v_cnt = uint32_t(proxy.positions.size() / 3);
+	REQUIRE(uint32_t(proxy.uvs.size()) == v_cnt * 2u);
+	// Both seam vertices (x=0.5, z=0 and x=0.5, z=1) must stay distinct across u=0.25 and u=0.75.
+	CHECK(v_cnt == 6u);
+	bool saw_left_seam = false;
+	bool saw_right_seam = false;
+	for (uint32_t v = 0; v < v_cnt; v++) {
+		const float px = proxy.positions[v * 3 + 0];
+		const float pz = proxy.positions[v * 3 + 2];
+		const float ux = proxy.uvs[v * 2 + 0];
+		const float uy = proxy.uvs[v * 2 + 1];
+		if (Math::is_equal_approx(px, 0.5f) && Math::is_equal_approx(pz, 0.0f)) {
+			if (Math::is_equal_approx(ux, 0.25f) && Math::is_equal_approx(uy, 0.0f)) {
+				saw_left_seam = true;
+			}
+			if (Math::is_equal_approx(ux, 0.75f) && Math::is_equal_approx(uy, 0.0f)) {
+				saw_right_seam = true;
+			}
+		}
+	}
+	CHECK(saw_left_seam);
+	CHECK(saw_right_seam);
 }
 
 } // namespace TestNextGeoRTProxy
