@@ -8424,6 +8424,8 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 			nextgi_source = next_gi.get_specular_filter_debug_texture(nextgi_view);
 		} else if (nextgi_view == RendererRD::NextGI::DEBUG_VIEW_LITE_PROBES) {
 			nextgi_source = next_gi.get_lite_debug_texture(rb.ptr());
+		} else if (nextgi_view == RendererRD::NextGI::DEBUG_VIEW_WORLD_CACHE) {
+			nextgi_source = next_gi.get_world_cache_debug_texture();
 		} else {
 			nextgi_source = next_gi.get_denoise_debug_texture(nextgi_view);
 		}

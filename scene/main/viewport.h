@@ -256,6 +256,8 @@ public:
 		DEBUG_DRAW_VSM_CACHE,
 		DEBUG_DRAW_VSM_OVERDRAW,
 		DEBUG_DRAW_VSM_CLIPMAP,
+		// GodotNext: nextgi_world_cache (#294)
+		DEBUG_DRAW_NEXTGI_WORLD_CACHE,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

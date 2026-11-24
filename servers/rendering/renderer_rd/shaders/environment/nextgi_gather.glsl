@@ -71,4 +71,46 @@ layout(set = 0, binding = 43, std430) restrict buffer GatherHitCounters {
 gi_hl_counters;
 #endif
 
+// GodotNext: nextgi_world_cache (#294). Sparse world-space lighting cache replacing SRC on HWRT.
+#ifdef MODE_WORLD_CACHE
+#include "nextgi_world_cache_common_inc.glsl"
+
+layout(set = 0, binding = 44, std430) restrict readonly buffer GatherWCKeys {
+	uint data[];
+}
+wc_keys;
+
+layout(set = 0, binding = 45, std430) restrict readonly buffer GatherWCRadiance {
+	vec4 data[];
+}
+wc_radiance;
+
+bool nextgi_wc_lookup(vec3 p_world, vec3 p_normal, vec3 p_camera_pos, out vec3 r_radiance) {
+	r_radiance = vec3(0.0);
+	float dist = length(p_world - p_camera_pos);
+	uint base_level = nextgi_wc_level_for_distance(dist);
+	uint face = nextgi_wc_normal_face(p_normal);
+	for (uint l = 0u; l < 2u; l++) {
+		uint level = base_level + l;
+		if (level >= NEXTGI_WC_LEVELS) {
+			break;
+		}
+		ivec3 cell = nextgi_wc_quantize(p_world, level);
+		uint key = nextgi_wc_make_key(cell, level, face);
+		uint base_slot = nextgi_wc_hash_bucket(cell, level, face) * NEXTGI_WC_SLOTS_PER_BUCKET;
+		for (uint w = 0u; w < NEXTGI_WC_SLOTS_PER_BUCKET; w++) {
+			if (wc_keys.data[base_slot + w] == key) {
+				vec4 rad = wc_radiance.data[base_slot + w];
+				if (rad.a > 0.0) {
+					r_radiance = rad.rgb;
+					return true;
+				}
+				return false;
+			}
+		}
+	}
+	return false;
+}
+#endif
+
 #include "nextgi_gather_body_inc.glsl"

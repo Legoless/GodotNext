@@ -245,6 +245,8 @@ class Node3DEditorViewport : public Control {
 		VIEW_DISPLAY_VSM_CACHE,
 		VIEW_DISPLAY_VSM_OVERDRAW,
 		VIEW_DISPLAY_VSM_CLIPMAP,
+		// GodotNext: nextgi_world_cache (#294)
+		VIEW_DISPLAY_NEXTGI_WORLD_CACHE,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 

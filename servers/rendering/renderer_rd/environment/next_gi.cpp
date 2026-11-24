@@ -46,12 +46,13 @@
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
-// GodotNext: nextgi_hit_groups (#130), nextgi_hit_lighting (#129)
+// GodotNext: nextgi_hit_groups (#130), nextgi_hit_lighting (#129), nextgi_world_cache (#294)
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_lighting.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_shadows.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_shadow_check.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_world_cache.h"
 // GodotNext: nextgeo_rt_native (#156)
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -573,11 +574,17 @@ void NextGI::init(bool p_forward_plus) {
 	const Quality new_quality = Quality(CLAMP(int(GLOBAL_GET("rendering/global_illumination/nextgi/quality")), 0, QUALITY_MAX - 1));
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
+	device_api_name = rd != nullptr ? rd->get_device_api_name() : String();
 	if (rd != nullptr) {
-		collect_device_inputs(rd, rd->get_device_api_name(), rd->get_device_type(), new_inputs);
+		collect_device_inputs(rd, device_api_name, rd->get_device_type(), new_inputs);
 	}
 	// GodotNext: nextgi_hwrt_mode (#286). Read at startup only, like UE's per-platform setting.
 	hit_mode = read_hardware_ray_tracing_mode();
+	// GodotNext: nextgi_world_cache (#294). Off by default, read at startup only.
+	world_cache_requested = read_world_cache();
+	world_cache_replaces_src = false;
+	world_cache_last_active = false;
+	world_cache_last_reason = int(NEXTGI_WC_REASON_OFF);
 	// GodotNext: ps_swrt_trace (#186, #188). Before the safety net, so no self-test runs.
 	deny_ray_query = _deny_ray_query();
 	apply_ray_query_denial(new_inputs, deny_ray_query);
@@ -593,6 +600,15 @@ void NextGI::init(bool p_forward_plus) {
 
 	// GodotNext: nextgi_rt_scene
 	_ensure_rt_scene();
+
+	// GodotNext: nextgi_world_cache (#294). Log unsupported startup configurations once per session.
+	if (world_cache_requested && new_inputs.project_enabled) {
+		const NextGIWorldCacheVerdict wc_init = evaluate_world_cache(false);
+		world_cache_last_reason = int(wc_init.reason);
+		if (!wc_init.replaces_src) {
+			_log_world_cache_fallback(int(wc_init.reason));
+		}
+	}
 }
 
 bool NextGI::keep_when_hwrt() {
@@ -777,6 +793,89 @@ NextGIHitLighting *NextGI::ensure_hit_lighting() {
 	return hit_lighting;
 }
 
+// GodotNext: nextgi_world_cache (#294)
+bool NextGI::read_world_cache() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings == nullptr || !settings->has_setting("rendering/global_illumination/nextgi/world_cache")) {
+		return false;
+	}
+	return bool(GLOBAL_GET("rendering/global_illumination/nextgi/world_cache"));
+}
+
+bool NextGI::is_world_cache_active() const {
+	return world_cache_last_active && world_cache != nullptr && world_cache->is_ready();
+}
+
+RID NextGI::get_world_cache_debug_texture() const {
+	return world_cache != nullptr ? world_cache->get_debug_texture() : RID();
+}
+
+void NextGI::_free_world_cache() {
+	if (world_cache != nullptr) {
+		memdelete(world_cache);
+		world_cache = nullptr;
+	}
+	world_cache_last_active = false;
+}
+
+void NextGI::_free_src_and_relight() {
+	if (src != nullptr) {
+		src->free();
+		memdelete(src);
+		src = nullptr;
+	}
+	if (relight != nullptr) {
+		memdelete(relight);
+		relight = nullptr;
+	}
+}
+
+void NextGI::_log_world_cache_fallback(int p_reason) {
+	const NextGIWorldCacheReason reason = NextGIWorldCacheReason(p_reason);
+	if (nextgi_world_cache_should_log_reason(reason, world_cache_logged_reasons)) {
+		const char *msg = nextgi_world_cache_reason_message(reason);
+		if (msg != nullptr && msg[0] != '\0') {
+			WARN_PRINT(msg);
+		}
+	}
+}
+
+NextGIWorldCacheVerdict NextGI::evaluate_world_cache(bool p_require_current_records) const {
+	const bool hwrt = result.tier == TIER_HWRT && (singleton != this || rt_scene != nullptr);
+	const bool swrt = result.tier == TIER_SOFTWARE;
+	const NextGIHitAvailability avail = NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_WORLD_CACHE));
+	const bool raygen_ready = hit_materials == nullptr ? !hit_init_failed : hit_materials->has_world_cache_raygen();
+	const bool has_records = hit_materials != nullptr && hit_materials->has_current_records();
+	return nextgi_world_cache_evaluate(
+			world_cache_requested,
+			hwrt,
+			swrt,
+			device_api_name,
+			inputs.is_metal,
+			NextGIHitMode(hit_mode),
+			avail,
+			raygen_ready,
+			has_records,
+			p_require_current_records);
+}
+
+void NextGI::_update_world_cache(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices) {
+	const NextGIWorldCacheVerdict verdict = evaluate_world_cache(true);
+	if (!verdict.active || rt_scene == nullptr || hit_materials == nullptr) {
+		world_cache_last_active = false;
+		world_cache_last_reason = int(verdict.reason);
+		return;
+	}
+	if (world_cache == nullptr) {
+		world_cache = memnew(NextGIWorldCache);
+	}
+	const bool debug_vis = active_debug_view == DEBUG_VIEW_WORLD_CACHE;
+	const RID normal_roughness = p_normal_roughness_slices != nullptr ? p_normal_roughness_slices[0] : RID();
+	const bool ok = world_cache->update(p_render_data, rt_scene, hit_materials, normal_roughness, debug_vis);
+	world_cache_last_active = ok && world_cache->is_ready();
+	world_cache_last_reason = world_cache_last_active ? int(NEXTGI_WC_REASON_ACTIVE) : int(verdict.reason);
+}
+
 // GodotNext: nextgi_shadow_policy (#145)
 void NextGI::_free_shadow_check() {
 	if (shadow_check != nullptr) {
@@ -828,7 +927,7 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 	// GodotNext: nextgi_hwrt_mode (#286). Inline makes no hit pipeline; Simplified Material makes the base
 	// library alone, with no material groups and no attribute stream.
 	const NextGIHitMode mode = NextGIHitMode(hit_mode);
-	if (hit_materials != nullptr && hit_materials_mode != hit_mode) {
+	if (hit_materials != nullptr && (hit_materials_mode != hit_mode || hit_materials_world_cache != world_cache_requested)) {
 		// init() read another mode (doctests): the hit groups are made again for it, once their tables are freed.
 		_free_hit_materials();
 	}
@@ -841,8 +940,9 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 	if (availability == NEXTGI_HIT_AVAILABLE && hit_materials == nullptr) {
 		// GodotNext: nextgi_shadow_policy (#145). The RT scene's texture table, which the shadow rays' alpha path shares
 		// (Direct3D 12 holds two texture or storage-buffer tables at a time), in every mode.
-		hit_materials = memnew(NextGIHitMaterials(nextgi_hit_mode_material_groups(mode), rt_scene != nullptr ? rt_scene->ensure_shadow_texture_table() : RID()));
+		hit_materials = memnew(NextGIHitMaterials(nextgi_hit_mode_material_groups(mode), rt_scene != nullptr ? rt_scene->ensure_shadow_texture_table() : RID(), world_cache_requested));
 		hit_materials_mode = hit_mode;
+		hit_materials_world_cache = world_cache_requested;
 		hit_materials_created++;
 		if (!hit_materials->is_ready()) {
 			// Latched until the consumers go away, so a failure is not retried (and logged) every frame.
@@ -955,6 +1055,11 @@ Dictionary NextGI::get_status() const {
 	status["hit_lighting_gi"] = read_hit_lighting_gi();
 	status["hit_lighting_gi_active"] = hit_lighting_gi_last_active;
 	status["hit_lighting_gi_reason"] = String(hit_lighting_gi_last_reason);
+	// GodotNext: nextgi_world_cache (#294)
+	status["world_cache"] = world_cache_requested;
+	status["world_cache_active"] = is_world_cache_active();
+	status["world_cache_replaces_src"] = world_cache_replaces_src;
+	status["world_cache_reason"] = String(nextgi_world_cache_reason_name(NextGIWorldCacheReason(world_cache_last_reason)));
 	_append_swrt_info(status);
 	return status;
 }
@@ -1066,6 +1171,27 @@ Dictionary NextGI::get_counters() const {
 	counters["hit_lighting_gi_dispatches"] = int64_t(0);
 	if (hit_lighting != nullptr) {
 		hit_lighting->fill_counters(counters, hit_lighting_gi_last_active);
+	}
+	// GodotNext: nextgi_world_cache (#294)
+	counters["world_cache"] = world_cache_requested;
+	counters["world_cache_active"] = is_world_cache_active();
+	counters["world_cache_replaces_src"] = world_cache_replaces_src;
+	counters["world_cache_reason"] = String(nextgi_world_cache_reason_name(NextGIWorldCacheReason(world_cache_last_reason)));
+	counters["world_cache_src_allocated"] = src != nullptr || relight != nullptr;
+	if (world_cache != nullptr) {
+		world_cache->fill_counters(counters);
+	} else {
+		counters["world_cache_bytes"] = int64_t(0);
+		counters["world_cache_dispatches"] = int64_t(0);
+		counters["world_cache_paths_traced"] = int64_t(0);
+		counters["world_cache_primary_hits"] = int64_t(0);
+		counters["world_cache_bounce_hits"] = int64_t(0);
+		counters["world_cache_cells_inserted"] = int64_t(0);
+		counters["world_cache_cells_updated"] = int64_t(0);
+		counters["world_cache_cells_active"] = int64_t(0);
+		counters["world_cache_cells_evicted"] = int64_t(0);
+		counters["world_cache_hash_collisions"] = int64_t(0);
+		counters["world_cache_shadow_rays"] = int64_t(0);
 	}
 	// GodotNext: rt_shadows (#141). Standalone HWRT ray-traced shadows telemetry.
 	if (rt_shadows != nullptr) {
@@ -1179,6 +1305,8 @@ NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) 
 			return DEBUG_VIEW_SPECULAR_DENOISED;
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES:
 			return DEBUG_VIEW_LITE_PROBES;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE:
+			return DEBUG_VIEW_WORLD_CACHE;
 		default:
 			return DEBUG_VIEW_MAX;
 	}
@@ -1234,6 +1362,9 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 	}
 	if (p_view == DEBUG_VIEW_LITE_PROBES) {
 		view.label = "lite probes";
+	}
+	if (p_view == DEBUG_VIEW_WORLD_CACHE) {
+		view.label = "world cache";
 	}
 	return view;
 }
@@ -1291,6 +1422,18 @@ Dictionary NextGI::get_tier_info() const {
 	info["hit_lighting_gi_marked_hits"] = int64_t(hit_lighting != nullptr && hit_lighting_gi_last_active ? hit_lighting->get_counters().last_gi_marked_hits : 0u);
 	info["hit_lighting_gi_shadow_rays"] = int64_t(hit_lighting != nullptr && hit_lighting_gi_last_active ? hit_lighting->get_counters().last_gi_shadow_rays : 0u);
 	info["hit_lighting_gi_dispatches"] = int64_t(hit_lighting != nullptr ? hit_lighting->get_counters().gi_dispatches : 0u);
+	// GodotNext: nextgi_world_cache (#294)
+	info["world_cache"] = world_cache_requested;
+	info["world_cache_active"] = is_world_cache_active();
+	info["world_cache_replaces_src"] = world_cache_replaces_src;
+	info["world_cache_reason"] = String(nextgi_world_cache_reason_name(NextGIWorldCacheReason(world_cache_last_reason)));
+	info["world_cache_src_allocated"] = src != nullptr || relight != nullptr;
+	if (world_cache != nullptr) {
+		world_cache->fill_info(info);
+	} else {
+		info["world_cache_bytes"] = int64_t(0);
+		info["world_cache_dispatches"] = int64_t(0);
+	}
 	{
 		Dictionary by_consumer;
 		by_consumer["hit_lighting"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING)));
@@ -1300,6 +1443,8 @@ Dictionary NextGI::get_tier_info() const {
 		by_consumer["check"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_CHECK)));
 		// GodotNext: path_tracer (#167)
 		by_consumer["path_tracer"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_PATH_TRACER)));
+		// GodotNext: nextgi_world_cache (#294)
+		by_consumer["world_cache"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_WORLD_CACHE)));
 		info["hit_groups_by_consumer"] = by_consumer;
 	}
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
@@ -1610,6 +1755,9 @@ void NextGI::begin_frame(uint64_t p_frame) {
 		memdelete(swrt_trace);
 		swrt_trace = nullptr;
 	}
+	// GodotNext: nextgi_world_cache (#294). A tier change releases World Cache GPU buffers.
+	_free_world_cache();
+	world_cache_replaces_src = false;
 	voxel_lighting_frame = UINT64_MAX;
 	voxel_lighting_slot = "none";
 	ray_query_versions_at_tier = ShaderRD::get_ray_query_versions_created();
@@ -1804,12 +1952,6 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	// GodotNext: nextgi_frame_tier (#186). Idempotent: render_scene() already ran it for this frame.
 	begin_frame(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 
-	// GodotNext: nextgi_src_relight
-	// Pages are assigned during the TLAS phase, which runs after card capture and before relight.
-	if (relight == nullptr) {
-		relight = memnew(NextGIRelight);
-		relight->init();
-	}
 	if (gather == nullptr) {
 		gather = memnew(NextGIGather);
 		gather->init();
@@ -1866,7 +2008,27 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		// GodotNext: nextgi_shadow_policy (#145). Casters whose alpha comes from shader code in the last TLAS phase
 		// ask for the hit groups: their shadow rays retrace through the material any-hit stages.
 		set_hit_consumer(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, hwrt_frame && rt_scene != nullptr && rt_scene->wants_shadow_retrace());
+		// GodotNext: nextgi_world_cache (#294). Request the hit-material pipeline when World Cache is eligible.
+		const bool wc_can_request_hits = world_cache_requested && hwrt_frame && !inputs.is_metal && nextgi_world_cache_api_supported(device_api_name);
+		set_hit_consumer(NEXTGI_HIT_CONSUMER_WORLD_CACHE, wc_can_request_hits);
 		_update_hit_materials(hwrt_frame, render_frame_number);
+		// GodotNext: nextgi_world_cache (#294). Decide whether World Cache replaces SRC on this view before allocating SRC.
+		const NextGIWorldCacheVerdict wc_verdict = evaluate_world_cache(false);
+		world_cache_replaces_src = wc_verdict.replaces_src;
+		if (!wc_verdict.replaces_src) {
+			world_cache_last_active = false;
+			world_cache_last_reason = int(wc_verdict.reason);
+			_free_world_cache();
+			if (world_cache_requested) {
+				_log_world_cache_fallback(int(wc_verdict.reason));
+			}
+		} else {
+			// When World Cache replaces SRC, never allocate, capture, or relight the Surface Cache.
+			_free_src_and_relight();
+			if (world_cache == nullptr || !world_cache->is_ready()) {
+				world_cache_last_reason = int(wc_verdict.reason);
+			}
+		}
 		// Re-evaluate after _update_hit_materials() so raygen readiness and init failures are reflected immediately.
 		const NextGIHitLightingVerdict resolved_hl = evaluate_hit_lighting_for_environment(p_render_data->environment);
 		const bool scenario_active = wants_hit_lighting && hwrt_frame && hit_materials != nullptr && hit_materials->has_hit_lighting_raygen();
@@ -1912,6 +2074,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	const bool shadow_check_on = hwrt_frame && rt_scene != nullptr && GLOBAL_GET_CACHED(bool, "rendering/global_illumination/nextgi/debug/shadow_ray_check");
 	if (rt_scene != nullptr && new_scenario) {
 		rt_scene->set_shadow_check_sources_enabled(shadow_check_on);
+	}
+	// GodotNext: nextgi_src_relight / nextgi_world_cache (#294).
+	// Allocate SRC relight only when the Surface Cache is active (not replaced by the World Cache).
+	if (!world_cache_replaces_src && relight == nullptr) {
+		relight = memnew(NextGIRelight);
+		relight->init();
 	}
 
 	// Every slot emits its timestamp, also while it has no work yet.
@@ -1961,9 +2129,15 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			// change applies at the next frame's begin_frame().
 			note_as_memory_budget(!rt_scene->is_as_memory_exceeded(), render_frame_number);
 		} else if (slot == PASS_SLOT_SRC_CAPTURE) {
-			_capture_src_cards(p_render_data);
+			if (!world_cache_replaces_src) {
+				_capture_src_cards(p_render_data);
+			}
 		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
-			_relight_src(p_render_data);
+			if (world_cache_replaces_src) {
+				_update_world_cache(p_render_data, p_normal_roughness_slices);
+			} else {
+				_relight_src(p_render_data);
+			}
 		} else if (slot == PASS_SLOT_SCREEN_TRACES) {
 			Ref<RenderSceneBuffersRD> buffers = p_render_data->render_buffers;
 			SSEffects *ss_effects = SSEffects::get_singleton();
@@ -2001,7 +2175,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	// GodotNext: path_tracer (#167). The view's path tracer sample, on this frame's TLAS before compaction.
 	_render_path_tracer(p_render_data, hwrt_frame);
 	// GodotNext: nextgi_hit_groups (#130). The check traces this frame's TLAS too, before compaction.
-	if (hwrt_frame && new_scenario && hit_materials != nullptr && (get_hit_consumers() & NEXTGI_HIT_CONSUMER_CHECK)) {
+	if (hwrt_frame && new_scenario && hit_materials != nullptr && src != nullptr && (get_hit_consumers() & NEXTGI_HIT_CONSUMER_CHECK)) {
 		hit_materials->run_check(rt_scene, src, p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f);
 	}
 	// GodotNext: nextgi_shadow_policy (#145). GM-4's caster-mask matrix, against this frame's TLAS.
@@ -2134,6 +2308,8 @@ NextGI::~NextGI() {
 		irradiance_field = nullptr;
 	}
 
+	// GodotNext: nextgi_world_cache (#294). Release World Cache buffers before hit materials and RT scene.
+	_free_world_cache();
 	// GodotNext: nextgi_hit_groups (#130). Before the RT scene: its pipeline and tables are its own.
 	_free_hit_materials();
 	_free_shadow_check(); // GodotNext: nextgi_shadow_policy (#145)

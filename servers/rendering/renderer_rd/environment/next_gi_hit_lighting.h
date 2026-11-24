@@ -99,6 +99,8 @@ enum : uint32_t {
 	NEXTGI_HL_PARAM_FLAG_REFLECT_DEBUG = 1u << 1,
 	NEXTGI_HL_PARAM_FLAG_BLUE_NOISE = 1u << 2,
 	NEXTGI_HL_PARAM_FLAG_SRC_INDIRECT = 1u << 3,
+	// GodotNext: nextgi_world_cache (#294). World Cache replaces SRC as indirect source.
+	NEXTGI_HL_PARAM_FLAG_WORLD_CACHE = 1u << 4,
 };
 
 NextGIRayLightingMode nextgi_ray_lighting_mode_from_setting(int p_setting);
@@ -226,6 +228,8 @@ static_assert(sizeof(NextGIHitLightCountersGPU) == 64, "NextGIHitLightCountersGP
 uint32_t nextgi_light_grid_world_to_cell(const Vector3 &p_world, const Vector3 &p_grid_min, float p_inv_cell_size);
 // CPU mirror of nextgi_light_grid.glsl's deterministic <= 32 lights/cell selection and overflow keeping.
 uint32_t nextgi_light_grid_fill_cell_cpu(const NextGIHitLightGPU *p_lights, uint32_t p_light_count, const Vector3 &p_box_min, const Vector3 &p_box_max, uint16_t r_indices[NEXTGI_LIGHT_GRID_CELL_CAP], uint32_t &r_overflow);
+// Shared D14 scenario light collector used by both Hit Lighting (#129) and World Cache (#294).
+void nextgi_collect_direct_lights(RenderDataRD *p_render_data, NextGIRTScene *p_rt_scene, LocalVector<NextGIHitLightGPU> &r_lights);
 
 // Multi-bounce mirror decision and translucent skip accumulation math.
 bool nextgi_hit_light_should_bounce(float p_roughness, uint32_t p_bounce_index, uint32_t p_max_bounces);
@@ -243,6 +247,9 @@ public:
 		NextGISRC *src = nullptr;
 		NextGIRelight *relight = nullptr;
 		NextGIWRC *wrc = nullptr;
+		// GodotNext: nextgi_world_cache (#294). Bound when World Cache replaces SRC on the view.
+		RID wc_keys;
+		RID wc_radiance;
 
 		RID depth;
 		RID normal_roughness;

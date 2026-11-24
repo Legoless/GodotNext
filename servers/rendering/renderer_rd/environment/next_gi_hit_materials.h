@@ -132,18 +132,28 @@ enum NextGIHitConsumer : uint32_t {
 	// GodotNext: path_tracer (#167). A viewport path traces (RendererRD::PathTracer). It shades hits with the
 	// material's own hit group, so it runs on them at Full only; otherwise it traces with its INLINE backend.
 	NEXTGI_HIT_CONSUMER_PATH_TRACER = 1u << 5,
+	// GodotNext: nextgi_world_cache (#294). Lumen World Cache (UE 5.9 Preview): runs on both Full and
+	// Simplified Material HWRT modes (in NEXTGI_HIT_SIMPLIFIED_CONSUMERS) on Vulkan and D3D12.
+	NEXTGI_HIT_CONSUMER_WORLD_CACHE = 1u << 6,
 };
 
-// GodotNext: path_tracer (#167), nextgi_hit_lighting (#129). The base library's ray generation stages:
-// the check's, the path tracer's, and hit lighting's.
+// GodotNext: path_tracer (#167), nextgi_hit_lighting (#129), nextgi_world_cache (#294). The base library's
+// ray generation stages: check/shadow retrace, path tracer, hit lighting, and World Cache trace.
 enum {
 	NEXTGI_HIT_RAYGEN_CHECK = 0,
 	NEXTGI_HIT_RAYGEN_PATH_TRACER = 1,
 	NEXTGI_HIT_RAYGEN_HIT_LIGHTING = 2,
+	NEXTGI_HIT_RAYGEN_WORLD_CACHE = 3,
+};
+
+// GodotNext: nextgi_world_cache (#294, #286). NextGIHitSurface.flags bits (nextgi_hit_layout_inc.glsl).
+enum : uint32_t {
+	NEXTGI_HIT_SURFACE_HAS_STREAM = 1u << 0,
+	NEXTGI_HIT_SURFACE_SIMPLIFIED_COLOR = 1u << 1,
 };
 
 // GodotNext: nextgi_hit_lighting (#129). Inputs for raygen stage 2 (nextgi_hit_lighting.glsl): sorted
-// reflection hit records, 64^3 world light grid, D14 scenario lights, SRC/WRC indirect sources, and
+// reflection hit records, 64^3 world light grid, D14 scenario lights, SRC/WRC/World Cache indirect sources, and
 // reflection output targets.
 struct NextGIHitLightTrace {
 	RID params;
@@ -158,6 +168,8 @@ struct NextGIHitLightTrace {
 	RID src_card_sets;
 	RID src_page_rects;
 	RID src_indirect;
+	RID wc_keys; // GodotNext: nextgi_world_cache (#294)
+	RID wc_radiance; // GodotNext: nextgi_world_cache (#294)
 	RID wrc_radiance;
 	RID wrc_visibility;
 	RID sky;
@@ -169,6 +181,24 @@ struct NextGIHitLightTrace {
 	uint32_t indirect_offset = 0; // Byte offset into indirect_buffer (0 = reflections, 32 = diffuse GI #128).
 	float time = 0.0f;
 	bool gi_pass = false; // True for diffuse GI hit lighting (#128): sets NEXTGI_HIT_PARAMS_GI_LIGHTING.
+};
+
+// GodotNext: nextgi_world_cache (#294). Inputs for raygen stage 3 (nextgi_world_cache_trace.glsl).
+struct NextGIHitWorldCacheTrace {
+	RID params;
+	RID keys;
+	RID radiance;
+	RID accum;
+	RID counters;
+	RID lights;
+	RID light_grid;
+	RID sky;
+	RID blue_noise;
+	RID depth;
+	RID normal_roughness;
+	uint32_t grid_w = 0;
+	uint32_t grid_h = 0;
+	float time = 0.0f;
 };
 
 // GodotNext: path_tracer (#167), path_tracer_denoise (#168), path_tracer_lights_camera (#169). One path tracer
@@ -219,10 +249,10 @@ enum NextGIHitMode {
 NextGIHitMode nextgi_hit_mode_from_setting(int p_setting);
 const char *nextgi_hit_mode_name(NextGIHitMode p_mode);
 
-// The consumers that can run on the simplified hit shader. The check then traces through the fallback group
-// alone. Hit lighting (#129), material retrace (#145), translucency, far field and the path tracer (#167) need the
+// The consumers that can run on the simplified hit shader: the check and the World Cache (#294, #286).
+// Hit lighting (#129), material retrace (#145), translucency, far field and the path tracer (#167) need the
 // material's own group.
-inline constexpr uint32_t NEXTGI_HIT_SIMPLIFIED_CONSUMERS = NEXTGI_HIT_CONSUMER_CHECK;
+inline constexpr uint32_t NEXTGI_HIT_SIMPLIFIED_CONSUMERS = NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_WORLD_CACHE;
 
 // The consumers p_mode lets run: all of them at Full, the simplified ones at Simplified Material, none at Inline.
 uint32_t nextgi_hit_mode_consumers(uint32_t p_consumers, NextGIHitMode p_mode);
@@ -381,6 +411,12 @@ void nextgi_hit_free_surface_stream(NextGIArenaAllocator &r_allocator, uint64_t 
 // R11G11B10 float packing of the payload's emission (positive, truncated), and its decode.
 uint32_t nextgi_hit_pack_r11g11b10(const Color &p_color);
 Color nextgi_hit_unpack_r11g11b10(uint32_t p_packed);
+
+// GodotNext: nextgi_world_cache (#294, #286). Packs simplified surface colour (linear albedo RGBA8,
+// R11G11B10F linear emission, unorm8 roughness & metallic) into NextGIHitSurface's spare words when
+// NEXTGI_HIT_SURFACE_HAS_STREAM is clear (Simplified Material mode / fallback geometries).
+void nextgi_hit_pack_simplified_surface(const Color &p_albedo_linear, const Color &p_emission_linear, float p_roughness, float p_metallic, uint32_t &r_packed_albedo, uint32_t &r_packed_emission, uint32_t &r_flags);
+void nextgi_hit_unpack_simplified_surface(uint32_t p_packed_albedo, uint32_t p_packed_emission, uint32_t p_flags, Color &r_albedo_linear, Color &r_emission_linear, float &r_roughness, float &r_metallic);
 
 // Why a material shader has no hit group of its own and its hits use the fallback group (plan §7.4's
 // resolve-ineligible rows, read for hits).
@@ -639,6 +675,11 @@ public:
 	const char *get_hit_lighting_ser_mode() const;
 	bool can_trace_hit_lighting() const;
 	bool trace_hit_lighting(NextGIRTScene *p_rt_scene, const NextGIHitLightTrace &p_trace);
+	// GodotNext: nextgi_world_cache (#294). Raygen stage 3 (nextgi_world_cache_trace.glsl), built only when
+	// World Cache is requested, in both Full and Simplified Material HWRT modes.
+	bool has_world_cache_raygen() const;
+	bool can_trace_world_cache() const;
+	bool trace_world_cache(NextGIRTScene *p_rt_scene, const NextGIHitWorldCacheTrace &p_trace);
 	RID get_hit_surface_buffer() const;
 	RID get_material_table_buffer() const;
 	uint32_t get_material_count() const;
@@ -666,7 +707,7 @@ public:
 	// from instead of a table of its own (NextGIRTScene's, which the shadow rays' alpha path shares: Direct3D 12 holds
 	// two texture or storage-buffer tables at a time). It must outlive this object, which does not free it. The
 	// check's, the path tracer's (#167) and the retrace's traces all bind it as set 1.
-	explicit NextGIHitMaterials(bool p_material_groups = true, RID p_texture_table = RID());
+	explicit NextGIHitMaterials(bool p_material_groups = true, RID p_texture_table = RID(), bool p_world_cache_raygen = false);
 	~NextGIHitMaterials();
 };
 

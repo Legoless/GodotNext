@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_world_cache.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
@@ -51,8 +52,8 @@
 
 using namespace RendererRD;
 
-// GodotNext: ps_swrt_trace (#186). The six update pipelines, shared by the hardware update and
-// its software sibling.
+// GodotNext: ps_swrt_trace (#186), nextgi_world_cache (#294). The update pipelines shared by the hardware
+// update and its software sibling (variants 6 & 7 are HWRT-only World Cache variants).
 struct NextGIWRCPipelines {
 	RID version;
 	RID trace;
@@ -61,6 +62,8 @@ struct NextGIWRCPipelines {
 	RID translucency_mark;
 	RID translucency_trace;
 	RID translucency_project;
+	RID trace_wc;
+	RID translucency_trace_wc;
 };
 
 struct NextGIWRC::ShaderState : NextGIWRCPipelines {
@@ -80,14 +83,29 @@ static Vector<String> _nextgi_wrc_variant_defines() {
 	defines.push_back("\n#define MODE_TRANSLUCENCY_MARK\n");
 	defines.push_back("\n#define MODE_TRANSLUCENCY_TRACE\n");
 	defines.push_back("\n#define MODE_TRANSLUCENCY_PROJECT\n");
+	// GodotNext: nextgi_world_cache (#294). HWRT-only variants sampling World Cache instead of SRC.
+	defines.push_back("\n#define MODE_WORLD_CACHE\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_TRACE\n#define MODE_WORLD_CACHE\n");
 	return defines;
 }
 
 static bool _nextgi_wrc_create_pipelines(ShaderRD &p_shader, NextGIWRCPipelines &r_pipelines) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	RID *pipelines[6] = { &r_pipelines.trace, &r_pipelines.project, &r_pipelines.translucency, &r_pipelines.translucency_mark, &r_pipelines.translucency_trace, &r_pipelines.translucency_project };
+	RID *pipelines[8] = {
+		&r_pipelines.trace,
+		&r_pipelines.project,
+		&r_pipelines.translucency,
+		&r_pipelines.translucency_mark,
+		&r_pipelines.translucency_trace,
+		&r_pipelines.translucency_project,
+		&r_pipelines.trace_wc,
+		&r_pipelines.translucency_trace_wc,
+	};
 	bool valid = true;
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < 8; i++) {
+		if (!p_shader.is_variant_enabled(i)) {
+			continue;
+		}
 		*pipelines[i] = rd->compute_pipeline_create(p_shader.version_get_shader(r_pipelines.version, i));
 		valid = valid && pipelines[i]->is_valid();
 	}
@@ -318,6 +336,12 @@ void NextGIWRC::_free_uniform_set() {
 		if (translucency_mark_uniform_set.is_valid() && rd->uniform_set_is_valid(translucency_mark_uniform_set)) {
 			rd->free_rid(translucency_mark_uniform_set);
 		}
+		if (trace_wc_uniform_set.is_valid() && rd->uniform_set_is_valid(trace_wc_uniform_set)) {
+			rd->free_rid(trace_wc_uniform_set);
+		}
+		if (translucency_trace_wc_uniform_set.is_valid() && rd->uniform_set_is_valid(translucency_trace_wc_uniform_set)) {
+			rd->free_rid(translucency_trace_wc_uniform_set);
+		}
 	}
 	// GodotNext: ps_swrt_trace (#186)
 	if (rd != nullptr && swrt_trace_set.is_valid() && rd->uniform_set_is_valid(swrt_trace_set)) {
@@ -328,6 +352,8 @@ void NextGIWRC::_free_uniform_set() {
 	volume_uniform_set = RID();
 	translucency_uniform_set = RID();
 	translucency_mark_uniform_set = RID();
+	trace_wc_uniform_set = RID();
+	translucency_trace_wc_uniform_set = RID();
 }
 
 void NextGIWRC::free_resources() {
@@ -562,11 +588,16 @@ Vector<String> NextGIWRC::get_shader_variant_defines() {
 	return _nextgi_wrc_variant_defines();
 }
 
+// GodotNext: nextgi_world_cache (#294). The software sibling has no World Cache (variants 6 & 7).
+void NextGIWRC::initialize_swrt_shader(ShaderRD &r_shader) {
+	r_shader.initialize(_nextgi_wrc_variant_defines());
+	r_shader.set_variant_enabled(6, false);
+	r_shader.set_variant_enabled(7, false);
+}
+
 String NextGIWRC::build_update_shader_source(int p_variant) {
 	NextgiWrcUpdateShaderRD update_shader;
-	Vector<String> defines;
-	defines.push_back("");
-	update_shader.initialize(defines);
+	update_shader.initialize(_nextgi_wrc_variant_defines());
 	const RID version = update_shader.version_create(false);
 	ERR_FAIL_COND_V(!version.is_valid(), String());
 	const Vector<String> sources = update_shader.version_build_variant_stage_sources(version, p_variant);
@@ -580,7 +611,7 @@ String NextGIWRC::build_update_shader_source(int p_variant) {
 // GodotNext: ps_swrt_trace (#186)
 String NextGIWRC::build_update_swrt_shader_source(int p_variant) {
 	NextgiWrcUpdateSwrtShaderRD update_shader;
-	update_shader.initialize(_nextgi_wrc_variant_defines());
+	initialize_swrt_shader(update_shader);
 	const RID version = update_shader.version_create(false);
 	ERR_FAIL_COND_V(!version.is_valid(), String());
 	const Vector<String> sources = update_shader.version_build_variant_stage_sources(version, p_variant);
@@ -635,7 +666,7 @@ bool NextGIWRC::_ensure_swrt_shader() {
 		return true;
 	}
 	swrt_shader = memnew(SWRTShaderState);
-	swrt_shader->shader.initialize(_nextgi_wrc_variant_defines());
+	initialize_swrt_shader(swrt_shader->shader);
 	swrt_shader->version = swrt_shader->shader.version_create(false);
 	if (!swrt_shader->version.is_valid()) {
 		memdelete(swrt_shader);
@@ -926,6 +957,24 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	uniforms[7] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, translucency_mip4);
 	uniforms[8] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, translucency_mip2);
 	translucency_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), active_shader.version_get_shader(active.version, 4), 0);
+	// GodotNext: nextgi_world_cache (#294). When World Cache replaces SRC on HWRT, WRC and translucency
+	// probe traces sample the sparse World Cache (variants 6 & 7) instead of SRC.
+	NextGIWorldCache *wc = (!swrt && next_gi->is_world_cache_active()) ? next_gi->get_world_cache() : nullptr;
+	const bool use_wc = wc != nullptr && wc->is_ready() && active.trace_wc.is_valid() && active.translucency_trace_wc.is_valid();
+	if (use_wc) {
+		Vector<RD::Uniform> wc_trace_uniforms = trace_uniforms;
+		wc_trace_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 36, wc->get_keys_buffer()));
+		wc_trace_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, wc->get_radiance_buffer()));
+		trace_wc_uniform_set = rd->uniform_set_create(wc_trace_uniforms, active_shader.version_get_shader(active.version, 6), 0);
+
+		Vector<RD::Uniform> wc_trans_uniforms;
+		for (int i = 0; i < 36; i++) {
+			wc_trans_uniforms.push_back(uniforms[i]);
+		}
+		wc_trans_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 36, wc->get_keys_buffer()));
+		wc_trans_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, wc->get_radiance_buffer()));
+		translucency_trace_wc_uniform_set = rd->uniform_set_create(wc_trans_uniforms, active_shader.version_get_shader(active.version, 7), 0);
+	}
 	// GodotNext: ps_swrt_trace (#186). Set 1 is the SDF trace with the frame's scene params
 	// (NextGISWRTTrace::prepare_scene_params() in the AS-updates slot); every variant declares it.
 	if (swrt) {
@@ -942,8 +991,13 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	};
 	if (uniform_set.is_valid()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, active.trace);
-		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		if (use_wc && trace_wc_uniform_set.is_valid()) {
+			rd->compute_list_bind_compute_pipeline(list, active.trace_wc);
+			rd->compute_list_bind_uniform_set(list, trace_wc_uniform_set, 0);
+		} else {
+			rd->compute_list_bind_compute_pipeline(list, active.trace);
+			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		}
 		bind_trace_set(list);
 		rd->compute_list_dispatch(list, trace_probes, 1, 1);
 		rd->compute_list_add_barrier(list);
@@ -960,8 +1014,13 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		bind_trace_set(list);
 		rd->compute_list_dispatch(list, (translucency_size.x + 7) / 8, (translucency_size.y + 7) / 8, 1);
 		rd->compute_list_add_barrier(list);
-		rd->compute_list_bind_compute_pipeline(list, active.translucency_trace);
-		rd->compute_list_bind_uniform_set(list, translucency_uniform_set, 0);
+		if (use_wc && translucency_trace_wc_uniform_set.is_valid()) {
+			rd->compute_list_bind_compute_pipeline(list, active.translucency_trace_wc);
+			rd->compute_list_bind_uniform_set(list, translucency_trace_wc_uniform_set, 0);
+		} else {
+			rd->compute_list_bind_compute_pipeline(list, active.translucency_trace);
+			rd->compute_list_bind_uniform_set(list, translucency_uniform_set, 0);
+		}
 		bind_trace_set(list);
 		rd->compute_list_dispatch(list, 8192, 1, 1);
 		rd->compute_list_end();

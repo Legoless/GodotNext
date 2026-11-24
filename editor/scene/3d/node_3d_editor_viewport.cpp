@@ -4708,7 +4708,9 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_VSM_PAGES:
 		case VIEW_DISPLAY_VSM_CACHE:
 		case VIEW_DISPLAY_VSM_OVERDRAW:
-		case VIEW_DISPLAY_VSM_CLIPMAP: {
+		case VIEW_DISPLAY_VSM_CLIPMAP:
+		// GodotNext: nextgi_world_cache (#294)
+		case VIEW_DISPLAY_NEXTGI_WORLD_CACHE: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4778,6 +4780,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_VSM_CACHE,
 				VIEW_DISPLAY_VSM_OVERDRAW,
 				VIEW_DISPLAY_VSM_CLIPMAP,
+				// GodotNext: nextgi_world_cache (#294)
+				VIEW_DISPLAY_NEXTGI_WORLD_CACHE,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4849,6 +4853,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_VSM_CACHE,
 				Viewport::DEBUG_DRAW_VSM_OVERDRAW,
 				Viewport::DEBUG_DRAW_VSM_CLIPMAP,
+				// GodotNext: nextgi_world_cache (#294)
+				Viewport::DEBUG_DRAW_NEXTGI_WORLD_CACHE,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7244,6 +7250,9 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	// GodotNext: ps_lumen_lite (#183)
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Lite Probes"), VIEW_DISPLAY_NEXTGI_LITE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows the half-resolution irradiance that Lumen Lite interpolates from the valid probes around each pixel. Pixels with no valid probe, such as those beyond the second probe level, are black. The view draws a labeled tint when that texture is missing."));
+	// GodotNext: nextgi_world_cache (#294)
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI World Cache"), VIEW_DISPLAY_NEXTGI_WORLD_CACHE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the runtime world-space lighting cache cells and their temporally filtered radiance when NextGI World Cache is active on HWRT Vulkan or D3D12."));
 	// GodotNext: nextgeo_exclusive_dispatch (#79)
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Cracks"), VIEW_DISPLAY_NEXTGEO_CRACKS, SupportedRenderingMethods::FORWARD_PLUS,

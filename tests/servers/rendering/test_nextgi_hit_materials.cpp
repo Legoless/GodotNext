@@ -165,9 +165,9 @@ TEST_CASE("[NextGIHit] Availability names the first missing requirement") {
 }
 
 // GodotNext: nextgi_hwrt_mode (#286). UE 5.9's per-platform Hardware Ray Tracing Mode (plan §21.1).
-// GodotNext: path_tracer (#167). The path tracer is one of them.
-static const uint32_t ALL_HIT_CONSUMERS[] = { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER };
-static const uint32_t EVERY_HIT_CONSUMER = NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_TRANSLUCENCY | NEXTGI_HIT_CONSUMER_FAR_FIELD | NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE | NEXTGI_HIT_CONSUMER_PATH_TRACER;
+// GodotNext: path_tracer (#167), nextgi_world_cache (#294).
+static const uint32_t ALL_HIT_CONSUMERS[] = { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER, NEXTGI_HIT_CONSUMER_WORLD_CACHE };
+static const uint32_t EVERY_HIT_CONSUMER = NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_TRANSLUCENCY | NEXTGI_HIT_CONSUMER_FAR_FIELD | NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE | NEXTGI_HIT_CONSUMER_PATH_TRACER | NEXTGI_HIT_CONSUMER_WORLD_CACHE;
 
 // The rule before the setting existed (#130, as on master before #286), written out so that Full is compared
 // with it and not with itself.
@@ -289,7 +289,7 @@ TEST_CASE("[NextGIHit] Inline creates no hit pipeline: every feature that needs 
 
 TEST_CASE("[NextGIHit] Simplified Material runs only the simplified consumers, with no material groups and no stream") {
 	CHECK_EQ(nextgi_hit_mode_consumers(EVERY_HIT_CONSUMER, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_SIMPLIFIED_CONSUMERS);
-	CHECK_EQ(NEXTGI_HIT_SIMPLIFIED_CONSUMERS, uint32_t(NEXTGI_HIT_CONSUMER_CHECK));
+	CHECK_EQ(NEXTGI_HIT_SIMPLIFIED_CONSUMERS, uint32_t(NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_WORLD_CACHE));
 	// The features that need a material's own hit group keep their inline path, with the mode's reason.
 	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER }) {
 		CHECK_EQ(nextgi_hit_setting_availability(consumer, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
@@ -381,8 +381,8 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full
 		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "INLINE");
 		CHECK_EQ(String(info["hit_groups"]), "HWRT_MODE_INLINE");
 		const Dictionary by_consumer = info["hit_groups_by_consumer"];
-		CHECK_EQ(by_consumer.size(), 6);
-		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer" }) {
+		CHECK_EQ(by_consumer.size(), 7);
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer", "world_cache" }) {
 			CHECK_EQ(String(by_consumer[feature]), "HWRT_MODE_INLINE");
 		}
 		CHECK_EQ(next_gi.get_hit_availability_for(NEXTGI_HIT_CONSUMER_CHECK), int(NEXTGI_HIT_HWRT_MODE_INLINE));
@@ -407,8 +407,9 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full
 		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "path_tracer" }) {
 			CHECK_EQ(String(by_consumer[feature]), "HWRT_MODE_SIMPLIFIED_MATERIAL");
 		}
-		// The check could run here, but this NextGI has no hardware tier (no device in the doctests).
+		// The check and world cache could run here, but this NextGI has no hardware tier (no device in the doctests).
 		CHECK_EQ(String(by_consumer["check"]), "NOT_HWRT");
+		CHECK_EQ(String(by_consumer["world_cache"]), "NOT_HWRT");
 		next_gi.set_hit_consumer(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, false);
 	}
 	{
@@ -423,7 +424,7 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full
 		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "FULL");
 		CHECK_EQ(String(info["hit_groups"]), "NO_CONSUMER");
 		const Dictionary by_consumer = info["hit_groups_by_consumer"];
-		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer" }) {
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer", "world_cache" }) {
 			CHECK_EQ(String(by_consumer[feature]), "NOT_HWRT");
 		}
 	}

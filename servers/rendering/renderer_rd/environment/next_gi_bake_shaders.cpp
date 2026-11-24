@@ -103,7 +103,8 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add_initialized(instances->gather_swrt);
 	_add(instances->relight_swrt_packed, NextGIRelight::get_shader_variant_defines(true));
 	_add(instances->relight_swrt_rgba16f, NextGIRelight::get_shader_variant_defines(false));
-	_add(instances->wrc_update_swrt, NextGIWRC::get_shader_variant_defines());
+	NextGIWRC::initialize_swrt_shader(instances->wrc_update_swrt);
+	_add_initialized(instances->wrc_update_swrt);
 	_add(instances->selftest, NextGI::get_selftest_variant_defines());
 	_add(instances->path_tracer, PathTracer::get_shader_variant_defines()); // GodotNext: path_tracer (#167)
 	_add(instances->path_tracer_denoise, PathTracer::get_denoise_shader_variant_defines()); // GodotNext: path_tracer_denoise (#168)

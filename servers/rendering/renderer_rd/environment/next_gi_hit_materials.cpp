@@ -42,6 +42,8 @@
 // GodotNext: nextgi_hit_lighting (#129)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_hit_lighting.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_hit_material.glsl.gen.h"
+// GodotNext: nextgi_world_cache (#294)
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_world_cache_trace.glsl.gen.h"
 // GodotNext: path_tracer (#167)
 #include "servers/rendering/renderer_rd/shaders/environment/path_tracer_hit.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -598,6 +600,37 @@ Color nextgi_hit_unpack_r11g11b10(uint32_t p_packed) {
 	return Color(r, g, b, 1.0f);
 }
 
+// GodotNext: nextgi_world_cache (#294, #286).
+void nextgi_hit_pack_simplified_surface(const Color &p_albedo_linear, const Color &p_emission_linear, float p_roughness, float p_metallic, uint32_t &r_packed_albedo, uint32_t &r_packed_emission, uint32_t &r_flags) {
+	const uint32_t r = uint32_t(Math::round(CLAMP(p_albedo_linear.r, 0.0f, 1.0f) * 255.0f));
+	const uint32_t g = uint32_t(Math::round(CLAMP(p_albedo_linear.g, 0.0f, 1.0f) * 255.0f));
+	const uint32_t b = uint32_t(Math::round(CLAMP(p_albedo_linear.b, 0.0f, 1.0f) * 255.0f));
+	const uint32_t a = uint32_t(Math::round(CLAMP(p_albedo_linear.a, 0.0f, 1.0f) * 255.0f));
+	r_packed_albedo = r | (g << 8u) | (b << 16u) | (a << 24u);
+	r_packed_emission = nextgi_hit_pack_r11g11b10(p_emission_linear);
+	const uint32_t rough = uint32_t(Math::round(CLAMP(p_roughness, 0.0f, 1.0f) * 255.0f));
+	const uint32_t metal = uint32_t(Math::round(CLAMP(p_metallic, 0.0f, 1.0f) * 255.0f));
+	r_flags = NEXTGI_HIT_SURFACE_SIMPLIFIED_COLOR | (rough << 8u) | (metal << 16u);
+}
+
+void nextgi_hit_unpack_simplified_surface(uint32_t p_packed_albedo, uint32_t p_packed_emission, uint32_t p_flags, Color &r_albedo_linear, Color &r_emission_linear, float &r_roughness, float &r_metallic) {
+	if ((p_flags & NEXTGI_HIT_SURFACE_SIMPLIFIED_COLOR) == 0u) {
+		r_albedo_linear = Color(0.5f, 0.5f, 0.5f, 1.0f);
+		r_emission_linear = Color(0.0f, 0.0f, 0.0f, 1.0f);
+		r_roughness = 1.0f;
+		r_metallic = 0.0f;
+		return;
+	}
+	r_albedo_linear = Color(
+			float(p_packed_albedo & 0xFFu) / 255.0f,
+			float((p_packed_albedo >> 8u) & 0xFFu) / 255.0f,
+			float((p_packed_albedo >> 16u) & 0xFFu) / 255.0f,
+			float((p_packed_albedo >> 24u) & 0xFFu) / 255.0f);
+	r_emission_linear = nextgi_hit_unpack_r11g11b10(p_packed_emission);
+	r_roughness = float((p_flags >> 8u) & 0xFFu) / 255.0f;
+	r_metallic = float((p_flags >> 16u) & 0xFFu) / 255.0f;
+}
+
 const char *nextgi_hit_ineligible_name(NextGIHitIneligible p_reason) {
 	switch (p_reason) {
 		case NEXTGI_HIT_ELIGIBLE:
@@ -881,6 +914,13 @@ struct NextGIHitMaterials::Internal {
 	const char *hit_lighting_ser_mode = "NONE";
 	RID dummy_rgba16f_image;
 	RID dummy_r16f_image;
+	// GodotNext: nextgi_world_cache (#294). Raygen stage 3 (NEXTGI_HIT_RAYGEN_WORLD_CACHE), built only
+	// when World Cache is requested, in both Full and Simplified Material HWRT modes.
+	NextgiWorldCacheTraceShaderRD world_cache_shader;
+	RID world_cache_version;
+	RID world_cache_shader_rid;
+	bool world_cache_raygen_requested = false;
+	bool world_cache_raygen = false;
 
 	RID base_library;
 	RID linked;
@@ -1077,7 +1117,50 @@ bool NextGIHitMaterials::_initialize() {
 			hit_lighting_ser_label = "NONE";
 		}
 	}
-	if (in.hit_lighting_shader_rid.is_valid()) {
+	// GodotNext: nextgi_world_cache (#294). Stage 3 (NEXTGI_HIT_RAYGEN_WORLD_CACHE) compiles ONLY when
+	// World Cache is requested, and works in both Full and Simplified Material HWRT modes.
+	if (in.world_cache_raygen_requested) {
+		in.world_cache_shader.initialize({ "" });
+		in.world_cache_version = in.world_cache_shader.version_create(false);
+		if (in.world_cache_version.is_valid()) {
+			in.world_cache_shader_rid = in.world_cache_shader.version_get_shader(in.world_cache_version, 0);
+		}
+	}
+	if (in.world_cache_shader_rid.is_valid()) {
+		RD::PipelineShader raygens[4];
+		raygens[0] = raygen;
+		raygens[1].shader = in.path_tracer_shader_rid.is_valid() ? in.path_tracer_shader_rid : in.base_shader_rid;
+		raygens[2].shader = in.hit_lighting_shader_rid.is_valid() ? in.hit_lighting_shader_rid : in.base_shader_rid;
+		raygens[3].shader = in.world_cache_shader_rid;
+		BitField<RD::RaytracingPipelineFlags> flags = RD::RAYTRACING_PIPELINE_FLAG_LIBRARY;
+		if (hit_lighting_ser_requested && in.hit_lighting_shader_rid.is_valid()) {
+			flags.set_flag(RD::RAYTRACING_PIPELINE_FLAG_REORDER);
+		}
+		in.base_library = rd->raytracing_pipeline_create(Span<RD::PipelineShader>(raygens, 4), Span<RD::PipelineShader>(&miss, 1), Span<RD::HitGroup>(&fallback, 1), 1, flags);
+		if (in.base_library.is_null() && hit_lighting_ser_requested && in.hit_lighting_shader_rid.is_valid()) {
+			if (in.hit_lighting_version.is_valid()) {
+				in.hit_lighting_shader.version_free(in.hit_lighting_version);
+				in.hit_lighting_version = RID();
+			}
+			for (int v = 0; v < 3; v++) {
+				in.hit_lighting_shader.set_variant_enabled(v, v == 0);
+			}
+			in.hit_lighting_version = in.hit_lighting_shader.version_create(false);
+			in.hit_lighting_shader_rid = in.hit_lighting_version.is_valid() ? in.hit_lighting_shader.version_get_shader(in.hit_lighting_version, 0) : RID();
+			hit_lighting_ser_requested = false;
+			hit_lighting_ser_label = "NONE";
+			raygens[2].shader = in.hit_lighting_shader_rid.is_valid() ? in.hit_lighting_shader_rid : in.base_shader_rid;
+			in.base_library = rd->raytracing_pipeline_create(Span<RD::PipelineShader>(raygens, 4), Span<RD::PipelineShader>(&miss, 1), Span<RD::HitGroup>(&fallback, 1), 1, RD::RAYTRACING_PIPELINE_FLAG_LIBRARY);
+		}
+		if (in.base_library.is_valid()) {
+			in.path_tracer_raygen = in.path_tracer_shader_rid.is_valid();
+			in.hit_lighting_raygen = in.hit_lighting_shader_rid.is_valid();
+			in.hit_lighting_ser = hit_lighting_ser_requested && in.hit_lighting_raygen;
+			in.hit_lighting_ser_mode = in.hit_lighting_ser ? hit_lighting_ser_label : "NONE";
+			in.world_cache_raygen = true;
+		}
+	}
+	if (in.base_library.is_null() && in.hit_lighting_shader_rid.is_valid()) {
 		RD::PipelineShader raygens[3];
 		raygens[0] = raygen;
 		raygens[1].shader = in.path_tracer_shader_rid.is_valid() ? in.path_tracer_shader_rid : in.base_shader_rid;
@@ -1786,31 +1869,75 @@ void NextGIHitMaterials::begin_records() {
 	in.counters.element_data_geometries = 0;
 }
 
+// GodotNext: nextgi_world_cache (#294, #286). Extracts constant surface colour (linear albedo/emissive,
+// roughness, metallic) for Simplified Material mode and streamless fallback geometries without compiling
+// per-material hit shaders or allocating bindless slots.
+static void _nextgi_hit_fill_simplified_surface(RID p_material, uint32_t &r_packed_albedo, uint32_t &r_packed_emission, uint32_t &r_flags) {
+	Color albedo_linear(0.5f, 0.5f, 0.5f, 1.0f);
+	Color emission_linear(0.0f, 0.0f, 0.0f, 1.0f);
+	float roughness = 1.0f;
+	float metallic = 0.0f;
+	MaterialStorage *storage = MaterialStorage::get_singleton();
+	if (p_material.is_valid() && storage != nullptr && storage->owns_material(p_material)) {
+		const MaterialStorage::ShaderData *shader_data = storage->material_get_shader_data(p_material);
+		auto get_param = [&](const StringName &p_name) -> Variant {
+			Variant v = storage->material_get_param(p_material, p_name);
+			if (v.get_type() == Variant::NIL && shader_data != nullptr) {
+				v = shader_data->get_default_parameter(p_name);
+			}
+			return v;
+		};
+		const Variant v_albedo = get_param("albedo");
+		if (v_albedo.get_type() == Variant::COLOR) {
+			albedo_linear = Color(v_albedo).srgb_to_linear();
+		} else {
+			albedo_linear = Color(0.8f, 0.8f, 0.8f, 1.0f).srgb_to_linear();
+		}
+		const Variant v_emission = get_param("emission");
+		if (v_emission.get_type() == Variant::COLOR) {
+			const Variant v_energy = get_param("emission_energy");
+			const float energy = (v_energy.get_type() == Variant::FLOAT || v_energy.get_type() == Variant::INT) ? MAX(float(v_energy), 0.0f) : 1.0f;
+			const Color em = Color(v_emission).srgb_to_linear();
+			emission_linear = Color(em.r * energy, em.g * energy, em.b * energy, 1.0f);
+		}
+		const Variant v_roughness = get_param("roughness");
+		if (v_roughness.get_type() == Variant::FLOAT || v_roughness.get_type() == Variant::INT) {
+			roughness = float(v_roughness);
+		}
+		const Variant v_metallic = get_param("metallic");
+		if (v_metallic.get_type() == Variant::FLOAT || v_metallic.get_type() == Variant::INT) {
+			metallic = float(v_metallic);
+		}
+	}
+	nextgi_hit_pack_simplified_surface(albedo_linear, emission_linear, roughness, metallic, r_packed_albedo, r_packed_emission, r_flags);
+}
+
 void NextGIHitMaterials::add_geometry(RenderGeometryInstance *p_instance, RID p_mesh, uint32_t p_surface, uint32_t p_arena_chunk, bool p_has_stream, uint32_t p_attribute_chunk, uint32_t p_attribute_offset, bool p_multimesh_element) {
 	Internal &in = *internal;
 	RenderGeometryInstanceBase *instance = static_cast<RenderGeometryInstanceBase *>(p_instance);
 
+	RID material_rid;
+	if (instance != nullptr && instance->data != nullptr) {
+		if (instance->data->material_override.is_valid()) {
+			material_rid = instance->data->material_override;
+		} else if (int(p_surface) < instance->data->surface_materials.size() && instance->data->surface_materials[p_surface].is_valid()) {
+			material_rid = instance->data->surface_materials[p_surface];
+		}
+	}
+	if (material_rid.is_null() && MeshStorage::get_singleton() != nullptr && p_mesh.is_valid()) {
+		material_rid = MeshStorage::get_singleton()->mesh_surface_get_material(p_mesh, int(p_surface));
+	}
+
 	Internal::SurfaceRecord record;
 	uint32_t group = 0;
 	if (nextgi_hit_geometry_uses_material(in.material_groups, p_has_stream, p_attribute_chunk, p_arena_chunk)) {
-		RID material_rid;
-		if (instance != nullptr && instance->data != nullptr) {
-			if (instance->data->material_override.is_valid()) {
-				material_rid = instance->data->material_override;
-			} else if (int(p_surface) < instance->data->surface_materials.size() && instance->data->surface_materials[p_surface].is_valid()) {
-				material_rid = instance->data->surface_materials[p_surface];
-			}
-		}
-		if (material_rid.is_null() && MeshStorage::get_singleton() != nullptr && p_mesh.is_valid()) {
-			material_rid = MeshStorage::get_singleton()->mesh_surface_get_material(p_mesh, int(p_surface));
-		}
 		if (material_rid.is_null()) {
 			// No material anywhere: the rasterizer draws the scene shader's default material.
 			material_rid = RendererSceneRenderImplementation::SceneShaderForwardClustered::get_default_material_for_nextgi();
 		}
 		record.attribute_chunk = p_attribute_chunk;
 		record.attribute_offset = p_attribute_offset;
-		record.flags = 1u;
+		record.flags = NEXTGI_HIT_SURFACE_HAS_STREAM;
 		const Material *material = material_rid.is_valid() ? _get_material(material_rid, in.frame) : nullptr;
 		if (material != nullptr && material->reason == NEXTGI_HIT_ELIGIBLE && material->ready_for_hits) {
 			record.material = material->index;
@@ -1830,6 +1957,9 @@ void NextGIHitMaterials::add_geometry(RenderGeometryInstance *p_instance, RID p_
 		}
 	} else {
 		in.counters.no_stream_geometries++;
+		// GodotNext: nextgi_world_cache (#294, #286). Pack simplified surface colour into the unused
+		// attribute_chunk/attribute_offset/flags words while keeping material = UINT32_MAX and group = 0.
+		_nextgi_hit_fill_simplified_surface(material_rid, record.attribute_chunk, record.attribute_offset, record.flags);
 	}
 	in.surfaces.push_back(record);
 	in.instance_groups.push_back(group);
@@ -1983,6 +2113,17 @@ static void _nextgi_hit_append_pt_extra_dummies(RID p_dummy_buffer, RID p_black_
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 60, p_black_texture));
 }
 
+// GodotNext: nextgi_world_cache (#294). Stand-in bindings 61..67 for stages other than world_cache_trace.
+static void _nextgi_hit_append_world_cache_dummies(RID p_dummy_buffer, RID p_black_texture, LocalVector<RD::Uniform> &r_uniforms, RID p_wc_keys = RID(), RID p_wc_radiance = RID()) {
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 61, p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 62, p_wc_keys.is_valid() ? p_wc_keys : p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 63, p_wc_radiance.is_valid() ? p_wc_radiance : p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 64, p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 65, p_dummy_buffer));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 66, p_black_texture));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 67, p_black_texture));
+}
+
 void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, float p_time) {
 	Internal &in = *internal;
 	if (!has_current_records() || p_rt_scene == nullptr || p_src == nullptr || !p_rt_scene->is_tlas_traceable()) {
@@ -2059,6 +2200,7 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	const RID check_white_array = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, check_black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
 	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, check_black, check_white_array, uniforms);
+	_nextgi_hit_append_world_cache_dummies(in.dummy_buffer, check_black, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 
 	struct PushConstant {
@@ -2184,6 +2326,7 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 58, p_trace.area_atlas.is_valid() ? p_trace.area_atlas : black));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 59, p_trace.projector_atlas.is_valid() ? p_trace.projector_atlas : black));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 60, p_trace.sky_octmap.is_valid() ? p_trace.sky_octmap : black));
+	_nextgi_hit_append_world_cache_dummies(in.dummy_buffer, black, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2251,6 +2394,7 @@ bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_r
 	const RID check_white_array = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	_nextgi_hit_append_hit_lighting_dummies(in.dummy_buffer, check_black, in.dummy_rgba16f_image, in.dummy_r16f_image, uniforms);
 	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, check_black, check_white_array, uniforms);
+	_nextgi_hit_append_world_cache_dummies(in.dummy_buffer, check_black, uniforms);
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -2374,6 +2518,8 @@ bool NextGIHitMaterials::trace_hit_lighting(NextGIRTScene *p_rt_scene, const Nex
 	// GodotNext: path_tracer_lights_camera (#169). Stand-ins for bindings 55..60.
 	const RID white_array = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
 	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, black, white_array, uniforms);
+	// GodotNext: nextgi_world_cache (#294). Bind real World Cache buffers when active for indirect fallback.
+	_nextgi_hit_append_world_cache_dummies(in.dummy_buffer, black, uniforms, p_trace.wc_keys, p_trace.wc_radiance);
 
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
@@ -2408,6 +2554,112 @@ bool NextGIHitMaterials::trace_hit_lighting(NextGIRTScene *p_rt_scene, const Nex
 	} else {
 		rd->raytracing_list_trace_rays(list, NEXTGI_HIT_RAYGEN_HIT_LIGHTING, in.hit_sbt, p_trace.max_rays, 1, 1);
 	}
+	rd->raytracing_list_end();
+	rd->draw_command_end_label();
+	rd->free_rid(scene_set);
+	return true;
+}
+
+// GodotNext: nextgi_world_cache (#294)
+bool NextGIHitMaterials::has_world_cache_raygen() const {
+	return internal->ready && internal->world_cache_raygen;
+}
+
+bool NextGIHitMaterials::can_trace_world_cache() const {
+	return has_world_cache_raygen() && is_ready() && has_current_records() && internal->linked.is_valid() &&
+			internal->hit_surface_buffer.is_valid() && internal->material_table_buffer.is_valid() && internal->texture_slot_buffer.is_valid();
+}
+
+bool NextGIHitMaterials::trace_world_cache(NextGIRTScene *p_rt_scene, const NextGIHitWorldCacheTrace &p_trace) {
+	Internal &in = *internal;
+	if (!can_trace_world_cache() || p_rt_scene == nullptr || !p_rt_scene->is_tlas_traceable() || p_trace.grid_w == 0 || p_trace.grid_h == 0) {
+		return false;
+	}
+	if (p_trace.params.is_null() || p_trace.keys.is_null() || p_trace.radiance.is_null() ||
+			p_trace.accum.is_null() || p_trace.counters.is_null() || p_trace.lights.is_null() ||
+			p_trace.light_grid.is_null() || p_trace.depth.is_null() || p_trace.normal_roughness.is_null()) {
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	ERR_FAIL_COND_V(rd == nullptr || texture_storage == nullptr, false);
+	const RID black = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	const RID white_array = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+	const RID shadow_instances = p_rt_scene->get_shadow_instance_buffer();
+	const RID shadow_alpha = p_rt_scene->get_shadow_alpha_buffer();
+
+	LocalVector<RD::Uniform> uniforms;
+	_nextgi_hit_append_scene_uniforms(p_rt_scene, in.hit_surface_buffer, in.material_table_buffer, in.texture_slot_buffer, in.dummy_buffer, uniforms);
+	// Bindings 23..36: check, path tracer, and shadow retrace stand-ins.
+	for (uint32_t binding = 23; binding <= 26; binding++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, binding, black));
+	}
+	for (uint32_t binding = 27; binding <= 29; binding++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, in.dummy_buffer));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 30, in.path_tracer_dummy_image));
+	for (uint32_t binding = 31; binding <= 34; binding++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, in.dummy_buffer));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, in.path_tracer_dummy_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, in.path_tracer_dummy_image));
+	// Bindings 37..54: reuse world light grid (40, 41), #145 shadow policy tables (43, 44), sky (50), blue noise (51).
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 38, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, p_trace.lights));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 41, p_trace.light_grid));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 42, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 43, shadow_instances.is_valid() ? shadow_instances : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 44, shadow_alpha.is_valid() ? shadow_alpha : in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 45, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 46, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 47, black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 48, black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 49, black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 50, p_trace.sky.is_valid() ? p_trace.sky : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 51, p_trace.blue_noise.is_valid() ? p_trace.blue_noise : black));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 52, in.dummy_rgba16f_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 53, in.dummy_r16f_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 54, in.dummy_rgba16f_image));
+	// Bindings 55..60: path tracer extra stand-ins.
+	_nextgi_hit_append_pt_extra_dummies(in.dummy_buffer, black, white_array, uniforms);
+	// Bindings 61..67: World Cache resources.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 61, p_trace.params));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 62, p_trace.keys));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 63, p_trace.radiance));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 64, p_trace.accum));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 65, p_trace.counters));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 66, p_trace.depth));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 67, p_trace.normal_roughness));
+
+	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
+	ERR_FAIL_COND_V(scene_set.is_null(), false);
+
+	struct PushConstant {
+		float time;
+		uint32_t record_count;
+		uint32_t job_count;
+		uint32_t sample_count;
+		uint32_t material_count;
+		uint32_t flags;
+		uint32_t pad0;
+		uint32_t pad1;
+	};
+	static_assert(sizeof(PushConstant) == 32, "HitParams is 32 bytes (nextgi_hit_layout_inc.glsl).");
+	PushConstant push = {};
+	push.time = p_trace.time;
+	push.record_count = in.record_count;
+	push.material_count = in.material_index_count;
+
+	rd->draw_command_begin_label("NextGI World Cache Trace");
+	RD::RaytracingListID list = rd->raytracing_list_begin();
+	rd->raytracing_list_bind_raytracing_pipeline(list, in.linked);
+	rd->raytracing_list_bind_uniform_set(list, scene_set, 0);
+	rd->raytracing_list_bind_uniform_set(list, in.texture_table_set, 1);
+	rd->raytracing_list_bind_uniform_set(list, in.params_table_set, 2);
+	rd->raytracing_list_set_push_constant(list, &push, sizeof(push));
+	rd->raytracing_list_trace_rays(list, NEXTGI_HIT_RAYGEN_WORLD_CACHE, in.hit_sbt, p_trace.grid_w, p_trace.grid_h, 1);
 	rd->raytracing_list_end();
 	rd->draw_command_end_label();
 	rd->free_rid(scene_set);
@@ -2486,11 +2738,14 @@ void NextGIHitMaterials::fill_counters(Dictionary &r_counters) const {
 	r_counters["hit_lighting_raygen"] = internal->hit_lighting_raygen;
 	r_counters["hit_lighting_ser"] = internal->hit_lighting_ser;
 	r_counters["hit_lighting_ser_mode"] = String(internal->hit_lighting_ser_mode);
+	// GodotNext: nextgi_world_cache (#294)
+	r_counters["hit_world_cache_raygen"] = internal->world_cache_raygen;
 }
 
-NextGIHitMaterials::NextGIHitMaterials(bool p_material_groups, RID p_texture_table) {
+NextGIHitMaterials::NextGIHitMaterials(bool p_material_groups, RID p_texture_table, bool p_world_cache_raygen) {
 	internal = memnew(Internal);
 	internal->material_groups = p_material_groups;
+	internal->world_cache_raygen_requested = p_world_cache_raygen;
 	if (singleton == nullptr) {
 		singleton = this;
 	}
@@ -2563,6 +2818,10 @@ NextGIHitMaterials::~NextGIHitMaterials() {
 	// GodotNext: nextgi_hit_lighting (#129)
 	if (in.hit_lighting_version.is_valid()) {
 		in.hit_lighting_shader.version_free(in.hit_lighting_version);
+	}
+	// GodotNext: nextgi_world_cache (#294)
+	if (in.world_cache_version.is_valid()) {
+		in.world_cache_shader.version_free(in.world_cache_version);
 	}
 	memdelete(internal);
 	internal = nullptr;

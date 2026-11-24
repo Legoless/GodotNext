@@ -6423,6 +6423,10 @@
 			Colors each pixel by the clipmap level of the virtual shadow page it samples for its first directional light, one hue per level. Gray means no directional light with virtual shadow maps reaches it.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE" value="69" enum="ViewportDebugDraw">
+			Displays the NextGI runtime world-space lighting cache cells and their temporally filtered radiance when [member ProjectSettings.rendering/global_illumination/nextgi/world_cache] is active on HWRT Vulkan or Direct3D 12. Shows a labeled fallback tint when the World Cache is inactive.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

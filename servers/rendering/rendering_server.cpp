@@ -3461,6 +3461,8 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP);
+	// GodotNext: nextgi_world_cache (#294)
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -4454,6 +4456,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/max_reflection_bounces", PROPERTY_HINT_RANGE, "1,4,1"), 1);
 	// GodotNext: nextgi_hit_lighting_gi (#128). Advanced, Epic-only hit lighting for screen-probe diffuse GI rays.
 	GLOBAL_DEF("rendering/global_illumination/nextgi/hit_lighting_gi", false);
+	// GodotNext: nextgi_world_cache (#294). Runtime world-space lighting cache replacing the Surface Cache on
+	// HWRT Vulkan and D3D12 (Full or Simplified Material mode). Off by default; read at startup.
+	GLOBAL_DEF_RST("rendering/global_illumination/nextgi/world_cache", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field", false);

@@ -218,6 +218,37 @@ bool hl_src_indirect_lookup(uint p_custom_index, vec3 p_world_pos, vec3 p_world_
 	return false;
 }
 
+// GodotNext: nextgi_world_cache (#294). Sparse World Cache lookup when World Cache replaces SRC.
+bool hl_world_cache_lookup(vec3 p_world_pos, vec3 p_world_normal, out vec3 r_radiance) {
+	r_radiance = vec3(0.0);
+	if ((hit_light_params.counts1.w & NEXTGI_HL_PARAM_FLAG_WORLD_CACHE) == 0u) {
+		return false;
+	}
+	float dist = length(p_world_pos - hit_light_params.camera_pos_radius.xyz);
+	uint base_level = nextgi_wc_level_for_distance(dist);
+	uint face = nextgi_wc_normal_face(p_world_normal);
+	for (uint l = 0u; l < 2u; l++) {
+		uint level = base_level + l;
+		if (level >= NEXTGI_WC_LEVELS) {
+			break;
+		}
+		ivec3 cell = nextgi_wc_quantize(p_world_pos, level);
+		uint key = nextgi_wc_make_key(cell, level, face);
+		uint base_slot = nextgi_wc_hash_bucket(cell, level, face) * NEXTGI_WC_SLOTS_PER_BUCKET;
+		for (uint w = 0u; w < NEXTGI_WC_SLOTS_PER_BUCKET; w++) {
+			if (hit_wc_keys.data[base_slot + w] == key) {
+				vec4 rad = hit_wc_radiance.data[base_slot + w];
+				if (rad.a > 0.0) {
+					r_radiance = rad.rgb;
+					return true;
+				}
+				return false;
+			}
+		}
+	}
+	return false;
+}
+
 // Primary hit re-trace using SER when supported, reordering by hit object + 16-bit material key.
 void hl_trace_primary(vec3 p_origin, vec3 p_dir, float p_tmax, uint p_cull_mask, uint p_material_key, vec2 p_cone) {
 	payload.shading = uvec4(0u);
@@ -346,7 +377,7 @@ vec3 hl_shade_surface(
 		}
 	}
 
-	// Indirect light at the hit from SRC indirect texture (D6) with WRC / ambient fallback.
+	// Indirect light at the hit from SRC indirect texture (D6) or WRC / World Cache / ambient fallback.
 	vec3 diffuse_color = p_albedo * (1.0 - p_metallic);
 	vec3 indirect = vec3(0.0);
 	vec3 src_irr;
@@ -358,7 +389,12 @@ vec3 hl_shade_surface(
 		if (wrc_ok) {
 			indirect = diffuse_color * wrc_rad * p_ao;
 		} else {
-			indirect = diffuse_color * hit_light_params.ambient_color_sky.rgb * p_ao;
+			vec3 wc_rad;
+			if (hl_world_cache_lookup(p_hit_pos, p_normal, wc_rad)) {
+				indirect = diffuse_color * wc_rad * p_ao;
+			} else {
+				indirect = diffuse_color * hit_light_params.ambient_color_sky.rgb * p_ao;
+			}
 		}
 	}
 

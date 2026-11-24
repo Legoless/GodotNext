@@ -667,11 +667,11 @@ bool NextGIHitLighting::_ensure_buffers(uint32_t p_max_rays, uint32_t p_light_co
 			hl_params_buffer.is_valid();
 }
 
-uint32_t NextGIHitLighting::_upload_lights(RenderDataRD *p_render_data, NextGIRTScene *p_rt_scene) {
+void nextgi_collect_direct_lights(RenderDataRD *p_render_data, NextGIRTScene *p_rt_scene, LocalVector<NextGIHitLightGPU> &r_lights) {
+	r_lights.clear();
 	LightStorage *light_storage = LightStorage::get_singleton();
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (p_render_data == nullptr || p_render_data->sdfgi_update_data == nullptr || light_storage == nullptr || rd == nullptr || p_rt_scene == nullptr) {
-		return 0;
+	if (p_render_data == nullptr || p_render_data->sdfgi_update_data == nullptr || light_storage == nullptr || p_rt_scene == nullptr) {
+		return;
 	}
 	float exposure = 1.0f;
 	if (p_render_data->camera_attributes.is_valid() && RSG::camera_attributes != nullptr) {
@@ -679,7 +679,6 @@ uint32_t NextGIHitLighting::_upload_lights(RenderDataRD *p_render_data, NextGIRT
 	}
 	const bool physical = RendererSceneRenderRD::get_singleton() != nullptr && RendererSceneRenderRD::get_singleton()->is_using_physical_light_units();
 
-	LocalVector<NextGIHitLightGPU> gpu_lights;
 	auto add_light = [&](RID p_light_instance, bool p_directional, bool p_static) {
 		if (!light_storage->owns_light_instance(p_light_instance)) {
 			return;
@@ -734,7 +733,7 @@ uint32_t NextGIHitLighting::_upload_lights(RenderDataRD *p_render_data, NextGIRT
 		gpu.shadow_flags[1] = has_shadow ? p_rt_scene->get_shadow_light_mode(caster_mask) : 0u;
 		gpu.shadow_flags[2] = caster_mask & NEXTGI_SHADOW_LAYER_MASK;
 		gpu.shadow_flags[3] = 0u;
-		gpu_lights.push_back(gpu);
+		r_lights.push_back(gpu);
 	};
 
 	const RendererSceneRender::RenderSDFGIUpdateData *feed = p_render_data->sdfgi_update_data;
@@ -749,6 +748,15 @@ uint32_t NextGIHitLighting::_upload_lights(RenderDataRD *p_render_data, NextGIRT
 	for (uint32_t i = 0; i < feed->nextgi_static_light_count; i++) {
 		add_light(feed->nextgi_static_light_instances[i], false, true);
 	}
+}
+
+uint32_t NextGIHitLighting::_upload_lights(RenderDataRD *p_render_data, NextGIRTScene *p_rt_scene) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr) {
+		return 0;
+	}
+	LocalVector<NextGIHitLightGPU> gpu_lights;
+	nextgi_collect_direct_lights(p_render_data, p_rt_scene, gpu_lights);
 
 	const uint32_t count = gpu_lights.size();
 	if (!_ensure_buffers(ray_capacity, MAX(count, 1u))) {
@@ -1073,6 +1081,7 @@ void NextGIHitLighting::_upload_hl_params(const ExecuteParams &p_params, uint32_
 	const bool has_src_indirect = p_params.src != nullptr && p_params.relight != nullptr &&
 			p_params.relight->get_indirect_texture().is_valid() && p_params.relight->get_page_rect_buffer().is_valid() &&
 			p_params.src->get_card_buffer().is_valid() && p_params.src->get_card_set_buffer().is_valid();
+	const bool has_world_cache = p_params.wc_keys.is_valid() && p_params.wc_radiance.is_valid();
 	hp.counts0[0] = p_max_rays;
 	hp.counts0[1] = p_light_count;
 	hp.counts0[2] = p_max_bounces;
@@ -1083,7 +1092,8 @@ void NextGIHitLighting::_upload_hl_params(const ExecuteParams &p_params, uint32_
 	hp.counts1[3] = (has_translucent ? uint32_t(NEXTGI_HL_PARAM_FLAG_TRANSLUCENT) : 0u) |
 			(p_params.reflect_debug ? uint32_t(NEXTGI_HL_PARAM_FLAG_REFLECT_DEBUG) : 0u) |
 			(p_params.blue_noise_mode ? uint32_t(NEXTGI_HL_PARAM_FLAG_BLUE_NOISE) : 0u) |
-			(has_src_indirect ? uint32_t(NEXTGI_HL_PARAM_FLAG_SRC_INDIRECT) : 0u);
+			(has_src_indirect ? uint32_t(NEXTGI_HL_PARAM_FLAG_SRC_INDIRECT) : 0u) |
+			(has_world_cache ? uint32_t(NEXTGI_HL_PARAM_FLAG_WORLD_CACHE) : 0u);
 	rd->buffer_update(hl_params_buffer, 0, sizeof(hp), &hp);
 }
 
@@ -1102,6 +1112,8 @@ bool NextGIHitLighting::_dispatch_raygen(const ExecuteParams &p_params, bool p_g
 	trace.src_card_sets = p_params.src != nullptr ? p_params.src->get_card_set_buffer() : RID();
 	trace.src_page_rects = p_params.relight != nullptr ? p_params.relight->get_page_rect_buffer() : RID();
 	trace.src_indirect = p_params.relight != nullptr ? p_params.relight->get_indirect_texture() : RID();
+	trace.wc_keys = p_params.wc_keys;
+	trace.wc_radiance = p_params.wc_radiance;
 	trace.wrc_radiance = (p_params.wrc != nullptr && p_params.wrc->is_ready()) ? p_params.wrc->get_radiance() : RID();
 	trace.wrc_visibility = (p_params.wrc != nullptr && p_params.wrc->is_ready()) ? p_params.wrc->get_visibility() : RID();
 	trace.sky = p_params.sky_tex;

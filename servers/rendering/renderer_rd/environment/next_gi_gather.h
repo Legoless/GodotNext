@@ -147,6 +147,10 @@ class NextGIGather {
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID gather_hl_uniform_set;
+	// GodotNext: nextgi_world_cache (#294). World Cache gather & reflect uniform sets (variants 8 & 9).
+	RID gather_wc_uniform_set;
+	RID reflect_wc_uniform_set;
+	bool bound_world_cache = false;
 	LocalVector<RenderingDevice::Uniform> last_gather_uniforms;
 	RID reflect_uniform_set;
 	RID reflect_far_uniform_set;

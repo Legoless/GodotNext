@@ -324,6 +324,20 @@ void main() {
 		normal = -normal;
 	}
 	uint flags = NEXTGI_HIT_PAYLOAD_HIT | NEXTGI_HIT_PAYLOAD_FALLBACK | (front_facing ? NEXTGI_HIT_PAYLOAD_FRONT_FACE : 0u);
-	payload.shading = uvec4(packUnorm4x8(vec4(0.5, 0.5, 0.5, 1.0)), packSnorm2x16(nextgi_hit_oct_encode(normal)), 255u | (255u << 16u) | (flags << 24u), 0u);
-	payload.hit = uvec4(floatBitsToUint(gl_HitTEXT), hit_surfaces.data[surface_index].material_id, hit_record.shader_slot, uint(gl_InstanceCustomIndexEXT));
+	NextGIHitSurface hs = hit_surfaces.data[surface_index];
+	// GodotNext: nextgi_world_cache (#294, #286). In Simplified Material mode (or streamless fallback
+	// geometries), read the per-surface packed linear albedo/emissive/roughness/metallic so the World Cache
+	// receives true surface colour without compiling per-material hit shaders.
+	uint packed_albedo = packUnorm4x8(vec4(0.5, 0.5, 0.5, 1.0));
+	uint packed_rm_ao = 255u | (255u << 16u);
+	uint packed_emission = 0u;
+	if ((hs.flags & NEXTGI_HIT_SURFACE_SIMPLIFIED_COLOR) != 0u) {
+		packed_albedo = hs.attribute_chunk;
+		packed_emission = hs.attribute_offset;
+		uint roughness_u8 = (hs.flags >> 8u) & 0xFFu;
+		uint metallic_u8 = (hs.flags >> 16u) & 0xFFu;
+		packed_rm_ao = roughness_u8 | (metallic_u8 << 8u) | (255u << 16u);
+	}
+	payload.shading = uvec4(packed_albedo, packSnorm2x16(nextgi_hit_oct_encode(normal)), packed_rm_ao | (flags << 24u), packed_emission);
+	payload.hit = uvec4(floatBitsToUint(gl_HitTEXT), hs.material_id, hit_record.shader_slot, uint(gl_InstanceCustomIndexEXT));
 }

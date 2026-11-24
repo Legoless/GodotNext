@@ -78,6 +78,8 @@ const uint NEXTGI_HL_PARAM_FLAG_TRANSLUCENT = 1u << 0u;
 const uint NEXTGI_HL_PARAM_FLAG_REFLECT_DEBUG = 1u << 1u;
 const uint NEXTGI_HL_PARAM_FLAG_BLUE_NOISE = 1u << 2u;
 const uint NEXTGI_HL_PARAM_FLAG_SRC_INDIRECT = 1u << 3u;
+// GodotNext: nextgi_world_cache (#294). World Cache replaces SRC as indirect lighting source.
+const uint NEXTGI_HL_PARAM_FLAG_WORLD_CACHE = 1u << 4u;
 
 // Compact per-ray hit record (48 bytes, std430).
 // origin_t: xyz = ray origin (after any screen-trace resume), w = hit distance t from origin.

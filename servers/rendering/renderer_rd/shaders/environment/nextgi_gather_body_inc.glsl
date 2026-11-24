@@ -349,6 +349,33 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 		accum += nextgi_pt_radiance(world + face * rec.origin_offset, -ray_dir, rng);
 	}
 	return accum / 16.0;
+#elif defined(MODE_WORLD_CACHE)
+	// GodotNext: nextgi_world_cache (#294). Sample the sparse world-space cache at the hit instead of SRC.
+	vec3 object_pos;
+	vec3 face_normal;
+	if (nextgi_hit_object_pos_normal(hit, object_pos, face_normal) && hit.custom_index < params.record_count) {
+		NextGIInstanceRecord rec = records.data[hit.custom_index];
+		vec3 world = vec3(
+				dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), object_pos) + rec.object_to_world[3],
+				dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), object_pos) + rec.object_to_world[7],
+				dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), object_pos) + rec.object_to_world[11]);
+		vec3 world_normal = normalize(nextgi_record_normal_to_world(rec, face_normal));
+		if (dot(world_normal, -ray_dir) < 0.0) {
+			world_normal = -world_normal;
+		}
+		vec3 wc_rad;
+		if (nextgi_wc_lookup(world, world_normal, params.camera_pos.xyz, wc_rad)) {
+			confidence = 1.0;
+			return wc_rad;
+		}
+		vec3 cached = nextgi_wrc_sample(world, -ray_dir);
+		if (nextgi_wrc_hit_cache) {
+			confidence = nextgi_wrc_confidence;
+			uncovered_count++;
+			return cached;
+		}
+	}
+	return nextgi_miss_radiance(ray_dir);
 #else
 	vec3 radiance;
 	bool uncovered = false;

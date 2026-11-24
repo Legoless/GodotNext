@@ -44,6 +44,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_world_cache.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/nextgi_blue_noise.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
@@ -188,15 +189,15 @@ static uint64_t nextgi_gather_counter_next_token = 1;
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
-	RID pipelines[8];
+	RID pipelines[10];
 };
 
 // GodotNext: ps_swrt_trace (#186). Same variants and pipeline indices as the hardware gather;
-// the hit-radiance reference (4), far field (6), and GI hit lighting (7) are hardware-only and stay disabled.
+// the hit-radiance reference (4), far field (6), GI hit lighting (7), and World Cache (8, 9) are hardware-only and stay disabled.
 struct NextGIGather::SWRTShaderState {
 	NextgiGatherSwrtShaderRD shader;
 	RID version;
-	RID pipelines[8];
+	RID pipelines[10];
 };
 
 static Vector<String> _nextgi_gather_variant_defines() {
@@ -209,6 +210,9 @@ static Vector<String> _nextgi_gather_variant_defines() {
 	defines.push_back("#define MODE_REFLECT\n");
 	defines.push_back("#define MODE_FAR_FIELD\n");
 	defines.push_back("#define MODE_HIT_LIGHTING_GI\n");
+	// GodotNext: nextgi_world_cache (#294). HWRT-only variants sampling the sparse World Cache instead of SRC.
+	defines.push_back("#define MODE_WORLD_CACHE\n");
+	defines.push_back("#define MODE_REFLECT\n#define MODE_WORLD_CACHE\n");
 	return defines;
 }
 
@@ -259,6 +263,12 @@ void NextGIGather::_free_uniform_set() {
 		if (rd->uniform_set_is_valid(gather_hl_uniform_set)) {
 			rd->free_rid(gather_hl_uniform_set);
 		}
+		if (rd->uniform_set_is_valid(gather_wc_uniform_set)) {
+			rd->free_rid(gather_wc_uniform_set);
+		}
+		if (rd->uniform_set_is_valid(reflect_wc_uniform_set)) {
+			rd->free_rid(reflect_wc_uniform_set);
+		}
 		if (rd->uniform_set_is_valid(reflect_uniform_set)) {
 			rd->free_rid(reflect_uniform_set);
 		}
@@ -273,6 +283,9 @@ void NextGIGather::_free_uniform_set() {
 	swrt_trace_set = RID();
 	uniform_set = RID();
 	gather_hl_uniform_set = RID();
+	gather_wc_uniform_set = RID();
+	reflect_wc_uniform_set = RID();
+	bound_world_cache = false;
 	last_gather_uniforms.clear();
 	reflect_uniform_set = RID();
 	reflect_far_uniform_set = RID();
@@ -287,7 +300,7 @@ void NextGIGather::free_resources() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 8; i++) {
+			for (int i = 0; i < 10; i++) {
 				if (shader->pipelines[i].is_valid()) {
 					rd->free_rid(shader->pipelines[i]);
 				}
@@ -302,7 +315,7 @@ void NextGIGather::free_resources() {
 	// GodotNext: ps_swrt_trace (#186)
 	if (swrt_shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 8; i++) {
+			for (int i = 0; i < 10; i++) {
 				if (swrt_shader->pipelines[i].is_valid()) {
 					rd->free_rid(swrt_shader->pipelines[i]);
 				}
@@ -394,7 +407,7 @@ bool NextGIGather::_ensure_shader() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < 10; i++) {
 		shader->pipelines[i] = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, i));
 		if (!shader->pipelines[i].is_valid()) {
 			for (int j = 0; j < i; j++) {
@@ -427,7 +440,7 @@ bool NextGIGather::_ensure_swrt_shader() {
 		swrt_shader = nullptr;
 		ERR_FAIL_V_MSG(false, "The NextGI software gather shader failed to compile.");
 	}
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < 10; i++) {
 		if (!swrt_shader->shader.is_variant_enabled(i)) {
 			continue;
 		}
@@ -673,8 +686,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		ERR_FAIL_NULL_V(next_gi->get_rt_scene(), false);
 	}
 	bound_swrt = swrt;
-	ERR_FAIL_NULL_V(relight, false);
-	ERR_FAIL_NULL_V(src, false);
+	// GodotNext: nextgi_world_cache (#294). When World Cache replaces SRC on this view, src and relight are not allocated.
+	const bool world_cache_replaces_src = !swrt && next_gi->is_world_cache_replacing_src();
+	if (!world_cache_replaces_src) {
+		ERR_FAIL_NULL_V(relight, false);
+		ERR_FAIL_NULL_V(src, false);
+	}
 	ERR_FAIL_NULL_V(scene, false);
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND_V(rb.is_null(), false);
@@ -748,7 +765,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.probes_y = nextgi_gather_probe_count_axis(screen.y);
 	const float rt_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
-	params.max_origin_offset = MAX(relight->get_max_origin_offset(), 0.001f);
+	params.max_origin_offset = relight != nullptr ? MAX(relight->get_max_origin_offset(), 0.001f) : 0.01f;
 	params.sky_enabled = sky_enabled;
 	params.feedback_count = p_feedback_count;
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
@@ -757,7 +774,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.record_count = swrt ? swrt_tracer->get_record_count() : next_gi->get_rt_scene()->get_total_record_count();
 	params.far_distance = MAX(float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance")), params.rt_radius);
 	params.far_occlusion_only = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_occlusion_only")) ? 1u : 0u;
-	params.page_rect_count = relight->get_page_rect_count();
+	params.page_rect_count = relight != nullptr ? relight->get_page_rect_count() : 0u;
 	const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
 	// GodotNext: nextgi_reflection_behaviours (#132). The Environment value caps
 	// the quality preset.
@@ -768,8 +785,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
 	params.sampling_mode = rr_sampling_mode;
 	// GodotNext: ps_swrt_trace (#186)
-	params.card_set_count = swrt ? src->get_card_set_count() : 0u;
-	params.card_count = swrt ? src->get_card_count() : 0u;
+	params.card_set_count = (swrt && src != nullptr) ? src->get_card_set_count() : 0u;
+	params.card_count = (swrt && src != nullptr) ? src->get_card_count() : 0u;
 	params.ray_stride = ray_stride;
 	params.ray_count = ray_count;
 	params.fog_enabled = 0u;
@@ -858,7 +875,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	last_fog_light_energy = params.fog_light_color[3];
 
 	_free_uniform_set();
-	RID page_rects = relight->get_page_rect_buffer();
+	RID page_rects = relight != nullptr ? relight->get_page_rect_buffer() : RID();
 	if (!page_rects.is_valid()) {
 		page_rects = dummy_buffer;
 	}
@@ -870,8 +887,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!records.is_valid()) {
 		records = dummy_buffer;
 	}
-	RID cards = src->get_card_buffer();
-	RID card_sets = src->get_card_set_buffer();
+	RID cards = src != nullptr ? src->get_card_buffer() : RID();
+	RID card_sets = src != nullptr ? src->get_card_set_buffer() : RID();
 	if (!cards.is_valid()) {
 		cards = dummy_buffer;
 	}
@@ -881,15 +898,15 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!feedback_buffer.is_valid()) {
 		feedback_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 4);
 	}
-	RID indirect = relight->get_indirect_texture();
+	RID indirect = relight != nullptr ? relight->get_indirect_texture() : RID();
 	if (!indirect.is_valid()) {
 		indirect = dummy_storage;
 	}
-	RID radiance = relight->get_radiance_texture();
+	RID radiance = relight != nullptr ? relight->get_radiance_texture() : RID();
 	if (!radiance.is_valid()) {
 		radiance = dummy_color;
 	}
-	RID material_depth = src->get_atlas_texture(NextGISRC::ATLAS_DEPTH);
+	RID material_depth = src != nullptr ? src->get_atlas_texture(NextGISRC::ATLAS_DEPTH) : RID();
 	if (!material_depth.is_valid()) {
 		material_depth = dummy_color;
 	}
@@ -1079,6 +1096,23 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), reflect_shader_rid, 0);
 	const RID reflect_far_shader_rid = shader->shader.version_get_shader(shader->version, 6);
 	reflect_far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 39), reflect_far_shader_rid, 0);
+	// GodotNext: nextgi_world_cache (#294). When World Cache is active, bind variants 8 (gather) and 9 (reflect)
+	// with bindings 44..45 pointing at the sparse World Cache buffers. Zero extra sets when World Cache is off.
+	NextGIWorldCache *wc = next_gi->is_world_cache_active() ? next_gi->get_world_cache() : nullptr;
+	if (wc != nullptr && wc->is_ready()) {
+		LocalVector<RD::Uniform> wc_uniforms;
+		wc_uniforms.reserve(38);
+		for (uint32_t i = 0; i < 36; i++) {
+			wc_uniforms.push_back(uniforms[i]);
+		}
+		wc_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 44, wc->get_keys_buffer()));
+		wc_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 45, wc->get_radiance_buffer()));
+		const RID wc_gather_rid = shader->shader.version_get_shader(shader->version, 8);
+		const RID wc_reflect_rid = shader->shader.version_get_shader(shader->version, 9);
+		gather_wc_uniform_set = rd->uniform_set_create(wc_uniforms, wc_gather_rid, 0);
+		reflect_wc_uniform_set = rd->uniform_set_create(wc_uniforms, wc_reflect_rid, 0);
+		bound_world_cache = gather_wc_uniform_set.is_valid() && reflect_wc_uniform_set.is_valid();
+	}
 	bound_tier = "HWRT";
 	return uniform_set.is_valid();
 }
@@ -1220,6 +1254,10 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		ep.src = hl_next_gi->get_src();
 		ep.relight = NextGIRelight::get_singleton();
 		ep.wrc = hl_next_gi->get_wrc(p_render_data->render_buffers.ptr());
+		if (hl_next_gi->is_world_cache_active() && hl_next_gi->get_world_cache() != nullptr && hl_next_gi->get_world_cache()->is_ready()) {
+			ep.wc_keys = hl_next_gi->get_world_cache()->get_keys_buffer();
+			ep.wc_radiance = hl_next_gi->get_world_cache()->get_radiance_buffer();
+		}
 		ep.depth = last_depth.is_valid() ? last_depth : dummy_color;
 		ep.normal_roughness = last_normal_roughness.is_valid() ? last_normal_roughness : dummy_color;
 		ep.hiz = last_hiz_texture.is_valid() ? last_hiz_texture : dummy_color;
@@ -1305,6 +1343,9 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		if (ran_gi_hit_lighting) {
 			rd->compute_list_bind_compute_pipeline(list, _pipeline(7));
 			rd->compute_list_bind_uniform_set(list, gather_hl_uniform_set, 0);
+		} else if (!hit_radiance_reference && bound_world_cache && gather_wc_uniform_set.is_valid()) {
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(8));
+			rd->compute_list_bind_uniform_set(list, gather_wc_uniform_set, 0);
 		} else {
 			rd->compute_list_bind_compute_pipeline(list, _pipeline(hit_radiance_reference ? 4 : 0));
 			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
@@ -1374,8 +1415,13 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		ReflectCountersGPU zero_reflect;
 		rd->buffer_update(reflect_counter_buffer, 0, sizeof(zero_reflect), &zero_reflect);
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, _pipeline(5));
-		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
+		if (bound_world_cache && reflect_wc_uniform_set.is_valid()) {
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(9));
+			rd->compute_list_bind_uniform_set(list, reflect_wc_uniform_set, 0);
+		} else {
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(5));
+			rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
+		}
 		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, reflect_groups_x, reflect_groups_y, 1);
 		rd->compute_list_end();
@@ -1703,12 +1749,15 @@ Vector<String> NextGIGather::get_shader_variant_defines() {
 }
 
 // GodotNext: nextgi_bake_swrt (#261). The software sibling has no hit-radiance reference (4),
-// no far field (6), and no GI hit lighting (7), whose sources need ray query; the shader baker's instance uses this too.
+// no far field (6), no GI hit lighting (7), and no World Cache (8, 9), whose sources need ray query;
+// the shader baker's instance uses this too.
 void NextGIGather::initialize_swrt_shader(ShaderRD &r_shader) {
 	r_shader.initialize(_nextgi_gather_variant_defines());
 	r_shader.set_variant_enabled(4, false);
 	r_shader.set_variant_enabled(6, false);
 	r_shader.set_variant_enabled(7, false);
+	r_shader.set_variant_enabled(8, false);
+	r_shader.set_variant_enabled(9, false);
 }
 
 String NextGIGather::build_shader_source(int p_variant) {

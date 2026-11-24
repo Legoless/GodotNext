@@ -42,6 +42,7 @@
 class RenderDataRD;
 class RenderSceneDataRD;
 class NextGISWRTTrace;
+class ShaderRD;
 
 namespace RendererRD {
 
@@ -159,6 +160,9 @@ class NextGIWRC {
 	RID counter_buffer;
 	RID uniform_set;
 	RID volume_uniform_set;
+	// GodotNext: nextgi_world_cache (#294). World Cache trace & translucency trace uniform sets (variants 6 & 7).
+	RID trace_wc_uniform_set;
+	RID translucency_trace_wc_uniform_set;
 	RID sampler;
 	RID dummy_tex;
 	RID dummy_buffer;
@@ -233,6 +237,8 @@ public:
 	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
 	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
 	static Vector<String> get_shader_variant_defines();
+	// GodotNext: nextgi_world_cache (#294). Initializes the software sibling with HWRT-only World Cache variants disabled.
+	static void initialize_swrt_shader(ShaderRD &r_shader);
 
 	void update(const RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;

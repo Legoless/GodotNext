@@ -60,6 +60,7 @@ TEST_FORCE_LINK(test_nextgi)
 #endif // MODULE_GLSLANG_ENABLED
 #include "servers/rendering/renderer_rd/environment/next_gi_bake_shaders.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -299,12 +300,19 @@ TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every N
 		CHECK_EQ(versions[i].first->requires_ray_query(), !no_ray_query);
 	}
 
-	// Gather bakes every runtime variant, the far-field and GI hit-lighting ones included; the software sibling
-	// has the runtime's variants, without the reference (4), far field (6) and GI hit lighting (7), which need ray query.
+	// Gather bakes every runtime variant, the far-field, GI hit-lighting and World Cache ones included; the software
+	// sibling has the runtime's variants, without reference (4), far field (6), GI hit lighting (7) and World Cache (8, 9),
+	// which need ray query.
 	CHECK_EQ(versions[0].first->get_variant_count(), RendererRD::NextGIGather::get_shader_variant_defines().size());
 	for (int variant = 0; variant < versions[0].first->get_variant_count(); variant++) {
 		CHECK(versions[0].first->is_variant_enabled(variant));
-		CHECK_EQ(versions[5].first->is_variant_enabled(variant), variant != 4 && variant != 6 && variant != 7);
+		CHECK_EQ(versions[5].first->is_variant_enabled(variant), variant != 4 && variant != 6 && variant != 7 && variant != 8 && variant != 9);
+	}
+	// WRC bakes every runtime variant, World Cache (6, 7) included; the software sibling disables World Cache (6, 7).
+	CHECK_EQ(versions[3].first->get_variant_count(), RendererRD::NextGIWRC::get_shader_variant_defines().size());
+	for (int variant = 0; variant < versions[3].first->get_variant_count(); variant++) {
+		CHECK(versions[3].first->is_variant_enabled(variant));
+		CHECK_EQ(versions[8].first->is_variant_enabled(variant), variant != 6 && variant != 7);
 	}
 	// Relight bakes both radiance formats on both tiers; the runtime picks one from the device.
 	for (int base : { 1, 6 }) {

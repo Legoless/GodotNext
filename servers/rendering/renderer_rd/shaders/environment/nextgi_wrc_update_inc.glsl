@@ -432,9 +432,30 @@ void nextgi_wrc_trace() {
 #endif
 		bool uncovered = false;
 		vec3 looked_up = vec3(0.0);
+#if defined(MODE_WORLD_CACHE) && !defined(NEXTGI_TRACE_SDF)
+		vec3 hit_obj_pos;
+		vec3 hit_face_normal;
+		bool wc_found = false;
+		if (nextgi_wrc_hit_pos_normal(hit, hit_obj_pos, hit_face_normal)) {
+			NextGIInstanceRecord rec = records.data[hit.custom_index];
+			vec3 hit_world = vec3(
+					dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), hit_obj_pos) + rec.object_to_world[3],
+					dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), hit_obj_pos) + rec.object_to_world[7],
+					dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), hit_obj_pos) + rec.object_to_world[11]);
+			vec3 hit_world_normal = normalize(nextgi_record_normal_to_world(rec, hit_face_normal));
+			if (dot(hit_world_normal, -direction) < 0.0) {
+				hit_world_normal = -hit_world_normal;
+			}
+			wc_found = nextgi_wrc_wc_lookup(hit_world, hit_world_normal, params.camera.xyz, looked_up);
+		}
+		if (!wc_found) {
+			looked_up = history ? previous : vec3(0.0);
+		}
+#else
 		if (!nextgi_src_lookup(hit, looked_up, uncovered)) {
 			looked_up = history ? previous : vec3(0.0);
 		}
+#endif
 		sample_radiance = looked_up;
 		back_face = !hit.front_face && hit.t < 0.5 * spacing;
 	} else {

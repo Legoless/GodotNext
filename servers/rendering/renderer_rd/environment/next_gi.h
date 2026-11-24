@@ -69,6 +69,10 @@ class NextGIHitLighting;
 struct NextGIHitLightingVerdict;
 struct NextGIHitLightingGIVerdict;
 
+// GodotNext: nextgi_world_cache (#294)
+class NextGIWorldCache;
+struct NextGIWorldCacheVerdict;
+
 // GodotNext: path_tracer (#167)
 class PathTracer;
 
@@ -356,11 +360,25 @@ private:
 	// the live hit_materials were made for. 0 is Full.
 	int hit_mode = 0;
 	int hit_materials_mode = 0;
+	bool hit_materials_world_cache = false;
 	uint64_t hit_materials_freed_frame = UINT64_MAX; // GodotNext: path_tracer (#167). nextgi_hit_tables_releasing().
 	void _update_hit_materials(bool p_hwrt_frame, uint64_t p_frame);
 	void _free_hit_materials();
 	bool _wants_shadow_streams() const; // GodotNext: nextgi_shadow_policy (#145)
 	uint64_t hit_materials_created = 0; // GodotNext: nextgi_shadow_policy (#145). NextGIHitMaterials made so far.
+
+	// GodotNext: nextgi_world_cache (#294). Runtime world-space lighting cache (off by default, read at startup).
+	String device_api_name;
+	bool world_cache_requested = false;
+	NextGIWorldCache *world_cache = nullptr;
+	uint32_t world_cache_logged_reasons = 0;
+	bool world_cache_replaces_src = false;
+	bool world_cache_last_active = false;
+	int world_cache_last_reason = 0;
+	void _free_world_cache();
+	void _free_src_and_relight();
+	void _update_world_cache(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices);
+	void _log_world_cache_fallback(int p_reason);
 
 	// GodotNext: nextgi_shadow_policy (#145). GM-4's caster-mask matrix, only while debug/shadow_ray_check is on.
 	NextGIShadowCheck *shadow_check = nullptr;
@@ -631,6 +649,7 @@ public:
 		DEBUG_VIEW_SPECULAR_REJECTED,
 		DEBUG_VIEW_SPECULAR_DENOISED,
 		DEBUG_VIEW_LITE_PROBES,
+		DEBUG_VIEW_WORLD_CACHE,
 		DEBUG_VIEW_MAX,
 	};
 
@@ -768,6 +787,14 @@ public:
 	bool is_hit_lighting_translucent_enabled() const { return hit_lighting_translucent_active; }
 	NextGIHitLighting *ensure_hit_lighting();
 	NextGIHitLighting *get_hit_lighting() const { return hit_lighting; }
+	// GodotNext: nextgi_world_cache (#294). Off by default, read at startup.
+	static bool read_world_cache();
+	bool is_world_cache_requested() const { return world_cache_requested; }
+	bool is_world_cache_replacing_src() const { return world_cache_replaces_src; }
+	bool is_world_cache_active() const;
+	NextGIWorldCache *get_world_cache() const { return world_cache; }
+	RID get_world_cache_debug_texture() const;
+	NextGIWorldCacheVerdict evaluate_world_cache(bool p_require_current_records = false) const;
 	void set_front_layer(NextGIFrontLayer *p_front_layer) { front_layer = p_front_layer; }
 	bool has_front_layer() const { return front_layer != nullptr; }
 	NextGIReference *get_reference() const { return reference; }

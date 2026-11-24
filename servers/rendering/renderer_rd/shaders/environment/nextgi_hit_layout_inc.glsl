@@ -45,15 +45,23 @@
 
 #include "nextgi_records_inc.glsl"
 #include "nextgi_hit_lighting_common_inc.glsl"
+#include "nextgi_world_cache_common_inc.glsl"
+
+// GodotNext: nextgi_world_cache (#294, #286). Bit 1 of NextGIHitSurface.flags: when bit 0 (attribute stream)
+// is clear (e.g. Simplified Material mode), attribute_chunk holds packed RGBA8 linear albedo + opacity,
+// attribute_offset holds packed R11G11B10F emission, bits 8..15 hold roughness (unorm8), and bits 16..23
+// hold metallic (unorm8), giving the simplified hit shader surface colour without compiling material groups.
+#define NEXTGI_HIT_SURFACE_HAS_STREAM 1u
+#define NEXTGI_HIT_SURFACE_SIMPLIFIED_COLOR 2u
 
 // NextGIHitMaterials' records (next_gi_hit_materials.cpp), std430.
 // One per NextGISurfaceRecord, at the same index: where the geometry's attribute stream is and which
 // material shades it.
 struct NextGIHitSurface {
 	uint attribute_chunk;
-	uint attribute_offset; // Bytes in the chunk.
+	uint attribute_offset; // Bytes in the chunk (or R11G11B10F emission when NEXTGI_HIT_SURFACE_SIMPLIFIED_COLOR).
 	uint material_id; // Index into hit_materials, or 0xFFFFFFFF. Not "material": the hit template defines that name.
-	uint flags; // Bit 0: the geometry has an attribute stream.
+	uint flags; // Bit 0: attribute stream; bit 1: simplified surface colour (bits 8..15 roughness, 16..23 metallic).
 };
 
 // One per material: its parameter buffer's slot in the set 2 table and its textures' slots.
@@ -300,6 +308,42 @@ layout(set = 0, binding = 57) uniform texture2DArray hit_pt_ies_atlas;
 layout(set = 0, binding = 58) uniform texture2D hit_pt_area_atlas;
 layout(set = 0, binding = 59) uniform texture2D hit_pt_projector_atlas;
 layout(set = 0, binding = 60) uniform texture2D hit_pt_sky_octmap;
+
+// GodotNext: nextgi_world_cache (#294). World Cache update raygen (stage 3) and indirect lookup resources.
+// Other raygen stages bind stand-in buffers/textures for these slots so pipeline libraries link identically.
+layout(set = 0, binding = 61, std430) restrict readonly buffer HitWCParams {
+	mat4 inv_view_proj;
+	vec4 camera_pos_radius;
+	vec4 grid_min_inv_cell;
+	vec4 ambient_color_sky;
+	vec4 view_to_world[3];
+	uvec4 counts0;
+	uvec4 counts1;
+}
+hit_wc_params;
+
+layout(set = 0, binding = 62, std430) restrict buffer HitWCKeys {
+	uint data[];
+}
+hit_wc_keys;
+
+layout(set = 0, binding = 63, std430) restrict readonly buffer HitWCRadiance {
+	vec4 data[];
+}
+hit_wc_radiance;
+
+layout(set = 0, binding = 64, std430) restrict buffer HitWCAccum {
+	uvec4 data[];
+}
+hit_wc_accum;
+
+layout(set = 0, binding = 65, std430) restrict buffer HitWCCounters {
+	NextGIWorldCacheCounters data;
+}
+hit_wc_counters;
+
+layout(set = 0, binding = 66) uniform texture2D hit_wc_depth;
+layout(set = 0, binding = 67) uniform texture2D hit_wc_normal_roughness;
 
 layout(set = 1, binding = 0) uniform texture2D hit_textures[];
 

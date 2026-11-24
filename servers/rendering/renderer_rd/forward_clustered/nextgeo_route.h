@@ -263,6 +263,8 @@ inline bool nextgeo_is_unsupported_debug_draw(RSE::ViewportDebugDraw p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE:
 		case RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW:
 		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP:
+		// GodotNext: nextgi_world_cache (#294). Drawn from World Cache buffers over depth/normal.
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WORLD_CACHE:
 			return false;
 		default:
 			return true;
