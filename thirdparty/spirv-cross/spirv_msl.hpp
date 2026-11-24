@@ -317,6 +317,10 @@ public:
 		uint32_t shader_input_buffer_index = 22;
 		uint32_t shader_index_buffer_index = 21;
 		uint32_t shader_patch_input_buffer_index = 20;
+		// GodotNext: metal_ray_shaders (#172). Buffer indices for Metal ray tracing pipelines.
+		uint32_t rt_sbt_params_buffer_index = 18;
+		uint32_t rt_intersection_function_table_index = 17;
+		uint32_t rt_visible_function_table_index = 16;
 		uint32_t shader_input_wg_index = 0;
 		uint32_t device_index = 0;
 		uint32_t enable_frag_output_mask = 0xffffffff;
@@ -880,6 +884,8 @@ protected:
 		SPVFuncImplConvertYCbCrBT2020,
 		SPVFuncImplDynamicImageSampler,
 		SPVFuncImplRayQueryIntersectionParams,
+		// GodotNext: metal_ray_shaders (#172). Structs and visible function signature for Metal ray shaders.
+		SPVFuncImplRayTracingTypes,
 		SPVFuncImplVariableDescriptor,
 		SPVFuncImplVariableSizedDescriptor,
 		SPVFuncImplVariableDescriptorArray,
@@ -926,6 +932,10 @@ protected:
 	void emit_mesh_entry_point();
 	void emit_mesh_outputs();
 	void emit_mesh_tasks(SPIRBlock &block) override;
+	// GodotNext: metal_ray_shaders (#172).
+	void emit_ignore_intersection() override;
+	void emit_terminate_ray() override;
+	bool emit_entry_point_void_return() override;
 	void emit_workgroup_initialization(const SPIRVariable &var) override;
 
 	// Allow Metal to use the array<T> template to make arrays a value type
@@ -979,6 +989,14 @@ protected:
 	bool is_tesc_shader() const;
 	bool is_tese_shader() const;
 	bool is_mesh_shader() const;
+	// GodotNext: metal_ray_shaders (#172).
+	bool is_ray_generation_shader() const;
+	bool is_closest_hit_shader() const;
+	bool is_miss_shader() const;
+	bool is_any_hit_shader() const;
+	bool is_ray_tracing_shader() const;
+	bool is_ray_tracing_visible_shader() const;
+	void emit_ray_tracing_entry_point_declarations();
 
 	void preprocess_op_codes();
 	void localize_global_variables();

@@ -283,6 +283,8 @@ void MDCommandBuffer::_begin() {
 	_indirect_count_clamps.clear();
 	_indirect_count_clamps_used = 0;
 	_indirect_count_clamp_fenced = false;
+	// GodotNext: metal_ray_shaders (#172)
+	raytracing.reset();
 }
 
 MDCommandBuffer::Alloc MDCommandBuffer::allocate_arg_buffer(uint32_t p_size) {
@@ -2050,6 +2052,248 @@ void MDCommandBuffer::compute_dispatch_indirect(RDD::BufferID p_indirect_buffer,
 
 	MTL::ComputeCommandEncoder *enc = compute.encoder.get();
 	enc->dispatchThreadgroups(indirectBuffer->buffer.get(), p_offset, compute.pipeline->compute_state.local);
+}
+
+#pragma mark - Raytracing Commands
+
+// GodotNext: metal_ray_shaders (#172)
+void MDCommandBuffer::raytracing_bind_pipeline(RDD::RaytracingPipelineID p_pipeline) {
+	MDRaytracingPipeline *pipeline = reinterpret_cast<MDRaytracingPipeline *>(p_pipeline.id);
+	ERR_FAIL_NULL(pipeline);
+	ERR_FAIL_COND(pipeline->is_library);
+	if (type == MDCommandBufferStateType::Render) {
+		render_end_pass();
+	} else if (type == MDCommandBufferStateType::InlineRender) {
+		_end_inline_render();
+	} else if (type == MDCommandBufferStateType::Blit) {
+		_end_blit();
+	} else if (type == MDCommandBufferStateType::AccelerationStructure) {
+		_end_as();
+	}
+	type = MDCommandBufferStateType::Compute;
+	if (raytracing.pipeline != pipeline) {
+		if (raytracing.pipeline != nullptr && raytracing.pipeline->layout_shader != pipeline->layout_shader) {
+			push_constant_binding = MetalPushConstantBinding();
+			push_constant_data_len = 0;
+		}
+		raytracing.pipeline = pipeline;
+	}
+}
+
+void MDCommandBuffer::raytracing_bind_uniform_set(RDD::UniformSetID p_uniform_set, RDD::ShaderID p_shader, uint32_t p_set_index) {
+	if (raytracing.uniform_sets.size() <= p_set_index) {
+		uint32_t old_size = raytracing.uniform_sets.size();
+		raytracing.uniform_sets.resize(p_set_index + 1);
+		for (uint32_t i = old_size; i < raytracing.uniform_sets.size(); i++) {
+			raytracing.uniform_sets[i] = nullptr;
+		}
+	}
+	raytracing.uniform_sets[p_set_index] = reinterpret_cast<MDUniformSet *>(p_uniform_set.id);
+}
+
+GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wunguarded-availability-new")
+
+void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth, RDD::BufferID p_indirect_buffer, uint64_t p_indirect_offset) {
+	ERR_FAIL_NULL(raytracing.pipeline);
+	ERR_FAIL_COND(raytracing.pipeline->raygen_entries.is_empty());
+
+	const bool is_indirect = p_indirect_buffer.id != 0;
+	if (!is_indirect && (p_width == 0 || p_height == 0 || p_depth == 0)) {
+		return;
+	}
+
+	const uint32_t raygen_index = RDD::metal_rt_raygen_index_from_sbt(p_raygen_sbt.offset, p_raygen_sbt.stride);
+	ERR_FAIL_UNSIGNED_INDEX(raygen_index, raytracing.pipeline->raygen_entries.size());
+	MDRaytracingPipeline::RaygenEntry &entry = raytracing.pipeline->raygen_entries[raygen_index];
+	ERR_FAIL_NULL(entry.state.get());
+	ERR_FAIL_NULL(entry.visible_table.get());
+	ERR_FAIL_NULL(entry.intersection_table.get());
+
+	// Ensure a compute command encoder is active, closing any non-compute encoder first.
+	if (type == MDCommandBufferStateType::Render) {
+		render_end_pass();
+	} else if (type == MDCommandBufferStateType::InlineRender) {
+		_end_inline_render();
+	} else if (type == MDCommandBufferStateType::Blit) {
+		_end_blit();
+	} else if (type == MDCommandBufferStateType::AccelerationStructure) {
+		_end_as();
+	}
+	type = MDCommandBufferStateType::Compute;
+	if (!compute.encoder) {
+		compute.encoder = NS::RetainPtr(command_buffer()->computeCommandEncoder(MTL::DispatchTypeConcurrent));
+		_encode_residency(compute.encoder.get());
+		_fence_wait(compute.encoder.get());
+	}
+	MTL::ComputeCommandEncoder *enc = compute.encoder.get();
+
+	RDD::MetalRTSBTParams params = {};
+	params.launch_size_x = p_width;
+	params.launch_size_y = p_height;
+	params.launch_size_z = p_depth;
+	params.handle_size = RDD::METAL_RT_SHADER_GROUP_HANDLE_SIZE;
+
+	if (p_miss_sbt.buffer.id != 0) {
+		const RDM::BufferInfo *miss_info = reinterpret_cast<const RDM::BufferInfo *>(p_miss_sbt.buffer.id);
+		if (miss_info != nullptr && miss_info->buffer.get() != nullptr) {
+			params.miss_sbt_address = miss_info->buffer->gpuAddress() + p_miss_sbt.offset;
+			params.miss_sbt_stride = p_miss_sbt.stride;
+			params.miss_sbt_count = p_miss_sbt.stride > 0 ? p_miss_sbt.size / p_miss_sbt.stride : 0;
+			enc->useResource(miss_info->buffer.get(), MTL::ResourceUsageRead);
+		}
+	}
+
+	if (p_hit_sbt.buffer.id != 0) {
+		const RDM::BufferInfo *hit_info = reinterpret_cast<const RDM::BufferInfo *>(p_hit_sbt.buffer.id);
+		if (hit_info != nullptr && hit_info->buffer.get() != nullptr) {
+			params.hit_sbt_address = hit_info->buffer->gpuAddress() + p_hit_sbt.offset;
+			params.hit_sbt_stride = p_hit_sbt.stride;
+			params.hit_sbt_count = p_hit_sbt.stride > 0 ? p_hit_sbt.size / p_hit_sbt.stride : 0;
+			enc->useResource(hit_info->buffer.get(), MTL::ResourceUsageRead);
+		}
+	}
+
+	MTL::Buffer *indirect_mtl_buffer = nullptr;
+	if (is_indirect) {
+		const RDM::BufferInfo *ind_info = reinterpret_cast<const RDM::BufferInfo *>(p_indirect_buffer.id);
+		ERR_FAIL_NULL(ind_info);
+		indirect_mtl_buffer = ind_info->buffer.get();
+		ERR_FAIL_NULL(indirect_mtl_buffer);
+		params.indirect_launch_address = indirect_mtl_buffer->gpuAddress() + p_indirect_offset;
+		enc->useResource(indirect_mtl_buffer, MTL::ResourceUsageRead);
+	}
+
+	MDShader *layout_shader = raytracing.pipeline->layout_shader;
+	const uint32_t max_sets = MIN((uint32_t)raytracing.uniform_sets.size(), 8u);
+	for (uint32_t set_index = 0; set_index < max_sets; set_index++) {
+		MDUniformSet *set = raytracing.uniform_sets[set_index];
+		if (set == nullptr) {
+			continue;
+		}
+		MTL::Buffer *arg_buf = nullptr;
+		if (set->bindless_table != nullptr) {
+			raytracing.resource_tracker.merge_from(set->bindless_table->get_usage_to_resources());
+			arg_buf = set->bindless_table->buffer.get();
+		} else {
+			raytracing.resource_tracker.merge_from(set->usage_to_resources);
+			arg_buf = set->arg_buffer.buffer.get();
+			if (sync_mode != RDM::SyncMode::HazardTracking && layout_shader != nullptr && set_index < (uint32_t)layout_shader->sets.size()) {
+				const UniformSet &shader_set = layout_shader->sets[set_index];
+				const uint32_t uniform_count = MIN((uint32_t)set->uniforms.size(), (uint32_t)shader_set.uniforms.size());
+				for (uint32_t i = 0; i < uniform_count; i++) {
+					const UniformInfo &ui = shader_set.uniforms[i];
+					const RDD::BoundUniform &uniform = set->uniforms[i];
+					if ((ui.usage & MTL::ResourceUsageWrite) == 0 || uniform.ids.is_empty()) {
+						continue;
+					}
+					if (uniform.type == RDD::UNIFORM_TYPE_STORAGE_BUFFER) {
+						const RDM::BufferInfo *info = reinterpret_cast<const RDM::BufferInfo *>(uniform.ids[0].id);
+						if (info != nullptr && info->buffer.get() != nullptr) {
+							enc->useResource(info->buffer.get(), ui.usage);
+						}
+					} else if (uniform.type == RDD::UNIFORM_TYPE_IMAGE) {
+						for (uint32_t j = 0; j < uniform.ids.size(); j++) {
+							const RDM::TextureInfo *tinfo = reinterpret_cast<const RDM::TextureInfo *>(uniform.ids[j].id);
+							if (tinfo != nullptr && tinfo->texture.get() != nullptr) {
+								enc->useResource(tinfo->texture.get(), ui.usage);
+							}
+						}
+					}
+				}
+			}
+		}
+		if (arg_buf != nullptr) {
+			const uint64_t gpu_addr = arg_buf->gpuAddress();
+			params.const_sets[set_index] = gpu_addr;
+			params.device_sets[set_index] = gpu_addr;
+			enc->setBuffer(arg_buf, 0, set_index);
+			entry.intersection_table->setBuffer(arg_buf, 0, set_index);
+			enc->useResource(arg_buf, MTL::ResourceUsageRead);
+		}
+	}
+
+	MDRingBuffer::Allocation pc_alloc;
+	if (push_constant_data_len > 0) {
+		pc_alloc = allocate_arg_buffer(push_constant_data_len);
+		memcpy(pc_alloc.ptr, push_constant_data, push_constant_data_len);
+		params.push_constants_address = pc_alloc.gpu_address;
+		enc->useResource(pc_alloc.buffer, MTL::ResourceUsageRead);
+		if (push_constant_binding.is_valid()) {
+			const uint32_t pc_slot = push_constant_binding.get_binding();
+			enc->setBuffer(pc_alloc.buffer, pc_alloc.offset, pc_slot);
+			entry.intersection_table->setBuffer(pc_alloc.buffer, pc_alloc.offset, pc_slot);
+		}
+	}
+
+	MDRingBuffer::Allocation params_alloc = allocate_arg_buffer(sizeof(RDD::MetalRTSBTParams));
+	memcpy(params_alloc.ptr, &params, sizeof(RDD::MetalRTSBTParams));
+	enc->useResource(params_alloc.buffer, MTL::ResourceUsageRead);
+
+	entry.intersection_table->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
+
+	raytracing.resource_tracker.encode(enc);
+
+	const MTL::Size threads_per_tg(RDD::METAL_RT_THREADGROUP_WIDTH, RDD::METAL_RT_THREADGROUP_HEIGHT, 1);
+
+	if (is_indirect) {
+		MTL::ComputePipelineState *convert_pso = device_driver->get_resource_cache().get_rt_indirect_dispatch_pipeline_state();
+		ERR_FAIL_NULL(convert_pso);
+		MDRingBuffer::Allocation tg_alloc = allocate_arg_buffer(sizeof(MTL::DispatchThreadgroupsIndirectArguments));
+		enc->useResource(tg_alloc.buffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+		enc->setComputePipelineState(convert_pso);
+		enc->setBuffer(indirect_mtl_buffer, p_indirect_offset, 0);
+		enc->setBuffer(tg_alloc.buffer, tg_alloc.offset, 1);
+		enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+		enc->memoryBarrier(MTL::BarrierScopeBuffers);
+
+		// Restore RT bindings after the 1-thread converter dispatch.
+		for (uint32_t set_index = 0; set_index < max_sets; set_index++) {
+			MDUniformSet *set = raytracing.uniform_sets[set_index];
+			if (set == nullptr) {
+				continue;
+			}
+			MTL::Buffer *arg_buf = set->bindless_table != nullptr ? set->bindless_table->buffer.get() : set->arg_buffer.buffer.get();
+			if (arg_buf != nullptr) {
+				enc->setBuffer(arg_buf, 0, set_index);
+			}
+		}
+		if (pc_alloc.is_valid() && push_constant_binding.is_valid()) {
+			enc->setBuffer(pc_alloc.buffer, pc_alloc.offset, push_constant_binding.get_binding());
+		}
+		enc->setComputePipelineState(entry.state.get());
+		enc->setVisibleFunctionTable(entry.visible_table.get(), RDD::METAL_RT_VISIBLE_FUNCTION_TABLE_BUFFER_INDEX);
+		enc->setIntersectionFunctionTable(entry.intersection_table.get(), RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX);
+		enc->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
+		enc->useResource(entry.visible_table.get(), MTL::ResourceUsageRead);
+		enc->useResource(entry.intersection_table.get(), MTL::ResourceUsageRead);
+		enc->dispatchThreadgroups(tg_alloc.buffer, tg_alloc.offset, threads_per_tg);
+	} else {
+		uint32_t gx = 0;
+		uint32_t gy = 0;
+		uint32_t gz = 0;
+		RDD::metal_rt_compute_threadgroups(p_width, p_height, p_depth, RDD::METAL_RT_THREADGROUP_WIDTH, RDD::METAL_RT_THREADGROUP_HEIGHT, 1, gx, gy, gz);
+		enc->setComputePipelineState(entry.state.get());
+		enc->setVisibleFunctionTable(entry.visible_table.get(), RDD::METAL_RT_VISIBLE_FUNCTION_TABLE_BUFFER_INDEX);
+		enc->setIntersectionFunctionTable(entry.intersection_table.get(), RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX);
+		enc->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
+		enc->useResource(entry.visible_table.get(), MTL::ResourceUsageRead);
+		enc->useResource(entry.intersection_table.get(), MTL::ResourceUsageRead);
+		enc->dispatchThreadgroups(MTL::Size(gx, gy, gz), threads_per_tg);
+	}
+
+	// Invalidate compute binding cache since RT trace overwrote compute encoder bindings.
+	binding_cache.clear();
+	compute.dirty.set_flag(ComputeState::DIRTY_ALL);
+}
+
+GODOT_CLANG_WARNING_POP
+
+void MDCommandBuffer::raytracing_trace_rays(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
+	_raytracing_encode_trace(p_raygen_sbt, p_miss_sbt, p_hit_sbt, p_width, p_height, p_depth, RDD::BufferID(), 0);
+}
+
+void MDCommandBuffer::raytracing_trace_rays_indirect(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, RDD::BufferID p_indirect_buffer, uint64_t p_offset) {
+	_raytracing_encode_trace(p_raygen_sbt, p_miss_sbt, p_hit_sbt, 0, 0, 0, p_indirect_buffer, p_offset);
 }
 
 void MDCommandBuffer::reset() {

@@ -758,6 +758,9 @@ protected:
 	void emit_unary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op);
 	void emit_unary_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op);
 	virtual void emit_mesh_tasks(SPIRBlock &block);
+	virtual void emit_ignore_intersection();
+	virtual void emit_terminate_ray();
+	virtual bool emit_entry_point_void_return();
 	bool expression_is_forwarded(uint32_t id) const;
 	bool expression_suppresses_usage_tracking(uint32_t id) const;
 	bool expression_read_implies_multiple_reads(uint32_t id) const;

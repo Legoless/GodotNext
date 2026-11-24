@@ -35,6 +35,7 @@
 #include "core/os/os.h"
 #include "core/templates/fixed_vector.h"
 #include "drivers/metal/metal_utils.h"
+#include "servers/rendering/rendering_device_rt_pipeline.h" // GodotNext: metal_ray_shaders (#172).
 
 #include <thirdparty/spirv-reflect/spirv_reflect.h>
 
@@ -379,6 +380,13 @@ MetalDeviceProfile::MinimumRequirements RenderingShaderContainerMetal::inspect_s
 				}
 				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_30);
 			}
+			// GodotNext: metal_ray_shaders (#172). Experimental Metal ray shaders require Apple9 and MSL 3.2+.
+			if (word_count >= 2 && opcode == spv::OpCapability && words[1] == spv::CapabilityRayTracingKHR) {
+				if (reqs.gpu < MetalDeviceProfile::GPU::Apple9) {
+					reqs.gpu = MetalDeviceProfile::GPU::Apple9;
+				}
+				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_32);
+			}
 			if (opcode == spv::OpImageTexelPointer) {
 				atomic_image_ids.insert(words[3]);
 			}
@@ -517,6 +525,10 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 	msl_options.pad_fragment_output_components = true;
 	msl_options.r32ui_alignment_constant_id = R32UI_ALIGNMENT_CONSTANT_ID;
 	msl_options.agx_manual_cube_grad_fixup = true;
+	// GodotNext: metal_ray_shaders (#172). Fixed MSL buffer indices for RT function tables and SBT params.
+	msl_options.rt_visible_function_table_index = RDD::METAL_RT_VISIBLE_FUNCTION_TABLE_BUFFER_INDEX;
+	msl_options.rt_intersection_function_table_index = RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX;
+	msl_options.rt_sbt_params_buffer_index = RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX;
 	if (reflection_data.has_multiview) {
 		msl_options.multiview = true;
 		msl_options.multiview_layered_rendering = true;
@@ -878,8 +890,12 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 			}
 		}
 
+		const bool is_rt_stage = (stage == RDC::SHADER_STAGE_RAYGEN || stage == RDC::SHADER_STAGE_ANY_HIT ||
+				stage == RDC::SHADER_STAGE_CLOSEST_HIT || stage == RDC::SHADER_STAGE_MISS ||
+				stage == RDC::SHADER_STAGE_INTERSECTION);
 		if (push_constant_resource_binding.desc_set == ResourceBindingPushConstantDescriptorSet &&
-				compiler.is_msl_resource_binding_used(execution_model, ResourceBindingPushConstantDescriptorSet, ResourceBindingPushConstantBinding)) {
+				(compiler.is_msl_resource_binding_used(execution_model, ResourceBindingPushConstantDescriptorSet, ResourceBindingPushConstantBinding) ||
+						(is_rt_stage && reflection_data.push_constant_size > 0))) {
 			mtl_reflection_data.push_constant_binding.set(stage, push_constant_resource_binding.msl_buffer);
 		}
 
@@ -909,6 +925,12 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 
 		stage_data.is_position_invariant = compiler.is_position_invariant();
 		stage_data.supports_fast_math = !entry_point.flags.get(spv::ExecutionModeSignedZeroInfNanPreserve);
+		// GodotNext: metal_ray_shaders (#172). Record per-stage ray payload size for library validation.
+		if (stage == RDC::SHADER_STAGE_RAYGEN || stage == RDC::SHADER_STAGE_ANY_HIT ||
+				stage == RDC::SHADER_STAGE_CLOSEST_HIT || stage == RDC::SHADER_STAGE_MISS ||
+				stage == RDC::SHADER_STAGE_INTERSECTION) {
+			stage_data.rt_payload_size = RDRTPipeline::get_spirv_payload_size(reinterpret_cast<const uint8_t *>(spirv.ptr()), spirv.size() * sizeof(uint32_t));
+		}
 		stage_data.hash = SHA256Digest(source.c_str(), source.length());
 		stage_data.source_size = source.length();
 		::Vector<uint8_t> binary_data;

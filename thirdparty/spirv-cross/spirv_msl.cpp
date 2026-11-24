@@ -1360,6 +1360,131 @@ uint32_t CompilerMSL::get_uint_type_id()
 	return uint_type_id;
 }
 
+// GodotNext: metal_ray_shaders (#172). Emit entry-point bindings for Metal ray-tracing stages.
+void CompilerMSL::emit_ray_tracing_entry_point_declarations()
+{
+	if (is_ray_generation_shader())
+	{
+		statement("uint3 spvLaunchSize = (spvRTParams.indirect_launch != nullptr) ? "
+		          "uint3(spvRTParams.indirect_launch[0], spvRTParams.indirect_launch[1], spvRTParams.indirect_launch[2]) : "
+		          "uint3(spvRTParams.launch_size_x, spvRTParams.launch_size_y, spvRTParams.launch_size_z);");
+		statement("if (any(spvLaunchID >= spvLaunchSize))");
+		begin_scope();
+		statement("return;");
+		end_scope();
+		ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var) {
+			if (var.storage == StorageClassRayPayloadKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				statement(type_to_glsl(type), " ", to_name(var_id), " = {};");
+			}
+		});
+		return;
+	}
+
+	if (is_ray_tracing_visible_shader())
+	{
+		for (uint32_t i = 0; i < kMaxArgumentBuffers; i++)
+		{
+			uint32_t id = argument_buffer_ids[i];
+			if (id == 0)
+				continue;
+
+			auto &var = get<SPIRVariable>(id);
+			auto &type = get_variable_data_type(var);
+			string addr_space = get_variable_address_space(var);
+			bool is_device = addr_space.find("device") != string::npos;
+			string ptr_field = is_device ? join("spvRTParams.device_sets[", i, "]") : join("spvRTParams.const_sets[", i, "]");
+			string cast_space = is_device ? addr_space : string("const constant");
+			statement(addr_space, " ", type_to_glsl(type), "& ", to_restrict(id, true), to_name(id),
+			          " = *static_cast<", cast_space, " ", type_to_glsl(type), "*>(", ptr_field, ");");
+		}
+
+		ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var) {
+			if (var.storage == StorageClassPushConstant && !is_hidden_variable(var))
+			{
+				add_resource_name(var_id);
+				auto &type = get_variable_data_type(var);
+				string addr_space = get_variable_address_space(var);
+				statement(addr_space, " ", type_to_glsl(type), "& ", to_restrict(var_id, true), to_name(var_id),
+				          " = *static_cast<const constant ", type_to_glsl(type), "*>(spvRTParams.push_constants);");
+			}
+			else if (var.storage == StorageClassIncomingRayPayloadKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				statement("thread ", type_to_glsl(type), "& ", to_name(var_id),
+				          " = *static_cast<thread ", type_to_glsl(type), "*>(spvPayloadPtr);");
+			}
+			else if (var.storage == StorageClassRayPayloadKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				statement(type_to_glsl(type), " ", to_name(var_id), " = {};");
+			}
+			else if (var.storage == StorageClassHitAttributeKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				if (type.basetype == SPIRType::Float && type.vecsize == 2 && type.columns == 1 && type.array.empty())
+					statement("float2 ", to_name(var_id), " = spvHitInfo.barycentrics;");
+				else
+					statement(type_to_glsl(type), " ", to_name(var_id), " = {};");
+			}
+			else if (var.storage == StorageClassShaderRecordBufferKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				statement("const device ", type_to_glsl(type), "& ", to_name(var_id),
+				          " = *static_cast<const device ", type_to_glsl(type), "*>(spvRecordPtr);");
+			}
+		});
+		return;
+	}
+
+	if (is_any_hit_shader())
+	{
+		bool emitted_record_ptr = false;
+		ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var) {
+			if (var.storage == StorageClassHitAttributeKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				if (type.basetype == SPIRType::Float && type.vecsize == 2 && type.columns == 1 && type.array.empty())
+					statement("float2 ", to_name(var_id), " = spvBary;");
+				else
+					statement(type_to_glsl(type), " ", to_name(var_id), " = {};");
+			}
+			else if (var.storage == StorageClassShaderRecordBufferKHR && !is_hidden_variable(var))
+			{
+				if (!emitted_record_ptr)
+				{
+					statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? "
+					          "spvRTParams.instance_sbt_offsets[spvInstanceId] : spvUserInstanceId;");
+					statement("uint spvSbtIndex = spvInstSbtOffset + spvGeometryId;");
+					statement("if (spvRTParams.hit_sbt_count > 0u && spvSbtIndex >= spvRTParams.hit_sbt_count)");
+					begin_scope();
+					statement("spvSbtIndex = spvRTParams.hit_sbt_count - 1u;");
+					end_scope();
+					statement("const device void* spvRecordPtr = spvRTParams.hit_sbt + spvSbtIndex * spvRTParams.hit_sbt_stride + spvRTParams.handle_size;");
+					emitted_record_ptr = true;
+				}
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				statement("const device ", type_to_glsl(type), "& ", to_name(var_id),
+				          " = *static_cast<const device ", type_to_glsl(type), "*>(spvRecordPtr);");
+			}
+			else if (var.storage == StorageClassIncomingRayPayloadKHR && !is_hidden_variable(var))
+			{
+				add_local_variable_name(var_id);
+				auto &type = get_variable_data_type(var);
+				statement(type_to_glsl(type), " ", to_name(var_id), " = {};");
+			}
+		});
+	}
+}
+
 void CompilerMSL::emit_entry_point_declarations()
 {
 	// FIXME: Get test coverage here ...
@@ -1493,6 +1618,10 @@ void CompilerMSL::emit_entry_point_declarations()
 			          type.basetype == SPIRType::SampledImage ? to_sampler_expression(samp.first) : to_name(samp.first),
 			          "(", merge(args), ");");
 	}
+
+	// GodotNext: metal_ray_shaders (#172). Emit ray-tracing entry-point bindings before runtime descriptor arrays.
+	if (processing_entry_point && is_ray_tracing_shader())
+		emit_ray_tracing_entry_point_declarations();
 
 	// Emit dynamic buffers here.
 	for (auto &dynamic_buffer : buffers_requiring_dynamic_offset)
@@ -1785,7 +1914,7 @@ string CompilerMSL::compile()
 	{
 		fixup_implicit_builtin_block_names(get_execution_model());
 	}
-	else
+	else if (!is_ray_tracing_shader())
 	{
 		stage_out_var_id = add_interface_block(StorageClassOutput);
 		patch_stage_out_var_id = add_interface_block(StorageClassOutput, true);
@@ -1926,13 +2055,15 @@ void CompilerMSL::preprocess_op_codes()
 		msl_options.manual_helper_invocation_updates |= should_enable;
 	}
 
-	if (is_intersection_query())
+	if (is_intersection_query() || is_ray_tracing_shader())
 	{
 		add_header_line("#if __METAL_VERSION__ >= 230");
 		add_header_line("#include <metal_raytracing>");
 		add_header_line("using namespace metal::raytracing;");
 		add_header_line("#endif");
 	}
+	if (is_ray_tracing_shader())
+		spv_function_implementations.insert(SPVFuncImplRayTracingTypes);
 }
 
 // Move the Private and Workgroup global variables to the entry function.
@@ -1950,6 +2081,12 @@ void CompilerMSL::localize_global_variables()
 		{
 			if (!variable_is_lut(var))
 				entry_func.add_local_variable(v_id);
+			iter = global_variables.erase(iter);
+		}
+		else if (var.storage == StorageClassRayPayloadKHR || var.storage == StorageClassIncomingRayPayloadKHR ||
+		         var.storage == StorageClassHitAttributeKHR || var.storage == StorageClassShaderRecordBufferKHR)
+		{
+			// GodotNext: metal_ray_shaders (#172). Bound in emit_ray_tracing_entry_point_declarations().
 			iter = global_variables.erase(iter);
 		}
 		else if (var.storage == StorageClassOutput && is_mesh_shader())
@@ -1995,7 +2132,9 @@ void CompilerMSL::extract_global_variables_from_functions()
 
 		if (var.storage == StorageClassInput || var.storage == StorageClassOutput ||
 		    var.storage == StorageClassUniform || var.storage == StorageClassUniformConstant ||
-		    var.storage == StorageClassPushConstant || var.storage == StorageClassStorageBuffer)
+		    var.storage == StorageClassPushConstant || var.storage == StorageClassStorageBuffer ||
+		    var.storage == StorageClassRayPayloadKHR || var.storage == StorageClassIncomingRayPayloadKHR ||
+		    var.storage == StorageClassHitAttributeKHR || var.storage == StorageClassShaderRecordBufferKHR)
 		{
 			global_var_ids.insert(var.self);
 		}
@@ -2125,6 +2264,15 @@ void CompilerMSL::extract_global_variables_from_function(uint32_t func_id, std::
 				base_id = ops[4];
 				if (global_var_ids.find(base_id) != global_var_ids.end())
 					added_arg_ids.insert(base_id);
+				break;
+			}
+
+			case OpTraceRayKHR:
+			{
+				if (global_var_ids.find(ops[0]) != global_var_ids.end())
+					added_arg_ids.insert(ops[0]);
+				if (global_var_ids.find(ops[10]) != global_var_ids.end())
+					added_arg_ids.insert(ops[10]);
 				break;
 			}
 
@@ -8056,6 +8204,61 @@ void CompilerMSL::emit_custom_functions()
 			statement("");
 			break;
 
+		case SPVFuncImplRayTracingTypes:
+			statement("struct spvRTShaderGroupHandle");
+			begin_scope();
+			statement("uint group_type;");
+			statement("uint visible_function_index;");
+			statement("uint intersection_function_index;");
+			statement("uint flags;");
+			end_scope_decl();
+			statement("");
+			statement("struct spvRTSBTParams");
+			begin_scope();
+			statement("uint launch_size_x;");
+			statement("uint launch_size_y;");
+			statement("uint launch_size_z;");
+			statement("uint handle_size;");
+			statement("const device uchar* miss_sbt;");
+			statement("uint miss_sbt_stride;");
+			statement("uint miss_sbt_count;");
+			statement("const device uchar* hit_sbt;");
+			statement("uint hit_sbt_stride;");
+			statement("uint hit_sbt_count;");
+			statement("const device uint* indirect_launch;");
+			statement("const device uint* instance_sbt_offsets;");
+			statement("const constant void* const_sets[8];");
+			statement("device void* device_sets[8];");
+			statement("const constant void* push_constants;");
+			statement("uint pad0;");
+			statement("uint pad1;");
+			end_scope_decl();
+			statement("");
+			statement("struct spvRTHitInfo");
+			begin_scope();
+			statement("uint3 launch_id;");
+			statement("uint3 launch_size;");
+			statement("float3 world_ray_origin;");
+			statement("float3 world_ray_direction;");
+			statement("float3 object_ray_origin;");
+			statement("float3 object_ray_direction;");
+			statement("float ray_tmin;");
+			statement("float ray_tmax;");
+			statement("uint ray_flags;");
+			statement("uint instance_id;");
+			statement("uint instance_custom_index;");
+			statement("uint primitive_id;");
+			statement("uint geometry_id;");
+			statement("uint hit_kind;");
+			statement("float2 barycentrics;");
+			statement("float4x3 object_to_world;");
+			statement("float4x3 world_to_object;");
+			end_scope_decl();
+			statement("");
+			statement("using spvRTVisibleFn = void(thread void*, const thread spvRTHitInfo&, const device void*, const constant spvRTSBTParams&);");
+			statement("");
+			break;
+
 		case SPVFuncImplVariableDescriptor:
 			statement("template<typename T>");
 			statement("struct spvDescriptor");
@@ -10328,6 +10531,98 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 		SPIRV_CROSS_THROW("ConvertUToAccelerationStructure is not supported in MSL.");
 	case OpRayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetKHR:
 		SPIRV_CROSS_THROW("BindingTableRecordOffset is not supported in MSL.");
+
+	case OpTraceRayKHR:
+	{
+		// GodotNext: metal_ray_shaders (#172). Lower OpTraceRayKHR to metal::raytracing::intersector,
+		// intersection_function_table, and visible_function_table dispatch with payload passed by thread pointer.
+		add_spv_func_and_recompile(SPVFuncImplRayTracingTypes);
+		flush_variable_declaration(ops[10]);
+		register_write(ops[10]);
+
+		begin_scope();
+		statement("uint spvRayFlags = ", to_expression(ops[1]), ";");
+		statement("float3 spvRayOrigin = ", to_expression(ops[6]), ";");
+		statement("float spvRayTmin = ", to_expression(ops[7]), ";");
+		statement("float3 spvRayDir = ", to_expression(ops[8]), ";");
+		statement("float spvRayTmax = ", to_expression(ops[9]), ";");
+		statement("ray spvRay(spvRayOrigin, spvRayDir, spvRayTmin, spvRayTmax);");
+		statement("intersector<triangle_data, instancing> spvIntersector;");
+		statement("if ((spvRayFlags & ", RayFlagsOpaqueKHRMask, "u) != 0u)");
+		statement("    spvIntersector.force_opacity(forced_opacity::opaque);");
+		statement("if ((spvRayFlags & ", RayFlagsNoOpaqueKHRMask, "u) != 0u)");
+		statement("    spvIntersector.force_opacity(forced_opacity::non_opaque);");
+		statement("if ((spvRayFlags & ", RayFlagsTerminateOnFirstHitKHRMask, "u) != 0u)");
+		statement("    spvIntersector.accept_any_intersection(true);");
+		statement("if ((spvRayFlags & ", RayFlagsCullBackFacingTrianglesKHRMask, "u) != 0u)");
+		statement("    spvIntersector.set_triangle_cull_mode(triangle_cull_mode::back);");
+		statement("if ((spvRayFlags & ", RayFlagsCullFrontFacingTrianglesKHRMask, "u) != 0u)");
+		statement("    spvIntersector.set_triangle_cull_mode(triangle_cull_mode::front);");
+		statement("if ((spvRayFlags & ", RayFlagsCullOpaqueKHRMask, "u) != 0u)");
+		statement("    spvIntersector.set_opacity_cull_mode(opacity_cull_mode::opaque);");
+		statement("if ((spvRayFlags & ", RayFlagsCullNoOpaqueKHRMask, "u) != 0u)");
+		statement("    spvIntersector.set_opacity_cull_mode(opacity_cull_mode::non_opaque);");
+		statement("if ((spvRayFlags & ", RayFlagsSkipTrianglesKHRMask, "u) != 0u)");
+		statement("    spvIntersector.set_geometry_cull_mode(geometry_cull_mode::triangle);");
+		statement("if ((spvRayFlags & ", RayFlagsSkipAABBsKHRMask, "u) != 0u)");
+		statement("    spvIntersector.set_geometry_cull_mode(geometry_cull_mode::bounding_box);");
+		statement("auto spvHit = spvIntersector.intersect(spvRay, ", to_non_uniform_aware_expression(ops[0]), ", ",
+		          to_expression(ops[2]), ", spvRTIntersectionTable);");
+		statement("spvRTHitInfo spvHitInfo = {};");
+		statement("spvHitInfo.launch_id = spvLaunchID;");
+		statement("spvHitInfo.launch_size = spvLaunchSize;");
+		statement("spvHitInfo.world_ray_origin = spvRayOrigin;");
+		statement("spvHitInfo.world_ray_direction = spvRayDir;");
+		statement("spvHitInfo.object_ray_origin = spvRayOrigin;");
+		statement("spvHitInfo.object_ray_direction = spvRayDir;");
+		statement("spvHitInfo.ray_tmin = spvRayTmin;");
+		statement("spvHitInfo.ray_tmax = spvRayTmax;");
+		statement("spvHitInfo.ray_flags = spvRayFlags;");
+		statement("if (spvHit.type == intersection_type::none)");
+		begin_scope();
+		statement("uint spvMissIdx = ", to_expression(ops[5]), ";");
+		statement("if (spvRTParams.miss_sbt != nullptr && spvMissIdx < spvRTParams.miss_sbt_count)");
+		begin_scope();
+		statement("const device spvRTShaderGroupHandle* spvMissHandle = reinterpret_cast<const device spvRTShaderGroupHandle*>(spvRTParams.miss_sbt + spvMissIdx * spvRTParams.miss_sbt_stride);");
+		statement("if (spvMissHandle->visible_function_index != 0xffffffffu)");
+		begin_scope();
+		statement("spvRTVisibleTable[spvMissHandle->visible_function_index](&", to_expression(ops[10]), ", spvHitInfo, nullptr, spvRTParams);");
+		end_scope();
+		end_scope();
+		end_scope();
+		statement("else if ((spvRayFlags & ", RayFlagsSkipClosestHitShaderKHRMask, "u) == 0u)");
+		begin_scope();
+		statement("spvHitInfo.ray_tmax = spvHit.distance;");
+		statement("spvHitInfo.instance_id = spvHit.instance_id;");
+		statement("spvHitInfo.instance_custom_index = spvHit.user_instance_id;");
+		statement("spvHitInfo.primitive_id = spvHit.primitive_id;");
+		statement("spvHitInfo.geometry_id = spvHit.geometry_id;");
+		statement("spvHitInfo.hit_kind = spvHit.triangle_front_facing ? 254u : 255u;");
+		statement("spvHitInfo.barycentrics = spvHit.triangle_barycentric_coord;");
+		statement("spvHitInfo.object_to_world = spvHit.object_to_world_transform;");
+		statement("spvHitInfo.world_to_object = spvHit.world_to_object_transform;");
+		statement("spvHitInfo.object_ray_origin = (spvHit.world_to_object_transform * float4(spvRayOrigin, 1.0));");
+		statement("spvHitInfo.object_ray_direction = (spvHit.world_to_object_transform * float4(spvRayDir, 0.0));");
+		statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? spvRTParams.instance_sbt_offsets[spvHit.instance_id] : spvHit.user_instance_id;");
+		statement("uint spvSbtIndex = spvInstSbtOffset + (", to_expression(ops[3]), ") + spvHit.geometry_id * (", to_expression(ops[4]), ");");
+		statement("if (spvRTParams.hit_sbt != nullptr && spvRTParams.hit_sbt_count > 0u)");
+		begin_scope();
+		statement("if (spvSbtIndex >= spvRTParams.hit_sbt_count)");
+		begin_scope();
+		statement("spvSbtIndex = spvRTParams.hit_sbt_count - 1u;");
+		end_scope();
+		statement("const device uchar* spvHitEntry = spvRTParams.hit_sbt + spvSbtIndex * spvRTParams.hit_sbt_stride;");
+		statement("const device spvRTShaderGroupHandle* spvHitHandle = reinterpret_cast<const device spvRTShaderGroupHandle*>(spvHitEntry);");
+		statement("if (spvHitHandle->visible_function_index != 0xffffffffu)");
+		begin_scope();
+		statement("spvRTVisibleTable[spvHitHandle->visible_function_index](&", to_expression(ops[10]), ", spvHitInfo, spvHitEntry + spvRTParams.handle_size, spvRTParams);");
+		end_scope();
+		end_scope();
+		end_scope();
+		end_scope();
+		flush_control_dependent_expressions(current_emitting_block->self);
+		break;
+	}
 
 	case OpRayQueryInitializeKHR:
 	{
@@ -14067,6 +14362,17 @@ string CompilerMSL::func_type_decl(SPIRType &type)
 	case ExecutionModelTaskEXT:
 		entry_type = "[[object]]";
 		break;
+	case ExecutionModelRayGenerationKHR:
+		entry_type = "kernel";
+		break;
+	case ExecutionModelClosestHitKHR:
+	case ExecutionModelMissKHR:
+		entry_type = "[[visible]]";
+		break;
+	case ExecutionModelAnyHitKHR:
+		entry_type = "[[intersection(triangle, triangle_data, instancing)]]";
+		return_type = "bool";
+		break;
 	default:
 		entry_type = "unknown";
 		break;
@@ -14088,6 +14394,56 @@ bool CompilerMSL::is_tese_shader() const
 bool CompilerMSL::is_mesh_shader() const
 {
 	return get_execution_model() == ExecutionModelMeshEXT;
+}
+
+bool CompilerMSL::is_ray_generation_shader() const
+{
+	return get_execution_model() == ExecutionModelRayGenerationKHR;
+}
+
+bool CompilerMSL::is_closest_hit_shader() const
+{
+	return get_execution_model() == ExecutionModelClosestHitKHR;
+}
+
+bool CompilerMSL::is_miss_shader() const
+{
+	return get_execution_model() == ExecutionModelMissKHR;
+}
+
+bool CompilerMSL::is_any_hit_shader() const
+{
+	return get_execution_model() == ExecutionModelAnyHitKHR;
+}
+
+bool CompilerMSL::is_ray_tracing_shader() const
+{
+	return is_ray_generation_shader() || is_closest_hit_shader() || is_miss_shader() || is_any_hit_shader();
+}
+
+bool CompilerMSL::is_ray_tracing_visible_shader() const
+{
+	return is_closest_hit_shader() || is_miss_shader();
+}
+
+void CompilerMSL::emit_ignore_intersection()
+{
+	statement("return false;");
+}
+
+void CompilerMSL::emit_terminate_ray()
+{
+	statement("return true;");
+}
+
+bool CompilerMSL::emit_entry_point_void_return()
+{
+	if (is_any_hit_shader())
+	{
+		statement("return true;");
+		return true;
+	}
+	return false;
 }
 
 bool CompilerMSL::uses_explicit_early_fragment_test()
@@ -14251,6 +14607,16 @@ string CompilerMSL::get_type_address_space(const SPIRType &type, uint32_t id, bo
 			addr_space = "object_data";
 		break;
 
+	case StorageClassRayPayloadKHR:
+	case StorageClassIncomingRayPayloadKHR:
+	case StorageClassHitAttributeKHR:
+		addr_space = "thread";
+		break;
+
+	case StorageClassShaderRecordBufferKHR:
+		addr_space = "const device";
+		break;
+
 	default:
 		break;
 	}
@@ -14324,6 +14690,9 @@ string CompilerMSL::entry_point_arg_stage_in()
 // and false for builtins that should be passed or calculated some other way.
 bool CompilerMSL::is_direct_input_builtin(BuiltIn bi_type)
 {
+	if (is_ray_tracing_shader())
+		return false;
+
 	switch (bi_type)
 	{
 	// Vertex function in
@@ -14669,10 +15038,63 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
 			ep_args += ", ";
 		ep_args += join("mesh_grid_properties spvMgp");
 	}
+
+	// GodotNext: metal_ray_shaders (#172). Kernel and intersection parameters for ray-tracing stages.
+	if (is_ray_generation_shader())
+	{
+		if (!ep_args.empty())
+			ep_args += ", ";
+		ep_args += join("visible_function_table<spvRTVisibleFn> spvRTVisibleTable [[buffer(",
+		                msl_options.rt_visible_function_table_index, ")]], ",
+		                "intersection_function_table<triangle_data, instancing> spvRTIntersectionTable [[buffer(",
+		                msl_options.rt_intersection_function_table_index, ")]], ",
+		                "constant spvRTSBTParams& spvRTParams [[buffer(",
+		                msl_options.rt_sbt_params_buffer_index, ")]], ",
+		                "uint3 spvLaunchID [[thread_position_in_grid]]");
+	}
+	else if (is_any_hit_shader())
+	{
+		if (!ep_args.empty())
+			ep_args += ", ";
+		ep_args += join("constant spvRTSBTParams& spvRTParams [[buffer(",
+		                msl_options.rt_sbt_params_buffer_index, ")]], ",
+		                "float2 spvBary [[barycentric_coord]], ",
+		                "uint spvPrimitiveId [[primitive_id]], ",
+		                "uint spvGeometryId [[geometry_id]], ",
+		                "uint spvInstanceId [[instance_id]], ",
+		                "uint spvUserInstanceId [[user_instance_id]], ",
+		                "bool spvFrontFacing [[triangle_front_facing]], ",
+		                "float spvDistance [[distance]], ",
+		                "float3 spvRayOrigin [[origin]], ",
+		                "float3 spvRayDirection [[direction]], ",
+		                "float spvMinDistance [[min_distance]], ",
+		                "float spvMaxDistance [[max_distance]], ",
+		                "float4x3 spvObjectToWorld [[object_to_world_transform]], ",
+		                "float4x3 spvWorldToObject [[world_to_object_transform]]");
+	}
 }
 
 string CompilerMSL::entry_point_args_argument_buffer(bool append_comma)
 {
+	if (is_ray_tracing_visible_shader())
+	{
+		// Register argument buffer names and populate entry_point_bindings for runtime arrays,
+		// while emitting the canonical [[visible]] signature (no [[buffer(N)]] attributes allowed).
+		for (uint32_t i = 0; i < kMaxArgumentBuffers; i++)
+		{
+			uint32_t id = argument_buffer_ids[i];
+			if (id != 0)
+				add_resource_name(id);
+		}
+		string unused_discrete_args;
+		entry_point_args_discrete_descriptors(unused_discrete_args);
+		string ep_args = "thread void* spvPayloadPtr, const thread spvRTHitInfo& spvHitInfo, "
+		                 "const device void* spvRecordPtr, const constant spvRTSBTParams& spvRTParams";
+		if (append_comma)
+			ep_args += ", ";
+		return ep_args;
+	}
+
 	string ep_args = entry_point_arg_stage_in();
 	Bitset claimed_bindings;
 
@@ -15074,6 +15496,17 @@ void CompilerMSL::entry_point_args_discrete_descriptors(string &ep_args)
 // This is the "classic" method of MSL 1 when we don't have argument buffer support.
 string CompilerMSL::entry_point_args_classic(bool append_comma)
 {
+	if (is_ray_tracing_visible_shader())
+	{
+		string unused_discrete_args;
+		entry_point_args_discrete_descriptors(unused_discrete_args);
+		string ep_args = "thread void* spvPayloadPtr, const thread spvRTHitInfo& spvHitInfo, "
+		                 "const device void* spvRecordPtr, const constant spvRTSBTParams& spvRTParams";
+		if (append_comma)
+			ep_args += ", ";
+		return ep_args;
+	}
+
 	string ep_args = entry_point_arg_stage_in();
 	entry_point_args_discrete_descriptors(ep_args);
 	entry_point_args_builtin(ep_args);
@@ -17664,6 +18097,57 @@ bool CompilerMSL::emit_complex_bitcast(uint32_t, uint32_t, uint32_t)
 // Output builtins are qualified with the name of the stage out structure.
 string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
 {
+	// GodotNext: metal_ray_shaders (#172). Ray-tracing builtins map to kernel / hit-info / intersection params.
+	if (is_ray_tracing_shader())
+	{
+		switch (builtin)
+		{
+		case BuiltInLaunchIdKHR:
+			if (is_ray_generation_shader())
+				return "spvLaunchID";
+			if (is_ray_tracing_visible_shader())
+				return "spvHitInfo.launch_id";
+			return "uint3(0u)";
+		case BuiltInLaunchSizeKHR:
+			if (is_ray_generation_shader())
+				return "spvLaunchSize";
+			if (is_ray_tracing_visible_shader())
+				return "spvHitInfo.launch_size";
+			return "uint3(spvRTParams.launch_size_x, spvRTParams.launch_size_y, spvRTParams.launch_size_z)";
+		case BuiltInInstanceId:
+			return is_any_hit_shader() ? "int(spvInstanceId)" : "int(spvHitInfo.instance_id)";
+		case BuiltInInstanceCustomIndexKHR:
+			return is_any_hit_shader() ? "int(spvUserInstanceId)" : "int(spvHitInfo.instance_custom_index)";
+		case BuiltInPrimitiveId:
+			return is_any_hit_shader() ? "spvPrimitiveId" : "spvHitInfo.primitive_id";
+		case BuiltInRayGeometryIndexKHR:
+			return is_any_hit_shader() ? "int(spvGeometryId)" : "int(spvHitInfo.geometry_id)";
+		case BuiltInHitKindKHR:
+			return is_any_hit_shader() ? "(spvFrontFacing ? 254u : 255u)" : "spvHitInfo.hit_kind";
+		case BuiltInRayTminKHR:
+			return is_any_hit_shader() ? "spvMinDistance" : "spvHitInfo.ray_tmin";
+		case BuiltInRayTmaxKHR:
+		case BuiltInHitTNV:
+			return is_any_hit_shader() ? "spvDistance" : "spvHitInfo.ray_tmax";
+		case BuiltInWorldRayOriginKHR:
+			return is_any_hit_shader() ? "(spvObjectToWorld * float4(spvRayOrigin, 1.0))" : "spvHitInfo.world_ray_origin";
+		case BuiltInWorldRayDirectionKHR:
+			return is_any_hit_shader() ? "(spvObjectToWorld * float4(spvRayDirection, 0.0))" : "spvHitInfo.world_ray_direction";
+		case BuiltInObjectRayOriginKHR:
+			return is_any_hit_shader() ? "spvRayOrigin" : "spvHitInfo.object_ray_origin";
+		case BuiltInObjectRayDirectionKHR:
+			return is_any_hit_shader() ? "spvRayDirection" : "spvHitInfo.object_ray_direction";
+		case BuiltInObjectToWorldKHR:
+			return is_any_hit_shader() ? "spvObjectToWorld" : "spvHitInfo.object_to_world";
+		case BuiltInWorldToObjectKHR:
+			return is_any_hit_shader() ? "spvWorldToObject" : "spvHitInfo.world_to_object";
+		case BuiltInIncomingRayFlagsKHR:
+			return is_any_hit_shader() ? "0u" : "spvHitInfo.ray_flags";
+		default:
+			break;
+		}
+	}
+
 	switch (builtin)
 	{
 	// Handle HLSL-style 0-based vertex/instance index.

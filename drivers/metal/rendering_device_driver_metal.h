@@ -97,6 +97,8 @@ protected:
 	// GodotNext: rd_mesh_shaders (#178). Object and mesh functions from Apple7, indirect mesh draws from Apple9, both
 	// only with argument buffers (the binding path the mesh stages use).
 	MeshShaderCaps mesh_shader_caps;
+	// GodotNext: metal_ray_shaders (#172). Experimental Metal ray shaders on Apple9+, macOS >= 26.4.
+	MetalRaytracingPipelineCaps raytracing_pipeline_caps;
 	static constexpr bool RAY_QUERY_AS_READY = true;
 	bool as_objects_ready = false;
 	// GodotNext: metal_acceleration_structure
@@ -107,6 +109,8 @@ protected:
 	bool _create_dummy_blas();
 	void _destroy_dummy_blas();
 	void _update_ray_query_caps();
+	void _update_raytracing_pipeline_caps();
+	bool _raytracing_pipeline_build_executable(MDRaytracingPipeline *p_pipeline, const char *p_label);
 	MetalDeviceProfile device_profile;
 	RenderingShaderContainerFormatMetal *shader_container_format = nullptr;
 	PixelFormats *pixel_formats = nullptr;
@@ -430,6 +434,8 @@ public:
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override final;
 	virtual void shader_free(ShaderID p_shader) override final;
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
+	// GodotNext: metal_ray_shaders (#172).
+	virtual uint32_t shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) override final;
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;
 
 #pragma mark - Uniform Set
@@ -596,6 +602,9 @@ public:
 	virtual void raytracing_pipeline_free(RaytracingPipelineID p_pipeline) override final;
 
 	virtual bool raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) override final;
+	// GodotNext: metal_ray_shaders (#172).
+	virtual RaytracingPipelineID raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
+	virtual RaytracingPipelineID raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
 
 	// ----- COMMANDS -----
 
@@ -608,6 +617,8 @@ public:
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) override final;
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override final;
+	// GodotNext: metal_ray_shaders (#172).
+	virtual void command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) override final;
 
 #pragma mark - Queries
 

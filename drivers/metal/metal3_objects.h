@@ -78,6 +78,8 @@ using ::MDComputeShader;
 using ::MDLibrary;
 using ::MDPipeline;
 using ::MDPipelineType;
+using ::MDRaytracingPipeline;
+using ::MDRaytracingShader;
 using ::MDRenderPipeline;
 using ::MDRenderShader;
 using ::MDShader;
@@ -400,6 +402,11 @@ private:
 	void _compute_bind_uniform_sets();
 	void _bind_uniforms_argument_buffers_compute(MDUniformSet *p_set, MDShader *p_shader, uint32_t p_set_index, uint32_t p_dynamic_offsets);
 
+#pragma mark - Raytracing
+
+	// GodotNext: metal_ray_shaders (#172).
+	void _raytracing_encode_trace(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth, RDD::BufferID p_indirect_buffer, uint64_t p_indirect_offset);
+
 protected:
 	void mark_push_constants_dirty() override;
 	RenderStateBase &get_render_state_base() override { return render; }
@@ -580,6 +587,19 @@ public:
 		}
 	} compute;
 
+	// GodotNext: metal_ray_shaders (#172). State for raytracing lists dispatched on compute encoders.
+	struct RaytracingState {
+		MDRaytracingPipeline *pipeline = nullptr;
+		LocalVector<MDUniformSet *> uniform_sets;
+		ResourceTracker resource_tracker;
+
+		_FORCE_INLINE_ void reset() {
+			pipeline = nullptr;
+			uniform_sets.clear();
+			resource_tracker.reset();
+		}
+	} raytracing;
+
 	struct {
 		NS::SharedPtr<MTL::RenderCommandEncoder> encoder;
 
@@ -691,6 +711,14 @@ public:
 	void compute_bind_uniform_sets(VectorView<RDD::UniformSetID> p_uniform_sets, RDD::ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override;
 	void compute_dispatch(uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) override;
 	void compute_dispatch_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset) override;
+
+#pragma mark - Raytracing Commands
+
+	// GodotNext: metal_ray_shaders (#172).
+	void raytracing_bind_pipeline(RDD::RaytracingPipelineID p_pipeline) override;
+	void raytracing_bind_uniform_set(RDD::UniformSetID p_uniform_set, RDD::ShaderID p_shader, uint32_t p_set_index) override;
+	void raytracing_trace_rays(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override;
+	void raytracing_trace_rays_indirect(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, RDD::BufferID p_indirect_buffer, uint64_t p_offset) override;
 
 #pragma mark - Transfer
 

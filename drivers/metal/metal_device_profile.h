@@ -59,6 +59,8 @@ public:
 
 namespace os_version {
 
+// GodotNext: metal_ray_shaders (#172). Experimental Metal ray shaders require macOS 26.4+.
+constexpr MinOsVersion MACOS_26_4(26'04'00);
 constexpr MinOsVersion MACOS_26_0(26'00'00);
 constexpr MinOsVersion MACOS_15_0(15'00'00);
 constexpr MinOsVersion MACOS_14_0(14'00'00);

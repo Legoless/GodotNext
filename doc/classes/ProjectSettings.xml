@@ -3695,6 +3695,10 @@
 			[b]Note:[/b] Enabling occlusion culling has a cost on the CPU. Only enable occlusion culling if you actually plan to use it. Large open scenes with few or no objects blocking the view will generally not benefit much from occlusion culling. Large open scenes generally benefit more from mesh LOD and visibility ranges ([member GeometryInstance3D.visibility_range_begin] and [member GeometryInstance3D.visibility_range_end]) compared to occlusion culling.
 			[b]Note:[/b] Due to memory constraints, occlusion culling is not supported by default in Web export templates. It can be enabled by compiling custom Web export templates with [code]module_raycast_enabled=yes[/code].
 		</member>
+		<member name="rendering/raytracing/metal_ray_shaders" type="bool" setter="" getter="" default="false" experimental="Experimental Metal ray shaders on Apple9+ (macOS 26.4+)">
+			Enables experimental Metal ray tracing pipelines ([constant RenderingDevice.SUPPORTS_RAYTRACING_PIPELINE], [constant RenderingDevice.SUPPORTS_RAYTRACING_PIPELINE_LIBRARY], and [constant RenderingDevice.SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT]) backed by Metal visible and intersection function tables on Apple9+ GPUs running macOS 26.4 or newer.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
 		<member name="rendering/reflections/reflection_atlas/reflection_count" type="int" setter="" getter="" default="64">
 			Number of cubemaps to store in the reflection atlas. The number of [ReflectionProbe]s in a scene will be limited by this amount. A higher number requires more VRAM.
 		</member>

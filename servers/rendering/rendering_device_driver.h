@@ -1262,6 +1262,77 @@ public:
 	// 1008=Apple8, 1009=Apple9); 0 on non-Metal drivers. Non-script tier-rule input.
 	virtual uint32_t get_metal_gpu_family() const { return 0; }
 
+	// GodotNext: metal_ray_shaders (#172). Experimental Metal ray tracing pipelines (visible and
+	// intersection function tables) require Apple9+, macOS >= 26.4, and rendering/raytracing/metal_ray_shaders.
+	// Pure helpers so capability gating, SBT handles, and dispatch layout are unit-tested on all platforms.
+	static constexpr uint32_t METAL_RAY_SHADERS_MIN_FAMILY = 1009; // MTLGPUFamilyApple9.
+	static constexpr uint32_t METAL_RAY_SHADERS_MIN_OS_VERSION = 260400; // macOS 26.4.0 (major * 10000 + minor * 100 + patch).
+	static constexpr uint32_t METAL_RT_SHADER_GROUP_HANDLE_SIZE = 16;
+	static constexpr uint32_t METAL_RT_SHADER_GROUP_HANDLE_ALIGNMENT = 16;
+	static constexpr uint32_t METAL_RT_SHADER_GROUP_BASE_ALIGNMENT = 64;
+	static constexpr uint32_t METAL_RT_VISIBLE_FUNCTION_TABLE_BUFFER_INDEX = 16;
+	static constexpr uint32_t METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX = 17;
+	static constexpr uint32_t METAL_RT_SBT_PARAMS_BUFFER_INDEX = 18;
+	static constexpr uint32_t METAL_RT_THREADGROUP_WIDTH = 8;
+	static constexpr uint32_t METAL_RT_THREADGROUP_HEIGHT = 8;
+
+	enum MetalRaytracingPipelineReason {
+		METAL_RT_PIPELINE_SUPPORTED = 0,
+		METAL_RT_PIPELINE_REASON_SETTING_OFF,
+		METAL_RT_PIPELINE_REASON_APPLE_FAMILY_TOO_OLD,
+		METAL_RT_PIPELINE_REASON_METAL_OS_TOO_OLD,
+		METAL_RT_PIPELINE_REASON_NO_RAY_QUERY,
+	};
+
+	struct MetalRaytracingPipelineCaps {
+		bool pipeline = false;
+		bool library = false;
+		bool trace_rays_indirect = false;
+		MetalRaytracingPipelineReason reason = METAL_RT_PIPELINE_REASON_SETTING_OFF;
+	};
+
+	// Binary layout of one Metal raytracing shader group handle written into raygen/miss/hit SBTs.
+	struct MetalRTShaderGroupHandle {
+		static constexpr uint32_t TYPE_RAYGEN = 1;
+		static constexpr uint32_t TYPE_MISS = 2;
+		static constexpr uint32_t TYPE_HIT = 3;
+		static constexpr uint32_t INVALID_FUNCTION_INDEX = UINT32_MAX;
+
+		uint32_t group_type = 0;
+		uint32_t visible_function_index = INVALID_FUNCTION_INDEX;
+		uint32_t intersection_function_index = INVALID_FUNCTION_INDEX;
+		uint32_t flags = 0;
+	};
+	static_assert(sizeof(MetalRTShaderGroupHandle) == METAL_RT_SHADER_GROUP_HANDLE_SIZE);
+
+	// Binary layout of spvRTSBTParams bound at METAL_RT_SBT_PARAMS_BUFFER_INDEX. Matches MSL struct spvRTSBTParams.
+	struct MetalRTSBTParams {
+		uint32_t launch_size_x = 0;
+		uint32_t launch_size_y = 0;
+		uint32_t launch_size_z = 0;
+		uint32_t handle_size = METAL_RT_SHADER_GROUP_HANDLE_SIZE;
+		uint64_t miss_sbt_address = 0;
+		uint32_t miss_sbt_stride = 0;
+		uint32_t miss_sbt_count = 0;
+		uint64_t hit_sbt_address = 0;
+		uint32_t hit_sbt_stride = 0;
+		uint32_t hit_sbt_count = 0;
+		uint64_t indirect_launch_address = 0;
+		uint64_t instance_sbt_offsets_address = 0;
+		uint64_t const_sets[8] = {};
+		uint64_t device_sets[8] = {};
+		uint64_t push_constants_address = 0;
+		uint32_t pad0 = 0;
+		uint32_t pad1 = 0;
+	};
+	static_assert(sizeof(MetalRTSBTParams) == 208);
+
+	static MetalRaytracingPipelineCaps metal_raytracing_pipeline_caps(bool p_setting_enabled, uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_version, bool p_ray_query);
+	static const char *metal_raytracing_pipeline_reason_name(MetalRaytracingPipelineReason p_reason);
+	static String metal_raytracing_pipeline_log_line(const MetalRaytracingPipelineCaps &p_caps);
+	static uint32_t metal_rt_raygen_index_from_sbt(uint64_t p_offset, uint64_t p_stride);
+	static void metal_rt_compute_threadgroups(uint32_t p_width, uint32_t p_height, uint32_t p_depth, uint32_t p_tg_x, uint32_t p_tg_y, uint32_t p_tg_z, uint32_t &r_groups_x, uint32_t &r_groups_y, uint32_t &r_groups_z);
+
 	virtual bool has_feature(Features p_feature) = 0;
 	virtual const MultiviewCapabilities &get_multiview_capabilities() = 0;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() = 0;

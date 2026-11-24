@@ -1220,6 +1220,8 @@ RDD::ShaderID RenderingDeviceDriverMetal::shader_create_from_container(const Ref
 	}
 
 	HashMap<RDD::ShaderStage, std::shared_ptr<MDLibrary>> libraries;
+	// GodotNext: metal_ray_shaders (#172). Per-stage ray payload sizes for RT library validation.
+	HashMap<RDD::ShaderStage, uint32_t> rt_payload_sizes;
 
 	PipelineType pipeline_type = PIPELINE_TYPE_RASTERIZATION;
 	Vector<uint8_t> decompressed_code;
@@ -1229,6 +1231,13 @@ RDD::ShaderID RenderingDeviceDriverMetal::shader_create_from_container(const Ref
 
 		if (shader.shader_stage == RDD::ShaderStage::SHADER_STAGE_COMPUTE) {
 			pipeline_type = PIPELINE_TYPE_COMPUTE;
+		} else if (shader.shader_stage == RDD::ShaderStage::SHADER_STAGE_RAYGEN ||
+				shader.shader_stage == RDD::ShaderStage::SHADER_STAGE_ANY_HIT ||
+				shader.shader_stage == RDD::ShaderStage::SHADER_STAGE_CLOSEST_HIT ||
+				shader.shader_stage == RDD::ShaderStage::SHADER_STAGE_MISS ||
+				shader.shader_stage == RDD::ShaderStage::SHADER_STAGE_INTERSECTION) {
+			pipeline_type = PIPELINE_TYPE_RAYTRACING;
+			rt_payload_sizes[shader.shader_stage] = shader_data.rt_payload_size;
 		}
 		if (std::optional<std::shared_ptr<MDLibrary>> lib = shader_cache_get_library(shader_data.hash); lib) {
 			libraries[shader.shader_stage] = std::move(*lib);
@@ -1342,6 +1351,15 @@ RDD::ShaderID RenderingDeviceDriverMetal::shader_create_from_container(const Ref
 
 		cs->local = MTL::Size(refl.compute_local_size[0], refl.compute_local_size[1], refl.compute_local_size[2]);
 		shader = cs;
+	} else if (pipeline_type == PIPELINE_TYPE_RAYTRACING) {
+		// GodotNext: metal_ray_shaders (#172).
+		ERR_FAIL_COND_V_MSG(!mtl_reflection_data.uses_argument_buffers(), RDD::ShaderID(), "Raytracing shaders need argument buffers on Metal.");
+		shader = new MDRaytracingShader(
+				shader_name,
+				uniform_sets,
+				mtl_reflection_data.uses_argument_buffers(),
+				std::move(libraries),
+				std::move(rt_payload_sizes));
 	} else {
 		MDRenderShader *rs = new MDRenderShader(
 				shader_name,
@@ -1378,6 +1396,16 @@ void RenderingDeviceDriverMetal::shader_free(ShaderID p_shader) {
 
 void RenderingDeviceDriverMetal::shader_destroy_modules(ShaderID p_shader) {
 	// TODO.
+}
+
+// GodotNext: metal_ray_shaders (#172).
+uint32_t RenderingDeviceDriverMetal::shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) {
+	const MDRaytracingShader *rt_shader = dynamic_cast<const MDRaytracingShader *>(reinterpret_cast<const MDShader *>(p_shader.id));
+	if (rt_shader == nullptr) {
+		return 0;
+	}
+	const uint32_t *size = rt_shader->payload_sizes.getptr(p_stage);
+	return size != nullptr ? *size : 0;
 }
 
 /*********************/
@@ -1425,6 +1453,14 @@ RDD::UniformSetID RenderingDeviceDriverMetal::uniform_set_create(VectorView<Boun
 				*sru |= stage_resource_usage(RDD::SHADER_STAGE_FRAGMENT, usage);
 			}
 			if (stage.has_flag(RDD::SHADER_STAGE_COMPUTE_BIT)) {
+				*sru |= stage_resource_usage(RDD::SHADER_STAGE_COMPUTE, usage);
+			}
+			// GodotNext: metal_ray_shaders (#172). Raytracing dispatches on a compute encoder.
+			if (stage.has_flag(RDD::SHADER_STAGE_RAYGEN_BIT) ||
+					stage.has_flag(RDD::SHADER_STAGE_ANY_HIT_BIT) ||
+					stage.has_flag(RDD::SHADER_STAGE_CLOSEST_HIT_BIT) ||
+					stage.has_flag(RDD::SHADER_STAGE_MISS_BIT) ||
+					stage.has_flag(RDD::SHADER_STAGE_INTERSECTION_BIT)) {
 				*sru |= stage_resource_usage(RDD::SHADER_STAGE_COMPUTE, usage);
 			}
 			// GodotNext: rd_mesh_shaders (#178)
@@ -2601,16 +2637,302 @@ RDD::PipelineID RenderingDeviceDriverMetal::compute_pipeline_create(ShaderID p_s
 
 // ----- PIPELINE -----
 
+// GodotNext: metal_ray_shaders (#172). Builds one compute pipeline state per raygen shader with
+// MTL::LinkedFunctions, MTL::VisibleFunctionTable (miss + closest-hit), and MTL::IntersectionFunctionTable
+// (any-hit or opaque triangle per hit group), plus shader group handles for raygen/miss/hit SBTs.
+bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytracingPipeline *p_pipeline, const char *p_label) {
+	NS::AutoreleasePool *pool = NS::AutoreleasePool::alloc()->init();
+	DEFER([pool]() { pool->release(); });
+
+	const uint32_t raygen_count = p_pipeline->raygen_shader_indices.size();
+	const uint32_t miss_count = p_pipeline->miss_shader_indices.size();
+	const uint32_t hit_count = p_pipeline->hit_groups.size();
+	ERR_FAIL_COND_V_MSG(raygen_count == 0, false, "Metal raytracing pipeline requires at least one ray generation shader.");
+
+	// Collect all visible functions (miss shaders followed by closest-hit shaders) and any-hit functions.
+	LocalVector<MTL::Function *> linked_fn_ptrs;
+	LocalVector<MTL::Function *> visible_fn_ptrs;
+	LocalVector<uint32_t> miss_visible_indices;
+	miss_visible_indices.resize(miss_count);
+	for (uint32_t i = 0; i < miss_count; i++) {
+		const uint32_t stage_idx = p_pipeline->miss_shader_indices[i];
+		ERR_FAIL_UNSIGNED_INDEX_V(stage_idx, p_pipeline->specialized_stages.size(), false);
+		MTL::Function *fn = p_pipeline->specialized_stages[stage_idx].function.get();
+		ERR_FAIL_NULL_V(fn, false);
+		miss_visible_indices[i] = visible_fn_ptrs.size();
+		visible_fn_ptrs.push_back(fn);
+		linked_fn_ptrs.push_back(fn);
+	}
+
+	LocalVector<uint32_t> hit_visible_indices;
+	LocalVector<MTL::Function *> hit_anyhit_fns;
+	hit_visible_indices.resize(hit_count);
+	hit_anyhit_fns.resize(hit_count);
+	for (uint32_t i = 0; i < hit_count; i++) {
+		const HitGroup &hg = p_pipeline->hit_groups[i];
+		hit_visible_indices[i] = MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+		hit_anyhit_fns[i] = nullptr;
+
+		if (hg.closest_hit_shader_index != UINT32_MAX) {
+			ERR_FAIL_UNSIGNED_INDEX_V(hg.closest_hit_shader_index, p_pipeline->specialized_stages.size(), false);
+			MTL::Function *fn = p_pipeline->specialized_stages[hg.closest_hit_shader_index].function.get();
+			ERR_FAIL_NULL_V(fn, false);
+			hit_visible_indices[i] = visible_fn_ptrs.size();
+			visible_fn_ptrs.push_back(fn);
+			linked_fn_ptrs.push_back(fn);
+		}
+		if (hg.any_hit_shader_index != UINT32_MAX) {
+			ERR_FAIL_UNSIGNED_INDEX_V(hg.any_hit_shader_index, p_pipeline->specialized_stages.size(), false);
+			MTL::Function *fn = p_pipeline->specialized_stages[hg.any_hit_shader_index].function.get();
+			ERR_FAIL_NULL_V(fn, false);
+			hit_anyhit_fns[i] = fn;
+			linked_fn_ptrs.push_back(fn);
+		}
+	}
+
+	// Populate shader group handles in RenderingDevice order: raygen, then miss, then hit groups.
+	p_pipeline->group_handles.clear();
+	p_pipeline->group_handles.reserve(raygen_count + miss_count + hit_count);
+	for (uint32_t i = 0; i < raygen_count; i++) {
+		MetalRTShaderGroupHandle h;
+		h.group_type = MetalRTShaderGroupHandle::TYPE_RAYGEN;
+		h.visible_function_index = i;
+		h.intersection_function_index = MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+		h.flags = 0;
+		p_pipeline->group_handles.push_back(h);
+	}
+	for (uint32_t i = 0; i < miss_count; i++) {
+		MetalRTShaderGroupHandle h;
+		h.group_type = MetalRTShaderGroupHandle::TYPE_MISS;
+		h.visible_function_index = miss_visible_indices[i];
+		h.intersection_function_index = MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+		h.flags = 0;
+		p_pipeline->group_handles.push_back(h);
+	}
+	for (uint32_t i = 0; i < hit_count; i++) {
+		MetalRTShaderGroupHandle h;
+		h.group_type = MetalRTShaderGroupHandle::TYPE_HIT;
+		h.visible_function_index = hit_visible_indices[i];
+		h.intersection_function_index = hit_anyhit_fns[i] != nullptr ? i : MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+		h.flags = 0;
+		p_pipeline->group_handles.push_back(h);
+	}
+
+	NS::SharedPtr<MTL::LinkedFunctions> linked_functions = NS::TransferPtr(MTL::LinkedFunctions::alloc()->init());
+	if (!linked_fn_ptrs.is_empty()) {
+		NS::Array *fn_array = NS::Array::array(reinterpret_cast<NS::Object *const *>(linked_fn_ptrs.ptr()), linked_fn_ptrs.size());
+		linked_functions->setFunctions(fn_array);
+	}
+
+	p_pipeline->raygen_entries.resize(raygen_count);
+	const uint32_t vft_count = MAX(visible_fn_ptrs.size(), 1u);
+	const uint32_t ift_count = MAX(hit_count, 1u);
+	const MTL::IntersectionFunctionSignature opaque_sig =
+			static_cast<MTL::IntersectionFunctionSignature>(MTL::IntersectionFunctionSignatureTriangleData | MTL::IntersectionFunctionSignatureInstancing);
+
+	for (uint32_t r = 0; r < raygen_count; r++) {
+		const uint32_t stage_idx = p_pipeline->raygen_shader_indices[r];
+		ERR_FAIL_UNSIGNED_INDEX_V(stage_idx, p_pipeline->specialized_stages.size(), false);
+		MTL::Function *raygen_fn = p_pipeline->specialized_stages[stage_idx].function.get();
+		ERR_FAIL_NULL_V(raygen_fn, false);
+
+		NS::SharedPtr<MTL::ComputePipelineDescriptor> desc = NS::TransferPtr(MTL::ComputePipelineDescriptor::alloc()->init());
+		desc->setComputeFunction(raygen_fn);
+		desc->setLinkedFunctions(linked_functions.get());
+		desc->setMaxCallStackDepth(MAX(p_pipeline->max_trace_recursion_depth, 1u) + 1u);
+		if (p_label != nullptr) {
+			desc->setLabel(NS::String::string(p_label, NS::UTF8StringEncoding));
+		}
+
+		NS::Error *error = nullptr;
+		NS::SharedPtr<MTL::ComputePipelineState> state = NS::TransferPtr(device->newComputePipelineState(desc.get(), MTL::PipelineOptionNone, nullptr, &error));
+		ERR_FAIL_COND_V_MSG(error != nullptr, false, String("Error creating Metal raytracing pipeline state: ") + error->localizedDescription()->utf8String());
+		ERR_FAIL_COND_V_MSG(!state, false, "Failed to create Metal raytracing compute pipeline state.");
+
+		NS::SharedPtr<MTL::VisibleFunctionTableDescriptor> vft_desc = NS::TransferPtr(MTL::VisibleFunctionTableDescriptor::alloc()->init());
+		vft_desc->setFunctionCount(vft_count);
+		NS::SharedPtr<MTL::VisibleFunctionTable> vft = NS::TransferPtr(state->newVisibleFunctionTable(vft_desc.get()));
+		ERR_FAIL_COND_V_MSG(!vft, false, "Failed to create Metal visible function table.");
+		for (uint32_t i = 0; i < visible_fn_ptrs.size(); i++) {
+			MTL::FunctionHandle *handle = state->functionHandle(visible_fn_ptrs[i]);
+			ERR_FAIL_NULL_V_MSG(handle, false, "Failed to retrieve Metal visible function handle.");
+			vft->setFunction(handle, i);
+		}
+
+		NS::SharedPtr<MTL::IntersectionFunctionTableDescriptor> ift_desc = NS::TransferPtr(MTL::IntersectionFunctionTableDescriptor::alloc()->init());
+		ift_desc->setFunctionCount(ift_count);
+		NS::SharedPtr<MTL::IntersectionFunctionTable> ift = NS::TransferPtr(state->newIntersectionFunctionTable(ift_desc.get()));
+		ERR_FAIL_COND_V_MSG(!ift, false, "Failed to create Metal intersection function table.");
+		if (hit_count == 0) {
+			ift->setOpaqueTriangleIntersectionFunction(opaque_sig, 0);
+		} else {
+			for (uint32_t i = 0; i < hit_count; i++) {
+				if (hit_anyhit_fns[i] != nullptr) {
+					MTL::FunctionHandle *handle = state->functionHandle(hit_anyhit_fns[i]);
+					ERR_FAIL_NULL_V_MSG(handle, false, "Failed to retrieve Metal intersection function handle.");
+					ift->setFunction(handle, i);
+				} else {
+					ift->setOpaqueTriangleIntersectionFunction(opaque_sig, i);
+				}
+			}
+		}
+
+		MDRaytracingPipeline::RaygenEntry &entry = p_pipeline->raygen_entries[r];
+		entry.state = std::move(state);
+		entry.visible_table = std::move(vft);
+		entry.intersection_table = std::move(ift);
+	}
+
+	return true;
+}
+
 RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) {
-	ERR_FAIL_V_MSG(RaytracingPipelineID(), "Ray tracing is not currently supported by the Metal driver.");
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE), RaytracingPipelineID(), "Metal raytracing pipelines are disabled or unsupported on this device.");
+
+	MDRaytracingPipeline *pipeline = new MDRaytracingPipeline();
+	pipeline->is_library = false;
+	pipeline->layout_shader = reinterpret_cast<MDShader *>(p_layout_defining_shader.id);
+	pipeline->max_trace_recursion_depth = p_max_trace_recursion_depth;
+
+	pipeline->specialized_stages.resize(p_shaders.size());
+	for (uint32_t i = 0; i < p_shaders.size(); i++) {
+		const PipelineShader &ps = p_shaders[i];
+		MDRaytracingShader *rt_shader = dynamic_cast<MDRaytracingShader *>(reinterpret_cast<MDShader *>(ps.shader.id));
+		if (rt_shader == nullptr || !rt_shader->stages.has(ps.shader_stage)) {
+			delete pipeline;
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Metal raytracing pipeline shader stage is missing.");
+		}
+		VectorView<PipelineSpecializationConstant> spec = ps.specialization_constants;
+		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec);
+		if (std::holds_alternative<Error>(fn_or_err)) {
+			delete pipeline;
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Failed to create Metal function for raytracing pipeline stage.");
+		}
+		pipeline->specialized_stages[i].stage = ps.shader_stage;
+		pipeline->specialized_stages[i].function = std::get<NS::SharedPtr<MTL::Function>>(fn_or_err);
+	}
+
+	for (uint32_t idx : p_raygen_shader_indices) {
+		pipeline->raygen_shader_indices.push_back(idx);
+	}
+	for (uint32_t idx : p_miss_shader_indices) {
+		pipeline->miss_shader_indices.push_back(idx);
+	}
+	for (const HitGroup &hg : p_hit_groups) {
+		pipeline->hit_groups.push_back(hg);
+	}
+
+	const char *label = pipeline->layout_shader != nullptr ? pipeline->layout_shader->name.get_data() : "RaytracingPipeline";
+	if (!_raytracing_pipeline_build_executable(pipeline, label)) {
+		delete pipeline;
+		return RaytracingPipelineID();
+	}
+
+	return RaytracingPipelineID(pipeline);
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY), RaytracingPipelineID(), "Metal raytracing pipeline libraries are disabled or unsupported on this device.");
+
+	MDRaytracingPipeline *library = new MDRaytracingPipeline();
+	library->is_library = true;
+	library->layout_shader = reinterpret_cast<MDShader *>(p_layout_defining_shader.id);
+	library->max_trace_recursion_depth = p_max_trace_recursion_depth;
+	library->max_payload_size = p_max_payload_size;
+
+	library->specialized_stages.resize(p_shaders.size());
+	for (uint32_t i = 0; i < p_shaders.size(); i++) {
+		const PipelineShader &ps = p_shaders[i];
+		MDRaytracingShader *rt_shader = dynamic_cast<MDRaytracingShader *>(reinterpret_cast<MDShader *>(ps.shader.id));
+		if (rt_shader == nullptr || !rt_shader->stages.has(ps.shader_stage)) {
+			delete library;
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Metal raytracing library shader stage is missing.");
+		}
+		VectorView<PipelineSpecializationConstant> spec = ps.specialization_constants;
+		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec);
+		if (std::holds_alternative<Error>(fn_or_err)) {
+			delete library;
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Failed to create Metal function for raytracing library stage.");
+		}
+		library->specialized_stages[i].stage = ps.shader_stage;
+		library->specialized_stages[i].function = std::get<NS::SharedPtr<MTL::Function>>(fn_or_err);
+	}
+
+	for (uint32_t idx : p_raygen_shader_indices) {
+		library->raygen_shader_indices.push_back(idx);
+	}
+	for (uint32_t idx : p_miss_shader_indices) {
+		library->miss_shader_indices.push_back(idx);
+	}
+	for (const HitGroup &hg : p_hit_groups) {
+		library->hit_groups.push_back(hg);
+	}
+
+	return RaytracingPipelineID(library);
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY), RaytracingPipelineID(), "Metal raytracing pipeline libraries are disabled or unsupported on this device.");
+	ERR_FAIL_COND_V(p_libraries.is_empty(), RaytracingPipelineID());
+
+	MDRaytracingPipeline *linked = new MDRaytracingPipeline();
+	linked->is_library = false;
+	linked->layout_shader = reinterpret_cast<MDShader *>(p_layout_defining_shader.id);
+	linked->max_trace_recursion_depth = p_max_trace_recursion_depth;
+	linked->max_payload_size = p_max_payload_size;
+
+	for (uint32_t l = 0; l < p_libraries.size(); l++) {
+		const MDRaytracingPipeline *lib = reinterpret_cast<const MDRaytracingPipeline *>(p_libraries[l].id);
+		if (lib == nullptr) {
+			delete linked;
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Null raytracing pipeline library passed to raytracing_pipeline_link.");
+		}
+		const uint32_t stage_base = linked->specialized_stages.size();
+		for (const MDRaytracingPipeline::SpecializedStage &s : lib->specialized_stages) {
+			linked->specialized_stages.push_back(s);
+		}
+		for (uint32_t idx : lib->raygen_shader_indices) {
+			linked->raygen_shader_indices.push_back(stage_base + idx);
+		}
+		for (uint32_t idx : lib->miss_shader_indices) {
+			linked->miss_shader_indices.push_back(stage_base + idx);
+		}
+		for (const HitGroup &hg : lib->hit_groups) {
+			HitGroup shifted;
+			shifted.closest_hit_shader_index = hg.closest_hit_shader_index != UINT32_MAX ? stage_base + hg.closest_hit_shader_index : UINT32_MAX;
+			shifted.any_hit_shader_index = hg.any_hit_shader_index != UINT32_MAX ? stage_base + hg.any_hit_shader_index : UINT32_MAX;
+			shifted.intersection_shader_index = hg.intersection_shader_index != UINT32_MAX ? stage_base + hg.intersection_shader_index : UINT32_MAX;
+			linked->hit_groups.push_back(shifted);
+		}
+	}
+
+	const char *label = linked->layout_shader != nullptr ? linked->layout_shader->name.get_data() : "LinkedRaytracingPipeline";
+	if (!_raytracing_pipeline_build_executable(linked, label)) {
+		delete linked;
+		return RaytracingPipelineID();
+	}
+
+	return RaytracingPipelineID(linked);
 }
 
 void RenderingDeviceDriverMetal::raytracing_pipeline_free(RDD::RaytracingPipelineID p_pipeline) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
+	MDRaytracingPipeline *pipeline = reinterpret_cast<MDRaytracingPipeline *>(p_pipeline.id);
+	delete pipeline;
 }
 
 bool RenderingDeviceDriverMetal::raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) {
-	ERR_FAIL_V_MSG(false, "Ray tracing is not currently supported by the Metal driver.");
+	const MDRaytracingPipeline *pipeline = reinterpret_cast<const MDRaytracingPipeline *>(p_pipeline.id);
+	ERR_FAIL_NULL_V(pipeline, false);
+	ERR_FAIL_COND_V(pipeline->is_library, false);
+	ERR_FAIL_COND_V(p_data_stride_bytes < METAL_RT_SHADER_GROUP_HANDLE_SIZE, false);
+	ERR_FAIL_NULL_V(r_data, false);
+
+	for (uint32_t i = 0; i < p_group_indices.size(); i++) {
+		const uint32_t handle_idx = p_group_index_offset + p_group_indices[i];
+		ERR_FAIL_UNSIGNED_INDEX_V(handle_idx, pipeline->group_handles.size(), false);
+		memcpy(r_data + uint64_t(i) * p_data_stride_bytes, &pipeline->group_handles[handle_idx], METAL_RT_SHADER_GROUP_HANDLE_SIZE);
+	}
+	return true;
 }
 
 // ----- COMMANDS -----
@@ -2621,15 +2943,23 @@ bool RenderingDeviceDriverMetal::raytracing_pipeline_get_shader_group_handles(Ra
 // are implemented in metal_acceleration_structure.cpp.
 
 void RenderingDeviceDriverMetal::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
+	MDCommandBufferBase *cb = reinterpret_cast<MDCommandBufferBase *>(p_cmd_buffer.id);
+	cb->raytracing_bind_pipeline(p_pipeline);
 }
 
 void RenderingDeviceDriverMetal::command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
+	MDCommandBufferBase *cb = reinterpret_cast<MDCommandBufferBase *>(p_cmd_buffer.id);
+	cb->raytracing_bind_uniform_set(p_uniform_set, p_shader, p_set_index);
 }
 
 void RenderingDeviceDriverMetal::command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
+	MDCommandBufferBase *cb = reinterpret_cast<MDCommandBufferBase *>(p_cmd_buffer.id);
+	cb->raytracing_trace_rays(p_raygen_sbt, p_miss_sbt, p_hit_sbt, p_width, p_height, p_depth);
+}
+
+void RenderingDeviceDriverMetal::command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) {
+	MDCommandBufferBase *cb = reinterpret_cast<MDCommandBufferBase *>(p_cmd_buffer.id);
+	cb->raytracing_trace_rays_indirect(p_raygen_sbt, p_miss_sbt, p_hit_sbt, p_indirect_buffer, p_offset);
 }
 
 #pragma mark - Queries
@@ -2780,10 +3110,20 @@ void RenderingDeviceDriverMetal::set_object_name(ObjectType p_type, ID p_driver_
 		case OBJECT_TYPE_SHADER: {
 			MDShader *shader = (MDShader *)(p_driver_id.id);
 			if (MDRenderShader *rs = dynamic_cast<MDRenderShader *>(shader); rs != nullptr) {
-				rs->vert->set_label(label);
-				rs->frag->set_label(label);
+				if (rs->vert) {
+					rs->vert->set_label(label);
+				}
+				if (rs->frag) {
+					rs->frag->set_label(label);
+				}
 			} else if (MDComputeShader *cs = dynamic_cast<MDComputeShader *>(shader); cs != nullptr) {
 				cs->kernel->set_label(label);
+			} else if (MDRaytracingShader *rts = dynamic_cast<MDRaytracingShader *>(shader); rts != nullptr) {
+				for (KeyValue<RDD::ShaderStage, std::shared_ptr<MDLibrary>> &kv : rts->stages) {
+					if (kv.value) {
+						kv.value->set_label(label);
+					}
+				}
 			} else {
 				DEV_ASSERT(false);
 			}
@@ -3088,6 +3428,13 @@ uint64_t RenderingDeviceDriverMetal::api_trait_get(ApiTrait p_trait) {
 		case API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE:
 			static_assert(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) == METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
 			return METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE;
+		// GodotNext: metal_ray_shaders (#172)
+		case API_TRAIT_SHADER_GROUP_HANDLE_SIZE:
+			return METAL_RT_SHADER_GROUP_HANDLE_SIZE;
+		case API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT:
+			return METAL_RT_SHADER_GROUP_HANDLE_ALIGNMENT;
+		case API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT:
+			return METAL_RT_SHADER_GROUP_BASE_ALIGNMENT;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
@@ -3157,7 +3504,14 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 			return mesh_shader_caps.mesh;
 		case SUPPORTS_MESH_SHADER_INDIRECT:
 			return mesh_shader_caps.indirect;
+		// GodotNext: metal_ray_shaders (#172). Experimental Apple9+ macOS 26.4+ ray shaders.
 		case SUPPORTS_RAYTRACING_PIPELINE:
+			return raytracing_pipeline_caps.pipeline;
+		case SUPPORTS_RAYTRACING_PIPELINE_LIBRARY:
+			return raytracing_pipeline_caps.library;
+		case SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT:
+			return raytracing_pipeline_caps.trace_rays_indirect;
+		case SUPPORTS_RAYTRACING_REORDER:
 			return false;
 		default:
 			return false;
@@ -3350,6 +3704,31 @@ void RenderingDeviceDriverMetal::_update_ray_query_caps() {
 			api_trait_get(API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE)));
 }
 
+// GodotNext: metal_ray_shaders (#172). Evaluate experimental Metal ray shaders enablement and log reason once.
+void RenderingDeviceDriverMetal::_update_raytracing_pipeline_caps() {
+	bool setting_enabled = false;
+	if (ProjectSettings::get_singleton() != nullptr && ProjectSettings::get_singleton()->has_setting("rendering/raytracing/metal_ray_shaders")) {
+		setting_enabled = bool(ProjectSettings::get_singleton()->get_setting("rendering/raytracing/metal_ray_shaders"));
+	}
+
+	raytracing_pipeline_caps = metal_raytracing_pipeline_caps(
+			setting_enabled,
+			(uint32_t)device_properties->features.highestFamily,
+#if TARGET_OS_OSX
+			true,
+#else
+			false,
+#endif
+			device_properties->os_version,
+			has_feature(SUPPORTS_RAY_QUERY));
+
+	static bool raytracing_pipeline_status_logged = false;
+	if (!raytracing_pipeline_status_logged) {
+		raytracing_pipeline_status_logged = true;
+		print_verbose(metal_raytracing_pipeline_log_line(raytracing_pipeline_caps));
+	}
+}
+
 void RenderingDeviceDriverMetal::_check_capabilities() {
 	capabilities.device_family = DEVICE_METAL;
 	parse_msl_version(device_properties->features.msl_target_version, capabilities.version_major, capabilities.version_minor);
@@ -3448,6 +3827,8 @@ Error RenderingDeviceDriverMetal::_initialize(uint32_t p_device_index, uint32_t 
 	device_properties = memnew(MetalDeviceProperties(device));
 	// GodotNext: metal_ray_query
 	_update_ray_query_caps();
+	// GodotNext: metal_ray_shaders (#172)
+	_update_raytracing_pipeline_caps();
 	// GodotNext: rd_mesh_shaders (#178)
 	mesh_shader_caps = metal_mesh_shader_caps((uint32_t)device_properties->features.highestFamily, device_properties->features.msl_target_version, device_properties->features.argument_buffers_enabled());
 	print_verbose(vformat("- Metal mesh shaders %s, indirect mesh draws %s", mesh_shader_caps.mesh ? "supported" : "not supported", mesh_shader_caps.indirect ? "supported" : "not supported"));

@@ -174,6 +174,68 @@ RenderingDeviceDriver::D3D12RaytracingPipelineCaps RenderingDeviceDriver::d3d12_
 	return caps;
 }
 
+// GodotNext: metal_ray_shaders (#172)
+RenderingDeviceDriver::MetalRaytracingPipelineCaps RenderingDeviceDriver::metal_raytracing_pipeline_caps(bool p_setting_enabled, uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_version, bool p_ray_query) {
+	MetalRaytracingPipelineCaps caps;
+	if (!p_setting_enabled) {
+		caps.reason = METAL_RT_PIPELINE_REASON_SETTING_OFF;
+		return caps;
+	}
+	if (!p_is_macos || p_apple_family < METAL_RAY_SHADERS_MIN_FAMILY) {
+		caps.reason = METAL_RT_PIPELINE_REASON_APPLE_FAMILY_TOO_OLD;
+		return caps;
+	}
+	if (p_os_version < METAL_RAY_SHADERS_MIN_OS_VERSION) {
+		caps.reason = METAL_RT_PIPELINE_REASON_METAL_OS_TOO_OLD;
+		return caps;
+	}
+	if (!p_ray_query) {
+		caps.reason = METAL_RT_PIPELINE_REASON_NO_RAY_QUERY;
+		return caps;
+	}
+	caps.pipeline = true;
+	caps.library = true;
+	caps.trace_rays_indirect = true;
+	caps.reason = METAL_RT_PIPELINE_SUPPORTED;
+	return caps;
+}
+
+const char *RenderingDeviceDriver::metal_raytracing_pipeline_reason_name(MetalRaytracingPipelineReason p_reason) {
+	switch (p_reason) {
+		case METAL_RT_PIPELINE_SUPPORTED:
+			return "SUPPORTED";
+		case METAL_RT_PIPELINE_REASON_SETTING_OFF:
+			return "SETTING_OFF";
+		case METAL_RT_PIPELINE_REASON_APPLE_FAMILY_TOO_OLD:
+			return "APPLE_FAMILY_TOO_OLD";
+		case METAL_RT_PIPELINE_REASON_METAL_OS_TOO_OLD:
+			return "METAL_OS_TOO_OLD";
+		case METAL_RT_PIPELINE_REASON_NO_RAY_QUERY:
+			return "NO_RAY_QUERY";
+	}
+	return "SETTING_OFF";
+}
+
+String RenderingDeviceDriver::metal_raytracing_pipeline_log_line(const MetalRaytracingPipelineCaps &p_caps) {
+	if (p_caps.pipeline) {
+		return "Metal: experimental ray shaders enabled (Apple9+, macOS 26.4+).";
+	}
+	return vformat("Metal: ray tracing pipelines disabled (%s).", metal_raytracing_pipeline_reason_name(p_caps.reason));
+}
+
+uint32_t RenderingDeviceDriver::metal_rt_raygen_index_from_sbt(uint64_t p_offset, uint64_t p_stride) {
+	return p_stride > 0 ? uint32_t(p_offset / p_stride) : 0;
+}
+
+void RenderingDeviceDriver::metal_rt_compute_threadgroups(uint32_t p_width, uint32_t p_height, uint32_t p_depth, uint32_t p_tg_x, uint32_t p_tg_y, uint32_t p_tg_z, uint32_t &r_groups_x, uint32_t &r_groups_y, uint32_t &r_groups_z) {
+	const uint32_t tx = MAX(p_tg_x, 1u);
+	const uint32_t ty = MAX(p_tg_y, 1u);
+	const uint32_t tz = MAX(p_tg_z, 1u);
+	r_groups_x = p_width > 0 ? ((p_width + tx - 1u) / tx) : 0u;
+	r_groups_y = p_height > 0 ? ((p_height + ty - 1u) / ty) : 0u;
+	r_groups_z = p_depth > 0 ? ((p_depth + tz - 1u) / tz) : 0u;
+}
+
 // GodotNext: d3d12_dxr (#118)
 bool RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(DataFormat p_format) {
 	switch (p_format) {

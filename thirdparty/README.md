@@ -1077,6 +1077,9 @@ Patches:
 - `0002-msl-argument-buffer-padding-as.patch` (treat `AccelerationStructure` as a buffer in argument-buffer index lookup and padding)
 - `0003-msl-int64-atomic-min-max.patch` (GodotNext: 64-bit `OpAtomicUMax` and `OpAtomicUMin` on device buffers
   and on `texture2d<ulong>` with MSL 3.1; every other 64-bit atomic still throws)
+- `0004-msl-ray-tracing-pipelines.patch` (GodotNext: MSL emission for SPIR-V ray-tracing stages `RayGenerationKHR`,
+  `ClosestHitKHR`, `MissKHR`, and `AnyHitKHR` using Metal `intersector<triangle_data, instancing>`,
+  `intersection_function_table`, and `visible_function_table`)
 
 
 ## spirv-headers

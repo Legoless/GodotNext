@@ -349,6 +349,49 @@ kernel void indirectCountClamp(device const uchar *records [[buffer(0)]],
 	return state;
 }
 
+// GodotNext: metal_ray_shaders (#172). Converts indirect trace-rays launch size (width, height, depth)
+// to MTL::DispatchThreadgroupsIndirectArguments for an 8x8x1 raygen threadgroup size.
+NS::SharedPtr<MTL::ComputePipelineState> MDResourceFactory::new_rt_indirect_dispatch_pipeline_state(String &r_error) {
+	NS::AutoreleasePool *pool = NS::AutoreleasePool::alloc()->init();
+	DEFER([pool]() { pool->release(); });
+
+	static const char *msl = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void rtIndirectLaunchToGroups(device const uint *launch_size [[buffer(0)]],
+        device uint *threadgroups [[buffer(1)]]) {
+    uint w = launch_size[0];
+    uint h = launch_size[1];
+    uint d = launch_size[2];
+    threadgroups[0] = w > 0u ? ((w + 7u) / 8u) : 0u;
+    threadgroups[1] = h > 0u ? ((h + 7u) / 8u) : 0u;
+    threadgroups[2] = d;
+}
+)";
+
+	NS::Error *err = nullptr;
+	NS::SharedPtr<MTL::CompileOptions> options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
+	NS::SharedPtr<MTL::Library> mtlLib = NS::TransferPtr(device->newLibrary(NS::String::string(msl, NS::UTF8StringEncoding), options.get(), &err));
+	if (!mtlLib) {
+		r_error = err != nullptr ? String(err->localizedDescription()->utf8String()) : String("the kernel did not compile");
+		return {};
+	}
+
+	NS::SharedPtr<MTL::Function> function = NS::TransferPtr(mtlLib->newFunction(MTLSTR("rtIndirectLaunchToGroups")));
+	if (!function) {
+		r_error = "the kernel function is missing";
+		return {};
+	}
+
+	err = nullptr;
+	NS::SharedPtr<MTL::ComputePipelineState> state = NS::TransferPtr(device->newComputePipelineState(function.get(), &err));
+	if (!state) {
+		r_error = err != nullptr ? String(err->localizedDescription()->utf8String()) : String("the pipeline was not created");
+	}
+	return state;
+}
+
 #pragma mark - Resource Cache
 
 MTL::RenderPipelineState *MDResourceCache::get_clear_render_pipeline_state(ClearAttKey &p_key, NS::Error **p_error) {
@@ -386,6 +429,19 @@ MTL::ComputePipelineState *MDResourceCache::get_indirect_count_clamp_pipeline_st
 		}
 	}
 	return indirect_count_clamp_state.get();
+}
+
+// GodotNext: metal_ray_shaders (#172)
+MTL::ComputePipelineState *MDResourceCache::get_rt_indirect_dispatch_pipeline_state() {
+	if (!rt_indirect_dispatch_state && !rt_indirect_dispatch_failed) {
+		String error;
+		rt_indirect_dispatch_state = resource_factory->new_rt_indirect_dispatch_pipeline_state(error);
+		if (!rt_indirect_dispatch_state) {
+			rt_indirect_dispatch_failed = true;
+			ERR_PRINT(vformat("Cannot create the Metal RT indirect dispatch pipeline: %s", error));
+		}
+	}
+	return rt_indirect_dispatch_state.get();
 }
 
 MTL::DepthStencilState *MDResourceCache::get_depth_stencil_state(bool p_use_depth, bool p_use_stencil) {
@@ -853,8 +909,26 @@ void MDCommandBufferBase::encode_push_constant_data(RDD::ShaderID p_shader, Vect
 		} break;
 		case MDCommandBufferStateType::InlineRender:
 		case MDCommandBufferStateType::Blit:
-		case MDCommandBufferStateType::None:
 			return;
+		case MDCommandBufferStateType::None: {
+			// GodotNext: metal_ray_shaders (#172). Raytracing lists can supply push constants before the compute encoder opens.
+			MDShader *shader = (MDShader *)(p_shader.id);
+			if (dynamic_cast<MDRaytracingShader *>(shader) == nullptr) {
+				return;
+			}
+			push_constant_binding = shader->push_constants.stage_binding;
+			if (!push_constant_binding.is_valid()) {
+				return;
+			}
+			const void *ptr = p_data.ptr();
+			uint32_t data_len = p_data.size() * sizeof(uint32_t);
+			push_constant_data_len = (data_len + 15u) & ~15u;
+			DEV_ASSERT(push_constant_data_len <= sizeof(push_constant_data));
+			memcpy(push_constant_data, ptr, data_len);
+			if (push_constant_data_len > 0) {
+				mark_push_constants_dirty();
+			}
+		} break;
 		// GodotNext: metal_acceleration_structure
 		case MDCommandBufferStateType::AccelerationStructure:
 			return;
@@ -869,7 +943,15 @@ static const char *SHADER_STAGE_NAMES[] = {
 	"tess_ctrl", // RDC::SHADER_STAGE_TESSELATION_CONTROL
 	"tess_eval", // RDC::SHADER_STAGE_TESSELATION_EVALUATION
 	"comp", // RDC::SHADER_STAGE_COMPUTE
+	"raygen", // RDC::SHADER_STAGE_RAYGEN
+	"any_hit", // RDC::SHADER_STAGE_ANY_HIT
+	"closest_hit", // RDC::SHADER_STAGE_CLOSEST_HIT
+	"miss", // RDC::SHADER_STAGE_MISS
+	"intersection", // RDC::SHADER_STAGE_INTERSECTION
+	"task", // RDC::SHADER_STAGE_TASK
+	"mesh", // RDC::SHADER_STAGE_MESH
 };
+static_assert(std_size(SHADER_STAGE_NAMES) == RDC::SHADER_STAGE_MAX);
 
 void ShaderCacheEntry::notify_free() {
 	owner.shader_cache_free_entry(this);

@@ -256,6 +256,8 @@ public:
 	NS::SharedPtr<MTL::DepthStencilState> new_depth_stencil_state(bool p_use_depth, bool p_use_stencil);
 	// GodotNext: rd_indirect_count (#177). r_error says why, when it returns null.
 	NS::SharedPtr<MTL::ComputePipelineState> new_indirect_count_clamp_pipeline_state(String &r_error);
+	// GodotNext: metal_ray_shaders (#172). Converts indirect ray-launch dimensions (w,h,d) into 8x8x1 threadgroup counts.
+	NS::SharedPtr<MTL::ComputePipelineState> new_rt_indirect_dispatch_pipeline_state(String &r_error);
 
 	MDResourceFactory(MTL::Device *p_device, PixelFormats &p_pixel_formats, uint32_t p_max_buffer_count) :
 			device(p_device), pixel_formats(p_pixel_formats), max_buffer_count(p_max_buffer_count) {}
@@ -279,6 +281,9 @@ private:
 	// GodotNext: rd_indirect_count (#177). A failed creation is reported once and not tried again.
 	NS::SharedPtr<MTL::ComputePipelineState> indirect_count_clamp_state;
 	bool indirect_count_clamp_failed = false;
+	// GodotNext: metal_ray_shaders (#172).
+	NS::SharedPtr<MTL::ComputePipelineState> rt_indirect_dispatch_state;
+	bool rt_indirect_dispatch_failed = false;
 
 public:
 	MTL::RenderPipelineState *get_clear_render_pipeline_state(ClearAttKey &p_key, NS::Error **p_error);
@@ -288,6 +293,8 @@ public:
 	// in the records at or past the GPU count (see MDCommandBuffer::render_draw_indirect_count_prepare()). Null,
 	// after one error, when it cannot be created.
 	MTL::ComputePipelineState *get_indirect_count_clamp_pipeline_state();
+	// GodotNext: metal_ray_shaders (#172). Converts an indirect trace-rays launch size (w, h, d) to 8x8x1 threadgroups.
+	MTL::ComputePipelineState *get_rt_indirect_dispatch_pipeline_state();
 
 	explicit MDResourceCache(MTL::Device *p_device, PixelFormats &p_pixel_formats, uint32_t p_max_buffer_count) :
 			resource_factory(new MDResourceFactory(p_device, p_pixel_formats, p_max_buffer_count)) {}
@@ -751,6 +758,14 @@ public:
 	virtual void compute_dispatch(uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) = 0;
 	virtual void compute_dispatch_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset) = 0;
 
+#pragma mark - Raytracing Commands
+
+	// GodotNext: metal_ray_shaders (#172).
+	virtual void raytracing_bind_pipeline(RDD::RaytracingPipelineID p_pipeline) = 0;
+	virtual void raytracing_bind_uniform_set(RDD::UniformSetID p_uniform_set, RDD::ShaderID p_shader, uint32_t p_set_index) = 0;
+	virtual void raytracing_trace_rays(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) = 0;
+	virtual void raytracing_trace_rays_indirect(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, RDD::BufferID p_indirect_buffer, uint64_t p_offset) = 0;
+
 #pragma mark - Transfer
 
 	virtual void resolve_texture(RDD::TextureID p_src_texture, RDD::TextureLayout p_src_texture_layout, uint32_t p_src_layer, uint32_t p_src_mipmap, RDD::TextureID p_dst_texture, RDD::TextureLayout p_dst_texture_layout, uint32_t p_dst_layer, uint32_t p_dst_mipmap) = 0;
@@ -972,6 +987,20 @@ public:
 			bool p_needs_view_mask_buffer,
 			bool p_uses_argument_buffers,
 			std::shared_ptr<MDLibrary> p_vert, std::shared_ptr<MDLibrary> p_frag);
+};
+
+// GodotNext: metal_ray_shaders (#172). Ray-tracing shader storing compiled stage libraries and payload sizes.
+class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0), visionos(2.0)) MDRaytracingShader final : public MDShader {
+public:
+	HashMap<RDD::ShaderStage, std::shared_ptr<MDLibrary>> stages;
+	HashMap<RDD::ShaderStage, uint32_t> payload_sizes;
+
+	MDRaytracingShader(CharString p_name, Vector<UniformSet> p_sets, bool p_uses_argument_buffers,
+			HashMap<RDD::ShaderStage, std::shared_ptr<MDLibrary>> p_stages,
+			HashMap<RDD::ShaderStage, uint32_t> p_payload_sizes) :
+			MDShader(p_name, p_sets, p_uses_argument_buffers),
+			stages(std::move(p_stages)),
+			payload_sizes(std::move(p_payload_sizes)) {}
 };
 
 #pragma mark - Uniform Set
@@ -1223,4 +1252,38 @@ public:
 	explicit MDComputePipeline(NS::SharedPtr<MTL::ComputePipelineState> p_state) :
 			MDPipeline(MDPipelineType::Compute), state(std::move(p_state)) {}
 	~MDComputePipeline() override = default;
+};
+
+// GodotNext: metal_ray_shaders (#172). Metal ray-tracing pipeline or library backed by compute PSOs,
+// MTL::LinkedFunctions, MTL::VisibleFunctionTable, and MTL::IntersectionFunctionTable.
+class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0), visionos(2.0)) MDRaytracingPipeline {
+public:
+	struct RaygenEntry {
+		NS::SharedPtr<MTL::ComputePipelineState> state;
+		NS::SharedPtr<MTL::VisibleFunctionTable> visible_table;
+		NS::SharedPtr<MTL::IntersectionFunctionTable> intersection_table;
+	};
+
+	struct SpecializedStage {
+		RDD::ShaderStage stage = RDD::SHADER_STAGE_MAX;
+		NS::SharedPtr<MTL::Function> function;
+	};
+
+	bool is_library = false;
+	MDShader *layout_shader = nullptr;
+	uint32_t max_trace_recursion_depth = 1;
+	uint32_t max_payload_size = 0;
+
+	// Pre-specialized functions and group definitions kept for libraries and linked pipelines.
+	LocalVector<SpecializedStage> specialized_stages;
+	LocalVector<uint32_t> raygen_shader_indices;
+	LocalVector<uint32_t> miss_shader_indices;
+	LocalVector<RDD::HitGroup> hit_groups;
+
+	// Executable state (populated for non-library and linked pipelines; one entry per raygen shader).
+	LocalVector<RaygenEntry> raygen_entries;
+	// Shader group handles in RD order: raygen groups, then miss groups, then hit groups.
+	LocalVector<RDD::MetalRTShaderGroupHandle> group_handles;
+
+	~MDRaytracingPipeline() = default;
 };

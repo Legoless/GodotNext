@@ -9,12 +9,15 @@ Import("env")
 
 # GodotNext: d3d12_interposer_hook (#120). The stub interposer is a separate DLL, not part of the tests library.
 d3d12_stub_dir = "servers/rendering/d3d12_stub_interposer"
+# GodotNext: metal_ray_shaders (#172). Exception-enabled SPIRV-Cross bridge compiled separately below.
+metal_msl_bridge = "servers/rendering/metal_msl_test_bridge.cpp"
 
 # Sources with tests must be explicitly linked first.
 force_link_sources = [
     path
     for path in glob.glob("*/**/*.cpp", recursive=True)
     if not path.replace("\\", "/").startswith(d3d12_stub_dir + "/")
+    and path.replace("\\", "/") != metal_msl_bridge
 ]
 force_link_header = env.CommandNoCache(
     "force_link.gen.h", env.Value(force_link_sources), env.Run(test_builders.force_link_builder)
@@ -28,7 +31,44 @@ if env["scu_build"]:
 else:
     env.add_source_files(tests_obj, glob.glob("*.cpp") + force_link_sources)
 
-lib = env.add_library("tests", tests_obj)
+# GodotNext: metal_ray_shaders (#172). Compile the SPIRV-Cross MSL test bridge with C++ exceptions
+# enabled so MSL ray-shader code generation is unit-tested on Linux and Windows without Xcode.
+env_spirv_cross_test = env.Clone()
+env_spirv_cross_test.Prepend(
+    CPPPATH=[
+        "#thirdparty/spirv-cross",
+        "#thirdparty/spirv-cross/include",
+        "#thirdparty/spirv-headers/include/spirv/unified1",
+    ]
+)
+if env_spirv_cross_test.msvc:
+    env_spirv_cross_test.Append(CXXFLAGS=["/EHsc"])
+else:
+    if "-fno-exceptions" in env_spirv_cross_test["CXXFLAGS"]:
+        env_spirv_cross_test["CXXFLAGS"].remove("-fno-exceptions")
+    env_spirv_cross_test.Append(CXXFLAGS=["-fexceptions"])
+
+spirv_cross_test_obj = []
+env_spirv_cross_test.add_source_files(spirv_cross_test_obj, [metal_msl_bridge])
+if not env.get("metal", False):
+    env_spirv_cross_tp = env_spirv_cross_test.Clone()
+    env_spirv_cross_tp.disable_warnings()
+    spirv_cross_sources = [
+        "#thirdparty/spirv-cross/" + src
+        for src in [
+            "spirv_cfg.cpp",
+            "spirv_cross.cpp",
+            "spirv_parser.cpp",
+            "spirv_msl.cpp",
+            "spirv_reflect.cpp",
+            "spirv_glsl.cpp",
+            "spirv_cross_parsed_ir.cpp",
+            "spirv_cross_util.cpp",
+        ]
+    ]
+    env_spirv_cross_tp.add_source_files(spirv_cross_test_obj, spirv_cross_sources)
+
+lib = env.add_library("tests", tests_obj + spirv_cross_test_obj)
 env.Prepend(LIBS=[lib])
 
 # GodotNext: d3d12_interposer_hook (#120). A stub D3D12 and DXGI interposer DLL for the D3D12Hooks tests,

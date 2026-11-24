@@ -4372,6 +4372,9 @@ void RenderingServer::init() {
 	// GodotNext: mac_hwrt_policy (#131). Match UE 5.9 on macOS: default to Off (SWRT), preserving explicit
 	// project values; opting in with Auto runs HWRT (EXPERIMENTAL) on Apple8+.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing.macos", PROPERTY_HINT_ENUM, "Auto,Off,Force"), 1);
+	// GodotNext: metal_ray_shaders (#172). Experimental Metal ray tracing pipelines (visible and intersection
+	// function tables) on Apple9+ running macOS 26.4+. Off by default; changing requires restart.
+	GLOBAL_DEF_RST("rendering/raytracing/metal_ray_shaders", false);
 	// GodotNext: nextgi_hwrt_mode (#286). UE 5.9's per-platform Hardware Ray Tracing Mode for the RT pipelines.
 	// The Windows and Linux entries decide on those platforms, as UE has the setting per platform.
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing_mode", PROPERTY_HINT_ENUM, "Full,Simplified Material,Inline"), 0);

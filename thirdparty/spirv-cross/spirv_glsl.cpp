@@ -7042,6 +7042,21 @@ void CompilerGLSL::emit_mesh_tasks(SPIRBlock &block)
 	          to_unpacked_expression(block.mesh.groups[2]), ");");
 }
 
+void CompilerGLSL::emit_ignore_intersection()
+{
+	statement("ignoreIntersectionEXT;");
+}
+
+void CompilerGLSL::emit_terminate_ray()
+{
+	statement("terminateRayEXT;");
+}
+
+bool CompilerGLSL::emit_entry_point_void_return()
+{
+	return false;
+}
+
 void CompilerGLSL::emit_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op)
 {
 	// Various FP arithmetic opcodes such as add, sub, mul will hit this.
@@ -18802,6 +18817,9 @@ BlockID CompilerGLSL::emit_block_chain_inner(SPIRBlock &block)
 					statement("return ", to_unpacked_expression(block.return_value), ";");
 			}
 		}
+		else if (processing_entry_point && emit_entry_point_void_return())
+		{
+		}
 		else if (!cfg.node_terminates_control_flow_in_sub_graph(current_function->entry_block, block.self) ||
 		         block.loop_dominator != BlockID(SPIRBlock::NoDominator))
 		{
@@ -18869,11 +18887,11 @@ BlockID CompilerGLSL::emit_block_chain_inner(SPIRBlock &block)
 	}
 
 	case SPIRBlock::IgnoreIntersection:
-		statement("ignoreIntersectionEXT;");
+		emit_ignore_intersection();
 		break;
 
 	case SPIRBlock::TerminateRay:
-		statement("terminateRayEXT;");
+		emit_terminate_ray();
 		break;
 
 	case SPIRBlock::EmitMeshTasks:
