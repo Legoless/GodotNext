@@ -110,6 +110,11 @@ NextGI::TierInputs inputs_for_reason(NextGI::TierReason p_reason) {
 			inputs.ray_query_hw = false;
 			inputs.driver_reason = NextGI::METAL_NO_ARGUMENT_BUFFERS;
 			break;
+		case NextGI::METAL_OS_TOO_OLD:
+			inputs.ray_query = false;
+			inputs.ray_query_hw = false;
+			inputs.driver_reason = NextGI::METAL_OS_TOO_OLD;
+			break;
 		case NextGI::SETTING_OFF:
 			inputs.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_OFF;
 			break;
@@ -316,13 +321,14 @@ TEST_CASE("[NextGI] Device-lost callback writes the fault file and does not touc
 }
 
 TEST_CASE("[NextGI] Each tier reason prints exactly one NextGI line") {
-	const NextGI::TierReason reasons[10] = {
+	const NextGI::TierReason reasons[11] = {
 		NextGI::NO_RAY_QUERY,
 		NextGI::NOT_HW_ACCELERATED,
 		NextGI::CPU_DEVICE,
 		NextGI::D3D12_NO_DXR,
 		NextGI::METAL_SYNC_MODE,
 		NextGI::METAL_NO_ARGUMENT_BUFFERS,
+		NextGI::METAL_OS_TOO_OLD,
 		NextGI::SETTING_OFF,
 		NextGI::AS_MEMORY,
 		NextGI::SELFTEST_FAILED,

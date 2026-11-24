@@ -1102,18 +1102,23 @@ public:
 	virtual uint64_t get_lazily_memory_used() = 0;
 	virtual uint64_t limit_get(Limit p_limit) = 0;
 	virtual uint64_t api_trait_get(ApiTrait p_trait);
-	// GodotNext: metal_ray_query
+	// GodotNext: metal_ray_query (#48, #171)
 	// Pure Metal ray-query capability check. Always compiled, so the doctests run without a GPU.
 	// msl_version uses major * 10000 + minor * 100, the same encoding as the Metal driver.
-	// hardware is true only when ray query is on and apple_family is Apple9 (1009) or later.
+	// Below macOS 14, indirect-instance AS descriptors and MSL 3.1 ulong texture atomics are
+	// unavailable, so reason is RAY_QUERY_REASON_METAL_OS_TOO_OLD.
+	// On Apple8 (M2) with macOS >= 14, ray_query is true and hardware is false (software-traversed
+	// BVH; NextGI reports NOT_HW_ACCELERATED unless opted in). Apple9+ sets hardware = true.
 	struct MetalRayQueryCaps {
 		bool ray_query = false;
 		bool hardware = false;
 		RayQueryUnsupportedReason reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+		const char *hardware_note = "";
 	};
 
 	static constexpr uint32_t METAL_RAY_QUERY_MIN_OS_MAJOR = 14;
 	static constexpr uint32_t METAL_RAY_QUERY_MIN_MSL = 20400; // MSL 2.4.
+	static constexpr uint32_t METAL_RAY_QUERY_APPLE8_FAMILY = 1008; // Apple8 (M2).
 	static constexpr uint32_t METAL_RAY_QUERY_HARDWARE_FAMILY = 1009; // Apple9.
 	static constexpr uint32_t METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE = 72;
 	// GodotNext: metal_acceleration_structure
@@ -1122,6 +1127,18 @@ public:
 	static constexpr uint32_t METAL_MAX_ACCELERATION_STRUCTURE_INSTANCES = 1u << 24;
 
 	static MetalRayQueryCaps metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers);
+
+	// GodotNext: metal_apple8 (#171), rd_atomics64 (#175)
+	// Pure Metal 64-bit integer atomic capability check. Apple9+ and Apple8 on Mac2 support
+	// uint64 max/min on buffers with MSL 3.1+ (macOS 14+ on macOS), and on 2D R64_UINT images
+	// when native image atomics are available. Metal has no 64-bit atomic arithmetic on any family.
+	struct MetalInt64AtomicCaps {
+		bool buffer_min_max = false;
+		bool image_min_max = false;
+		bool arith = false;
+	};
+	static constexpr uint32_t METAL_INT64_ATOMICS_MIN_MSL = 30100; // MSL 3.1.
+	static MetalInt64AtomicCaps metal_int64_atomic_caps(uint32_t p_apple_family, bool p_is_mac2, bool p_is_macos, uint32_t p_os_major, uint32_t p_msl_version, bool p_native_image_atomics);
 
 	// GodotNext: rq_substrate (#22), rt_core_check (#283)
 	// Pure Vulkan ray-query capability check, always compiled so the doctests run without a GPU.

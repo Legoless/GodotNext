@@ -3134,15 +3134,15 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 		// create.
 		case SUPPORTS_ASYNC_COMPUTE:
 			return sync_mode == Barriers;
-		// GodotNext: rd_atomics64 (#175). SPIRV-Cross translates only 64-bit OpAtomicUMax and OpAtomicUMin
-		// (atomic_max_explicit and atomic_min_explicit on atomic_ulong, texture2d<ulong> atomic_max and
-		// atomic_min). Metal has no 64-bit atomic add.
+		// GodotNext: rd_atomics64 (#175), metal_apple8 (#171). SPIRV-Cross translates only 64-bit OpAtomicUMax
+		// and OpAtomicUMin (atomic_max_explicit and atomic_min_explicit on atomic_ulong, texture2d<ulong>
+		// atomic_max and atomic_min). Metal has no 64-bit atomic add on any Apple family.
 		case SUPPORTS_BUFFER_INT64_ATOMICS:
 			return device_properties->features.supports_buffer_atomic_64_bit;
 		case SUPPORTS_IMAGE_INT64_ATOMICS:
-			return device_properties->features.supports_buffer_atomic_64_bit && device_properties->features.supports_image_atomic_64_bit && device_properties->features.supports_native_image_atomics;
+			return device_properties->features.supports_image_atomic_64_bit;
 		case SUPPORTS_INT64_ATOMIC_ARITH:
-			return false;
+			return device_properties->features.supports_int64_atomic_arith;
 		// GodotNext: rd_bindless (#176). Runtime arrays live in tier 2 argument buffers without encoders. False
 		// until BINDLESS_VALIDATED.
 		case SUPPORTS_BINDLESS:
@@ -3287,7 +3287,7 @@ void RenderingDeviceDriverMetal::encode_imported_resources(MTL::ComputeCommandEn
 	}
 }
 
-// GodotNext: metal_ray_query
+// GodotNext: metal_ray_query (#48, #171)
 static const char *_metal_ray_query_reason_name(RenderingDeviceDriver::RayQueryUnsupportedReason p_reason) {
 	switch (p_reason) {
 		case RenderingDeviceDriver::RAY_QUERY_SUPPORTED:
@@ -3300,6 +3300,8 @@ static const char *_metal_ray_query_reason_name(RenderingDeviceDriver::RayQueryU
 			return "METAL_SYNC_MODE";
 		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS:
 			return "METAL_NO_ARGUMENT_BUFFERS";
+		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_OS_TOO_OLD:
+			return "METAL_OS_TOO_OLD";
 	}
 	return "NO_RAY_QUERY";
 }
@@ -3338,9 +3340,10 @@ void RenderingDeviceDriverMetal::_update_ray_query_caps() {
 
 	const int apple_family = int(device_properties->features.highestFamily) - int(MTL::GPUFamilyApple1) + 1;
 	print_verbose(vformat("Metal: GPU family Apple%d.", apple_family));
-	print_verbose(vformat("Metal: ray query helper ray_query=%s hardware=%s reason=%s; reported reason=%s has_feature=%s instance_size=%d.",
+	print_verbose(vformat("Metal: ray query helper ray_query=%s hardware=%s (%s) reason=%s; reported reason=%s has_feature=%s instance_size=%d.",
 			ray_query_caps.ray_query ? "true" : "false",
 			ray_query_caps.hardware ? "true" : "false",
+			ray_query_caps.hardware_note[0] != '\0' ? ray_query_caps.hardware_note : "n/a",
 			_metal_ray_query_reason_name(ray_query_caps.reason),
 			_metal_ray_query_reason_name(ray_query_reason),
 			has_feature(SUPPORTS_RAY_QUERY) ? "true" : "false",

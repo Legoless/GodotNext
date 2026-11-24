@@ -801,10 +801,10 @@ TEST_CASE("[NextGI] Tier and reason names are unique and cover the tier reasons"
 		CHECK_FALSE(name.is_empty());
 		names.insert(name);
 	}
-	// NONE plus the §6.3 reasons and SWRT_REDUCED.
-	CHECK_EQ(names.size(), 12u);
+	// NONE plus the §6.3 reasons, METAL_OS_TOO_OLD (§21.0.2, #171) and SWRT_REDUCED.
+	CHECK_EQ(names.size(), 13u);
 	CHECK_EQ(NextGI::get_tier_name(NextGI::TIER_SOFTWARE), "SWRT");
-	for (const char *reason : { "NO_RAY_QUERY", "NOT_HW_ACCELERATED", "CPU_DEVICE", "D3D12_NO_DXR", "METAL_SYNC_MODE", "METAL_NO_ARGUMENT_BUFFERS", "SETTING_OFF", "AS_MEMORY", "SELFTEST_FAILED", "HWRT_FAULTED", "SWRT_REDUCED" }) {
+	for (const char *reason : { "NO_RAY_QUERY", "NOT_HW_ACCELERATED", "CPU_DEVICE", "D3D12_NO_DXR", "METAL_SYNC_MODE", "METAL_NO_ARGUMENT_BUFFERS", "METAL_OS_TOO_OLD", "SETTING_OFF", "AS_MEMORY", "SELFTEST_FAILED", "HWRT_FAULTED", "SWRT_REDUCED" }) {
 		CHECK(names.has(reason));
 	}
 }
@@ -1301,6 +1301,8 @@ static NextGI::TierReason metal_tier_reason(RenderingDeviceDriver::RayQueryUnsup
 			return NextGI::METAL_SYNC_MODE;
 		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS:
 			return NextGI::METAL_NO_ARGUMENT_BUFFERS;
+		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_OS_TOO_OLD:
+			return NextGI::METAL_OS_TOO_OLD;
 	}
 	return NextGI::NO_RAY_QUERY;
 }
@@ -1319,14 +1321,58 @@ static void check_metal_tier(const RenderingDeviceDriver::MetalRayQueryCaps &p_c
 	check_tier(inputs, p_tier, p_reason, warn_force);
 }
 
-TEST_CASE("[NextGI][Metal] Apple7 and Apple8 give NOT_HW_ACCELERATED, and HWRT under force") {
+TEST_CASE("[NextGI][Metal] Apple7 and Apple8 on macOS 14+ report ray_query=true, hardware=false (NOT_HW_ACCELERATED) and HWRT under force") {
 	for (uint32_t family : { 1007u, 1008u }) {
 		const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(family);
 		CHECK(caps.ray_query);
 		CHECK_FALSE(caps.hardware);
 		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+		CHECK(String(caps.hardware_note).contains("NOT_HW_ACCELERATED"));
 		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
 		check_metal_tier(caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_FORCE);
+	}
+}
+
+TEST_CASE("[NextGI][Metal] Apple8 limits: 64-bit atomics max/min only and no indirect mesh draws (#171)") {
+	// Apple7 (M1): no 64-bit atomics, direct mesh shaders only.
+	const RenderingDeviceDriver::MetalInt64AtomicCaps a7_atomics = RenderingDeviceDriver::metal_int64_atomic_caps(1007, true, true, 14, 30100, true);
+	CHECK_FALSE(a7_atomics.buffer_min_max);
+	CHECK_FALSE(a7_atomics.image_min_max);
+	CHECK_FALSE(a7_atomics.arith);
+	const RenderingDeviceDriver::MeshShaderCaps a7_mesh = RenderingDeviceDriver::metal_mesh_shader_caps(1007, 30100, true);
+	CHECK(a7_mesh.mesh);
+	CHECK_FALSE(a7_mesh.indirect);
+
+	// Apple8 (M2) on Mac2 + macOS 14 + MSL 3.1: 64-bit atomics max/min only (no arith), no indirect mesh shaders.
+	const RenderingDeviceDriver::MetalInt64AtomicCaps a8_atomics = RenderingDeviceDriver::metal_int64_atomic_caps(1008, true, true, 14, 30100, true);
+	CHECK(a8_atomics.buffer_min_max);
+	CHECK(a8_atomics.image_min_max);
+	CHECK_FALSE(a8_atomics.arith);
+	const RenderingDeviceDriver::MeshShaderCaps a8_mesh = RenderingDeviceDriver::metal_mesh_shader_caps(1008, 30100, true);
+	CHECK(a8_mesh.mesh);
+	CHECK_FALSE(a8_mesh.indirect);
+
+	// Apple8 without Mac2 (e.g., iOS): no 64-bit atomics.
+	const RenderingDeviceDriver::MetalInt64AtomicCaps a8_non_mac = RenderingDeviceDriver::metal_int64_atomic_caps(1008, false, false, 17, 30100, true);
+	CHECK_FALSE(a8_non_mac.buffer_min_max);
+	CHECK_FALSE(a8_non_mac.image_min_max);
+	CHECK_FALSE(a8_non_mac.arith);
+
+	// Apple8 on macOS 13: no 64-bit atomics (MSL 3.1 ulong texture atomics need macOS 14).
+	const RenderingDeviceDriver::MetalInt64AtomicCaps a8_macos13 = RenderingDeviceDriver::metal_int64_atomic_caps(1008, true, true, 13, 30100, false);
+	CHECK_FALSE(a8_macos13.buffer_min_max);
+	CHECK_FALSE(a8_macos13.image_min_max);
+	CHECK_FALSE(a8_macos13.arith);
+
+	// Apple9+ unchanged: 64-bit atomics max/min only (no arith), direct + indirect mesh shaders.
+	for (uint32_t family : { 1009u, 1010u, 1011u }) {
+		const RenderingDeviceDriver::MetalInt64AtomicCaps a9_atomics = RenderingDeviceDriver::metal_int64_atomic_caps(family, true, true, 14, 30100, true);
+		CHECK(a9_atomics.buffer_min_max);
+		CHECK(a9_atomics.image_min_max);
+		CHECK_FALSE(a9_atomics.arith);
+		const RenderingDeviceDriver::MeshShaderCaps a9_mesh = RenderingDeviceDriver::metal_mesh_shader_caps(family, 30100, true);
+		CHECK(a9_mesh.mesh);
+		CHECK(a9_mesh.indirect);
 	}
 }
 
@@ -1360,12 +1406,20 @@ TEST_CASE("[NextGI][Metal] Argument buffers off gives METAL_NO_ARGUMENT_BUFFERS"
 	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_NO_ARGUMENT_BUFFERS);
 }
 
-TEST_CASE("[NextGI][Metal] macOS 13 gives NO_RAY_QUERY") {
-	const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(1010, true, true, true, 13);
-	CHECK_FALSE(caps.ray_query);
-	CHECK_FALSE(caps.hardware);
-	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
-	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
+TEST_CASE("[NextGI][Metal] macOS 13 gives METAL_OS_TOO_OLD on Apple8 and Apple9+ (#171)") {
+	for (uint32_t family : { 1007u, 1008u, 1009u, 1010u }) {
+		const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(family, true, true, true, 13);
+		CHECK_FALSE(caps.ray_query);
+		CHECK_FALSE(caps.hardware);
+		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_OS_TOO_OLD);
+		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD);
+		// Force still cannot bypass a missing OS capability and warns.
+		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD, NextGI::HARDWARE_RAY_TRACING_FORCE);
+	}
+	// Apply driver reason directly through apply_driver_ray_query too.
+	NextGI::TierInputs inputs = hwrt_inputs();
+	NextGI::apply_driver_ray_query(false, false, RenderingDeviceCommons::RAY_QUERY_REASON_METAL_OS_TOO_OLD, inputs);
+	check_tier(inputs, NextGI::TIER_SOFTWARE, NextGI::METAL_OS_TOO_OLD);
 }
 
 TEST_CASE("[NextGI][Metal] A missing ray-query capability gives NO_RAY_QUERY") {

@@ -122,3 +122,22 @@ The Metal driver reports `SUPPORTS_BUFFER_INT64_ATOMICS` and `SUPPORTS_IMAGE_INT
 | Copied files | None |
 
 How it was used: buffer max and min become `atomic_max_explicit` or `atomic_min_explicit` on `(device atomic_ulong*)` with relaxed order, and image max and min become `.atomic_max` or `.atomic_min` on `texture2d<ulong, access::read_write>`, passing a scalar `ulong` that converts to `ulong4`. Because these functions return nothing, a shader that reads the result fails. Because the buffer functions take only `device` pointers, threadgroup memory has no 64-bit atomics, so RenderingDevice files 64-bit atomics on shared memory under the arithmetic flag, which Metal does not report. MSL 3.1 also has 64-bit texture atomics on 1D, arrayed and 3D textures, but the patch translates 2D, non-arrayed images only, so the other kinds also go under the arithmetic flag. Export baking defers shaders with `Int64Atomics` or `Int64ImageEXT` to runtime unless the target profile has Apple8 and MSL 3.1. No Metal compiler has seen this MSL yet; the M5 Max run checks it.
+
+## Apple8 (M2) ray query and macOS 14 floor (#171)
+
+Apple8 (M2) exposes Metal ray tracing (`supportsRaytracing()`) via software-traversed BVH without dedicated hardware ray-tracing units, whereas Apple9+ adds hardware ray-tracing units and indirect mesh draws. Indirect-instance acceleration-structure descriptors (`MTLIndirectInstanceAccelerationStructureDescriptor`) and MSL 3.1 `ulong` texture atomics require macOS 14, so the driver reports `RAY_QUERY_REASON_METAL_OS_TOO_OLD` (`METAL_OS_TOO_OLD`) on macOS below 14 instead of collapsing it into `NO_RAY_QUERY`.
+
+### Apple Metal Feature Set Tables and macOS 14 SDK documentation
+
+| Field | Value |
+|---|---|
+| What | Apple GPU family feature matrix: Apple8 vs Apple9 ray-tracing capabilities (`supportsRaytracing` vs hardware ray tracing), 64-bit integer texture/buffer atomic min/max support on Apple8 (Mac2) and Apple9+ in MSL 3.1 (macOS 14+), indirect mesh shader draws on Apple9+ only, and macOS 14 availability of `MTLIndirectInstanceAccelerationStructureDescriptor` |
+| Upstream | https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf and https://developer.apple.com/documentation/metal/mtlindirectinstanceaccelerationstructuredescriptor |
+| Version | Metal Feature Set Tables (Apple GPU families 7–10) and Metal documentation consulted 2026-11-24 |
+| License | Apple Developer Documentation. Consulted, not copied. No sample code was copied. metal-cpp is vendored under Apache-2.0 |
+| Read on | 2026-11-24, for issue #171 |
+| Consulted by | The #171 implementer |
+| Used in | `servers/rendering/rendering_device_commons.h`, `servers/rendering/rendering_device_driver.{h,cpp}`, `drivers/metal/metal_device_properties.{h,cpp}`, `drivers/metal/rendering_device_driver_metal.cpp`, `servers/rendering/renderer_rd/environment/next_gi.{h,cpp}` |
+| Copied files | None |
+
+How it was used: `RenderingDeviceDriver::metal_ray_query_caps()` reports `RAY_QUERY_REASON_METAL_OS_TOO_OLD` on macOS < 14, and on macOS >= 14 sets `ray_query = true, hardware = false` on Apple8 (reporting `NOT_HW_ACCELERATED` via NextGI) and `hardware = true` on Apple9+. `RenderingDeviceDriver::metal_int64_atomic_caps()` and `RenderingDeviceDriver::metal_mesh_shader_caps()` record Apple8's limits in `MetalDeviceProperties` (`supports_buffer_atomic_64_bit` and `supports_image_atomic_64_bit` max/min only with `supports_int64_atomic_arith = false`, and `supports_mesh_shader_indirect = false`).

@@ -3060,7 +3060,7 @@
 		<constant name="SUPPORTS_RAY_QUERY" value="11" enum="Features">
 			Support for ray query extension.
 
-			[b]Note:[/b] Vulkan reports this when the device exposes acceleration structures, ray query and buffer device addresses. The Metal driver reports it on Apple9 and later once an acceleration structure can be built. D3D12 reports it with DXR 1.1 (raytracing tier 1.1), shader model 6.6 (for the buffer device addresses acceleration structures use) and a build that links the GodotNext Mesa NIR library, which compiles ray query to DXIL; otherwise the reason is [constant RAY_QUERY_REASON_D3D12_NO_DXR].
+			[b]Note:[/b] Vulkan reports this when the device exposes acceleration structures, ray query and buffer device addresses. The Metal driver reports it on macOS 14 and later on Apple GPUs with Metal ray tracing (Apple7 and later, including Apple8/M2 where [constant SUPPORTS_RAY_QUERY_HARDWARE] is [code]false[/code] and Apple9+ where it is [code]true[/code]) once an acceleration structure can be built; below macOS 14 the reason is [constant RAY_QUERY_REASON_METAL_OS_TOO_OLD]. D3D12 reports it with DXR 1.1 (raytracing tier 1.1), shader model 6.6 (for the buffer device addresses acceleration structures use) and a build that links the GodotNext Mesa NIR library, which compiles ray query to DXIL; otherwise the reason is [constant RAY_QUERY_REASON_D3D12_NO_DXR].
 		</constant>
 		<constant name="SUPPORTS_RAY_QUERY_HARDWARE" value="16" enum="Features">
 			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later. The Vulkan and D3D12 drivers set it for NVIDIA, AMD and Intel GPUs with ray query unless the GPU's PCI IDs are on a list of parts without ray-tracing units, so later generations count without an engine update: NVIDIA Turing and later RTX parts, AMD RDNA2 and later discrete GPUs, and Intel Xe-HPG and later GPUs with ray-tracing units, integrated Intel Arc GPUs included. AMD integrated GPUs leave it unset, as do other vendors' devices and software implementations.
@@ -3143,6 +3143,9 @@
 		</constant>
 		<constant name="RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS" value="4" enum="RayQueryUnsupportedReason">
 			The Metal driver runs without the argument buffers ray query needs.
+		</constant>
+		<constant name="RAY_QUERY_REASON_METAL_OS_TOO_OLD" value="5" enum="RayQueryUnsupportedReason">
+			The macOS version is below macOS 14, which indirect-instance acceleration structure descriptors and MSL 3.1 64-bit texture atomics need.
 		</constant>
 		<constant name="LIMIT_MAX_BOUND_UNIFORM_SETS" value="0" enum="Limit">
 			Maximum number of uniform sets that can be bound at a given time.

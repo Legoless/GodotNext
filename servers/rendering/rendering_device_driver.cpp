@@ -77,11 +77,20 @@ uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 	}
 }
 
-// GodotNext: metal_ray_query
+// GodotNext: metal_ray_query (#48, #171)
 RenderingDeviceDriver::MetalRayQueryCaps RenderingDeviceDriver::metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers) {
 	MetalRayQueryCaps caps;
 	// The first failing check wins.
-	if (!p_is_macos || p_os_major < METAL_RAY_QUERY_MIN_OS_MAJOR || !p_supports_raytracing || p_msl_version < METAL_RAY_QUERY_MIN_MSL || !p_gpu_address) {
+	if (!p_is_macos || !p_supports_raytracing) {
+		caps.reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+		return caps;
+	}
+	if (p_os_major < METAL_RAY_QUERY_MIN_OS_MAJOR) {
+		// Indirect-instance AS descriptors and MSL 3.1 ulong texture atomics need macOS 14 (#171).
+		caps.reason = RAY_QUERY_REASON_METAL_OS_TOO_OLD;
+		return caps;
+	}
+	if (p_msl_version < METAL_RAY_QUERY_MIN_MSL || !p_gpu_address) {
 		caps.reason = RAY_QUERY_REASON_NO_RAY_QUERY;
 		return caps;
 	}
@@ -95,7 +104,21 @@ RenderingDeviceDriver::MetalRayQueryCaps RenderingDeviceDriver::metal_ray_query_
 	}
 	caps.ray_query = true;
 	caps.hardware = p_apple_family >= METAL_RAY_QUERY_HARDWARE_FAMILY;
+	caps.hardware_note = caps.hardware ? "Apple9+ hardware ray tracing" : "NOT_HW_ACCELERATED (Apple GPU without hardware RT units)";
 	caps.reason = RAY_QUERY_SUPPORTED;
+	return caps;
+}
+
+// GodotNext: metal_apple8 (#171), rd_atomics64 (#175)
+RenderingDeviceDriver::MetalInt64AtomicCaps RenderingDeviceDriver::metal_int64_atomic_caps(uint32_t p_apple_family, bool p_is_mac2, bool p_is_macos, uint32_t p_os_major, uint32_t p_msl_version, bool p_native_image_atomics) {
+	MetalInt64AtomicCaps caps;
+	if (p_is_macos && p_os_major < METAL_RAY_QUERY_MIN_OS_MAJOR) {
+		return caps;
+	}
+	const bool gpu_ok = p_apple_family >= METAL_RAY_QUERY_HARDWARE_FAMILY || (p_apple_family >= METAL_RAY_QUERY_APPLE8_FAMILY && p_is_mac2);
+	caps.buffer_min_max = gpu_ok && p_msl_version >= METAL_INT64_ATOMICS_MIN_MSL;
+	caps.image_min_max = caps.buffer_min_max && p_native_image_atomics;
+	caps.arith = false;
 	return caps;
 }
 

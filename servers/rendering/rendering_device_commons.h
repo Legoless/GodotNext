@@ -1144,7 +1144,7 @@ public:
 		SUPPORTS_MESH_SHADER_INDIRECT,
 	};
 
-	// GodotNext: metal_ray_query
+	// GodotNext: metal_ray_query (#48, #171)
 	// Returned with SUPPORTS_RAY_QUERY. #22 fills the Vulkan and D3D12 cases.
 	enum RayQueryUnsupportedReason {
 		RAY_QUERY_SUPPORTED,
@@ -1152,6 +1152,7 @@ public:
 		RAY_QUERY_REASON_D3D12_NO_DXR,
 		RAY_QUERY_REASON_METAL_SYNC_MODE,
 		RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS,
+		RAY_QUERY_REASON_METAL_OS_TOO_OLD,
 	};
 
 	enum SubgroupOperations {

@@ -136,6 +136,7 @@ static const char *_nextgi_reason_names[NextGI::TIER_REASON_MAX] = {
 	"D3D12_NO_DXR",
 	"METAL_SYNC_MODE",
 	"METAL_NO_ARGUMENT_BUFFERS",
+	"METAL_OS_TOO_OLD",
 	"SETTING_OFF",
 	"AS_MEMORY",
 	"SELFTEST_FAILED",
@@ -162,6 +163,8 @@ static NextGI::TierReason _nextgi_reason_from_driver(RenderingDeviceCommons::Ray
 			return NextGI::METAL_SYNC_MODE;
 		case RenderingDeviceCommons::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS:
 			return NextGI::METAL_NO_ARGUMENT_BUFFERS;
+		case RenderingDeviceCommons::RAY_QUERY_REASON_METAL_OS_TOO_OLD:
+			return NextGI::METAL_OS_TOO_OLD;
 	}
 	return NextGI::NO_RAY_QUERY;
 }
@@ -172,6 +175,7 @@ static bool _nextgi_is_driver_reason(NextGI::TierReason p_reason) {
 		case NextGI::D3D12_NO_DXR:
 		case NextGI::METAL_SYNC_MODE:
 		case NextGI::METAL_NO_ARGUMENT_BUFFERS:
+		case NextGI::METAL_OS_TOO_OLD:
 			return true;
 		default:
 			return false;

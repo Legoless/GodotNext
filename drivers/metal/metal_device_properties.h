@@ -117,9 +117,14 @@ struct API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0)) MetalFeatures {
 	bool metal_fx_temporal = false; /**< If true, Metal FX temporal functions are supported. */
 	bool supports_gpu_address = false; /**< If true, referencing a GPU address in a shader is supported. */
 	bool supports_image_atomic_32_bit = false; /**< If true, 32-bit atomic operations on images are supported by the GPU. */
-	bool supports_image_atomic_64_bit = false; /**< If true, 64-bit atomic operations on images are supported by the GPU. */
-	bool supports_buffer_atomic_64_bit = false; /**< GodotNext: rd_atomics64 (#175). If true, 64-bit atomic min and max on device buffers are supported by the GPU. */
+	bool supports_image_atomic_64_bit = false; /**< GodotNext: rd_atomics64 (#175), metal_apple8 (#171). If true, 64-bit atomic min and max on 2D R64_UINT images are supported. */
+	bool supports_buffer_atomic_64_bit = false; /**< GodotNext: rd_atomics64 (#175), metal_apple8 (#171). If true, 64-bit atomic min and max on device buffers are supported by the GPU. */
+	bool supports_int64_atomic_arith = false; /**< GodotNext: rd_atomics64 (#175), metal_apple8 (#171). Metal has no 64-bit atomic arithmetic on any family (max/min only). */
 	bool supports_native_image_atomics = false; /**< If true, native image atomic operations are supported by the OS. */
+	bool supports_mac2 = false; /**< GodotNext: metal_apple8 (#171). True when the device supports MTL::GPUFamilyMac2. */
+	bool supports_ray_query_hardware = false; /**< GodotNext: metal_apple8 (#171). True on Apple9+ GPUs with hardware ray-tracing units (false on Apple8). */
+	bool supports_mesh_shader = false; /**< GodotNext: rd_mesh_shaders (#178), metal_apple8 (#171). True on Apple7+ with MSL 3.0+ and argument buffers. */
+	bool supports_mesh_shader_indirect = false; /**< GodotNext: rd_mesh_shaders (#178), metal_apple8 (#171). True on Apple9+ only; false on Apple8. */
 	bool supports_border_color = false; /**< If true, sampler border color (clamp-to-border) is supported. Requires Apple7+. */
 	bool supports_residency_sets = false; /**< If true, residency sets (MTLResidencySet) are supported by the OS. */
 	bool supports_msaa_depth_resolve = false;

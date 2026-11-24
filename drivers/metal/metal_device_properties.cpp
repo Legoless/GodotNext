@@ -159,11 +159,9 @@ void MetalDeviceProperties::init_features(MTL::Device *p_device) {
 	features.supports_border_color = p_device->supportsFamily(MTL::GPUFamilyApple7);
 	features.argument_buffers_tier = p_device->argumentBuffersSupport();
 	features.supports_image_atomic_32_bit = p_device->supportsFamily(MTL::GPUFamilyApple6);
-	features.supports_image_atomic_64_bit = p_device->supportsFamily(GPUFamilyApple9) || (p_device->supportsFamily(MTL::GPUFamilyApple8) && p_device->supportsFamily(MTL::GPUFamilyMac2));
-	// GodotNext: rd_atomics64 (#175). The GPUs of the 64-bit texture atomics, and an MSL target the
-	// SPIRV-Cross 64-bit min and max path accepts (3.1). Apple8 is unvalidated (no M2 in the fleet, #171).
-	features.supports_buffer_atomic_64_bit = features.supports_image_atomic_64_bit && features.msl_target_version >= MSL_VERSION_31;
-	features.supports_msaa_depth_resolve = p_device->supportsFamily(MTL::GPUFamilyMetal3) || p_device->supportsFamily(MTL::GPUFamilyApple3) || p_device->supportsFamily(MTL::GPUFamilyMac2);
+	features.supports_mac2 = p_device->supportsFamily(MTL::GPUFamilyMac2);
+	features.supports_ray_query_hardware = features.highestFamily >= GPUFamilyApple9;
+	features.supports_msaa_depth_resolve = p_device->supportsFamily(MTL::GPUFamilyMetal3) || p_device->supportsFamily(MTL::GPUFamilyApple3) || features.supports_mac2;
 
 	if (features.msl_target_version >= MSL_VERSION_31) {
 		// Native atomics are only supported on 3.1 and above.
@@ -175,6 +173,19 @@ void MetalDeviceProperties::init_features(MTL::Device *p_device) {
 	if (OS::get_singleton()->get_environment("GODOT_MTL_DISABLE_IMAGE_ATOMICS") == "1") {
 		features.supports_native_image_atomics = false;
 	}
+
+	// GodotNext: rd_atomics64 (#175), metal_apple8 (#171). Apple8 (Mac2) and Apple9+ support 64-bit
+	// uint64 max/min atomics only with MSL 3.1+ (macOS 14+ on macOS). No 64-bit atomic arithmetic.
+	const RDD::MetalInt64AtomicCaps int64_atomics = RDD::metal_int64_atomic_caps(
+			(uint32_t)features.highestFamily,
+			features.supports_mac2,
+			features.supportsMac,
+			os_version / 10000,
+			features.msl_target_version,
+			features.supports_native_image_atomics);
+	features.supports_buffer_atomic_64_bit = int64_atomics.buffer_min_max;
+	features.supports_image_atomic_64_bit = int64_atomics.image_min_max;
+	features.supports_int64_atomic_arith = int64_atomics.arith;
 
 	if (__builtin_available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, *)) {
 		features.supports_residency_sets = p_device->supportsFamily(MTL::GPUFamilyApple6);
@@ -189,6 +200,15 @@ void MetalDeviceProperties::init_features(MTL::Device *p_device) {
 	if (String v = OS::get_singleton()->get_environment("GODOT_MTL_DISABLE_ARGUMENT_BUFFERS"); v == "1") {
 		features.use_argument_buffers = false;
 	}
+
+	// GodotNext: rd_mesh_shaders (#178), metal_apple8 (#171). Apple8 has direct mesh shaders only
+	// (SUPPORTS_MESH_SHADER_INDIRECT = false); Apple9+ supports indirect mesh draws.
+	const RDD::MeshShaderCaps mesh_caps = RDD::metal_mesh_shader_caps(
+			(uint32_t)features.highestFamily,
+			features.msl_target_version,
+			features.argument_buffers_enabled());
+	features.supports_mesh_shader = mesh_caps.mesh;
+	features.supports_mesh_shader_indirect = mesh_caps.indirect;
 
 	if (__builtin_available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) {
 		features.metal_fx_spatial = MTLFX::SpatialScalerDescriptor::supportsDevice(p_device);
@@ -368,9 +388,10 @@ void MetalDeviceProperties::init_os_props() {
 }
 
 MetalDeviceProperties::MetalDeviceProperties(MTL::Device *p_device) {
+	// GodotNext: metal_apple8 (#171). Populate os_version before init_features() checks macOS 14+ caps.
+	init_os_props();
 	init_features(p_device);
 	init_limits(p_device);
-	init_os_props();
 }
 
 MetalDeviceProperties::~MetalDeviceProperties() {
