@@ -1731,13 +1731,19 @@
 		<method name="get_frame_generation_status">
 			<return type="Dictionary" />
 			<description>
-				Returns the frame-generation state, as resolved for the next frame: [code]provider[/code] ([String], [member ProjectSettings.rendering/frame_generation/provider]), [code]requested[/code] ([bool], a provider is set), [code]active[/code] ([bool]), [code]active_provider[/code] ([String], the name of the active provider, or empty), [code]reason[/code] ([int], a [enum FrameGenerationExtension.FrameGenerationReason]), [code]multiplier[/code] ([int], the active multiplier, or [code]1[/code] while frame generation is off), [code]requested_multiplier[/code] ([int], [member ProjectSettings.rendering/frame_generation/multiplier]), [code]dynamic[/code] ([bool], [member ProjectSettings.rendering/frame_generation/dynamic]), [code]present_hook[/code] ([bool], [method FrameGenerationExtension._on_present] is called; D3D12 only) and [code]split_textures[/code] ([int], the textures the HUD-less split holds: [code]0[/code] while frame generation is off, [code]2[/code] while a viewport splits).
+				Returns the frame-generation state, as resolved for the next frame: [code]provider[/code] ([String], [member ProjectSettings.rendering/frame_generation/provider]), [code]requested[/code] ([bool], a provider is set), [code]active[/code] ([bool]), [code]active_provider[/code] ([String], the name of the active provider, or empty), [code]reason[/code] ([int], a [enum FrameGenerationExtension.FrameGenerationReason]), [code]multiplier[/code] ([int], the active multiplier, or [code]1[/code] while frame generation is off), [code]requested_multiplier[/code] ([int], [member ProjectSettings.rendering/frame_generation/multiplier]), [code]dynamic[/code] ([bool], [member ProjectSettings.rendering/frame_generation/dynamic]), [code]dynamic_target_fps[/code] ([int], [member ProjectSettings.rendering/frame_generation/dynamic_target_fps]), [code]max_multiplier[/code] ([int]), [code]dynamic_supported[/code] ([bool]), [code]num_frames_presented[/code] ([int]), [code]vram_bytes[/code] ([int]), [code]present_hook[/code] ([bool], [method FrameGenerationExtension._on_present] is called; D3D12 only) and [code]split_textures[/code] ([int], the textures the HUD-less split holds: [code]0[/code] while frame generation is off, [code]2[/code] while a viewport splits).
 			</description>
 		</method>
 		<method name="get_frame_setup_time_cpu" qualifiers="const">
 			<return type="float" />
 			<description>
 				Returns the time taken to setup rendering on the CPU in milliseconds. This value is shared across all viewports and does [i]not[/i] require [method viewport_set_measure_render_time] to be enabled on a viewport to be queried. See also [method viewport_get_measured_render_time_cpu].
+			</description>
+		</method>
+		<method name="get_latency_status" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns the current low-latency (Reflex) state as a [Dictionary] with keys [code]mode[/code] ([int]: 0 = Off, 1 = On, 2 = On + Boost) and [code]reason[/code] ([String]: e.g. [code]"OFF"[/code], [code]"OK"[/code], [code]"FORCED_BY_FG"[/code], [code]"API_UNSUPPORTED"[/code], or [code]"REFLEX_UNAVAILABLE"[/code]).
 			</description>
 		</method>
 		<method name="get_rendering_device" qualifiers="const">
@@ -6133,6 +6139,12 @@
 		</constant>
 		<constant name="VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE" value="12" enum="ViewportScaling3DReason">
 			No registered [TemporalUpscalerExtension] matches [member ProjectSettings.rendering/scaling_3d/custom_upscaler], or the matching one is unavailable. The viewport falls back to TSR.
+		</constant>
+		<constant name="VIEWPORT_SCALING_3D_REASON_RR_REQUIRES_NEXTGI_EPIC" value="13" enum="ViewportScaling3DReason">
+			DLSS Ray Reconstruction requires NextGI hardware ray tracing explicitly set to Epic quality (Auto quality never enables Ray Reconstruction). DLSS falls back to Super Resolution with the built-in denoiser.
+		</constant>
+		<constant name="VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE" value="14" enum="ViewportScaling3DReason">
+			DLSS Ray Reconstruction is unavailable for the current upscaler, view count, or backend. DLSS falls back to Super Resolution with the built-in denoiser.
 		</constant>
 		<constant name="VIEWPORT_UPDATE_DISABLED" value="0" enum="ViewportUpdateMode">
 			Do not update the viewport's render target.

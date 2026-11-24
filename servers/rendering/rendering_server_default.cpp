@@ -32,6 +32,7 @@
 
 #include "core/config/engine.h"
 #include "core/object/callable_mp.h"
+#include "core/os/latency_markers.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 #include "servers/display/display_server.h"
@@ -118,7 +119,10 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, double p_frame_step_unscaled) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, double p_frame_step_unscaled, uint64_t p_latency_frame_id) {
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+	set_render_latency_frame_id(p_latency_frame_id);
+	emit_latency_marker(LATENCY_MARKER_RENDER_SUBMIT_START, p_latency_frame_id);
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	drawing_frame = true;
 	// GodotNext: pt_tsr_stability (#198).
@@ -159,6 +163,9 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, doubl
 
 	GodotProfileZoneGrouped(_profile_zone, "canvas_render->update");
 	RSG::canvas_render->update();
+
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5). End render submit before present in end_frame().
+	emit_latency_marker(LATENCY_MARKER_RENDER_SUBMIT_END, p_latency_frame_id);
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
 	RSG::rasterizer->end_frame(p_swap_buffers);
@@ -535,10 +542,12 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// time is frozen, and whatever RenderingServer.force_draw passes); passes that measure real
 	// time, such as the TSR flicker clock, take the main loop's unscaled step instead.
 	const double frame_step_unscaled = Engine::get_singleton()->get_process_step();
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5). Capture frame ID on main thread for render submit / present.
+	const uint64_t latency_frame_id = get_latency_frame_id();
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_step_unscaled);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_step_unscaled, latency_frame_id);
 	} else {
-		_draw(p_present, frame_step, frame_step_unscaled);
+		_draw(p_present, frame_step, frame_step_unscaled, latency_frame_id);
 	}
 }
 

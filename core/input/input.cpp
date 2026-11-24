@@ -36,6 +36,7 @@
 #include "core/input/default_controller_mappings.h"
 #include "core/input/input_map.h"
 #include "core/object/class_db.h"
+#include "core/os/latency_markers.h"
 #include "core/os/os.h"
 
 #ifdef DEV_ENABLED
@@ -1672,6 +1673,9 @@ void Input::flush_frame_parsed_events() {
 
 void Input::flush_buffered_events() {
 	_THREAD_SAFE_METHOD_
+
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5). Emit INPUT_SAMPLE at most once per frame.
+	emit_latency_input_sample_once(get_latency_frame_id());
 
 	while (buffered_events.front()) {
 		// The final delivery of the input event involves releasing the lock.

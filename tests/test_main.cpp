@@ -76,6 +76,8 @@
 #endif // PHYSICS_3D_DISABLED
 
 #include "modules/modules_tests.gen.h" // IWYU pragma: keep // TODO: Migrate module tests to compilation files.
+// GodotNext: pu_dlss_rr (#206), pu_streamline_reflex (#209), pu_dlss_fg (#200, #201).
+#include "tests/servers/rendering/test_dlss_core_seams.h" // IWYU pragma: keep
 
 int test_main(int argc, char *argv[]) {
 	ForceLink::force_link_tests();

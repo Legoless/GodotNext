@@ -605,6 +605,9 @@ enum ViewportScaling3DReason {
 	VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED,
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE,
+	// GodotNext: pu_dlss_rr (#206).
+	VIEWPORT_SCALING_3D_REASON_RR_REQUIRES_NEXTGI_EPIC,
+	VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE,
 };
 
 enum ViewportAnisotropicFiltering {

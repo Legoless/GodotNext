@@ -128,6 +128,11 @@ Error RenderingContextDriverD3D12::_init_device_factory() {
 	ComPtr<ID3D12SDKConfiguration1> sdk_config;
 	HRESULT hr = d3d_D3D12GetInterface(CLSID_D3D12SDKConfigurationGodot, IID_PPV_ARGS(sdk_config.GetAddressOf()));
 	if (SUCCEEDED(hr)) {
+		// GodotNext: pu_streamline_reflex (#209). When a library override is active, skip
+		// CreateDeviceFactory so D3D12CreateDevice runs through the interposer library.
+		if (D3D12Hooks::has_library_override()) {
+			return OK;
+		}
 		hr = sdk_config->CreateDeviceFactory(agility_sdk_version, agility_sdk_path.ascii().get_data(), IID_PPV_ARGS(device_factory.GetAddressOf()));
 		if (FAILED(hr)) {
 			sdk_config->CreateDeviceFactory(agility_sdk_version, ".\\", IID_PPV_ARGS(device_factory.GetAddressOf()));

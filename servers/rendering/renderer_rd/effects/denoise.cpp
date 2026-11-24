@@ -30,6 +30,7 @@
 
 #include "denoise.h"
 
+#include "servers/rendering/renderer_rd/effects/denoiser_bypass.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -37,6 +38,8 @@
 using namespace RendererRD;
 
 NextGIDenoise::NextGIDenoise(bool p_init_gi_shaders) {
+	// GodotNext: pu_dlss_rr (#206). Register MegaLights denoiser in the vendor-neutral bypass registry.
+	DenoiserBypass::register_denoiser(SNAME("megalights_denoise"));
 	if (!p_init_gi_shaders) {
 		return;
 	}
@@ -366,10 +369,12 @@ bool NextGIDenoise::_ensure_megalights_shaders() {
 }
 
 NextGIDenoise::MegaLightsDenoiseOutput NextGIDenoise::megalights_denoise(const MegaLightsDenoiseParams &p_params) {
+	// GodotNext: pu_dlss_rr (#206). Honour vendor-neutral DenoiserBypass contract for MegaLights.
+	const bool effective_rr_bypass = p_params.rr_bypass || DenoiserBypass::is_bypassed(p_params.render_buffers);
 	MegaLightsDenoiseOutput out;
 	out.diffuse = p_params.noisy_diffuse;
 	out.specular = p_params.noisy_specular;
-	out.bypassed = p_params.rr_bypass;
+	out.bypassed = effective_rr_bypass;
 
 	ERR_FAIL_COND_V(!p_params.noisy_diffuse.is_valid() || !p_params.noisy_specular.is_valid(), out);
 	ERR_FAIL_COND_V(!p_params.depth.is_valid() || !p_params.params_ubo.is_valid(), out);
@@ -421,7 +426,7 @@ NextGIDenoise::MegaLightsDenoiseOutput NextGIDenoise::megalights_denoise(const M
 	if (p_params.orthogonal) {
 		flags |= ML_DENOISE_FLAG_ORTHOGONAL;
 	}
-	if (p_params.rr_bypass) {
+	if (effective_rr_bypass) {
 		flags |= ML_DENOISE_FLAG_RR_BYPASS;
 	}
 	ubo.config[0] = p_params.frame_index;
@@ -432,7 +437,7 @@ NextGIDenoise::MegaLightsDenoiseOutput NextGIDenoise::megalights_denoise(const M
 	const RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	const RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
-	if (p_params.rr_bypass) {
+	if (effective_rr_bypass) {
 		// RR Bypass (DLSS-RR contract, PU+): skip temporal and spatial denoising entirely and
 		// expose the noisy demodulated diffuse & specular targets directly at render resolution.
 		if (p_params.debug_vis_mode >= 0 && p_params.debug_vis_output.is_valid() && _ensure_megalights_shaders()) {

@@ -87,6 +87,12 @@ public:
 		float fovy = 0.0f;
 		float delta_time = 0.0f;
 		bool reset = false;
+		// GodotNext: pu_dlss_rr (#206). Ray Reconstruction guides (populated when rr_guides_active).
+		RID rr_diffuse_albedo;
+		RID rr_specular_albedo;
+		RID rr_normal_roughness;
+		RID rr_specular_hit_distance;
+		bool rr_active = false;
 	};
 
 private:
@@ -108,6 +114,10 @@ public:
 	virtual uint32_t jitter_phase_count(const Size2i &p_target_size, const Size2i &p_render_size) const {
 		return nextgi_temporal_jitter_phase_count(p_target_size, p_render_size, true);
 	}
+	// GodotNext: pu_dlss_rr (#206). Ray Reconstruction query seam.
+	virtual bool is_ray_reconstruction_active(const RenderSceneBuffersRD *p_rb) const { return false; }
+	virtual String get_rr_maturity_label() const { return String(); }
+	virtual RSE::ViewportScaling3DReason get_rr_reason(const RenderSceneBuffersRD *p_rb) const { return RSE::VIEWPORT_SCALING_3D_REASON_NONE; }
 	virtual RSE::ViewportScaling3DReason ensure_context(RenderSceneBuffersRD *p_render_buffers, uint32_t p_view) = 0;
 	virtual void process(Ref<RenderSceneBuffersRD> p_render_buffers, uint32_t p_view, const Inputs &p_inputs) = 0;
 	virtual void free_contexts(RenderSceneBuffersRD *p_render_buffers) = 0;
@@ -151,6 +161,38 @@ inline RSE::ViewportScaling3DReason nextgi_resolve_dlss_reason(bool p_api_suppor
 		return RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED;
 	}
 	return RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+}
+
+// GodotNext: pu_dlss_rr (#206). Pure Ray Reconstruction activation helper
+// encoding §21.5 U4 step 2 so doctests, viewport status, and upscaler backends
+// agree: RR activates ONLY when requested, DLSS is the active upscaler,
+// NextGI runs HWRT at explicit Epic (quality == AUTO NEVER enables RR even if
+// auto resolved to Epic), view_count == 1, and the RR backend is available.
+struct RRActivationResult {
+	bool active = false;
+	RSE::ViewportScaling3DReason reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+};
+
+inline RRActivationResult nextgi_resolve_rr_activation(bool p_rr_requested, bool p_dlss_active, bool p_nextgi_hwrt, bool p_nextgi_quality_is_explicit_epic, bool p_nextgi_quality_is_auto, uint32_t p_view_count, bool p_rr_backend_available = true) {
+	RRActivationResult result;
+	if (!p_rr_requested) {
+		return result;
+	}
+	if (!p_dlss_active || p_view_count != 1 || !p_rr_backend_available) {
+		result.reason = RSE::VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE;
+		return result;
+	}
+	if (!p_nextgi_hwrt || p_nextgi_quality_is_auto || !p_nextgi_quality_is_explicit_epic) {
+		result.reason = RSE::VIEWPORT_SCALING_3D_REASON_RR_REQUIRES_NEXTGI_EPIC;
+		return result;
+	}
+	result.active = true;
+	result.reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+	return result;
+}
+
+inline uint32_t nextgi_rr_jitter_phase_count(uint32_t p_base_phases, bool p_rr_active) {
+	return p_rr_active ? MAX(p_base_phases, 32u) : p_base_phases;
 }
 
 // GodotNext: pt_temporal_upscaler_extension (#192). SCALING_3D_MODE_CUSTOM

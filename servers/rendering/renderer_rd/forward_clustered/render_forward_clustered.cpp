@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/templates/hash_set.h"
+#include "servers/rendering/renderer_rd/effects/denoiser_bypass.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
@@ -277,6 +278,8 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 
 	if (render_buffers != nullptr) {
 		TemporalUpscalerRegistry::free_contexts(render_buffers);
+		// GodotNext: pu_dlss_rr (#206).
+		DenoiserBypass::clear_rb(render_buffers);
 	}
 
 	if (fsr2_context) {
@@ -6993,10 +6996,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			global_pipeline_data_required.use_multiview = true;
 		}
 
-		// GodotNext: rr_guides (#205). The opaque passes of this view write the two albedo guides.
+		// GodotNext: rr_guides (#205) / pu_dlss_rr (#206). The opaque passes of this view write
+		// the two albedo guides when RR guides are requested or RR is active on this view.
 		// enable_view_shader_groups() is the only place the RR shader groups are enabled; the
 		// doctest checks its gate.
-		rr_guides_active = RendererRD::RRGuides::enable_view_shader_groups(scene_shader, RendererRD::RRGuides::is_requested(), false, p_render_data->scene_data->view_count, rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, using_nextgeo && !visibility_only);
+		const bool rr_wanted = RendererRD::RRGuides::is_requested() || (external_upscaler != nullptr && external_upscaler->is_ray_reconstruction_active(rb.ptr()));
+		rr_guides_active = RendererRD::RRGuides::enable_view_shader_groups(scene_shader, rr_wanted, false, p_render_data->scene_data->view_count, rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, using_nextgeo && !visibility_only);
 		if (rr_guides_active) {
 			rb->ensure_rr_guides();
 			color_pass_flags |= COLOR_PASS_FLAG_RR_GUIDES;
@@ -8377,9 +8382,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RD::get_singleton()->draw_command_end_label();
 #endif
 		} else if (scale_type == SCALE_EXTERNAL) {
-			// GodotNext: pt_temporal_upscaler_extension (#192). Read the label with
-			// its span size rather than up to a NUL.
-			const Span<char> upscaler_label = external_upscaler->get_label();
+			// GodotNext: pt_temporal_upscaler_extension (#192) / pu_dlss_rr (#206). Read the label
+			// with its span size rather than up to a NUL; emit "DLSS-RR" while RR is active.
+			const bool rr_slot_active = external_upscaler->is_ray_reconstruction_active(rb.ptr());
+			const Span<char> upscaler_label = (rr_slot_active && rb->get_scaling_3d_mode() == RSE::VIEWPORT_SCALING_3D_MODE_DLSS)
+					? Span<char>("DLSS-RR")
+					: external_upscaler->get_label();
 			const String label = String::utf8(upscaler_label.ptr(), upscaler_label.size());
 			RD::get_singleton()->draw_command_begin_label(upscaler_label);
 			RENDER_TIMESTAMP(label);
@@ -8411,6 +8419,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				inputs.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
 				inputs.delta_time = float(time_step);
 				inputs.reset = reset_temporal_history;
+				// GodotNext: pu_dlss_rr (#206). Populate Ray Reconstruction guide RIDs when guides were written.
+				if (rr_guides_active && rb->has_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO)) {
+					inputs.rr_diffuse_albedo = rb->get_texture_slice(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO, v, 0);
+					inputs.rr_specular_albedo = rb->get_texture_slice(RB_SCOPE_RR_GUIDES, RB_TEX_RR_SPECULAR_ALBEDO, v, 0);
+					inputs.rr_normal_roughness = rb->get_texture_slice(RB_SCOPE_RR_GUIDES, RB_TEX_RR_NORMAL_ROUGHNESS, v, 0);
+					inputs.rr_specular_hit_distance = next_gi.get_specular_hit_distance(rb.ptr(), int(v));
+					inputs.rr_active = rr_slot_active;
+				}
 				external_upscaler->process(rb, v, inputs);
 			}
 			RD::get_singleton()->draw_command_end_label();

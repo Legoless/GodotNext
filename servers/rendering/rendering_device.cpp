@@ -36,6 +36,7 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
+#include "core/os/latency_markers.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
@@ -9669,8 +9670,18 @@ void RenderingDevice::swap_buffers(bool p_present) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "_end_frame");
 	_end_frame();
 
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+	const uint64_t latency_frame_id = p_present ? get_render_latency_frame_id() : 0;
+	if (p_present) {
+		emit_latency_marker(LATENCY_MARKER_PRESENT_START, latency_frame_id);
+	}
+
 	GodotProfileZoneGrouped(_profile_zone, "_execute_frame");
 	_execute_frame(p_present);
+
+	if (p_present) {
+		emit_latency_marker(LATENCY_MARKER_PRESENT_END, latency_frame_id);
+	}
 
 	// Advance to the next frame and begin recording again.
 	frame = (frame + 1) % frames.size();

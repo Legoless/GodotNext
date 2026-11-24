@@ -3055,6 +3055,9 @@
 		<member name="rendering/frame_generation/dynamic" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], asks the frame-generation provider to choose the multiplier at runtime. Passed to [method FrameGenerationExtension._set_mode]; a provider that cannot do this keeps [member rendering/frame_generation/multiplier].
 		</member>
+		<member name="rendering/frame_generation/dynamic_target_fps" type="int" setter="" getter="" default="0">
+			Target frame rate in FPS for Dynamic Multi Frame Generation when [member rendering/frame_generation/dynamic] is [code]true[/code]. [code]0[/code] targets the display refresh rate.
+		</member>
 		<member name="rendering/frame_generation/multiplier" type="int" setter="" getter="" default="2">
 			The number of displayed frames per rendered frame that frame generation asks for, from 2 to 6. Passed to [method FrameGenerationExtension._set_mode]. [method RenderingServer.get_frame_generation_status] reports the multiplier that runs.
 		</member>
@@ -3310,6 +3313,9 @@
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.
 			[b]Note:[/b] This property is only read when the project starts. To control VoxelGI quality at runtime, call [method RenderingServer.voxel_gi_set_quality] instead.
+		</member>
+		<member name="rendering/latency/reflex_mode" type="int" setter="" getter="" default="0">
+			Selects NVIDIA Reflex low-latency pacing mode on Direct3D 12: [b]Off[/b] ([code]0[/code]), [b]On[/b] ([code]1[/code]), or [b]On + Boost[/b] ([code]2[/code]). Forced on while DLSS Frame Generation is active. Query runtime state with [method RenderingServer.get_latency_status].
 		</member>
 		<member name="rendering/lightmapping/bake_performance/max_rays_per_pass" type="int" setter="" getter="" default="4">
 			The maximum number of rays that can be thrown per pass when baking lightmaps with [LightmapGI]. Depending on the scene, adjusting this value may result in higher GPU utilization when baking lightmaps, leading to faster bake times.
@@ -3941,6 +3947,12 @@
 		</member>
 		<member name="rendering/scaling_3d/dlss/project_id" type="String" setter="" getter="" default="&quot;&quot;">
 			The project ID passed to the DLSS runtime. Developer builds only; see the license packet.
+		</member>
+		<member name="rendering/scaling_3d/dlss/ray_reconstruction" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], enables DLSS Ray Reconstruction when DLSS is active, NextGI hardware ray tracing is explicitly set to Epic, and the viewport is single-view. Beta on Vulkan. Inert without the DLSS module.
+		</member>
+		<member name="rendering/scaling_3d/dlss/rr_preset" type="int" setter="" getter="" default="0">
+			The DLSS Ray Reconstruction preset (Default, D, E, or F). Inert without the DLSS module.
 		</member>
 		<member name="rendering/scaling_3d/dynamic_resolution/enabled" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables the GPU-time dynamic resolution controller in the Forward+ renderer. Rendered 3D resolution steps across 16 evenly spaced buckets between [member rendering/scaling_3d/dynamic_resolution/min_scale] and [member rendering/scaling_3d/dynamic_resolution/max_scale] (intersected with the active upscaler's supported scale range), changing at most once every 30 frames without resetting temporal upscaler history.

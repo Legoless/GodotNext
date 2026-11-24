@@ -51,6 +51,7 @@
 #include "core/object/class_db.h"
 #include "core/object/message_queue.h"
 #include "core/object/script_language.h"
+#include "core/os/latency_markers.h"
 #include "core/os/os.h"
 #include "core/os/process_id.h"
 #include "core/os/time.h"
@@ -4985,6 +4986,11 @@ bool Main::iteration() {
 	GodotProfileZoneGroupedFirst(_profile_zone, "prepare");
 	iterating++;
 
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+	const uint64_t latency_frame_id = begin_latency_frame();
+	emit_latency_marker(LATENCY_MARKER_SLEEP, latency_frame_id);
+	emit_latency_marker(LATENCY_MARKER_SIMULATION_START, latency_frame_id);
+
 	const uint64_t ticks = OS::get_singleton()->get_ticks_usec();
 	Engine::get_singleton()->_frame_ticks = ticks;
 	main_timer_sync.set_cpu_ticks_usec(ticks);
@@ -5147,6 +5153,9 @@ bool Main::iteration() {
 	bool wants_present = (DisplayServer::get_singleton()->can_any_window_draw() ||
 								 DisplayServer::get_singleton()->has_additional_outputs()) &&
 			RenderingServer::get_singleton()->is_render_loop_enabled();
+
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+	emit_latency_marker(LATENCY_MARKER_SIMULATION_END, latency_frame_id);
 
 	bool drew_frame = false;
 	if (wants_present || has_pending_resources_for_processing) {

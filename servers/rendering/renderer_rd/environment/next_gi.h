@@ -242,6 +242,11 @@ public:
 	// The name-to-line table, in emission order. The timing runner maps timestamp names to §2.1
 	// lines with it and keeps line 1b out of the steady-state p95 (Q11).
 	static const PassSlotInfo PASS_SLOTS[PASS_SLOT_MAX];
+	// GodotNext: pu_dlss_rr (#206). Under DLSS-RR bypass, line 8 (PASS_SLOT_DENOISE) emits ZERO
+	// timestamps while line 7 (PASS_SLOT_INTEGRATION) and all other slots stay active.
+	static bool should_emit_pass_slot(PassSlot p_slot, bool p_rr_bypassed) {
+		return !(p_rr_bypassed && p_slot == PASS_SLOT_DENOISE);
+	}
 
 	// Startup self-test (#36). 48 hits, each at least 1e-3 in barycentric distance from every
 	// edge and with a distinct t, then 16 misses. One triangle, one instance, hit_sbt_range 0.
@@ -327,11 +332,6 @@ private:
 	void _clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const;
 	// #60: the specular trace writes RB_TEX_REFLECTION after the gather, so clear it up front.
 	void _clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const;
-	// #60: the specular first-hit distance (R16F, 65504 on a miss), for the RR guides (#206).
-	// GodotNext: nextgi_reflect_divisor (#274). It has the trace size,
-	// nextgi_reflect_trace_size(internal size, reflection_divisor), not the view's. Under Lite it is
-	// an empty RID: no specular trace runs there.
-	RID get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const;
 	void _apply_safety_net(TierInputs &r_inputs);
 	static bool _deny_ray_query(); // GodotNext: ps_swrt_trace (#186, #188)
 	void _select_swrt_auto_quality();
@@ -724,6 +724,11 @@ public:
 	// size, cleared to the miss value; the view's NextGIGather calls it when it sizes the trace (the
 	// front layer's gather writes its own target, #276).
 	static void ensure_specular_hit_buffer(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_trace_size);
+	// #60 / #206: the specular first-hit distance (R16F, 65504 on a miss), for the RR guides.
+	// GodotNext: nextgi_reflect_divisor (#274). It has the trace size,
+	// nextgi_reflect_trace_size(internal size, reflection_divisor), not the view's. Under Lite it is
+	// an empty RID: no specular trace runs there.
+	RID get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const;
 
 	// _render_shadow_begin and _render_shadow_end bracket a shadow batch, which fills
 	// RENDER_LIST_SECONDARY. The frame block never runs inside one.

@@ -609,6 +609,11 @@ public:
 	virtual void register_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) = 0;
 	virtual void unregister_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) = 0;
 	virtual Dictionary get_frame_generation_status() = 0;
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+	typedef Dictionary (*LatencyStatusCallback)();
+	static void set_latency_status_callback(LatencyStatusCallback p_callback);
+	static LatencyStatusCallback get_latency_status_callback();
+	Dictionary get_latency_status() const;
 	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80) / nextgeo_residency (#78).
 	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID());
 	virtual Dictionary virtual_geometry_get_memory_report();

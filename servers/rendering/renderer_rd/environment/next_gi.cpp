@@ -42,6 +42,7 @@
 #include "core/os/os.h"
 #include "core/string/print_string.h"
 #include "core/templates/safe_refcount.h"
+#include "servers/rendering/renderer_rd/effects/denoiser_bypass.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
@@ -567,6 +568,8 @@ bool NextGI::_deny_ray_query() {
 }
 
 void NextGI::init(bool p_forward_plus) {
+	// GodotNext: pu_dlss_rr (#206). Register NextGI line 8 in the vendor-neutral denoiser bypass contract.
+	DenoiserBypass::register_denoiser(SNAME("nextgi_line8"));
 	TierInputs new_inputs;
 	new_inputs.forward_plus = p_forward_plus;
 	new_inputs.project_enabled = GLOBAL_GET("rendering/global_illumination/nextgi/enabled");
@@ -2102,6 +2105,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		relight->init();
 	}
 
+	// GodotNext: pu_dlss_rr (#206). Under DLSS-RR bypass, skip line 8 (PASS_SLOT_DENOISE) with
+	// zero line-8 timestamps while keeping line 7 (PASS_SLOT_INTEGRATION) active.
+	const bool bypass_line8 = DenoiserBypass::is_bypassed(rb.ptr());
+
 	// Every slot emits its timestamp, also while it has no work yet.
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
 		// GodotNext: nextgi_wrc_per_view (#253). The WRC update is per view (G3-8): each view traces
@@ -2109,6 +2116,9 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		const bool scenario_slot = nextgi_is_scenario_slot(slot);
 		if (scenario_slot && !new_scenario) {
 			// Secondary views reuse this frame's AS and SRC work.
+			continue;
+		}
+		if (!should_emit_pass_slot(PassSlot(slot), bypass_line8)) {
 			continue;
 		}
 		RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[slot].name, view_index, multiview));
@@ -2270,6 +2280,8 @@ NextGIRTShadows *NextGI::ensure_rt_shadows() {
 }
 
 NextGI::NextGI() {
+	// GodotNext: pu_dlss_rr (#206). Register NextGI line 8 in the vendor-neutral denoiser bypass contract.
+	DenoiserBypass::register_denoiser(SNAME("nextgi_line8"));
 	// Doctests build their own instances; the renderer's instance is the first one.
 	if (singleton == nullptr) {
 		singleton = this;

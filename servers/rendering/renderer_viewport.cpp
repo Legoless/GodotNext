@@ -172,6 +172,11 @@ static const char *scaling_3d_reason_name(RSE::ViewportScaling3DReason p_reason)
 		// GodotNext: pt_temporal_upscaler_extension (#192).
 		case RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE:
 			return "custom upscaler unavailable";
+		// GodotNext: pu_dlss_rr (#206).
+		case RSE::VIEWPORT_SCALING_3D_REASON_RR_REQUIRES_NEXTGI_EPIC:
+			return "Ray Reconstruction requires NextGI HWRT Epic";
+		case RSE::VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE:
+			return "Ray Reconstruction unavailable";
 	}
 	return "unknown";
 }
@@ -602,6 +607,11 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 				ERR_FAIL_NULL(upscaler);
 				jitter_phase_count = upscaler->jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
+#ifdef RD_ENABLED
+				// GodotNext: pu_dlss_rr (#206). DLSS Ray Reconstruction requires >= 32 jitter phases at every scale.
+				Ref<RenderSceneBuffersRD> render_buffers_rd = p_viewport->render_buffers;
+				jitter_phase_count = nextgi_rr_jitter_phase_count(jitter_phase_count, upscaler->is_ray_reconstruction_active(render_buffers_rd.ptr()));
+#endif
 			} else if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && custom_upscaler != nullptr) {
 				// GodotNext: pt_temporal_upscaler_extension (#192).
 				jitter_phase_count = custom_upscaler->jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
@@ -676,7 +686,18 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 		p_viewport->render_buffers->set_path_tracing(viewport_path_tracing_active(p_viewport->path_tracing_enabled, p_viewport->debug_draw), p_viewport->path_tracing_samples, p_viewport->path_tracing_max_bounces, p_viewport->path_tracing_firefly_clamp, p_viewport->path_tracing_denoiser, p_viewport->path_tracing_denoise_requested);
 		p_viewport->path_tracing_denoise_requested = false;
 	}
-	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
+	uint32_t jitter_phase_count = p_viewport->jitter_phase_count;
+#ifdef RD_ENABLED
+	// GodotNext: pu_dlss_rr (#206). Enforce >= 32 jitter phases whenever DLSS Ray Reconstruction is active.
+	if (p_viewport->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+		TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		Ref<RenderSceneBuffersRD> render_buffers_rd = p_viewport->render_buffers;
+		if (upscaler != nullptr && upscaler->is_ray_reconstruction_active(render_buffers_rd.ptr())) {
+			jitter_phase_count = nextgi_rr_jitter_phase_count(jitter_phase_count, true);
+		}
+	}
+#endif
+	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
 
 	RENDER_TIMESTAMP("< Render 3D Scene");
 #endif // _3D_DISABLED
@@ -1849,6 +1870,37 @@ Dictionary RendererViewport::viewport_get_scaling_3d_status(RID p_viewport) cons
 		status["preset"] = int(viewport->tsr_quality);
 	} else {
 		status["preset"] = int(GLOBAL_GET("rendering/scaling_3d/dlss/preset"));
+	}
+	// GodotNext: pu_dlss_rr (#206). Report Ray Reconstruction status when DLSS is requested or active.
+	if (viewport->requested_scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || viewport->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+		bool rr_active = false;
+		RSE::ViewportScaling3DReason rr_reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+		String rr_maturity;
+		const bool rr_requested = bool(GLOBAL_GET("rendering/scaling_3d/dlss/ray_reconstruction"));
+#ifdef RD_ENABLED
+		TemporalUpscaler *dlss_upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		if (dlss_upscaler != nullptr) {
+			rr_active = dlss_upscaler->is_ray_reconstruction_active(render_buffers_rd.ptr());
+			rr_reason = dlss_upscaler->get_rr_reason(render_buffers_rd.ptr());
+			rr_maturity = dlss_upscaler->get_rr_maturity_label();
+			if (rr_active) {
+				status["jitter_phase_count"] = int64_t(nextgi_rr_jitter_phase_count(viewport->jitter_phase_count, true));
+			}
+		}
+		if (rr_requested && !rr_active && rr_reason == RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
+			rr_reason = RSE::VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE;
+		}
+		if (rr_maturity.is_empty() && RD::get_singleton() != nullptr && RD::get_singleton()->get_device_api_name() == "Vulkan") {
+			rr_maturity = "beta";
+		}
+#else
+		if (rr_requested) {
+			rr_reason = RSE::VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE;
+		}
+#endif
+		status["rr_active"] = rr_active;
+		status["rr_reason"] = int(rr_reason);
+		status["rr_maturity"] = rr_maturity;
 	}
 	return status;
 }

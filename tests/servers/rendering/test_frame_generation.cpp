@@ -240,9 +240,11 @@ TEST_CASE("[FrameGeneration] Reasons are append-only, bound and named by their t
 	CHECK_EQ(int(FrameGenerationExtension::REASON_NOT_MAIN_WINDOW), 5);
 	CHECK_EQ(int(FrameGenerationExtension::REASON_PROVIDER_ALREADY_ACTIVE), 6);
 	CHECK_EQ(int(FrameGenerationExtension::REASON_PROVIDER_UNAVAILABLE), 7);
-	CHECK_EQ(int(FrameGenerationExtension::REASON_MAX), 8);
+	CHECK_EQ(int(FrameGenerationExtension::REASON_STREAMLINE_UNAVAILABLE), 8);
+	CHECK_EQ(int(FrameGenerationExtension::REASON_DYNAMIC_MFG_UNSUPPORTED), 9);
+	CHECK_EQ(int(FrameGenerationExtension::REASON_MAX), 10);
 
-	const char *tokens[] = { "OK", "API_UNSUPPORTED", "FG_GPU_UNSUPPORTED", "MFG_REQUIRES_RTX50", "NOT_NVIDIA_RTX", "NOT_MAIN_WINDOW", "PROVIDER_ALREADY_ACTIVE", "PROVIDER_UNAVAILABLE" };
+	const char *tokens[] = { "OK", "API_UNSUPPORTED", "FG_GPU_UNSUPPORTED", "MFG_REQUIRES_RTX50", "NOT_NVIDIA_RTX", "NOT_MAIN_WINDOW", "PROVIDER_ALREADY_ACTIVE", "PROVIDER_UNAVAILABLE", "STREAMLINE_UNAVAILABLE", "DYNAMIC_MFG_UNSUPPORTED" };
 	REQUIRE(ClassDB::has_enum("FrameGenerationExtension", "FrameGenerationReason", true));
 	for (int i = 0; i < FrameGenerationExtension::REASON_MAX; i++) {
 		CHECK_EQ(FrameGenerationExtension::get_reason_token(Reason(i)), String(tokens[i]));

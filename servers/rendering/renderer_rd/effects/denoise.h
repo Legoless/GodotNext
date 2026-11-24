@@ -41,6 +41,8 @@
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_shadow.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_specular.glsl.gen.h"
 
+class RenderSceneBuffersRD;
+
 namespace RendererRD {
 
 // GodotNext: NextGI diffuse denoiser (#53, D8).
@@ -180,6 +182,9 @@ public:
 
 	struct MegaLightsDenoiseParams {
 		bool rr_bypass = false;
+		// GodotNext: pu_dlss_rr (#206). When set, DenoiserBypass::is_bypassed(render_buffers)
+		// also activates RR bypass.
+		const RenderSceneBuffersRD *render_buffers = nullptr;
 		bool has_history = false;
 		bool velocity_enabled = false;
 		bool reset_mask_enabled = false;

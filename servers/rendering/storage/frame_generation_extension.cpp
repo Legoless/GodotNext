@@ -146,6 +146,9 @@ void FrameGenerationExtension::_bind_methods() {
 	BIND_ENUM_CONSTANT(REASON_NOT_MAIN_WINDOW);
 	BIND_ENUM_CONSTANT(REASON_PROVIDER_ALREADY_ACTIVE);
 	BIND_ENUM_CONSTANT(REASON_PROVIDER_UNAVAILABLE);
+	// GodotNext: pu_streamline_reflex (#209) / pu_dlss_mfg (#201).
+	BIND_ENUM_CONSTANT(REASON_STREAMLINE_UNAVAILABLE);
+	BIND_ENUM_CONSTANT(REASON_DYNAMIC_MFG_UNSUPPORTED);
 	BIND_ENUM_CONSTANT(REASON_MAX);
 }
 
@@ -198,6 +201,10 @@ String FrameGenerationExtension::get_reason_token(FrameGenerationReason p_reason
 			return "PROVIDER_ALREADY_ACTIVE";
 		case REASON_PROVIDER_UNAVAILABLE:
 			return "PROVIDER_UNAVAILABLE";
+		case REASON_STREAMLINE_UNAVAILABLE:
+			return "STREAMLINE_UNAVAILABLE";
+		case REASON_DYNAMIC_MFG_UNSUPPORTED:
+			return "DYNAMIC_MFG_UNSUPPORTED";
 		case REASON_MAX:
 			break;
 	}
@@ -213,6 +220,7 @@ namespace {
 const char *FG_PROVIDER_SETTING = "rendering/frame_generation/provider";
 const char *FG_MULTIPLIER_SETTING = "rendering/frame_generation/multiplier";
 const char *FG_DYNAMIC_SETTING = "rendering/frame_generation/dynamic";
+const char *FG_DYNAMIC_TARGET_FPS_SETTING = "rendering/frame_generation/dynamic_target_fps";
 
 Mutex fg_mutex;
 HashMap<String, Ref<FrameGenerationExtension>> fg_providers;
@@ -223,6 +231,7 @@ uint32_t fg_settings_version = 0;
 String fg_settings_provider;
 int fg_settings_multiplier = 2;
 bool fg_settings_dynamic = false;
+int fg_settings_dynamic_target_fps = 0;
 
 // The resolved state.
 bool fg_resolved = false;
@@ -238,6 +247,7 @@ int fg_multiplier = 1;
 ObjectID fg_mode_target;
 int fg_mode_multiplier = 0;
 bool fg_mode_dynamic = false;
+int fg_mode_dynamic_target_fps = -1;
 // The last fallback that was logged, so each change logs one line.
 String fg_logged_provider;
 FGReason fg_logged_reason = FrameGenerationExtension::REASON_OK;
@@ -264,6 +274,9 @@ void _fg_log(const String &p_provider, FGReason p_reason, int p_requested_multip
 		case FrameGenerationExtension::REASON_MFG_REQUIRES_RTX50:
 			WARN_PRINT(vformat("Frame generation: provider \"%s\" runs at 2x instead of %dx (%s).", p_provider, p_requested_multiplier, token));
 			break;
+		case FrameGenerationExtension::REASON_DYNAMIC_MFG_UNSUPPORTED:
+			WARN_PRINT(vformat("Frame generation: provider \"%s\" runs at fixed %dx instead of dynamic (%s).", p_provider, p_requested_multiplier, token));
+			break;
 		case FrameGenerationExtension::REASON_NOT_MAIN_WINDOW:
 			WARN_PRINT(vformat("Frame generation: provider \"%s\" is off (%s): frame generation runs only in the main window of a running game, never in the editor or XR.", p_provider, token));
 			break;
@@ -279,7 +292,7 @@ void _fg_log(const String &p_provider, FGReason p_reason, int p_requested_multip
 } // namespace
 
 bool FrameGenerationRegistry::Context::operator==(const Context &p_other) const {
-	return provider == p_other.provider && multiplier == p_other.multiplier && dynamic == p_other.dynamic && editor == p_other.editor && xr_main_window == p_other.xr_main_window && rendering_device == p_other.rendering_device;
+	return provider == p_other.provider && multiplier == p_other.multiplier && dynamic == p_other.dynamic && dynamic_target_fps == p_other.dynamic_target_fps && editor == p_other.editor && xr_main_window == p_other.xr_main_window && rendering_device == p_other.rendering_device;
 }
 
 int FrameGenerationRegistry::clamp_multiplier(int p_multiplier) {
@@ -297,10 +310,12 @@ FrameGenerationRegistry::Context FrameGenerationRegistry::read_context() {
 			fg_settings_provider = _fg_setting<String>(FG_PROVIDER_SETTING, String());
 			fg_settings_multiplier = _fg_setting<int>(FG_MULTIPLIER_SETTING, MULTIPLIER_MIN);
 			fg_settings_dynamic = _fg_setting<bool>(FG_DYNAMIC_SETTING, false);
+			fg_settings_dynamic_target_fps = MAX(_fg_setting<int>(FG_DYNAMIC_TARGET_FPS_SETTING, 0), 0);
 		}
 		context.provider = fg_settings_provider;
 		context.multiplier = fg_settings_multiplier;
 		context.dynamic = fg_settings_dynamic;
+		context.dynamic_target_fps = fg_settings_dynamic_target_fps;
 	}
 	context.editor = Engine::get_singleton()->is_editor_hint();
 	context.rendering_device = RenderingDevice::get_singleton() != nullptr && OS::get_singleton()->get_current_rendering_method() != "gl_compatibility";
@@ -363,6 +378,8 @@ void FrameGenerationRegistry::update(const Context &p_context) {
 	Ref<FrameGenerationExtension> candidate;
 	bool send_mode = false;
 	Dictionary mode;
+	const int requested_multiplier = clamp_multiplier(p_context.multiplier);
+	const int requested_dynamic_target_fps = MAX(p_context.dynamic_target_fps, 0);
 	{
 		MutexLock lock(fg_mutex);
 		if (fg_resolved && p_context == fg_context && fg_resolved_revision == fg_revision) {
@@ -375,12 +392,12 @@ void FrameGenerationRegistry::update(const Context &p_context) {
 		if (entry != nullptr) {
 			candidate = *entry;
 		}
-		mode["multiplier"] = clamp_multiplier(p_context.multiplier);
+		mode["multiplier"] = requested_multiplier;
 		mode["dynamic"] = p_context.dynamic;
-		send_mode = candidate.is_valid() && (fg_mode_target != candidate->get_instance_id() || fg_mode_multiplier != clamp_multiplier(p_context.multiplier) || fg_mode_dynamic != p_context.dynamic);
+		mode["dynamic_target_fps"] = requested_dynamic_target_fps;
+		send_mode = candidate.is_valid() && (fg_mode_target != candidate->get_instance_id() || fg_mode_multiplier != requested_multiplier || fg_mode_dynamic != p_context.dynamic || fg_mode_dynamic_target_fps != requested_dynamic_target_fps);
 	}
 
-	const int requested_multiplier = clamp_multiplier(p_context.multiplier);
 	FGReason reason = FrameGenerationExtension::REASON_OK;
 	Ref<FrameGenerationExtension> active;
 	int multiplier = 1;
@@ -419,6 +436,11 @@ void FrameGenerationRegistry::update(const Context &p_context) {
 			active = candidate;
 			multiplier = 2;
 			reason = available;
+		} else if (available == FrameGenerationExtension::REASON_DYNAMIC_MFG_UNSUPPORTED) {
+			// Dynamic MFG unsupported: stay active at the fixed requested multiplier and say why.
+			active = candidate;
+			multiplier = requested_multiplier;
+			reason = available;
 		} else {
 			reason = available;
 		}
@@ -429,8 +451,9 @@ void FrameGenerationRegistry::update(const Context &p_context) {
 		MutexLock lock(fg_mutex);
 		if (mode_sent) {
 			fg_mode_target = candidate->get_instance_id();
-			fg_mode_multiplier = clamp_multiplier(p_context.multiplier);
+			fg_mode_multiplier = requested_multiplier;
 			fg_mode_dynamic = p_context.dynamic;
+			fg_mode_dynamic_target_fps = requested_dynamic_target_fps;
 		}
 		if (!keep_active) {
 			if (active.is_valid() && active != fg_active) {
@@ -459,17 +482,38 @@ void FrameGenerationRegistry::update(const Context &p_context) {
 }
 
 Dictionary FrameGenerationRegistry::get_status() {
-	MutexLock lock(fg_mutex);
 	Dictionary status;
-	status["provider"] = fg_context.provider;
-	status["requested"] = !fg_context.provider.is_empty();
-	status["active"] = fg_active.is_valid();
-	status["active_provider"] = fg_active_name;
-	status["reason"] = int(fg_reason);
-	status["multiplier"] = fg_active.is_valid() ? fg_multiplier : 1;
-	status["requested_multiplier"] = clamp_multiplier(fg_context.multiplier);
-	status["dynamic"] = fg_context.dynamic;
-	status["present_hook"] = has_present_hook();
+	Ref<FrameGenerationExtension> active_provider;
+	{
+		MutexLock lock(fg_mutex);
+		status["provider"] = fg_context.provider;
+		status["requested"] = !fg_context.provider.is_empty();
+		status["active"] = fg_active.is_valid();
+		status["active_provider"] = fg_active_name;
+		status["reason"] = int(fg_reason);
+		status["multiplier"] = fg_active.is_valid() ? fg_multiplier : 1;
+		status["requested_multiplier"] = clamp_multiplier(fg_context.multiplier);
+		status["dynamic"] = fg_context.dynamic;
+		status["dynamic_target_fps"] = MAX(fg_context.dynamic_target_fps, 0);
+		status["present_hook"] = has_present_hook();
+		active_provider = fg_active;
+	}
+	// GodotNext: pu_dlss_fg (#200, #201). Query C++ provider capabilities outside fg_mutex.
+	int max_multiplier = 1;
+	bool dynamic_supported = false;
+	int64_t num_frames_presented = 0;
+	int64_t vram_bytes = 0;
+	if (active_provider.is_valid()) {
+		const Dictionary caps = active_provider->get_provider_capabilities();
+		max_multiplier = int(caps.get("max_multiplier", int(status["multiplier"])));
+		dynamic_supported = bool(caps.get("dynamic_supported", false));
+		num_frames_presented = int64_t(caps.get("num_frames_presented", int64_t(0)));
+		vram_bytes = int64_t(caps.get("vram_bytes", int64_t(0)));
+	}
+	status["max_multiplier"] = max_multiplier;
+	status["dynamic_supported"] = dynamic_supported;
+	status["num_frames_presented"] = num_frames_presented;
+	status["vram_bytes"] = vram_bytes;
 	return status;
 }
 
@@ -613,6 +657,7 @@ void FrameGenerationRegistry::clear() {
 		fg_inputs.unref();
 		fg_revision++;
 		fg_settings_version = 0;
+		fg_settings_dynamic_target_fps = 0;
 		fg_resolved = false;
 		fg_context = Context();
 		fg_resolved_revision = 0;
@@ -623,6 +668,7 @@ void FrameGenerationRegistry::clear() {
 		fg_mode_target = ObjectID();
 		fg_mode_multiplier = 0;
 		fg_mode_dynamic = false;
+		fg_mode_dynamic_target_fps = -1;
 		fg_logged_provider = String();
 		fg_logged_reason = FrameGenerationExtension::REASON_OK;
 		fg_activation_reset = false;

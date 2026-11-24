@@ -35,6 +35,7 @@
 #include "core/object/callable_mp.h"
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
+#include "servers/rendering/renderer_rd/effects/denoiser_bypass.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
@@ -1029,6 +1030,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
 	const NextGIFarField *far_field = swrt ? nullptr : next_gi->get_rt_scene()->get_far_field();
 	const RID far_tlas = far_field != nullptr && far_field->is_trace_ready() ? far_field->get_tlas() : tlas;
+	// GodotNext: pu_dlss_rr (#206). Capture per-rb bypass state for this frame's line-8 passes.
+	current_frame_rr_bypass = DenoiserBypass::is_bypassed(rb.ptr());
+	const bool stabilizer_active = rr_stabilizer_enabled && !current_frame_rr_bypass;
 	RD::Uniform uniforms[39] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
@@ -1045,8 +1049,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, chunks[3]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_rects),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 15, probe_image),
-		// GodotNext: nextgi_rr_hooks — with the stabilizer off, the integration writes ambient directly.
-		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, rr_stabilizer_enabled ? ambient_scratch : rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)),
+		// GodotNext: nextgi_rr_hooks / pu_dlss_rr (#206) — with the stabilizer bypassed, integration writes ambient directly.
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, stabilizer_active ? ambient_scratch : rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 17, indirect),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, counter_buffer),
@@ -1580,7 +1584,7 @@ void NextGIGather::_denoise_specular() {
 	const Size2i screen_size(last_screen_w, last_screen_h);
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 
-	if (!rr_specular_filter_enabled) {
+	if (!rr_specular_filter_enabled || current_frame_rr_bypass) {
 		// DLSS-RR bypass hook (#206): raw specular goes straight to the upsample and the history
 		// is dropped so re-enabling starts fresh.
 		if (specular_history.is_valid()) {
@@ -1698,7 +1702,10 @@ void NextGIGather::integrate(RenderDataRD *p_render_data) {
 }
 
 void NextGIGather::_stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers) {
-	if (!rr_stabilizer_enabled || denoise == nullptr || !ambient_scratch.is_valid() || !prev_ambient.is_valid() || p_render_buffers.is_null()) {
+	if (!rr_stabilizer_enabled || current_frame_rr_bypass || denoise == nullptr || !ambient_scratch.is_valid() || !prev_ambient.is_valid() || p_render_buffers.is_null()) {
+		if (current_frame_rr_bypass) {
+			ambient_history_valid = false;
+		}
 		return;
 	}
 	if (!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {

@@ -144,6 +144,8 @@ class NextGIGather {
 	uint32_t rr_probe_history_cap = 16;
 	bool rr_specular_filter_enabled = true;
 	uint32_t rr_sampling_mode = 0;
+	// GodotNext: pu_dlss_rr (#206). Per-frame DenoiserBypass state captured in _bind().
+	bool current_frame_rr_bypass = false;
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID gather_hl_uniform_set;

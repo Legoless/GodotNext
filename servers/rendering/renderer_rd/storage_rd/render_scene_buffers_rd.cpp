@@ -32,6 +32,7 @@
 #include "render_scene_buffers_rd.compat.inc"
 
 #include "core/object/class_db.h"
+#include "servers/rendering/renderer_rd/effects/denoiser_bypass.h" // GodotNext: pu_dlss_rr (#206)
 #include "servers/rendering/renderer_rd/effects/path_tracer.h" // GodotNext: path_tracer (#167)
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -43,6 +44,7 @@ RenderSceneBuffersRD::RenderSceneBuffersRD() {
 }
 
 RenderSceneBuffersRD::~RenderSceneBuffersRD() {
+	DenoiserBypass::clear_rb(this);
 	cleanup();
 
 	data_buffers.clear();

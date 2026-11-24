@@ -38,6 +38,7 @@
 #include "core/templates/sort_array.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/effects/denoise.h"
+#include "servers/rendering/renderer_rd/effects/denoiser_bypass.h"
 #include "servers/rendering/renderer_rd/effects/megalights_stbn.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
@@ -3643,6 +3644,9 @@ void MegaLights::_dispatch_denoise(const FrameInputs &p_inputs, const Ref<MegaLi
 
 	NextGIDenoise::MegaLightsDenoiseParams dp;
 	dp.rr_bypass = p_rr_bypass;
+	// GodotNext: pu_dlss_rr (#206). Forward the view's RenderSceneBuffersRD so megalights_denoise()
+	// honours the vendor-neutral DenoiserBypass contract.
+	dp.render_buffers = p_inputs.render_data != nullptr ? p_inputs.render_data->render_buffers.ptr() : nullptr;
 	dp.has_history = has_history;
 	dp.velocity_enabled = !p_in_check_loop && p_inputs.velocity_enabled && p_inputs.velocity_texture.is_valid();
 	dp.reset_mask_enabled = reset_mask_enabled;
@@ -3723,7 +3727,8 @@ void MegaLights::denoise_samples(const FrameInputs &p_inputs, Ref<RenderSceneBuf
 		return;
 	}
 	const Settings settings = read_settings();
-	const bool rr_bypass = (settings.denoiser == DENOISER_RR_BYPASS);
+	// GodotNext: pu_dlss_rr (#206). Honour vendor-neutral DenoiserBypass contract for MegaLights.
+	const bool rr_bypass = (settings.denoiser == DENOISER_RR_BYPASS) || DenoiserBypass::is_bypassed(p_rb.ptr());
 	const int debug_vis_mode = debug_vis_mode_from_viewport(p_inputs.debug_draw);
 	_dispatch_denoise(p_inputs, view, view->get_frame_index(), rr_bypass, debug_vis_mode, p_inputs.reset_temporal_history, p_inputs.dirty_reset_regions, true, false);
 }
@@ -5304,7 +5309,8 @@ MegaLights::FrontLayerResult MegaLights::render_front_layer(const FrameInputs &p
 
 	_dispatch_shade(fl_inputs, fl_view, settings, fl_view->get_frame_index(), false, -1.0f);
 
-	const bool rr_bypass = (settings.denoiser == DENOISER_RR_BYPASS);
+	// GodotNext: pu_dlss_rr (#206). Honour vendor-neutral DenoiserBypass contract for MegaLights.
+	const bool rr_bypass = (settings.denoiser == DENOISER_RR_BYPASS) || DenoiserBypass::is_bypassed(p_rb.ptr());
 	_dispatch_denoise(fl_inputs, fl_view, fl_view->get_frame_index(), rr_bypass, -1, fl_inputs.reset_temporal_history, fl_inputs.dirty_reset_regions, false, false);
 	fl_view->advance_frame_index();
 

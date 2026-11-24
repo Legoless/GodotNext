@@ -144,6 +144,9 @@ public:
 		REASON_NOT_MAIN_WINDOW,
 		REASON_PROVIDER_ALREADY_ACTIVE,
 		REASON_PROVIDER_UNAVAILABLE,
+		// GodotNext: pu_streamline_reflex (#209) / pu_dlss_mfg (#201).
+		REASON_STREAMLINE_UNAVAILABLE,
+		REASON_DYNAMIC_MFG_UNSUPPORTED,
 		REASON_MAX,
 	};
 
@@ -158,13 +161,17 @@ protected:
 	GDVIRTUAL0(_reset)
 
 public:
-	String get_provider_name() const;
+	virtual String get_provider_name() const;
 	// REASON_PROVIDER_UNAVAILABLE without an override, or for a value outside the enum.
-	FrameGenerationReason is_available() const;
-	void set_mode(const Dictionary &p_mode);
-	void on_frame_inputs(const Ref<FrameGenerationInputs> &p_inputs);
-	void on_present(Object *p_inputs, bool p_before);
-	void reset();
+	virtual FrameGenerationReason is_available() const;
+	virtual void set_mode(const Dictionary &p_mode);
+	virtual void on_frame_inputs(const Ref<FrameGenerationInputs> &p_inputs);
+	virtual void on_present(Object *p_inputs, bool p_before);
+	virtual void reset();
+	// GodotNext: pu_dlss_fg (#200, #201). Optional C++ provider capability and runtime counters
+	// merged into FrameGenerationRegistry::get_status() (max_multiplier, dynamic_supported,
+	// num_frames_presented, vram_bytes).
+	virtual Dictionary get_provider_capabilities() const { return Dictionary(); }
 
 	// The reason's name without the REASON_ prefix, as the log lines print it.
 	static String get_reason_token(FrameGenerationReason p_reason);
@@ -182,6 +189,7 @@ public:
 		String provider;
 		int multiplier = 2;
 		bool dynamic = false;
+		int dynamic_target_fps = 0;
 		bool editor = false;
 		bool xr_main_window = false;
 		bool rendering_device = true;

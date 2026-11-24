@@ -23,7 +23,7 @@
 		<method name="_is_available" qualifiers="virtual const">
 			<return type="int" />
 			<description>
-				Returns a [enum FrameGenerationReason]: [constant REASON_OK] if the provider can run on the current device and rendering driver with the mode last passed to [method _set_mode], or the reason it cannot. [constant REASON_MFG_REQUIRES_RTX50] keeps the provider active at a multiplier of 2. Any other reason leaves frame generation off. It is called on the rendering thread after [method _set_mode], when the provider is selected and whenever the settings or the registrations change; register the provider again to have it checked again. If not overridden, [constant REASON_PROVIDER_UNAVAILABLE] is returned.
+				Returns a [enum FrameGenerationReason]: [constant REASON_OK] if the provider can run on the current device and rendering driver with the mode last passed to [method _set_mode], or the reason it cannot. [constant REASON_MFG_REQUIRES_RTX50] keeps the provider active at a multiplier of 2. [constant REASON_DYNAMIC_MFG_UNSUPPORTED] keeps the provider active at the requested fixed multiplier. Any other reason leaves frame generation off. It is called on the rendering thread after [method _set_mode], when the provider is selected and whenever the settings or the registrations change; register the provider again to have it checked again. If not overridden, [constant REASON_PROVIDER_UNAVAILABLE] is returned.
 				A provider that needs a present hook should return [constant REASON_API_UNSUPPORTED] on Vulkan and Metal, which have none.
 			</description>
 		</method>
@@ -54,7 +54,7 @@
 			<return type="void" />
 			<param index="0" name="mode" type="Dictionary" />
 			<description>
-				Called on the rendering thread with the requested mode before [method _is_available], when the provider is selected and whenever the mode changes. [param mode] has the keys [code]multiplier[/code] (an [int] from 2 to 6, [member ProjectSettings.rendering/frame_generation/multiplier]) and [code]dynamic[/code] (a [bool], [member ProjectSettings.rendering/frame_generation/dynamic]).
+				Called on the rendering thread with the requested mode before [method _is_available], when the provider is selected and whenever the mode changes. [param mode] has the keys [code]multiplier[/code] (an [int] from 2 to 6, [member ProjectSettings.rendering/frame_generation/multiplier]), [code]dynamic[/code] (a [bool], [member ProjectSettings.rendering/frame_generation/dynamic]), and [code]dynamic_target_fps[/code] (an [int], [member ProjectSettings.rendering/frame_generation/dynamic_target_fps]).
 			</description>
 		</method>
 	</methods>
@@ -83,7 +83,13 @@
 		<constant name="REASON_PROVIDER_UNAVAILABLE" value="7" enum="FrameGenerationReason">
 			No registered provider has the requested name, or the provider cannot run for a reason not listed here.
 		</constant>
-		<constant name="REASON_MAX" value="8" enum="FrameGenerationReason">
+		<constant name="REASON_STREAMLINE_UNAVAILABLE" value="8" enum="FrameGenerationReason">
+			The Streamline runtime could not be loaded or initialized.
+		</constant>
+		<constant name="REASON_DYNAMIC_MFG_UNSUPPORTED" value="9" enum="FrameGenerationReason">
+			Dynamic Multi Frame Generation is not supported by the current device or driver. The provider stays active at the requested fixed multiplier.
+		</constant>
+		<constant name="REASON_MAX" value="10" enum="FrameGenerationReason">
 			Represents the size of the [enum FrameGenerationReason] enum.
 		</constant>
 	</constants>

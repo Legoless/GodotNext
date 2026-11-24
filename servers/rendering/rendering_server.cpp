@@ -31,6 +31,8 @@
 #include "rendering_server.h"
 #include "rendering_server.compat.inc"
 
+#include <atomic>
+
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
 #include "core/object/class_db.h"
@@ -2584,6 +2586,44 @@ RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(R
 	return upscaler->get_availability(1, 1.0f, effective_scale);
 }
 
+// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+static std::atomic<RenderingServer::LatencyStatusCallback> latency_status_callback{ nullptr };
+
+void RenderingServer::set_latency_status_callback(LatencyStatusCallback p_callback) {
+	latency_status_callback.store(p_callback, std::memory_order_release);
+}
+
+RenderingServer::LatencyStatusCallback RenderingServer::get_latency_status_callback() {
+	return latency_status_callback.load(std::memory_order_acquire);
+}
+
+Dictionary RenderingServer::get_latency_status() const {
+	const LatencyStatusCallback cb = latency_status_callback.load(std::memory_order_acquire);
+	if (cb != nullptr) {
+		return cb();
+	}
+	int requested_mode = 0;
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings != nullptr && settings->has_setting("rendering/latency/reflex_mode")) {
+		requested_mode = CLAMP(int(settings->get_setting_with_override("rendering/latency/reflex_mode")), 0, 2);
+	}
+	Dictionary status;
+	status["mode"] = 0;
+	if (requested_mode == 0) {
+		status["reason"] = String("OFF");
+		return status;
+	}
+	const String driver_name = OS::get_singleton() != nullptr ? OS::get_singleton()->get_current_rendering_driver_name() : String();
+	bool is_d3d12 = (driver_name == "d3d12");
+#ifdef RD_ENABLED
+	if (RD::get_singleton() != nullptr) {
+		is_d3d12 = (RD::get_singleton()->get_device_api_name() == "D3D12");
+	}
+#endif
+	status["reason"] = is_d3d12 ? String("REFLEX_UNAVAILABLE") : String("API_UNSUPPORTED");
+	return status;
+}
+
 void RenderingServer::_bind_methods() {
 	BIND_CONSTANT(RSE::NO_INDEX_ARRAY);
 	BIND_CONSTANT(RSE::ARRAY_WEIGHTS_SIZE);
@@ -3271,6 +3311,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("register_frame_generation_extension", "extension"), &RenderingServer::register_frame_generation_extension);
 	ClassDB::bind_method(D_METHOD("unregister_frame_generation_extension", "extension"), &RenderingServer::unregister_frame_generation_extension);
 	ClassDB::bind_method(D_METHOD("get_frame_generation_status"), &RenderingServer::get_frame_generation_status);
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5).
+	ClassDB::bind_method(D_METHOD("get_latency_status"), &RenderingServer::get_latency_status);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_memory_report"), &RenderingServer::virtual_geometry_get_memory_report);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_routing_counters"), &RenderingServer::virtual_geometry_get_routing_counters);
@@ -3394,6 +3436,9 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED);
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+	// GodotNext: pu_dlss_rr (#206).
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_RR_REQUIRES_NEXTGI_EPIC);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_RR_UNAVAILABLE);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_UPDATE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_UPDATE_ONCE); // Then goes to disabled, must be manually updated.
@@ -4507,6 +4552,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/scaling_3d/dlss/project_id", PROPERTY_HINT_NONE, ""), String());
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/application_id", PROPERTY_HINT_RANGE, "0,2147483647,1"), 0);
 	GLOBAL_DEF("rendering/scaling_3d/dlss/allow_ota_updates", false);
+	// GodotNext: pu_dlss_rr (#206). Inert without modules/dlss; Beta on Vulkan.
+	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "rendering/scaling_3d/dlss/ray_reconstruction", PROPERTY_HINT_NONE, "Beta on Vulkan"), false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/rr_preset", PROPERTY_HINT_ENUM, "Default,D,E,F"), 0);
 	// GodotNext: pt_dynamic_resolution (#191).
 	GLOBAL_DEF("rendering/scaling_3d/dynamic_resolution/enabled", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dynamic_resolution/target_frame_rate", PROPERTY_HINT_RANGE, "1,1000,1,or_greater"), 60);
@@ -4514,10 +4562,13 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/dynamic_resolution/max_scale", PROPERTY_HINT_RANGE, "0.1,2.0,0.0001"), 1.0f);
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/scaling_3d/custom_upscaler", PROPERTY_HINT_NONE, ""), String());
-	// GodotNext: pu_fg_present_path (#203). Off by default; "" is off.
+	// GodotNext: pu_fg_present_path (#203) / pu_dlss_mfg (#201). Off by default; "" is off.
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/frame_generation/provider", PROPERTY_HINT_NONE, ""), String());
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/frame_generation/multiplier", PROPERTY_HINT_RANGE, "2,6,1"), 2);
 	GLOBAL_DEF("rendering/frame_generation/dynamic", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/frame_generation/dynamic_target_fps", PROPERTY_HINT_RANGE, "0,1000,1"), 0);
+	// GodotNext: pu_streamline_reflex (#209, plan §21.5 U5). Off by default; D3D12 only.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/latency/reflex_mode", PROPERTY_HINT_ENUM, "Off,On,On + Boost"), 0);
 
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/textures/default_filters/texture_mipmap_bias", PROPERTY_HINT_RANGE, "-2,2,0.001"), 0.0f);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/decals/filter", PROPERTY_HINT_ENUM, "Nearest (Fast),Linear (Fast),Nearest Mipmap (Fast),Linear Mipmap (Fast),Nearest Mipmap Anisotropic (Average),Linear Mipmap Anisotropic (Average)"), RSE::DECAL_FILTER_LINEAR_MIPMAPS);
