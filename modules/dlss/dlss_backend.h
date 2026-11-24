@@ -173,5 +173,24 @@ public:
 };
 
 #ifdef DLSS_BACKEND_NGX
+struct DLSSNGXParameterMappingCheck {
+	bool is_hdr = false;
+	bool depth_inverted = false;
+	bool mv_low_res = false;
+	bool mv_jittered = false;
+	bool auto_exposure = false;
+	float pre_exposure = 0.0f;
+	float exposure_scale = 0.0f;
+	float mv_scale_x = 0.0f;
+	float mv_scale_y = 0.0f;
+	float jitter_x = 0.0f;
+	float jitter_y = 0.0f;
+	int reset = 0;
+	uint32_t preset_k_value = 0;
+	bool has_exposure_texture = false;
+	bool has_transparency_mask = false;
+};
+
 DLSSBackend *dlss_backend_create_ngx();
+DLSSNGXParameterMappingCheck dlss_ngx_vk_check_parameter_mapping(const DLSSBackend::FeatureCreateParams &p_create, const DLSSBackend::EvaluateParams &p_eval);
 #endif

@@ -202,7 +202,7 @@ Raw `vulkaninfo` JSON snapshots (both well under 5 MB):
 
 ### Expected NGX requirements (unverified) — the RTX 4080 SUPER
 
-Recorded per plan v2.4 without downloading any NVIDIA SDK; #100 logs the actual runtime NGX requirement list:
+Recorded per plan v2.4 without downloading any NVIDIA SDK; the RTX 5090 Linux runtime check (#100) is recorded right below:
 
 | Requirement | Value | Query |
 |---|---|---|
@@ -211,6 +211,18 @@ Recorded per plan v2.4 without downloading any NVIDIA SDK; #100 logs the actual 
 | `VK_NVX_binary_import` | yes (rev `2`) | `.capabilities.device.extensions["VK_NVX_binary_import"]` |
 | `VK_NVX_image_view_handle` | yes (rev `4`) | `.capabilities.device.extensions["VK_NVX_image_view_handle"]` |
 | `VK_KHR_push_descriptor` | yes (rev `2`) | `.capabilities.device.extensions["VK_KHR_push_descriptor"]` |
+
+### Verified NGX Vulkan extension requirements (#100) — the RTX 5090 machine
+
+Recorded on 2026-11-24 with NVIDIA DLSS SDK `v310.9.16` (`libnvidia-ngx-dlss.so.310.9.16`, SHA-256 `30982c937afed85c96b8d313323de9a650a2eec6de1bb0f714b21750f4ce98f6`), NVIDIA Linux driver `595.99.02` (Vulkan `1.4.329`), and `VK_LAYER_KHRONOS_validation` `1.4.363.1` with SyncVal + `--gpu-abort`:
+
+- **Required instance extensions (1):** `VK_KHR_get_physical_device_properties2`.
+- **Required device extensions reported by NGX (4 raw; 3 merged on Vulkan 1.2+):**
+  - `VK_NVX_binary_import` (**required**; settled by #100)
+  - `VK_NVX_image_view_handle` (**required**)
+  - `VK_KHR_push_descriptor` (**required**)
+  - `VK_EXT_buffer_device_address` (reported by `NVSDK_NGX_VULKAN_RequiredExtensions`; filtered out when `VK_KHR_buffer_device_address` is supported and enabled, since Vulkan forbids enabling both under `VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-03328`).
+- **Validation result:** 0 validation errors and 0 SyncVal hazards on `upscaler_torture` (Preset K Quality 0.67, default and `GODOT_RG_FULL_BARRIERS=1 GODOT_RG_REORDER=0`) and `nextgi_perf` (NextGI HWRT + DLSS DLAA 1.0 Preset K), with `--gpu-validation --gpu-abort`.
 
 ### Timing clock locks — the RTX 4080 SUPER machine
 

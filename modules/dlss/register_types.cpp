@@ -32,11 +32,28 @@
 
 #include "dlss_backend.h"
 #include "dlss_backend_mock.h"
+#include "dlss_upscaler.h"
+
+#ifdef VULKAN_ENABLED
+#include "dlss_vulkan_extensions.h"
+#endif
 
 #include "core/error/error_macros.h"
 #include "core/os/memory.h"
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 
 static DLSSBackend *dlss_active_backend = nullptr;
+static DLSSUpscaler *dlss_upscaler = nullptr;
+#ifdef VULKAN_ENABLED
+static DLSSVulkanExtensionProvider *dlss_vk_provider = nullptr;
+
+static void _dlss_on_vk_device_destroying(void *p_userdata) {
+	DLSSUpscaler *upscaler = static_cast<DLSSUpscaler *>(p_userdata);
+	if (upscaler != nullptr) {
+		upscaler->shutdown();
+	}
+}
+#endif
 
 DLSSBackend *dlss_get_active_backend() {
 	return dlss_active_backend;
@@ -58,16 +75,52 @@ void initialize_dlss_module(ModuleInitializationLevel p_level) {
 		dlss_active_backend = memnew(DLSSBackendMock);
 #endif
 	}
+
+	if (dlss_upscaler == nullptr) {
+		dlss_upscaler = memnew(DLSSUpscaler(dlss_active_backend));
+		TemporalUpscalerRegistry::register_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS, dlss_upscaler);
+	}
+
+#ifdef VULKAN_ENABLED
+	if (dlss_vk_provider == nullptr) {
+		dlss_vk_provider = memnew(DLSSVulkanExtensionProvider(dlss_active_backend));
+		dlss_vk_provider->set_device_destroying_callback(_dlss_on_vk_device_destroying, dlss_upscaler);
+		dlss_upscaler->set_vulkan_extension_provider(dlss_vk_provider);
+		VulkanExtensionProviders::register_provider(dlss_vk_provider);
+	}
+#endif
 }
 
 void uninitialize_dlss_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SERVERS) {
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS) {
+		if (dlss_upscaler != nullptr) {
+			TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		}
+		// Keep dlss_upscaler, dlss_active_backend, and dlss_vk_provider alive until
+		// finalize_display() finishes destroying RD command pools and invokes
+		// on_device_destroying() before vkDestroyDevice; final cleanup runs at CORE.
 		return;
 	}
 
-	if (dlss_active_backend != nullptr) {
-		dlss_active_backend->shutdown();
-		memdelete(dlss_active_backend);
-		dlss_active_backend = nullptr;
+	if (p_level == MODULE_INITIALIZATION_LEVEL_CORE) {
+#ifdef VULKAN_ENABLED
+		if (dlss_vk_provider != nullptr) {
+			dlss_vk_provider->set_device_destroying_callback(nullptr, nullptr);
+			dlss_vk_provider->set_backend(nullptr);
+			VulkanExtensionProviders::unregister_provider(dlss_vk_provider);
+			memdelete(dlss_vk_provider);
+			dlss_vk_provider = nullptr;
+		}
+#endif
+		if (dlss_upscaler != nullptr) {
+			dlss_upscaler->shutdown();
+			memdelete(dlss_upscaler);
+			dlss_upscaler = nullptr;
+		}
+		if (dlss_active_backend != nullptr) {
+			dlss_active_backend->shutdown();
+			memdelete(dlss_active_backend);
+			dlss_active_backend = nullptr;
+		}
 	}
 }

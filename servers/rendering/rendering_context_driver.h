@@ -152,6 +152,12 @@ public:
 
 	String get_driver_and_device_memory_report() const;
 
+	// GodotNext: pu_dlss_sr_effect (#100). C++-only hook for optional modules to append
+	// a device-memory category row to get_driver_and_device_memory_report().
+	typedef uint64_t (*MemoryReportBytesCallback)(void *p_userdata);
+	static void add_memory_report_source(const String &p_category, MemoryReportBytesCallback p_callback, void *p_userdata);
+	static void remove_memory_report_source(const String &p_category);
+
 	virtual const char *get_tracked_object_name(uint32_t p_type_index) const;
 	virtual uint64_t get_tracked_object_type_count() const;
 

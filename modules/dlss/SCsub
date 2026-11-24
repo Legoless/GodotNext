@@ -13,14 +13,80 @@ Import("env_modules")
 
 env_dlss = env_modules.Clone()
 
+
+def _generate_allowlist_header(target, source, env):
+    src_path = str(source[0])
+    out_path = str(target[0])
+    rows = []
+    if os.path.isfile(src_path):
+        with open(src_path, "r", encoding="utf-8") as f:
+            in_table = False
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line.startswith("|"):
+                    in_table = False
+                    continue
+                parts = [p.strip().strip("`") for p in line.strip("|").split("|")]
+                if len(parts) < 3:
+                    continue
+                if parts[0].lower() == "vuid" and parts[1].lower().startswith("dll"):
+                    in_table = True
+                    continue
+                if all(set(p) <= {"-", ":"} and len(p) > 0 for p in parts[:3]):
+                    continue
+                if in_table and parts[0]:
+                    rows.append((parts[0], parts[1], parts[2]))
+
+    def _c_esc(s):
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    lines = [
+        "/* Generated from docs/godotnext/dlss-validation-allowlist.md; do not edit by hand. */",
+        "#pragma once",
+        "#include <cstdint>",
+        "",
+        "struct DLSSValidationAllowlistEntry {",
+        "\tconst char *vuid;",
+        "\tconst char *dll_sha256;",
+        "\tconst char *driver;",
+        "};",
+        "",
+        f"static constexpr uint32_t DLSS_VALIDATION_ALLOWLIST_COUNT = {len(rows)}u;",
+        "static const DLSSValidationAllowlistEntry DLSS_VALIDATION_ALLOWLIST[] = {",
+    ]
+    if rows:
+        for vuid, sha, drv in rows:
+            lines.append(f'\t{{ "{_c_esc(vuid)}", "{_c_esc(sha)}", "{_c_esc(drv)}" }},')
+    else:
+        lines.append('\t{ "", "", "" },')
+    lines.append("};")
+    lines.append("")
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+allowlist_header = env_dlss.CommandNoCache(
+    "dlss_validation_allowlist.gen.h",
+    "#docs/godotnext/dlss-validation-allowlist.md",
+    env_dlss.Action(_generate_allowlist_header, "Generating $TARGET from $SOURCE"),
+)
+
 module_obj = []
 
 env_dlss.add_source_files(module_obj, "register_types.cpp")
 env_dlss.add_source_files(module_obj, "dlss_backend_mock.cpp")
+env_dlss.add_source_files(module_obj, "dlss_upscaler.cpp")
+
+if env["vulkan"]:
+    vk_ext_obj = env_dlss.add_source_files(module_obj, "dlss_vulkan_extensions.cpp")
+    env_dlss.Depends(vk_ext_obj, allowlist_header)
 
 if env["tests"]:
     env_dlss.Append(CPPDEFINES=["TESTS_ENABLED"])
-    env_dlss.add_source_files(module_obj, "./tests/*.cpp")
+    test_objs = env_dlss.add_source_files(module_obj, "./tests/*.cpp")
+    env_dlss.Depends(test_objs, allowlist_header)
 
 if env["dlss_backend"] == "ngx":
     env_dlss.Append(CPPDEFINES=["DLSS_BACKEND_NGX"])
@@ -33,10 +99,7 @@ if env["dlss_backend"] == "ngx":
         env_dlss.add_source_files(module_obj, "dlss_ngx_vk.cpp")
 
     lib_path = env["dlss_resolved_lib"]
-    if env["platform"] == "windows":
-        env.Append(LIBS=[env.File(lib_path)])
-    else:
-        env.Append(LIBS=[env.File(lib_path)])
+    env.Append(LIBS=[env.File(lib_path)])
 
     # Copy runtime libraries unmodified into #bin/ and write bin/dlss_runtime.json.
     sdk_root = env["dlss_resolved_sdk"]
@@ -116,13 +179,20 @@ if env["dlss_backend"] == "ngx":
             json.dump(manifest, f, indent=2, sort_keys=True)
             f.write("\n")
 
+    manifest_sig = env.Value(
+        (
+            sdk_root,
+            bool(env["dlss_dev_runtime"]),
+            tuple((os.path.basename(p), v) for p, v in runtime_files),
+        )
+    )
     manifest_cmd = env.CommandNoCache(
         "#bin/dlss_runtime.json",
-        copied_targets,
+        copied_targets + [manifest_sig],
         env.Action(_write_dlss_manifest, "Generating DLSS runtime manifest $TARGET"),
     )
-    env.AlwaysBuild(manifest_cmd)
-    env.Default(copied_targets, manifest_cmd)
+    if module_obj:
+        env.Depends(module_obj[0], copied_targets + [manifest_cmd])
 else:
     env_dlss.Append(CPPDEFINES=["DLSS_BACKEND_MOCK"])
 

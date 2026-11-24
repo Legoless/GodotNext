@@ -69,6 +69,37 @@ default and mock backends. DLSS-enabled `ngx` builds are allowed only on owned
 NVIDIA RTX machines, never on rented/cloud GPUs (Supplement §3; the five
 questions in `dlss-license.md`).
 
+## Settings, presets, reasons, and diagnostics (#100)
+
+When `modules/dlss` is enabled, `DLSSUpscaler` registers as
+`NVIDIA DLSS (Temporal - NVIDIA RTX only)` for `VIEWPORT_SCALING_3D_MODE_DLSS`.
+
+- **Project settings (`rendering/scaling_3d/dlss/*`):**
+  - `project_id`: GUID string passed to `NVSDK_NGX_VULKAN_Init_with_ProjectID`
+    (required unless `application_id` is non-zero; an empty `project_id` and zero
+    `application_id` reports `PROJECT_ID_MISSING` without invoking NGX).
+  - `application_id`: optional NVIDIA-assigned integer ID (uses
+    `NVSDK_NGX_VULKAN_Init` when non-zero).
+  - `preset`: `Default` (0), `J` (1), `K` (2, transformer), `L` (3), `M` (4).
+  - `allow_ota_updates`: default `false`; `NVSDK_NGX_UpdateFeature` is called
+    only when enabled.
+- **Scale snapping:** scales in `[0.30, 1.0]` map to Ultra Performance,
+  Performance, Balanced, Quality, and DLAA, with render dimensions resolved from
+  NGX's optimal-settings query, mip-bias offset `-1.0`, and dense velocity mode.
+- **Fallback reasons:** `NOT_NVIDIA_RTX`, `DRIVER_TOO_OLD`, `RUNTIME_MISSING`,
+  `EXTENSION_MISSING`, `PROJECT_ID_MISSING`, `FEATURE_CREATE_FAILED` (latched per
+  `RenderSceneBuffersRD*` on create/evaluate error).
+- **Memory report:** NGX per-feature VRAM is reported as the `NGX` row in
+  `RenderingContextDriver::get_driver_and_device_memory_report()`.
+- **Validation allowlist (`docs/godotnext/dlss-validation-allowlist.md`):**
+  Any Vulkan validation message referencing a GodotNext-created object always
+  fails (`--gpu-abort`). Messages referencing only NGX-internal objects skip
+  `--gpu-abort` only when an exact `(VUID, DLL SHA-256, driver)` row is present.
+- **Dev overlay:** When built with `dlss_dev_runtime=yes` (local debugging only;
+  never export or distribute), the NVIDIA NGX dev overlay (`CTRL+ALT+F12` or NGX
+  debug indicator settings) confirms runtime preset, jitter, and motion vector
+  signs.
+
 ## Distributor duties (§19(f))
 
 A build that links NGX contains NVIDIA object code. Distributing it requires:

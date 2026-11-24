@@ -30,6 +30,43 @@
 
 #include "rendering_context_driver.h"
 
+#include "core/os/mutex.h"
+#include "core/templates/local_vector.h"
+
+namespace {
+struct ExtraMemoryReportSource {
+	String category;
+	RenderingContextDriver::MemoryReportBytesCallback callback = nullptr;
+	void *userdata = nullptr;
+};
+
+Mutex extra_memory_report_mutex;
+LocalVector<ExtraMemoryReportSource> extra_memory_report_sources;
+} // namespace
+
+void RenderingContextDriver::add_memory_report_source(const String &p_category, MemoryReportBytesCallback p_callback, void *p_userdata) {
+	ERR_FAIL_COND(p_category.is_empty() || p_callback == nullptr);
+	MutexLock lock(extra_memory_report_mutex);
+	for (ExtraMemoryReportSource &src : extra_memory_report_sources) {
+		if (src.category == p_category) {
+			src.callback = p_callback;
+			src.userdata = p_userdata;
+			return;
+		}
+	}
+	extra_memory_report_sources.push_back({ p_category, p_callback, p_userdata });
+}
+
+void RenderingContextDriver::remove_memory_report_source(const String &p_category) {
+	MutexLock lock(extra_memory_report_mutex);
+	for (uint32_t i = 0; i < extra_memory_report_sources.size(); i++) {
+		if (extra_memory_report_sources[i].category == p_category) {
+			extra_memory_report_sources.remove_at(i);
+			return;
+		}
+	}
+}
+
 RenderingContextDriver::~RenderingContextDriver() {
 }
 
@@ -198,6 +235,20 @@ String RenderingContextDriver::get_driver_and_device_memory_report() const {
 		report += String::num_real(double(get_device_memory_by_object_type(i)) / (1024.0 * 1024.0));
 		report += ";";
 		report += String::num_uint64(get_device_allocs_by_object_type(i));
+	}
+
+	{
+		MutexLock lock(extra_memory_report_mutex);
+		for (const ExtraMemoryReportSource &src : extra_memory_report_sources) {
+			const uint64_t bytes = src.callback != nullptr ? src.callback(src.userdata) : 0;
+			const uint64_t allocs = bytes > 0 ? 1u : 0u;
+			report += "\n";
+			report += src.category;
+			report += ";0;0;";
+			report += String::num_real(double(bytes) / (1024.0 * 1024.0));
+			report += ";";
+			report += String::num_uint64(allocs);
+		}
 	}
 
 	return report;
