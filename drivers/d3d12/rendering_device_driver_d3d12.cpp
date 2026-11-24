@@ -8147,6 +8147,8 @@ RenderingDeviceDriverD3D12::RenderingDeviceDriverD3D12(RenderingContextDriverD3D
 }
 
 RenderingDeviceDriverD3D12::~RenderingDeviceDriverD3D12() {
+	D3D12Hooks::call_device_destroying_callback(device.Get());
+
 	rtv_descriptor_heap_pool.free(null_rtv_alloc);
 
 	{
@@ -8240,6 +8242,7 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 	if (D3D12Hooks::get_singleton() != nullptr) {
 		D3D12Hooks::get_singleton()->set_device(device.Get());
 	}
+	D3D12Hooks::call_device_created_callback(device.Get());
 
 	if (context_driver->use_validation_layers()) {
 		ComPtr<ID3D12InfoQueue> info_queue;
@@ -8470,6 +8473,13 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	if (SUCCEEDED(res)) {
 		format_capabilities.relaxed_casting_supported = options12.RelaxedFormatCastingSupported;
 		barrier_capabilities.enhanced_barriers_supported = options12.EnhancedBarriersSupported;
+	}
+	if (D3D12Hooks::has_library_override() && barrier_capabilities.enhanced_barriers_supported) {
+		// GodotNext: pu_streamline_reflex (#209), pu_dlss_fg (#200). Interposer libraries
+		// (e.g. Streamline) proxy command lists and swap-chain buffers using legacy D3D12
+		// resource states, which cannot be mixed with Enhanced Barriers on the same command list.
+		barrier_capabilities.enhanced_barriers_supported = false;
+		print_verbose("D3D12: Using legacy resource barriers while a D3D12 library override is active.");
 	}
 #ifdef DEBUG_ENABLED
 	// GodotNext: d3d12_dxr (#118), pu_dlss_d3d12 (#119). Debug builds can force the legacy

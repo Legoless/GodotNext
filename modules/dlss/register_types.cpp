@@ -41,6 +41,10 @@
 #include "dlss_vulkan_extensions.h"
 #endif
 
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/d3d12_hooks.h"
+#endif
+
 #ifdef TOOLS_ENABLED
 void dlss_register_editor_plugins();
 #endif
@@ -59,6 +63,16 @@ static Ref<DLSSFrameGeneration> dlss_frame_generation;
 static DLSSVulkanExtensionProvider *dlss_vk_provider = nullptr;
 
 static void _dlss_on_vk_device_destroying(void *p_userdata) {
+	DLSSUpscaler *upscaler = static_cast<DLSSUpscaler *>(p_userdata);
+	if (upscaler != nullptr) {
+		upscaler->shutdown();
+	}
+}
+#endif
+
+#ifdef D3D12_ENABLED
+static void _dlss_on_d3d12_device_destroying(ID3D12Device *p_device, void *p_userdata) {
+	(void)p_device;
 	DLSSUpscaler *upscaler = static_cast<DLSSUpscaler *>(p_userdata);
 	if (upscaler != nullptr) {
 		upscaler->shutdown();
@@ -109,6 +123,12 @@ void initialize_dlss_module(ModuleInitializationLevel p_level) {
 		TemporalUpscalerRegistry::register_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS, dlss_upscaler);
 	}
 
+#ifdef D3D12_ENABLED
+	if (dlss_d3d12_backend != nullptr && !D3D12Hooks::is_registration_locked()) {
+		D3D12Hooks::set_device_destroying_callback(_dlss_on_d3d12_device_destroying, dlss_upscaler);
+	}
+#endif
+
 	// #209 / #200: Initialize Streamline on D3D12 (game-only, when FG or Reflex is requested)
 	// before DisplayServer::create, and register the DLSS-G FrameGenerationExtension provider.
 	GDREGISTER_CLASS(DLSSFrameGeneration);
@@ -145,7 +165,11 @@ void uninitialize_dlss_module(ModuleInitializationLevel p_level) {
 	}
 
 	if (p_level == MODULE_INITIALIZATION_LEVEL_CORE) {
-		dlss_streamline_shutdown();
+#ifdef D3D12_ENABLED
+		if (!D3D12Hooks::is_registration_locked()) {
+			D3D12Hooks::set_device_destroying_callback(nullptr, nullptr);
+		}
+#endif
 #ifdef VULKAN_ENABLED
 		if (dlss_vk_provider != nullptr) {
 			dlss_vk_provider->set_device_destroying_callback(nullptr, nullptr);
@@ -170,5 +194,6 @@ void uninitialize_dlss_module(ModuleInitializationLevel p_level) {
 			memdelete(dlss_active_backend);
 			dlss_active_backend = nullptr;
 		}
+		dlss_streamline_shutdown();
 	}
 }

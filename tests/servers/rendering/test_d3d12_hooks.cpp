@@ -126,6 +126,8 @@ struct HookReset {
 	static void reset() {
 		D3D12Hooks::set_library_override(String(), String());
 		D3D12Hooks::set_present_callback(Callable());
+		D3D12Hooks::set_device_created_callback(nullptr, nullptr);
+		D3D12Hooks::set_device_destroying_callback(nullptr, nullptr);
 	}
 };
 
@@ -153,6 +155,21 @@ void record_present(uint64_t p_swap_chain, uint64_t p_frame_index, int p_stage) 
 
 IDXGISwapChain *fake_swap_chain() {
 	return reinterpret_cast<IDXGISwapChain *>(uintptr_t(0x1000));
+}
+
+ID3D12Device *fake_d3d12_device() {
+	return reinterpret_cast<ID3D12Device *>(uintptr_t(0x2000));
+}
+
+struct DeviceCreatedCapture {
+	int count = 0;
+	ID3D12Device *last_device = nullptr;
+};
+
+void record_device_created(ID3D12Device *p_device, void *p_userdata) {
+	DeviceCreatedCapture *cap = static_cast<DeviceCreatedCapture *>(p_userdata);
+	cap->count++;
+	cap->last_device = p_device;
 }
 
 TEST_CASE("[D3D12Hooks] Without registration, D3D12 and DXGI are the system libraries and no present callback runs") {
@@ -215,6 +232,56 @@ TEST_CASE("[D3D12Hooks] The present callback receives the swap chain, the frame 
 	CHECK_FALSE(D3D12Hooks::has_present_callback());
 	D3D12Hooks::call_present_callback(fake_swap_chain(), 42, D3D12Hooks::PRESENT_STAGE_BEFORE);
 	CHECK(present_records.size() == 2);
+}
+
+TEST_CASE("[D3D12Hooks] The device created callback runs on device creation and is locked during init") {
+	HookReset reset;
+	DeviceCreatedCapture cap;
+
+	REQUIRE(D3D12Hooks::set_device_created_callback(&record_device_created, &cap) == OK);
+	D3D12Hooks::call_device_created_callback(nullptr);
+	CHECK(cap.count == 0);
+	D3D12Hooks::call_device_created_callback(fake_d3d12_device());
+	CHECK(cap.count == 1);
+	CHECK(cap.last_device == fake_d3d12_device());
+
+	{
+		RegistrationLock lock;
+		ErrorCapture errors;
+		ERR_PRINT_OFF;
+		const Error err = D3D12Hooks::set_device_created_callback(nullptr, nullptr);
+		ERR_PRINT_ON;
+		CHECK(err == ERR_LOCKED);
+		CHECK(errors.count == 1);
+		CHECK(errors.last_message.contains("D3D12Hooks::set_device_created_callback()"));
+	}
+
+	REQUIRE(D3D12Hooks::set_device_created_callback(nullptr, nullptr) == OK);
+	D3D12Hooks::call_device_created_callback(fake_d3d12_device());
+	CHECK(cap.count == 1);
+
+	DeviceCreatedCapture destroy_cap;
+	REQUIRE(D3D12Hooks::set_device_destroying_callback(&record_device_created, &destroy_cap) == OK);
+	D3D12Hooks::call_device_destroying_callback(nullptr);
+	CHECK(destroy_cap.count == 0);
+	D3D12Hooks::call_device_destroying_callback(fake_d3d12_device());
+	CHECK(destroy_cap.count == 1);
+	CHECK(destroy_cap.last_device == fake_d3d12_device());
+
+	{
+		RegistrationLock lock;
+		ErrorCapture errors;
+		ERR_PRINT_OFF;
+		const Error err = D3D12Hooks::set_device_destroying_callback(nullptr, nullptr);
+		ERR_PRINT_ON;
+		CHECK(err == ERR_LOCKED);
+		CHECK(errors.count == 1);
+		CHECK(errors.last_message.contains("D3D12Hooks::set_device_destroying_callback()"));
+	}
+
+	REQUIRE(D3D12Hooks::set_device_destroying_callback(nullptr, nullptr) == OK);
+	D3D12Hooks::call_device_destroying_callback(fake_d3d12_device());
+	CHECK(destroy_cap.count == 1);
 }
 
 TEST_CASE("[D3D12Hooks] Registering after init fails with one named error") {

@@ -136,6 +136,9 @@ void _mock_latency_marker_cb(LatencyMarker p_marker, uint64_t p_frame_id) {
 
 uint64_t g_sl_token_frame_id = UINT64_MAX;
 sl::FrameToken *g_sl_current_token = nullptr;
+bool g_sl_device_set = false;
+LUID g_sl_adapter_luid = {};
+bool g_sl_has_adapter_luid = false;
 bool g_sl_reflex_low_latency_available = false;
 bool g_sl_reflex_state_queried = false;
 int g_sl_applied_reflex_mode = -1;
@@ -302,8 +305,25 @@ sl::float4x4 projection_to_sl_matrix(const Projection &p_proj) {
 	return out;
 }
 
+void _sl_on_d3d12_device_created(ID3D12Device *p_device, void *p_userdata) {
+	(void)p_userdata;
+	MutexLock lock(g_sl_mutex);
+	if (!g_sl_loaded || p_device == nullptr || g_sl_device_set) {
+		return;
+	}
+	const sl::Result res = slSetD3DDevice(static_cast<void *>(p_device));
+	if (res == sl::Result::eOk) {
+		g_sl_device_set = true;
+		g_sl_adapter_luid = p_device->GetAdapterLuid();
+		g_sl_has_adapter_luid = true;
+		print_verbose("Streamline: slSetD3DDevice succeeded.");
+	} else {
+		WARN_PRINT(vformat("Streamline: slSetD3DDevice failed (%s).", sl_result_to_name(res)));
+	}
+}
+
 void _sl_sync_reflex_options_locked() {
-	if (!g_sl_loaded || RD::get_singleton() == nullptr) {
+	if (!g_sl_loaded || !g_sl_device_set || RD::get_singleton() == nullptr) {
 		return;
 	}
 	if (!g_sl_reflex_state_queried) {
@@ -365,7 +385,7 @@ void _sl_sync_reflex_options_locked() {
 }
 
 void _sl_latency_marker_callback(LatencyMarker p_marker, uint64_t p_frame_id) {
-	if (!g_sl_loaded || RD::get_singleton() == nullptr) {
+	if (!g_sl_loaded || !g_sl_device_set || RD::get_singleton() == nullptr) {
 		return;
 	}
 	MutexLock lock(g_sl_mutex);
@@ -433,11 +453,16 @@ public:
 
 	bool query_feature_supported(String &r_result_name) const override {
 		r_result_name = String();
-		if (!g_sl_loaded) {
+		if (!g_sl_loaded || !g_sl_device_set) {
 			r_result_name = "eErrorNotInitialized";
 			return false;
 		}
 		sl::AdapterInfo adapter;
+		LUID luid_copy = g_sl_adapter_luid;
+		if (g_sl_has_adapter_luid) {
+			adapter.deviceLUID = reinterpret_cast<uint8_t *>(&luid_copy);
+			adapter.deviceLUIDSizeInBytes = sizeof(luid_copy);
+		}
 		const sl::Result res = slIsFeatureSupported(sl::kFeatureDLSS_G, adapter);
 		r_result_name = String(sl_result_to_name(res));
 		return res == sl::Result::eOk;
@@ -445,6 +470,9 @@ public:
 
 	bool set_constants(uint64_t p_frame_index, const ConstantsSnapshot &p_consts) override {
 		MutexLock lock(g_sl_mutex);
+		if (!g_sl_loaded || !g_sl_device_set) {
+			return false;
+		}
 		sl::FrameToken *token = sl_get_or_create_token_locked(p_frame_index);
 		if (token == nullptr) {
 			return false;
@@ -456,6 +484,7 @@ public:
 		slc.prevClipToClip = projection_to_sl_matrix(p_consts.prev_clip_to_clip);
 		slc.jitterOffset = sl::float2(p_consts.jitter_offset.x, p_consts.jitter_offset.y);
 		slc.mvecScale = sl::float2(p_consts.mv_scale.x, p_consts.mv_scale.y);
+		slc.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
 		slc.cameraPos = sl::float3(p_consts.camera_pos.x, p_consts.camera_pos.y, p_consts.camera_pos.z);
 		slc.cameraUp = sl::float3(p_consts.camera_up.x, p_consts.camera_up.y, p_consts.camera_up.z);
 		slc.cameraRight = sl::float3(p_consts.camera_right.x, p_consts.camera_right.y, p_consts.camera_right.z);
@@ -478,6 +507,9 @@ public:
 
 	bool set_tags(uint64_t p_frame_index, const Vector<TagSnapshot> &p_tags, uint64_t p_cmd_list_handle) override {
 		MutexLock lock(g_sl_mutex);
+		if (!g_sl_loaded || !g_sl_device_set) {
+			return false;
+		}
 		sl::FrameToken *token = sl_get_or_create_token_locked(p_frame_index);
 		if (token == nullptr || p_tags.is_empty()) {
 			return false;
@@ -497,8 +529,12 @@ public:
 			sl::ResourceTag(nullptr, 0, sl::eValidUntilPresent),
 		};
 
+		bool all_valid_until_present = true;
 		for (uint32_t i = 0; i < count; i++) {
 			const TagSnapshot &t = p_tags[i];
+			if (!t.valid_until_present) {
+				all_valid_until_present = false;
+			}
 			void *native_res = reinterpret_cast<void *>(static_cast<uintptr_t>(t.resource_handle));
 			sl_resources[i] = sl::Resource(sl::ResourceType::eTex2d, native_res, t.d3d12_state);
 			extents[i].top = 0;
@@ -512,7 +548,8 @@ public:
 					&extents[i]);
 		}
 
-		void *cmd_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(p_cmd_list_handle));
+		// sl_core_api.h: cmdBuffer can be null when all tags use eValidUntilPresent.
+		void *cmd_ptr = all_valid_until_present ? nullptr : reinterpret_cast<void *>(static_cast<uintptr_t>(p_cmd_list_handle));
 		if (cmd_ptr != nullptr) {
 			cmd_ptr = sl_unwrap_native_interface(cmd_ptr);
 		}
@@ -530,7 +567,16 @@ public:
 			slo.mode = sl::DLSSGMode::eOff;
 		}
 		slo.numFramesToGenerate = p_opts.num_frames_to_generate;
-		sl::DLSSGFlags flags = sl::DLSSGFlags::eRequestVRAMEstimate;
+		sl::DLSSGFlags flags{};
+		if (p_opts.color_width >= 4 && p_opts.color_height >= 4) {
+			flags |= sl::DLSSGFlags::eRequestVRAMEstimate;
+			slo.colorWidth = p_opts.color_width;
+			slo.colorHeight = p_opts.color_height;
+			slo.mvecDepthWidth = p_opts.mvec_depth_width >= 4 ? p_opts.mvec_depth_width : p_opts.color_width;
+			slo.mvecDepthHeight = p_opts.mvec_depth_height >= 4 ? p_opts.mvec_depth_height : p_opts.color_height;
+			slo.numBackBuffers = 3;
+			slo.colorBufferFormat = 28; // DXGI_FORMAT_R8G8B8A8_UNORM
+		}
 		if (p_opts.retain_resources_when_off) {
 			flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
 		}
@@ -546,7 +592,7 @@ public:
 	}
 
 	bool set_options(const OptionsSnapshot &p_opts) override {
-		if (!g_sl_loaded) {
+		if (!g_sl_loaded || !g_sl_device_set) {
 			return false;
 		}
 		const sl::ViewportHandle viewport(0u);
@@ -556,7 +602,7 @@ public:
 
 	bool get_state(const OptionsSnapshot *p_opts, StateSnapshot &r_state) override {
 		r_state = StateSnapshot();
-		if (!g_sl_loaded) {
+		if (!g_sl_loaded || !g_sl_device_set) {
 			return false;
 		}
 		const sl::ViewportHandle viewport(0u);
@@ -796,6 +842,9 @@ bool dlss_streamline_init_if_requested() {
 
 	g_sl_loaded = true;
 	g_sl_init_failed = false;
+	g_sl_device_set = false;
+	g_sl_has_adapter_luid = false;
+	D3D12Hooks::set_device_created_callback(_sl_on_d3d12_device_created, nullptr);
 	dlss_ngx_d3d12_set_native_device_unwrap(sl_unwrap_native_interface);
 	dlss_ngx_d3d12_set_native_command_list_unwrap(sl_unwrap_native_interface);
 	set_latency_marker_callback(_sl_latency_marker_callback);
@@ -825,8 +874,11 @@ void dlss_streamline_shutdown() {
 		g_sl_loaded = false;
 	}
 	if (!D3D12Hooks::is_registration_locked()) {
+		D3D12Hooks::set_device_created_callback(nullptr, nullptr);
 		D3D12Hooks::set_library_override(String(), String());
 	}
+	g_sl_device_set = false;
+	g_sl_has_adapter_luid = false;
 	g_sl_current_token = nullptr;
 	g_sl_token_frame_id = UINT64_MAX;
 	g_sl_reflex_state_queried = false;

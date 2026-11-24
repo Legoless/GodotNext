@@ -95,6 +95,10 @@ public:
 		bool dynamic_resolution_enabled = false;
 		uint32_t dynamic_res_width = 0;
 		uint32_t dynamic_res_height = 0;
+		uint32_t color_width = 0;
+		uint32_t color_height = 0;
+		uint32_t mvec_depth_width = 0;
+		uint32_t mvec_depth_height = 0;
 		bool enable_ui_recomposition = true;
 		float dynamic_target_fps = 0.0f;
 
@@ -105,6 +109,10 @@ public:
 					dynamic_resolution_enabled == p_other.dynamic_resolution_enabled &&
 					dynamic_res_width == p_other.dynamic_res_width &&
 					dynamic_res_height == p_other.dynamic_res_height &&
+					color_width == p_other.color_width &&
+					color_height == p_other.color_height &&
+					mvec_depth_width == p_other.mvec_depth_width &&
+					mvec_depth_height == p_other.mvec_depth_height &&
 					enable_ui_recomposition == p_other.enable_ui_recomposition &&
 					dynamic_target_fps == p_other.dynamic_target_fps;
 		}
@@ -156,6 +164,7 @@ class DLSSFrameGeneration : public FrameGenerationExtension {
 
 	bool skip_next_present = true;
 	bool runtime_disabled = false;
+	Size2i last_render_size;
 	Size2i last_output_size;
 	uint64_t last_swap_chain = 0;
 

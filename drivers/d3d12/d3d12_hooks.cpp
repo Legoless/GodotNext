@@ -40,6 +40,10 @@ D3D12Hooks *D3D12Hooks::singleton = nullptr;
 String D3D12Hooks::d3d12_library_override;
 String D3D12Hooks::dxgi_library_override;
 Callable *D3D12Hooks::present_callback = nullptr;
+D3D12Hooks::DeviceCreatedCallback D3D12Hooks::device_created_callback = nullptr;
+void *D3D12Hooks::device_created_userdata = nullptr;
+D3D12Hooks::DeviceDestroyingCallback D3D12Hooks::device_destroying_callback = nullptr;
+void *D3D12Hooks::device_destroying_userdata = nullptr;
 SafeNumeric<uint32_t> D3D12Hooks::registration_locks;
 
 D3D12Hooks::D3D12Hooks() {
@@ -101,6 +105,32 @@ void D3D12Hooks::call_present_callback(IDXGISwapChain *p_swap_chain, uint64_t p_
 	present_callback->callp(args, 3, ret, ce);
 	if (ce.error != Callable::CallError::CALL_OK) {
 		ERR_PRINT_ONCE("D3D12Hooks: the present callback failed: " + Variant::get_callable_error_text(*present_callback, args, 3, ce) + ".");
+	}
+}
+
+Error D3D12Hooks::set_device_created_callback(DeviceCreatedCallback p_callback, void *p_userdata) {
+	ERR_FAIL_COND_V_MSG(is_registration_locked(), ERR_LOCKED, "D3D12Hooks::set_device_created_callback() must be called before the D3D12 rendering context initializes (before RenderingServer init).");
+	device_created_callback = p_callback;
+	device_created_userdata = p_userdata;
+	return OK;
+}
+
+void D3D12Hooks::call_device_created_callback(ID3D12Device *p_device) {
+	if (device_created_callback != nullptr && p_device != nullptr) {
+		device_created_callback(p_device, device_created_userdata);
+	}
+}
+
+Error D3D12Hooks::set_device_destroying_callback(DeviceDestroyingCallback p_callback, void *p_userdata) {
+	ERR_FAIL_COND_V_MSG(is_registration_locked(), ERR_LOCKED, "D3D12Hooks::set_device_destroying_callback() must be called before the D3D12 rendering context initializes (before RenderingServer init).");
+	device_destroying_callback = p_callback;
+	device_destroying_userdata = p_userdata;
+	return OK;
+}
+
+void D3D12Hooks::call_device_destroying_callback(ID3D12Device *p_device) {
+	if (device_destroying_callback != nullptr && p_device != nullptr) {
+		device_destroying_callback(p_device, device_destroying_userdata);
 	}
 }
 

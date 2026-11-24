@@ -50,9 +50,15 @@ private:
 	static String d3d12_library_override;
 	static String dxgi_library_override;
 	static Callable *present_callback;
+	static void (*device_created_callback)(ID3D12Device *p_device, void *p_userdata);
+	static void *device_created_userdata;
+	static void (*device_destroying_callback)(ID3D12Device *p_device, void *p_userdata);
+	static void *device_destroying_userdata;
 	static SafeNumeric<uint32_t> registration_locks;
 
 public:
+	typedef void (*DeviceCreatedCallback)(ID3D12Device *p_device, void *p_userdata);
+	typedef void (*DeviceDestroyingCallback)(ID3D12Device *p_device, void *p_userdata);
 	D3D12Hooks();
 	virtual ~D3D12Hooks();
 	virtual D3D_FEATURE_LEVEL get_feature_level() const = 0;
@@ -83,6 +89,16 @@ public:
 	static Error set_present_callback(const Callable &p_callback);
 	static bool has_present_callback() { return present_callback != nullptr; }
 	static void call_present_callback(IDXGISwapChain *p_swap_chain, uint64_t p_frame_index, PresentStage p_stage);
+
+	// Calls p_callback immediately after ID3D12Device creation (before command queues and swap chains
+	// are created). Pass nullptr to clear. Same registration rule as above.
+	static Error set_device_created_callback(DeviceCreatedCallback p_callback, void *p_userdata);
+	static void call_device_created_callback(ID3D12Device *p_device);
+
+	// Calls p_callback immediately before ID3D12Device teardown in ~RenderingDeviceDriverD3D12,
+	// while the device is still alive and idle. Pass nullptr to clear. Same registration rule as above.
+	static Error set_device_destroying_callback(DeviceDestroyingCallback p_callback, void *p_userdata);
+	static void call_device_destroying_callback(ID3D12Device *p_device);
 
 	// Called by RenderingContextDriverD3D12: registration stays closed while any context is initialized.
 	static void lock_registration();

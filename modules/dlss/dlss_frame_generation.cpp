@@ -30,8 +30,6 @@
 
 #include "dlss_frame_generation.h"
 
-#include "dlss_ngx_d3d12.h"
-
 #include "core/math/math_funcs.h"
 #include "core/string/print_string.h"
 #include "servers/rendering/rendering_device.h"
@@ -44,8 +42,6 @@ struct DLSSFGTagCallbackArgs {
 	DLSSFrameGenBackendOps *ops = nullptr;
 	uint64_t frame_index = 0;
 	Vector<DLSSFrameGenBackendOps::TagSnapshot> tags;
-	RDD::TextureID driver_ids[4];
-	uint32_t driver_id_count = 0;
 };
 
 void _dlss_fg_tag_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_cmd_buffer, void *p_userdata) {
@@ -54,18 +50,12 @@ void _dlss_fg_tag_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID
 		return;
 	}
 	if (args->ops != nullptr && !args->tags.is_empty()) {
-#if defined(DLSS_BACKEND_NGX) && defined(D3D12_ENABLED)
-		if (p_driver != nullptr && p_driver->get_capabilities().device_family == RDD::DEVICE_DIRECTX && args->driver_id_count > 0) {
-			bool rw[4] = { false, false, false, false };
-			dlss_ngx_d3d12_prepare_callback_textures(
-					p_driver,
-					p_cmd_buffer,
-					VectorView<RDD::TextureID>(args->driver_ids, args->driver_id_count),
-					VectorView<bool>(rw, args->driver_id_count));
-		}
-#endif
-		const uint64_t cmd_handle = p_driver != nullptr ? p_driver->command_buffer_get_native_handle(p_cmd_buffer) : 0;
-		args->ops->set_tags(args->frame_index, args->tags, cmd_handle);
+		// All DLSS-G tags use eValidUntilPresent and are already transitioned to SHADER_RESOURCE by
+		// RenderingDeviceGraph via CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE; pass 0 for cmd_list so
+		// Streamline records no commands onto Godot's command list during tagging.
+		(void)p_driver;
+		(void)p_cmd_buffer;
+		args->ops->set_tags(args->frame_index, args->tags, 0);
 	}
 	memdelete(args);
 }
@@ -214,6 +204,7 @@ void DLSSFrameGeneration::on_frame_inputs(const Ref<FrameGenerationInputs> &p_in
 	if (resized || p_inputs->get_reset()) {
 		skip_next_present = true;
 	}
+	last_render_size = render_size;
 	last_output_size = output_size;
 	if (swap_chain != 0) {
 		last_swap_chain = swap_chain;
@@ -272,9 +263,6 @@ void DLSSFrameGeneration::on_frame_inputs(const Ref<FrameGenerationInputs> &p_in
 			tag.d3d12_state = D3D12_STATE_ALL_SHADER_RESOURCE;
 			tag.valid_until_present = true;
 			cb_args->tags.push_back(tag);
-			if (info.driver_id.id != 0 && cb_args->driver_id_count < 4) {
-				cb_args->driver_ids[cb_args->driver_id_count++] = info.driver_id;
-			}
 			if (cb_res_count < 4) {
 				cb_res[cb_res_count++] = { p_rid, RD::CALLBACK_RESOURCE_TYPE_TEXTURE, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE };
 			}
@@ -353,6 +341,17 @@ void DLSSFrameGeneration::on_present(Object *p_inputs, bool p_before) {
 			opts.num_frames_to_generate = CLAMP(desired_gen, 1u, max_gen);
 		}
 
+		const Size2i out_sz = (inputs != nullptr && inputs->get_output_size().width > 0 && inputs->get_output_size().height > 0) ? inputs->get_output_size() : last_output_size;
+		const Size2i ren_sz = (inputs != nullptr && inputs->get_render_size().width > 0 && inputs->get_render_size().height > 0) ? inputs->get_render_size() : last_render_size;
+		if (out_sz.width > 0 && out_sz.height > 0) {
+			opts.color_width = uint32_t(out_sz.width);
+			opts.color_height = uint32_t(out_sz.height);
+		}
+		if (ren_sz.width > 0 && ren_sz.height > 0) {
+			opts.mvec_depth_width = uint32_t(ren_sz.width);
+			opts.mvec_depth_height = uint32_t(ren_sz.height);
+		}
+
 		if (ops->is_dynamic_resolution_enabled() && inputs != nullptr) {
 			const Size2i rs = inputs->get_render_size();
 			if (rs.width > 0 && rs.height > 0) {
@@ -395,6 +394,9 @@ void DLSSFrameGeneration::on_present(Object *p_inputs, bool p_before) {
 
 Dictionary DLSSFrameGeneration::get_provider_capabilities() const {
 	MutexLock lock(mutex);
+	if (!state_queried) {
+		_refresh_capabilities_locked();
+	}
 	Dictionary caps;
 	const uint32_t max_gen = MAX(1u, cached_state.num_frames_to_generate_max);
 	caps["max_multiplier"] = int(max_gen) + 1;
