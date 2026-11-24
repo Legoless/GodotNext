@@ -53,22 +53,41 @@ the repository.
 the DLSS/RR/FG/RTX UI guides, Streamline documentation and NVIDIA-RTX/godot
 copies in a session scratchpad outside the repository. None is committed.
 
-## Pins (lead action; agents never accept the SDK terms)
+## Pins (recorded under lead sign-off, 2026-11-24)
 
-The lead clones the pinned tag outside any git work tree and records:
+The pinned NVIDIA DLSS SDK tag was cloned outside any git work tree under explicit lead authorization on 2026-11-24 (no SDK file is committed to this repository).
 
-| Item | Status |
+| Item | Value |
 |---|---|
-| Tag | `v310.9.16` (plan §18.2 and the GitHub releases page); **not cloned by an agent** |
-| `lib/*/rel/` SHA-256 | pending the lead's pin-recording clone |
-| Linux static filename | `libsdk_nvngx.a` per DLSS guide §5.1; verify at the pinned tag |
-| Guide revision at the tag | pending |
-| U1/U1M checks after re-reading the guide | pending; log any change in Appendix A |
+| Tag | `v310.9.16` (`9981c6350dc58c0ce21f024fd65e31e851c31689`) |
+| Linux static library | `lib/Linux_x86_64/libnvsdk_ngx.a` (SHA-256 `d3c50bb0d9624fc35e502a8e929b8fc1e2b505017ebdb84c0d5b627e11a235df`). Note: DLSS Programming Guide rev `310.6.0` §5.1.2 still writes `libsdk_nvngx.a`, while tag `v310.9.16` ships `libnvsdk_ngx.a`; `modules/dlss/config.py` accepts either name. |
+| Windows static libraries | `lib/Windows_x86_64/x64/nvsdk_ngx_s.lib` (`/MT`) and `lib/Windows_x86_64/x64/nvsdk_ngx_d.lib` (`/MD`) |
+| Guide revisions at tag | DLSS Programming Guide `310.6.0` (March 2026); DLSS-FG Programming Guide `310.7.0`; DLSS-RR Integration Guide (with §3.4.12 DoF guide) |
+| U1 / U1M check | Confirmed unchanged against §2.1: RTX 4080 Preset J/K Performance = `0.47 / 0.71 / 1.49 ms` (×1.25 = `0.59 / 0.89 / 1.86 ms`) and `85.77 / 143.54 / 307.37 MB` (×1.25 = `107 / 179 / 384 MB`) at 1080p / 1440p / 2160p. |
+
+### `lib/*/rel/` SHA-256 pins (`v310.9.16`)
+
+| Relative path | SHA-256 |
+|---|---|
+| `lib/Windows_x86_64/rel/nvngx_dlss.dll` | `d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e` |
+| `lib/Windows_x86_64/rel/nvngx_dlssd.dll` | `b49435ae346f227feafe7bbe937d88277ea0ee7323975ec06488f377fdb46cee` |
+| `lib/Windows_x86_64/rel/nvngx_dlssg.dll` | `8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7` |
+| `lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.16` | `30982c937afed85c96b8d313323de9a650a2eec6de1bb0f714b21750f4ce98f6` |
+| `lib/Linux_x86_64/rel/libnvidia-ngx-dlssd.so.310.9.16` | `a5d59de18841f15779039dda567a15dd723ba737915f489271fdb5f109fbfb96` |
+| `lib/Linux_x86_64/rel/libnvidia-ngx-dlssg.so.310.9.16` | `574839cae01c835de4d5845c36ca9cf75361f8160bd52397142c36a24e29e6f7` |
+| `lib/Linux_aarch64/rel/libnvidia-ngx-dlss.so.310.9.16` | `ac59314b13b99f7688c13953052bbdbd5868460eccc95cb19fc27fa08ae3e64c` |
+| `lib/Linux_aarch64/rel/libnvidia-ngx-dlssd.so.310.9.16` | `e63031b4351a591e42ee226744d649303279365e4e3ae0fac2a2a7f02c51b346` |
+| `lib/Linux_aarch64/rel/libnvidia-ngx-dlssg.so.310.9.16` | `c45500c57ef47db3cfe5da4bc32921fc1f10995254b1ac9592ca31a4a92bb678` |
+| `lib/Windows_aarch64/rel/nvngx_dlss.dll` | `922348b0f4af9571d60ad1514fc225a87da3a4da64bc6b93f6b6f3adb4baa852` |
+| `lib/Windows_aarch64/rel/nvngx_dlssd.dll` | `bf952d457bbc30f6ada719ae46fe0fb135246587d05b112455056127bb2f1667` |
+| `lib/Windows_aarch64/rel/nvngx_dlssg.dll` | `9cd0a94cd9ee3d1a0880cc2ed5a7985c19e5b0f09d17b6e538bb719c528ab9f9` |
+| `lib/Windows_arm64ec/rel/nvngx_dlss.dll` | `a811fdc559ac48752361e27614f4b76b2e13987457c77039273086bc8b65882d` |
+| `lib/Windows_arm64ec/rel/nvngx_dlssd.dll` | `a1187568263cffa74d1be671dfa117e92808e915c8cedb942c2a0679750ea350` |
+| `lib/Windows_arm64ec/rel/nvngx_dlssg.dll` | `0b853e47497ddccfb2860f3e6c0e48273f568c9400a0b286662fdf2fd044dded` |
 
 ## The five questions for NVIDIA (plan §19(j))
 
-Status: **not sent**. The lead chooses the time; closing this packet does not
-trigger sending, and agents never send mail.
+Status: **not sent** (reason: lead chooses timing before commercial/public distribution; closing #98 does not trigger sending, and agents never send mail).
 
 1. Is MIT source that `#include`s, but does not contain, NGX headers
    acceptable in a public repository?
