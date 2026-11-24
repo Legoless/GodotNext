@@ -53,6 +53,7 @@ class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	uint32_t mesh_buffer_capacity = 0;
 
 protected:
+	uint64_t _get_max_storage_buffer_range() const override;
 	void _upload_records(uint32_t p_first, uint32_t p_count) override;
 	void _upload_mesh_records(uint32_t p_first, uint32_t p_count) override;
 	bool _resize_dag(uint32_t p_bytes) override;

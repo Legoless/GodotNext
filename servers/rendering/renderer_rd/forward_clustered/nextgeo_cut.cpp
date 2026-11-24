@@ -2399,6 +2399,19 @@ bool NextGeoCut::_ensure_vsm() {
 		return false;
 	}
 	vsm_ready = true;
+	// GodotNext: vsm_max_storage_buffer_range (#306). Log device storage-buffer range limit and chosen NextGeo layout once at VSM init.
+	{
+		const uint64_t max_storage_range = rd->limit_get(RD::LIMIT_MAX_STORAGE_BUFFER_RANGE);
+		if (RSG::virtual_mesh_storage != nullptr) {
+			const RendererVirtualMeshStorage::PageArenaLayout layout = RSG::virtual_mesh_storage->get_page_arena_layout();
+			print_line(vformat("VSM NextGeo: maxStorageBufferRange=%d MiB (%d B), page arena=%d MiB (%d slots x %d KiB, requested %d MiB%s).",
+					max_storage_range >> 20, max_storage_range, uint64_t(layout.arena_bytes) >> 20, layout.slot_count,
+					RSG::virtual_mesh_storage->get_page_slot_size_bytes() >> 10, layout.requested_bytes >> 20,
+					layout.clamped_to_device_limit ? ", clamped to device limit" : ""));
+		} else {
+			print_line(vformat("VSM NextGeo: maxStorageBufferRange=%d MiB (%d B).", max_storage_range >> 20, max_storage_range));
+		}
+	}
 	return true;
 }
 
@@ -2528,13 +2541,20 @@ bool NextGeoCut::_ensure_vsm_bins(RenderingDevice *p_rd) {
 	if (vsm_bin_args.is_null()) {
 		vsm_bin_args = p_rd->storage_buffer_create(RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 	}
+	if (vsm_bin_draw_count.is_null()) {
+		const uint32_t one = 1u;
+		Vector<uint8_t> one_bytes;
+		one_bytes.resize(sizeof(uint32_t));
+		memcpy(one_bytes.ptrw(), &one, sizeof(uint32_t));
+		vsm_bin_draw_count = p_rd->storage_buffer_create(sizeof(uint32_t), one_bytes, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	}
 	if (vsm_bin_append.is_null()) {
 		vsm_bin_append = _storage(RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY * sizeof(uint32_t));
 	}
 	if (vsm_bin_lists.is_null()) {
 		vsm_bin_lists = _storage(RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY * sizeof(uint32_t));
 	}
-	vsm_bins_ready = vsm_bin_state.is_valid() && vsm_bin_args.is_valid() && vsm_bin_append.is_valid() && vsm_bin_lists.is_valid();
+	vsm_bins_ready = vsm_bin_state.is_valid() && vsm_bin_args.is_valid() && vsm_bin_draw_count.is_valid() && vsm_bin_append.is_valid() && vsm_bin_lists.is_valid();
 	return vsm_bins_ready;
 }
 
@@ -2676,7 +2696,14 @@ void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inpu
 			}
 			rd->draw_list_set_push_constant(dl, &push, sizeof(push));
 			// firstInstance = 0 in vsm_bin_args (written by raster_bin_compact PREFIX).
-			rd->draw_list_draw_indirect(dl, false, vsm_bin_args, RendererRD::nextgeo_raster_bin_args_word(0u, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_HW) * sizeof(uint32_t), 1u, 0u);
+			// GodotNext: vsm_max_storage_buffer_range (#306). Use indirect-count draw when supported
+			// (matching vsm_hw_pipeline) so software drivers (llvmpipe) execute the HW bin draw reliably.
+			const uint32_t args_offset = RendererRD::nextgeo_raster_bin_args_word(0u, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_HW) * sizeof(uint32_t);
+			if (rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT) && vsm_bin_draw_count.is_valid()) {
+				rd->draw_list_draw_indirect_count(dl, false, vsm_bin_args, args_offset, vsm_bin_draw_count, 0u, 1u, 0u);
+			} else {
+				rd->draw_list_draw_indirect(dl, false, vsm_bin_args, args_offset, 1u, 0u);
+			}
 		}
 		rd->draw_list_end();
 	}
@@ -2830,6 +2857,10 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 	const RID residency_buf = p_storage->get_residency_buffer().is_valid() ? p_storage->get_residency_buffer() : dummy_page_buf;
 	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_page_buf;
+	// GodotNext: vsm_max_storage_buffer_range (#306). Refuse to bind a page arena larger than the device limit.
+	const uint64_t max_storage_range = rd->limit_get(RD::LIMIT_MAX_STORAGE_BUFFER_RANGE);
+	ERR_FAIL_COND_V_MSG(max_storage_range > 0 && p_storage->get_page_buffer().is_valid() && p_storage->get_page_arena_allocation_bytes() > max_storage_range, false,
+			vformat("VSM NextGeo: page arena (%d B) exceeds device maxStorageBufferRange (%d B).", p_storage->get_page_arena_allocation_bytes(), max_storage_range));
 	const RID bin_table_buf = (use_bins && vsm_bin_table_buffer.is_valid()) ? vsm_bin_table_buffer : dummy_page_buf;
 	const RID bin_append_buf = (use_bins && vsm_bin_append.is_valid()) ? vsm_bin_append : dummy_page_buf;
 	const RID bin_state_buf = (use_bins && vsm_bin_state.is_valid()) ? vsm_bin_state : dummy_page_buf;
@@ -3177,7 +3208,7 @@ void NextGeoCut::_free_vsm_resources() {
 		rd->free_rid(vsm_hiz_texture);
 		vsm_hiz_texture = RID();
 	}
-	for (RID *buf : { &vsm_params_buffer, &vsm_map_meta_buffer, &vsm_counters[0], &vsm_counters[1], &vsm_counters_ring[0], &vsm_counters_ring[1], &vsm_counters_ring[2], &vsm_seed_args, &vsm_bvh_args[0], &vsm_bvh_args[1], &vsm_group_args, &vsm_raster_args, &vsm_raster_counts, &vsm_nodes_a, &vsm_nodes_b, &vsm_groups, &vsm_clusters[0], &vsm_clusters[1], &vsm_raster_lists, &vsm_hiz_owner, &vsm_bin_state, &vsm_bin_args, &vsm_bin_append, &vsm_bin_lists, &vsm_bin_table_buffer }) {
+	for (RID *buf : { &vsm_params_buffer, &vsm_map_meta_buffer, &vsm_counters[0], &vsm_counters[1], &vsm_counters_ring[0], &vsm_counters_ring[1], &vsm_counters_ring[2], &vsm_seed_args, &vsm_bvh_args[0], &vsm_bvh_args[1], &vsm_group_args, &vsm_raster_args, &vsm_raster_counts, &vsm_nodes_a, &vsm_nodes_b, &vsm_groups, &vsm_clusters[0], &vsm_clusters[1], &vsm_raster_lists, &vsm_hiz_owner, &vsm_bin_state, &vsm_bin_args, &vsm_bin_draw_count, &vsm_bin_append, &vsm_bin_lists, &vsm_bin_table_buffer }) {
 		if (buf->is_valid()) {
 			rd->free_rid(*buf);
 			*buf = RID();

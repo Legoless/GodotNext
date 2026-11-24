@@ -430,3 +430,49 @@ TEST_CASE("[NextGeo][Routing] Surface mask, clear reason and counters") {
 	storage.mesh_clear_virtual_geometry(mesh, 0);
 	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(0));
 }
+
+TEST_CASE("[NextGeo][VSM] Page arena layout obeys maxStorageBufferRange (#306)") {
+	constexpr uint64_t MIB = 1024ull * 1024ull;
+	constexpr uint32_t SLOT = 64u * 1024u;
+
+	// Vulkan minimum 128 MiB limit (e.g. Mesa lavapipe) clamps the 512 MiB default cleanly to 128 MiB.
+	const RendererVirtualMeshStorage::PageArenaLayout lavapipe = RendererVirtualMeshStorage::compute_page_arena_layout(512ull * MIB, SLOT, 1u, 128ull * MIB);
+	CHECK(lavapipe.valid);
+	CHECK(lavapipe.clamped_to_device_limit);
+	CHECK_EQ(lavapipe.arena_bytes, uint32_t(128u * 1024u * 1024u));
+	CHECK_EQ(lavapipe.slot_count, uint32_t(2048u));
+	CHECK(uint64_t(lavapipe.arena_bytes) <= 128ull * MIB);
+
+	// Non-slot-aligned device limit rounds down so the binding never exceeds maxStorageBufferRange.
+	const RendererVirtualMeshStorage::PageArenaLayout unaligned = RendererVirtualMeshStorage::compute_page_arena_layout(512ull * MIB, SLOT, 1u, 128ull * MIB + 1000ull);
+	CHECK(unaligned.valid);
+	CHECK(unaligned.clamped_to_device_limit);
+	CHECK_EQ(unaligned.arena_bytes, uint32_t(128u * 1024u * 1024u));
+	CHECK(uint64_t(unaligned.arena_bytes) <= 128ull * MIB + 1000ull);
+
+	// Large GPU limit (4 GiB) keeps the full 512 MiB cache unclamped.
+	const RendererVirtualMeshStorage::PageArenaLayout desktop = RendererVirtualMeshStorage::compute_page_arena_layout(512ull * MIB, SLOT, 1u, 4096ull * MIB);
+	CHECK(desktop.valid);
+	CHECK_FALSE(desktop.clamped_to_device_limit);
+	CHECK_EQ(desktop.arena_bytes, uint32_t(512u * 1024u * 1024u));
+	CHECK_EQ(desktop.slot_count, uint32_t(8192u));
+
+	// Required pinned slots exceeding the device limit are refused rather than exceeding maxStorageBufferRange.
+	const RendererVirtualMeshStorage::PageArenaLayout refused = RendererVirtualMeshStorage::compute_page_arena_layout(512ull * MIB, SLOT, 2049u, 128ull * MIB);
+	CHECK_FALSE(refused.valid);
+	CHECK_EQ(refused.arena_bytes, uint32_t(0u));
+	CHECK_EQ(refused.slot_count, uint32_t(0u));
+
+	// Limit smaller than a single slot is refused cleanly.
+	const RendererVirtualMeshStorage::PageArenaLayout tiny = RendererVirtualMeshStorage::compute_page_arena_layout(512ull * MIB, SLOT, 1u, SLOT - 1u);
+	CHECK_FALSE(tiny.valid);
+
+	// Live storage honors max_storage_buffer_range_override on layout query.
+	TestVirtualMeshStorage storage;
+	storage.set_max_storage_buffer_range_override(128ull * MIB);
+	const RendererVirtualMeshStorage::PageArenaLayout live_layout = storage.get_page_arena_layout();
+	CHECK(live_layout.valid);
+	CHECK(live_layout.clamped_to_device_limit);
+	CHECK_EQ(live_layout.arena_bytes, uint32_t(128u * 1024u * 1024u));
+	CHECK_EQ(live_layout.slot_count, uint32_t(2048u));
+}

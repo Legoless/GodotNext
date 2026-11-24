@@ -436,6 +436,7 @@ private:
 	bool vsm_bins_ready = false;
 	RID vsm_bin_state;
 	RID vsm_bin_args;
+	RID vsm_bin_draw_count;
 	RID vsm_bin_append;
 	RID vsm_bin_lists;
 	RID vsm_bin_table_buffer;

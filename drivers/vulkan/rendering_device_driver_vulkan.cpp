@@ -8623,6 +8623,9 @@ uint64_t RenderingDeviceDriverVulkan::limit_get(Limit p_limit) {
 			return limits.maxPushConstantsSize;
 		case LIMIT_MAX_UNIFORM_BUFFER_SIZE:
 			return limits.maxUniformBufferRange;
+		// GodotNext: vsm_max_storage_buffer_range (#306).
+		case LIMIT_MAX_STORAGE_BUFFER_RANGE:
+			return limits.maxStorageBufferRange;
 		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTE_OFFSET:
 			return limits.maxVertexInputAttributeOffset;
 		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTES:

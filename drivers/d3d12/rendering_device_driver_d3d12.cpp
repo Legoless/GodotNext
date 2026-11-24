@@ -7491,6 +7491,9 @@ uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 			return device_limits.max_srvs_per_shader_stage;
 		case LIMIT_MAX_UNIFORM_BUFFER_SIZE:
 			return 65536;
+		// GodotNext: vsm_max_storage_buffer_range (#306). D3D12 raw/structured storage buffers support 32-bit byte offsets up to 2 GiB.
+		case LIMIT_MAX_STORAGE_BUFFER_RANGE:
+			return uint64_t(1) << 31;
 		case LIMIT_MAX_VIEWPORT_DIMENSIONS_X:
 		case LIMIT_MAX_VIEWPORT_DIMENSIONS_Y:
 			return 16384; // Based on max. texture size. Maybe not correct.

@@ -1062,6 +1062,9 @@ public:
 		LIMIT_MAX_MESH_WORKGROUP_COUNT_Y,
 		LIMIT_MAX_MESH_WORKGROUP_COUNT_Z,
 		LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT,
+		// GodotNext: vsm_max_storage_buffer_range (#306). Maximum byte range of a single storage-buffer
+		// descriptor (VkPhysicalDeviceLimits::maxStorageBufferRange on Vulkan).
+		LIMIT_MAX_STORAGE_BUFFER_RANGE,
 	};
 
 	enum Features {

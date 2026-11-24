@@ -1185,6 +1185,63 @@ void RendererVirtualMeshStorage::set_page_arena_bytes_override(uint64_t p_bytes)
 	}
 }
 
+void RendererVirtualMeshStorage::set_max_storage_buffer_range_override(uint64_t p_bytes) {
+	max_storage_buffer_range_override = p_bytes;
+	if (!meshes.is_empty()) {
+		_ensure_page_arena();
+	}
+}
+
+uint64_t RendererVirtualMeshStorage::get_effective_max_storage_buffer_range() const {
+	if (max_storage_buffer_range_override > 0) {
+		return max_storage_buffer_range_override;
+	}
+	return _get_max_storage_buffer_range();
+}
+
+RendererVirtualMeshStorage::PageArenaLayout RendererVirtualMeshStorage::compute_page_arena_layout(uint64_t p_desired_bytes, uint32_t p_slot_page_size, uint32_t p_required_pinned_slots, uint64_t p_max_storage_buffer_range) {
+	PageArenaLayout layout;
+	const uint64_t slot_sz = MAX<uint64_t>(p_slot_page_size, 256u);
+	constexpr uint64_t HARD_CAP = 0x7FFF0000ull;
+	const uint64_t raw_cap = (p_max_storage_buffer_range > 0) ? MIN<uint64_t>(HARD_CAP, p_max_storage_buffer_range) : HARD_CAP;
+	const uint64_t aligned_cap = (raw_cap / slot_sz) * slot_sz;
+
+	const uint64_t desired_clamped_hard = MIN<uint64_t>(p_desired_bytes, HARD_CAP);
+	const uint64_t desired_slots = MAX<uint64_t>(desired_clamped_hard / slot_sz, 1ull);
+	const uint64_t requested_aligned = desired_slots * slot_sz;
+	layout.requested_bytes = requested_aligned;
+	layout.effective_limit_bytes = raw_cap;
+
+	const uint64_t min_bytes = uint64_t(MAX(p_required_pinned_slots, 1u)) * slot_sz;
+	if (aligned_cap == 0 || min_bytes > aligned_cap) {
+		layout.clamped_to_device_limit = (p_max_storage_buffer_range > 0 && requested_aligned > aligned_cap);
+		layout.valid = false;
+		return layout;
+	}
+
+	layout.clamped_to_device_limit = (p_max_storage_buffer_range > 0 && requested_aligned > aligned_cap);
+	const uint64_t capped_desired = MIN<uint64_t>(requested_aligned, aligned_cap);
+	const uint64_t target_bytes = MAX<uint64_t>(capped_desired, min_bytes);
+	const uint64_t slots = target_bytes / slot_sz;
+	const uint64_t actual_bytes = slots * slot_sz;
+	if (slots == 0 || actual_bytes > raw_cap || actual_bytes > UINT32_MAX) {
+		layout.valid = false;
+		return layout;
+	}
+
+	layout.slot_count = uint32_t(slots);
+	layout.arena_bytes = uint32_t(actual_bytes);
+	layout.valid = true;
+	return layout;
+}
+
+RendererVirtualMeshStorage::PageArenaLayout RendererVirtualMeshStorage::get_page_arena_layout() const {
+	if (last_page_arena_layout.valid) {
+		return last_page_arena_layout;
+	}
+	return compute_page_arena_layout(_desired_page_arena_bytes(), slot_page_size, 1u, get_effective_max_storage_buffer_range());
+}
+
 void RendererVirtualMeshStorage::set_page_upload_bytes_per_frame_override(uint64_t p_bytes) {
 	page_upload_override_bytes = p_bytes;
 }
@@ -1350,13 +1407,7 @@ void RendererVirtualMeshStorage::_evict_all_non_pinned_leaf_first() {
 
 bool RendererVirtualMeshStorage::_ensure_page_arena() {
 	const uint64_t desired_bytes = _desired_page_arena_bytes();
-	if (page_capacity == desired_bytes && !page_slots.is_empty() && uint64_t(page_slots.size()) * uint64_t(slot_page_size) == desired_bytes) {
-		return true;
-	}
-
-	// Evict non-pinned streaming pages leaf-first before resizing the backing buffer.
-	_evict_all_non_pinned_leaf_first();
-
+	const uint64_t max_storage_range = get_effective_max_storage_buffer_range();
 	uint32_t required_pinned_slots = 0;
 	for (const KeyValue<RID, MeshInfo> &E : meshes) {
 		for (uint32_t p = 0; p < E.value.root_page_count; p++) {
@@ -1367,13 +1418,26 @@ bool RendererVirtualMeshStorage::_ensure_page_arena() {
 		}
 	}
 
-	const uint64_t min_bytes = uint64_t(MAX(required_pinned_slots, 1u)) * uint64_t(slot_page_size);
-	const uint64_t target_bytes = MIN<uint64_t>(MAX(desired_bytes, min_bytes), 0x7FFF0000ull);
-	const uint32_t total_slots = uint32_t(target_bytes / uint64_t(slot_page_size));
-	const uint32_t actual_bytes = total_slots * slot_page_size;
+	const PageArenaLayout layout = compute_page_arena_layout(desired_bytes, slot_page_size, required_pinned_slots, max_storage_range);
+	if (!layout.valid) {
+		ERR_PRINT(vformat("NextGeo: page arena needs at least %d pinned slots (%d B), which exceeds device maxStorageBufferRange (%d B).",
+				MAX(required_pinned_slots, 1u), uint64_t(MAX(required_pinned_slots, 1u)) * uint64_t(slot_page_size), max_storage_range));
+		return false;
+	}
+	if (page_capacity == layout.arena_bytes && !page_slots.is_empty() && uint32_t(page_slots.size()) == layout.slot_count && uint64_t(page_slots.size()) * uint64_t(slot_page_size) == layout.arena_bytes) {
+		last_page_arena_layout = layout;
+		return true;
+	}
+
+	// Evict non-pinned streaming pages leaf-first before resizing the backing buffer.
+	_evict_all_non_pinned_leaf_first();
+
+	const uint32_t total_slots = layout.slot_count;
+	const uint32_t actual_bytes = layout.arena_bytes;
 	if (!_resize_pages(actual_bytes)) {
 		return false;
 	}
+	last_page_arena_layout = layout;
 
 	page_capacity = actual_bytes;
 	page_slots.clear();
@@ -1453,9 +1517,12 @@ uint32_t RendererVirtualMeshStorage::_allocate_page_slot(bool p_pinned) {
 	}
 
 	if (p_pinned) {
-		// Pinned root pages are never dropped: grow the arena if every slot is already pinned.
+		// Pinned root pages are never dropped: grow the arena if every slot is already pinned,
+		// staying within the device's maxStorageBufferRange (#306).
+		const uint64_t max_storage_range = get_effective_max_storage_buffer_range();
+		const uint64_t hard_cap = (max_storage_range > 0) ? MIN<uint64_t>(0x7FFF0000ull, max_storage_range) : 0x7FFF0000ull;
 		const uint64_t grown = uint64_t(page_slots.size() + 16u) * uint64_t(slot_page_size);
-		if (grown <= 0x7FFF0000ull) {
+		if (grown <= hard_cap) {
 			const uint64_t saved_override = page_arena_override_bytes;
 			page_arena_override_bytes = grown;
 			const bool ok = _ensure_page_arena();

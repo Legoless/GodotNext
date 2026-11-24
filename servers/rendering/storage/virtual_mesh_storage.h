@@ -443,8 +443,24 @@ public:
 	void process_streaming();
 	void flush();
 
+	// GodotNext: vsm_max_storage_buffer_range (#306). Layout chosen for the NextGeo page arena
+	// storage buffer against the device's maxStorageBufferRange limit.
+	struct PageArenaLayout {
+		uint32_t arena_bytes = 0;
+		uint32_t slot_count = 0;
+		uint64_t requested_bytes = 0;
+		uint64_t effective_limit_bytes = 0;
+		bool clamped_to_device_limit = false;
+		bool valid = false;
+	};
+
+	static PageArenaLayout compute_page_arena_layout(uint64_t p_desired_bytes, uint32_t p_slot_page_size, uint32_t p_required_pinned_slots, uint64_t p_max_storage_buffer_range);
+
 	// --- Residency & Streaming (#78) ---
 	void set_page_arena_bytes_override(uint64_t p_bytes);
+	void set_max_storage_buffer_range_override(uint64_t p_bytes);
+	uint64_t get_effective_max_storage_buffer_range() const;
+	PageArenaLayout get_page_arena_layout() const;
 	void set_page_upload_bytes_per_frame_override(uint64_t p_bytes);
 	void set_io_delay_seed(uint64_t p_seed);
 	uint64_t get_io_delay_seed() const { return io_delay_seed; }
@@ -515,6 +531,7 @@ protected:
 	virtual void _upload_records(uint32_t p_first, uint32_t p_count) = 0;
 	virtual void _upload_mesh_records(uint32_t p_first, uint32_t p_count) = 0;
 	// GodotNext: nextgeo_gpu_cull (#76). The DAG buffer lives in the renderer.
+	virtual uint64_t _get_max_storage_buffer_range() const { return 0; }
 	virtual bool _resize_dag(uint32_t p_bytes) { return false; }
 	virtual void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
 	virtual void _reset_dag() {}
@@ -707,6 +724,8 @@ protected:
 	// Residency & streaming state (#78).
 	uint32_t slot_page_size = 64u * 1024u;
 	uint64_t page_arena_override_bytes = 0;
+	uint64_t max_storage_buffer_range_override = 0;
+	PageArenaLayout last_page_arena_layout;
 	uint64_t page_upload_override_bytes = 0;
 	LocalVector<PageSlot> page_slots;
 	LocalVector<uint32_t> free_page_slots;

@@ -2997,6 +2997,9 @@ uint64_t RenderingDeviceDriverMetal::limit_get(Limit p_limit) {
 			return limits.maxBufferLength;
 		case LIMIT_MAX_UNIFORM_BUFFER_SIZE:
 			return limits.maxBufferLength;
+		// GodotNext: vsm_max_storage_buffer_range (#306).
+		case LIMIT_MAX_STORAGE_BUFFER_RANGE:
+			return limits.maxBufferLength;
 		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTE_OFFSET:
 			return limits.maxVertexDescriptorLayoutStride;
 		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTES:

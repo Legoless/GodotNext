@@ -5525,6 +5525,12 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 				ERR_FAIL_COND_V_MSG(set_uniform.length > 0 && buffer->size != (uint32_t)set_uniform.length, RID(),
 						"Storage buffer supplied (binding: " + itos(uniform.binding) + ") size (" + itos(buffer->size) + ") does not match size of shader uniform: (" + itos(set_uniform.length) + ").");
 
+				// GodotNext: vsm_max_storage_buffer_range (#306). Refuse rather than write a storage-buffer
+				// descriptor past the device's maxStorageBufferRange.
+				const uint64_t max_storage_buffer_range = driver->limit_get(LIMIT_MAX_STORAGE_BUFFER_RANGE);
+				ERR_FAIL_COND_V_MSG(max_storage_buffer_range > 0 && uint64_t(buffer->size) > max_storage_buffer_range, RID(),
+						"Storage buffer supplied (binding: " + itos(uniform.binding) + ") size (" + itos(buffer->size) + ") exceeds device maxStorageBufferRange (" + itos(max_storage_buffer_range) + ").");
+
 				if (set_uniform.writable && _buffer_make_mutable(buffer, buffer_id)) {
 					// The buffer must be mutable if it's used for writing.
 					draw_graph.add_synchronization();
@@ -5748,6 +5754,10 @@ uint32_t RenderingDevice::bindless_table_allocate(RID p_table, RID p_resource) {
 			ERR_FAIL_NULL_V_MSG(buffer, RDBindless::INVALID_SLOT, "The resource for a bindless storage-buffer table is not a valid storage buffer.");
 			// A dynamic buffer moves its contents every frame; a table entry names one place.
 			ERR_FAIL_COND_V_MSG(buffer->usage.has_flag(RDD::BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT), RDBindless::INVALID_SLOT, "A dynamic (persistent) storage buffer cannot be placed in a bindless table.");
+			// GodotNext: vsm_max_storage_buffer_range (#306).
+			const uint64_t max_storage_buffer_range = driver->limit_get(LIMIT_MAX_STORAGE_BUFFER_RANGE);
+			ERR_FAIL_COND_V_MSG(max_storage_buffer_range > 0 && uint64_t(buffer->size) > max_storage_buffer_range, RDBindless::INVALID_SLOT,
+					vformat("Storage buffer size (%d) exceeds device maxStorageBufferRange (%d) for a bindless table.", uint64_t(buffer->size), max_storage_buffer_range));
 
 			_check_transfer_worker_buffer(buffer);
 			if (_buffer_make_mutable(buffer, p_resource)) {
@@ -11861,6 +11871,8 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_COUNT_Y);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_COUNT_Z);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT);
+	// GodotNext: vsm_max_storage_buffer_range (#306)
+	BIND_ENUM_CONSTANT(LIMIT_MAX_STORAGE_BUFFER_RANGE);
 
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);

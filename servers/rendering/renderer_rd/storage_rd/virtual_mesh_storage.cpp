@@ -63,11 +63,22 @@ void VirtualMeshStorage::free_resources() {
 	_reset_residency();
 }
 
+uint64_t VirtualMeshStorage::_get_max_storage_buffer_range() const {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return 0;
+	}
+	return rd->limit_get(RD::LIMIT_MAX_STORAGE_BUFFER_RANGE);
+}
+
 bool VirtualMeshStorage::_resize_dag(uint32_t p_bytes) {
 	RenderingDevice *rd = RD::get_singleton();
 	if (rd == nullptr) {
 		return false;
 	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: DAG buffer size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
 	if (dag_buffer.is_valid()) {
 		rd->free_rid(dag_buffer);
 		dag_buffer = RID();
@@ -103,6 +114,9 @@ bool VirtualMeshStorage::_resize_pages(uint32_t p_bytes) {
 	if (rd == nullptr) {
 		return false;
 	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: page arena size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
 	if (page_buffer.is_valid()) {
 		rd->free_rid(page_buffer);
 		page_buffer = RID();
@@ -138,6 +152,9 @@ bool VirtualMeshStorage::_resize_clusters(uint32_t p_bytes) {
 	if (rd == nullptr) {
 		return false;
 	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: cluster table size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
 	if (cluster_buffer.is_valid()) {
 		rd->free_rid(cluster_buffer);
 		cluster_buffer = RID();
@@ -173,6 +190,9 @@ bool VirtualMeshStorage::_resize_residency(uint32_t p_bytes) {
 	if (rd == nullptr) {
 		return false;
 	}
+	const uint64_t max_range = get_effective_max_storage_buffer_range();
+	ERR_FAIL_COND_V_MSG(max_range > 0 && uint64_t(p_bytes) > max_range, false,
+			vformat("NextGeo: residency buffer size (%d B) exceeds device maxStorageBufferRange (%d B).", uint64_t(p_bytes), max_range));
 	if (residency_buffer.is_valid()) {
 		rd->free_rid(residency_buffer);
 		residency_buffer = RID();

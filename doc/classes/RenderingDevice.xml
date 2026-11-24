@@ -3314,6 +3314,9 @@
 		<constant name="LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT" value="65" enum="Limit">
 			Maximum total number of mesh shader workgroups (X * Y * Z) that one mesh task draw without a task stage, or one task shader workgroup, can launch. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
 		</constant>
+		<constant name="LIMIT_MAX_STORAGE_BUFFER_RANGE" value="66" enum="Limit">
+			Maximum byte range of a single storage buffer descriptor ([code]VkPhysicalDeviceLimits::maxStorageBufferRange[/code] on Vulkan). Storage buffers larger than this limit cannot be bound as a single descriptor.
+		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.
 		</constant>
