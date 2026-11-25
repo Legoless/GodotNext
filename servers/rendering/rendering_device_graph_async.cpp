@@ -380,10 +380,11 @@ BitField<RDD::BarrierAccessBits> RenderingDeviceGraph::async_queue_access(BitFie
 	return p_access.get_shared(supported);
 }
 
-void RenderingDeviceGraph::set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions) {
+void RenderingDeviceGraph::set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions, bool p_buffers_require_transitions) {
 	DEV_ASSERT(driver == nullptr);
 	driver_honors_barriers = p_honors_barriers;
 	driver_textures_require_layout_transitions = p_textures_require_layout_transitions;
+	driver_buffers_require_transitions = p_buffers_require_transitions;
 }
 
 // GodotNext: rd_indirect_count (#177)

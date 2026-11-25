@@ -821,9 +821,29 @@ void RenderingShaderContainerD3D12::_add_raytracing_stand_ins(const HashMap<int,
 // uses ("Internal declaration '...' is unused."), and each ray-tracing stage is a library of its own, which often uses
 // a few of the bindings its shader declares. So this removes the resource variables that no resource index names and
 // that no instruction reads. Mesa reads uniform and storage buffers (and root constants) through resource indices
-// rather than through their variables, so those variables count as used when an index names their register. The root
-// signature still binds every binding of the shader, so the pipeline's global root signature covers all its stages.
+// rather than through their variables, so those variables count as used when an index names their register. Because
+// nir_to_dxil()'s own optimize_nir() later collapses dead branches and dead loads (for example in an any-hit stage that
+// does not cut or whose discard condition does not depend on earlier loads) without stripping newly dead UBO/SSBO/uniform
+// variables afterward, run the same dead-code and dead-control-flow passes before scanning live resource indices. The
+// root signature still binds every binding of the shader, so the pipeline's global root signature covers all its stages.
 void RenderingShaderContainerD3D12::_remove_unused_resources(nir_shader *p_shader) const {
+	bool progress = false;
+	do {
+		progress = false;
+		progress |= nir_lower_vars_to_ssa(p_shader);
+		progress |= nir_copy_prop(p_shader);
+		progress |= nir_opt_copy_prop_vars(p_shader);
+		progress |= nir_opt_remove_phis(p_shader);
+		progress |= nir_opt_dce(p_shader);
+		progress |= nir_opt_if(p_shader, nir_opt_if_options(nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis));
+		progress |= nir_opt_dead_cf(p_shader);
+		progress |= nir_opt_constant_folding(p_shader);
+		progress |= nir_opt_algebraic(p_shader);
+		progress |= nir_opt_undef(p_shader);
+		progress |= nir_opt_deref(p_shader);
+	} while (progress);
+	nir_remove_dead_derefs(p_shader);
+
 	HashSet<uint64_t> indexed;
 	nir_foreach_function_impl(impl, p_shader) {
 		nir_foreach_block(block, impl) {

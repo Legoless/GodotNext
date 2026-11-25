@@ -2307,18 +2307,22 @@ void RenderingDeviceGraph::add_blas_build(RDD::AccelerationStructureID p_acceler
 	thread_local LocalVector<ResourceTracker *> trackers;
 	thread_local LocalVector<ResourceUsage> usages;
 
-	// Sources and destination.
-	uint32_t resource_count = p_src_trackers.size() + 1;
-	trackers.resize(resource_count);
-	usages.resize(resource_count);
+	// Sources (deduplicated so a shared vertex/index buffer never self-depends under buffer-transition tracking) and destination.
+	trackers.clear();
+	usages.clear();
+	trackers.reserve(p_src_trackers.size() + 1);
+	usages.reserve(p_src_trackers.size() + 1);
 
 	for (uint32_t i = 0; i < p_src_trackers.size(); ++i) {
-		trackers[i] = p_src_trackers[i];
-		usages[i] = RESOURCE_USAGE_STORAGE_BUFFER_READ;
+		ResourceTracker *src_tracker = p_src_trackers[i];
+		if (src_tracker != nullptr && !trackers.has(src_tracker)) {
+			trackers.push_back(src_tracker);
+			usages.push_back(RESOURCE_USAGE_STORAGE_BUFFER_READ);
+		}
 	}
 
-	trackers[resource_count - 1] = p_dst_tracker;
-	usages[resource_count - 1] = RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
+	trackers.push_back(p_dst_tracker);
+	usages.push_back(RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE);
 
 	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
 }

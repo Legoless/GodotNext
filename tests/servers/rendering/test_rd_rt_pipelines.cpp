@@ -1134,4 +1134,44 @@ TEST_CASE("[RD][RTPipeline] Direct3D 12 RT pipelines follow ray query, and libra
 	CHECK(caps.trace_rays_indirect);
 }
 
+TEST_CASE("[RD][RTPipeline] BLAS build deduplicates shared source buffer trackers when buffer transitions are tracked") {
+	// Under D3D12 legacy barriers (API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS), a buffer state transition
+	// counts as a write in the render graph. Sharing one buffer between vertex/index or multiple
+	// geometries in a BLAS must not make the BLAS build command depend on itself.
+	RDG graph;
+	graph.set_driver_traits_for_test(false, true, true);
+	RDG::ResourceTracker *shared_arena = RDG::resource_tracker_create();
+	shared_arena->buffer_driver_id = RDD::BufferID(71);
+	RDG::ResourceTracker *blas_tracker = RDG::resource_tracker_create();
+	blas_tracker->acceleration_structure_driver_id = RDD::AccelerationStructureID(72);
+
+	graph.begin();
+	// 0: a compute pass writes the shared vertex/index buffer.
+	graph.add_compute_list_begin();
+	graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+	graph.add_compute_list_usage(shared_arena, RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ_WRITE);
+	graph.add_compute_list_dispatch(1, 1, 1);
+	graph.add_compute_list_end();
+
+	// 1: a BLAS build lists the same source buffer twice (vertex + index in one arena).
+	RDG::ResourceTracker *src_trackers[2] = { shared_arena, shared_arena };
+	RTErrorCapture errors;
+	ERR_PRINT_OFF;
+	graph.add_blas_build(RDD::AccelerationStructureID(72), RDD::BufferID(73), 0, blas_tracker, VectorView<RDG::ResourceTracker *>(src_trackers, 2), RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+	ERR_PRINT_ON;
+
+	CHECK_EQ(errors.count, 0);
+	CHECK_EQ(shared_arena->usage, RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ);
+
+	LocalVector<int32_t> order;
+	RDG::AsyncPlan plan;
+	graph.plan_for_test(order, plan, false);
+	REQUIRE_EQ(order.size(), 2u);
+	CHECK_EQ(order[0], 0);
+	CHECK_EQ(order[1], 1);
+
+	RDG::resource_tracker_free(blas_tracker);
+	RDG::resource_tracker_free(shared_arena);
+}
+
 #endif // RD_ENABLED

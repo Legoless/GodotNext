@@ -1369,7 +1369,7 @@ public:
 	// set_driver_traits_for_test(): the driver traits initialize() reads, so a driverless graph records
 	// barriers. async_barriers_for_test(): plans as end() does with an async command buffer and, when
 	// the plan is active, gathers p_selection's barriers from every async command of the frame.
-	void set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions);
+	void set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions, bool p_buffers_require_transitions = false);
 	// GodotNext: rd_indirect_count (#177). The indirect-count draws of recorded command p_command_index (a draw
 	// list), as the driver is asked to prepare them before its render pass begins.
 	struct IndirectCountDraw {

@@ -2,6 +2,7 @@
 from misc.utility.scons_hints import *
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -197,7 +198,12 @@ if env["dlss_backend"] == "ngx":
         return h.hexdigest()
 
     def _write_dlss_manifest(target, source, env):
-        from modules.dlss.config import DLSS_SDK_TAG, STREAMLINE_SDK_TAG
+        cfg_path = env.File("#modules/dlss/config.py").abspath
+        spec = importlib.util.spec_from_file_location("godotnext_dlss_config", cfg_path)
+        cfg_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cfg_mod)
+        DLSS_SDK_TAG = cfg_mod.DLSS_SDK_TAG
+        STREAMLINE_SDK_TAG = cfg_mod.STREAMLINE_SDK_TAG
 
         detected_tag = _describe_sdk_tag(sdk_root)
         if detected_tag != DLSS_SDK_TAG:

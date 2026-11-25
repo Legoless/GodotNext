@@ -6783,14 +6783,16 @@ RDD::AccelerationStructureID RenderingDeviceDriverD3D12::blas_create(VectorView<
 		// encoding instead.
 		desc.Triangles.VertexBuffer.StartAddress = vertex_buffer->gpu_virtual_address + geometry.vertex_offset;
 		desc.Triangles.VertexBuffer.StrideInBytes = geometry.vertex_stride;
-		as_info->input_buffers.push_back(vertex_buffer);
+		if (!as_info->input_buffers.has(vertex_buffer)) {
+			as_info->input_buffers.push_back(vertex_buffer);
+		}
 
 		if (geometry.index_buffer) {
 			BufferInfo *index_buffer = (BufferInfo *)geometry.index_buffer.id;
 			desc.Triangles.IndexFormat = geometry.index_format == INDEX_BUFFER_FORMAT_UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
 			desc.Triangles.IndexCount = geometry.index_count;
 			desc.Triangles.IndexBuffer = index_buffer->gpu_virtual_address + geometry.index_offset;
-			if (index_buffer != vertex_buffer) {
+			if (!as_info->input_buffers.has(index_buffer)) {
 				as_info->input_buffers.push_back(index_buffer);
 			}
 		} else {

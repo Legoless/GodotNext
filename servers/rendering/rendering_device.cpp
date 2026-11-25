@@ -528,7 +528,9 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 		rdd_geometry.vertex_format = rd_geometry.vertex_format;
 
 		if (vertex_buffer->draw_tracker != nullptr) {
-			draw_trackers.push_back(vertex_buffer->draw_tracker);
+			if (!draw_trackers.has(vertex_buffer->draw_tracker)) {
+				draw_trackers.push_back(vertex_buffer->draw_tracker);
+			}
 		} else {
 			untracked_buffers.insert(rd_geometry.vertex_buffer);
 		}
@@ -561,7 +563,9 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 			rdd_geometry.index_format = index_format;
 
 			if (index_buffer->draw_tracker != nullptr) {
-				draw_trackers.push_back(index_buffer->draw_tracker);
+				if (!draw_trackers.has(index_buffer->draw_tracker)) {
+					draw_trackers.push_back(index_buffer->draw_tracker);
+				}
 			} else {
 				untracked_buffers.insert(rd_geometry.index_buffer);
 			}

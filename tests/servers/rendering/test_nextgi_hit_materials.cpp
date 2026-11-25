@@ -1425,8 +1425,17 @@ void fragment() {
 			d3d12_format.set_lib_d3d12(lib_d3d12);
 			const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> spirv = _hit_spirv(d3d12_format, case_stages);
 			REQUIRE_EQ(spirv.size(), 2);
+#ifdef DEBUG_ENABLED
+			const RenderingShaderContainerD3D12::DXILValidationStats before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+#endif
 			Ref<RenderingShaderContainer> container = d3d12_format.create_container();
 			CHECK_MESSAGE(container->set_code_from_spirv("NextgiHitMaterialDiscardD3D12", spirv), c.name);
+#ifdef DEBUG_ENABLED
+			const RenderingShaderContainerD3D12::DXILValidationStats after = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+			if (after.requested && after.active) {
+				CHECK_MESSAGE(after.failed == before.failed, c.name);
+			}
+#endif
 		}
 #endif
 	}
