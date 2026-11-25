@@ -1,5 +1,5 @@
 diff --git a/thirdparty/spirv-cross/spirv_glsl.cpp b/thirdparty/spirv-cross/spirv_glsl.cpp
-index f9ce6cb0..4a7eb2b3 100644
+index f9ce6cb..4a7eb2b 100644
 --- a/thirdparty/spirv-cross/spirv_glsl.cpp
 +++ b/thirdparty/spirv-cross/spirv_glsl.cpp
 @@ -7042,6 +7042,21 @@ void CompilerGLSL::emit_mesh_tasks(SPIRBlock &block)
@@ -49,7 +49,7 @@ index f9ce6cb0..4a7eb2b3 100644
  
  	case SPIRBlock::EmitMeshTasks:
 diff --git a/thirdparty/spirv-cross/spirv_glsl.hpp b/thirdparty/spirv-cross/spirv_glsl.hpp
-index 98e93ee9..336ef756 100644
+index 98e93ee..336ef75 100644
 --- a/thirdparty/spirv-cross/spirv_glsl.hpp
 +++ b/thirdparty/spirv-cross/spirv_glsl.hpp
 @@ -758,6 +758,9 @@ protected:
@@ -63,7 +63,7 @@ index 98e93ee9..336ef756 100644
  	bool expression_suppresses_usage_tracking(uint32_t id) const;
  	bool expression_read_implies_multiple_reads(uint32_t id) const;
 diff --git a/thirdparty/spirv-cross/spirv_msl.cpp b/thirdparty/spirv-cross/spirv_msl.cpp
-index c3710460..57863fff 100644
+index c371046..8418ad6 100644
 --- a/thirdparty/spirv-cross/spirv_msl.cpp
 +++ b/thirdparty/spirv-cross/spirv_msl.cpp
 @@ -1360,6 +1360,131 @@ uint32_t CompilerMSL::get_uint_type_id()
@@ -171,7 +171,7 @@ index c3710460..57863fff 100644
 +				if (!emitted_record_ptr)
 +				{
 +					statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? "
-+					          "spvRTParams.instance_sbt_offsets[spvInstanceId] : spvUserInstanceId;");
++					          "spvRTParams.instance_sbt_offsets[spvInstanceId * 18u + 14u] : spvUserInstanceId;");
 +					statement("uint spvSbtIndex = spvInstSbtOffset + spvGeometryId;");
 +					statement("if (spvRTParams.hit_sbt_count > 0u && spvSbtIndex >= spvRTParams.hit_sbt_count)");
 +					begin_scope();
@@ -259,7 +259,24 @@ index c3710460..57863fff 100644
  		{
  			global_var_ids.insert(var.self);
  		}
-@@ -2128,6 +2267,15 @@ void CompilerMSL::extract_global_variables_from_function(uint32_t func_id, std::
+@@ -2007,6 +2146,7 @@ void CompilerMSL::extract_global_variables_from_functions()
+ 		if (get<SPIRVariable>(var).storage != StorageClassFunction)
+ 			global_var_ids.insert(var);
+ 
++	functions_using_trace_ray.clear();
+ 	std::set<uint32_t> added_arg_ids;
+ 	unordered_set<uint32_t> processed_func_ids;
+ 	extract_global_variables_from_function(ir.default_entry_point, added_arg_ids, global_var_ids, processed_func_ids);
+@@ -2093,6 +2233,8 @@ void CompilerMSL::extract_global_variables_from_function(uint32_t func_id, std::
+ 				extract_global_variables_from_function(inner_func_id, inner_func_args, global_var_ids,
+ 				                                       processed_func_ids);
+ 				added_arg_ids.insert(inner_func_args.begin(), inner_func_args.end());
++				if (functions_using_trace_ray.count(inner_func_id))
++					functions_using_trace_ray.insert(func_id);
+ 				break;
+ 			}
+ 
+@@ -2128,6 +2270,16 @@ void CompilerMSL::extract_global_variables_from_function(uint32_t func_id, std::
  				break;
  			}
  
@@ -269,13 +286,14 @@ index c3710460..57863fff 100644
 +					added_arg_ids.insert(ops[0]);
 +				if (global_var_ids.find(ops[10]) != global_var_ids.end())
 +					added_arg_ids.insert(ops[10]);
++				functions_using_trace_ray.insert(func_id);
 +				break;
 +			}
 +
  			case OpAtomicExchange:
  			case OpAtomicCompareExchange:
  			case OpAtomicStore:
-@@ -8056,6 +8204,61 @@ void CompilerMSL::emit_custom_functions()
+@@ -8056,6 +8208,61 @@ void CompilerMSL::emit_custom_functions()
  			statement("");
  			break;
  
@@ -337,7 +355,7 @@ index c3710460..57863fff 100644
  		case SPVFuncImplVariableDescriptor:
  			statement("template<typename T>");
  			statement("struct spvDescriptor");
-@@ -10329,6 +10532,98 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -10329,6 +10536,99 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  	case OpRayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetKHR:
  		SPIRV_CROSS_THROW("BindingTableRecordOffset is not supported in MSL.");
  
@@ -377,9 +395,10 @@ index c3710460..57863fff 100644
 +		statement("    spvIntersector.set_geometry_cull_mode(geometry_cull_mode::bounding_box);");
 +		statement("auto spvHit = spvIntersector.intersect(spvRay, ", to_non_uniform_aware_expression(ops[0]), ", ",
 +		          to_expression(ops[2]), ", spvRTIntersectionTable);");
++		const bool in_rt_entry = current_function == nullptr || current_function->self == ir.default_entry_point;
 +		statement("spvRTHitInfo spvHitInfo = {};");
-+		statement("spvHitInfo.launch_id = spvLaunchID;");
-+		statement("spvHitInfo.launch_size = spvLaunchSize;");
++		statement("spvHitInfo.launch_id = ", in_rt_entry ? "spvLaunchID" : "spvRTLaunchID", ";");
++		statement("spvHitInfo.launch_size = ", in_rt_entry ? "spvLaunchSize" : "spvRTLaunchSize", ";");
 +		statement("spvHitInfo.world_ray_origin = spvRayOrigin;");
 +		statement("spvHitInfo.world_ray_direction = spvRayDir;");
 +		statement("spvHitInfo.object_ray_origin = spvRayOrigin;");
@@ -412,7 +431,7 @@ index c3710460..57863fff 100644
 +		statement("spvHitInfo.world_to_object = spvHit.world_to_object_transform;");
 +		statement("spvHitInfo.object_ray_origin = (spvHit.world_to_object_transform * float4(spvRayOrigin, 1.0));");
 +		statement("spvHitInfo.object_ray_direction = (spvHit.world_to_object_transform * float4(spvRayDir, 0.0));");
-+		statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? spvRTParams.instance_sbt_offsets[spvHit.instance_id] : spvHit.user_instance_id;");
++		statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? spvRTParams.instance_sbt_offsets[spvHit.instance_id * 18u + 14u] : spvHit.user_instance_id;");
 +		statement("uint spvSbtIndex = spvInstSbtOffset + (", to_expression(ops[3]), ") + spvHit.geometry_id * (", to_expression(ops[4]), ");");
 +		statement("if (spvRTParams.hit_sbt != nullptr && spvRTParams.hit_sbt_count > 0u)");
 +		begin_scope();
@@ -436,7 +455,49 @@ index c3710460..57863fff 100644
  	case OpRayQueryInitializeKHR:
  	{
  		flush_variable_declaration(ops[0]);
-@@ -14067,6 +14362,17 @@ string CompilerMSL::func_type_decl(SPIRType &type)
+@@ -11964,6 +12264,19 @@ void CompilerMSL::emit_function_prototype(SPIRFunction &func, const Bitset &)
+ 			decl += ", ";
+ 	}
+ 
++	// GodotNext: metal_ray_shaders (#172). Forward ray-tracing entry-point tables, SBT params, and launch
++	// dimensions to raygen helper functions that invoke OpTraceRayKHR directly or transitively.
++	if (!processing_entry_point && is_ray_generation_shader() && functions_using_trace_ray.count(func.self))
++	{
++		if (!func.arguments.empty() || (!type.array.empty() && msl_options.force_native_arrays))
++			decl += ", ";
++		decl += "visible_function_table<spvRTVisibleFn> spvRTVisibleTable, "
++		        "intersection_function_table<triangle_data, instancing, world_space_data> spvRTIntersectionTable, "
++		        "constant spvRTSBTParams& spvRTParams, "
++		        "thread const uint3& spvRTLaunchID, "
++		        "thread const uint3& spvRTLaunchSize";
++	}
++
+ 	decl += ")";
+ 	statement(decl);
+ }
+@@ -13088,6 +13401,21 @@ string CompilerMSL::to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_
+ 	return arg_str;
+ }
+ 
++void CompilerMSL::append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<string> &arglist)
++{
++	CompilerGLSL::append_global_func_args(func, index, arglist);
++	// GodotNext: metal_ray_shaders (#172). Match raygen helper prototypes emitted by emit_function_prototype().
++	if (is_ray_generation_shader() && functions_using_trace_ray.count(func.self))
++	{
++		const bool in_rt_entry = current_function == nullptr || current_function->self == ir.default_entry_point;
++		arglist.push_back("spvRTVisibleTable");
++		arglist.push_back("spvRTIntersectionTable");
++		arglist.push_back("spvRTParams");
++		arglist.push_back(in_rt_entry ? "spvLaunchID" : "spvRTLaunchID");
++		arglist.push_back(in_rt_entry ? "spvLaunchSize" : "spvRTLaunchSize");
++	}
++}
++
+ // If the ID represents a sampled image that has been assigned a sampler already,
+ // generate an expression for the sampler, otherwise generate a fake sampler name
+ // by appending a suffix to the expression constructed from the ID.
+@@ -14067,6 +14395,17 @@ string CompilerMSL::func_type_decl(SPIRType &type)
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
  		break;
@@ -454,7 +515,7 @@ index c3710460..57863fff 100644
  	default:
  		entry_type = "unknown";
  		break;
-@@ -14090,6 +14396,56 @@ bool CompilerMSL::is_mesh_shader() const
+@@ -14090,6 +14429,56 @@ bool CompilerMSL::is_mesh_shader() const
  	return get_execution_model() == ExecutionModelMeshEXT;
  }
  
@@ -511,7 +572,7 @@ index c3710460..57863fff 100644
  bool CompilerMSL::uses_explicit_early_fragment_test()
  {
  	auto &ep_flags = get_entry_point().flags;
-@@ -14251,6 +14607,16 @@ string CompilerMSL::get_type_address_space(const SPIRType &type, uint32_t id, bo
+@@ -14251,6 +14640,16 @@ string CompilerMSL::get_type_address_space(const SPIRType &type, uint32_t id, bo
  			addr_space = "object_data";
  		break;
  
@@ -528,7 +589,7 @@ index c3710460..57863fff 100644
  	default:
  		break;
  	}
-@@ -14324,6 +14690,9 @@ string CompilerMSL::entry_point_arg_stage_in()
+@@ -14324,6 +14723,9 @@ string CompilerMSL::entry_point_arg_stage_in()
  // and false for builtins that should be passed or calculated some other way.
  bool CompilerMSL::is_direct_input_builtin(BuiltIn bi_type)
  {
@@ -538,7 +599,7 @@ index c3710460..57863fff 100644
  	switch (bi_type)
  	{
  	// Vertex function in
-@@ -14669,10 +15038,63 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14669,10 +15071,63 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  			ep_args += ", ";
  		ep_args += join("mesh_grid_properties spvMgp");
  	}
@@ -602,7 +663,7 @@ index c3710460..57863fff 100644
  	string ep_args = entry_point_arg_stage_in();
  	Bitset claimed_bindings;
  
-@@ -15074,6 +15496,17 @@ void CompilerMSL::entry_point_args_discrete_descriptors(string &ep_args)
+@@ -15074,6 +15529,17 @@ void CompilerMSL::entry_point_args_discrete_descriptors(string &ep_args)
  // This is the "classic" method of MSL 1 when we don't have argument buffer support.
  string CompilerMSL::entry_point_args_classic(bool append_comma)
  {
@@ -620,7 +681,7 @@ index c3710460..57863fff 100644
  	string ep_args = entry_point_arg_stage_in();
  	entry_point_args_discrete_descriptors(ep_args);
  	entry_point_args_builtin(ep_args);
-@@ -17664,6 +18097,57 @@ bool CompilerMSL::emit_complex_bitcast(uint32_t, uint32_t, uint32_t)
+@@ -17664,6 +18130,57 @@ bool CompilerMSL::emit_complex_bitcast(uint32_t, uint32_t, uint32_t)
  // Output builtins are qualified with the name of the stage out structure.
  string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
  {
@@ -678,8 +739,38 @@ index c3710460..57863fff 100644
  	switch (builtin)
  	{
  	// Handle HLSL-style 0-based vertex/instance index.
+@@ -18211,6 +18728,29 @@ string CompilerMSL::builtin_type_decl(BuiltIn builtin, uint32_t id)
+ 	case BuiltInPrimitiveTriangleIndicesEXT:
+ 		return "uint3";
+ 
++	// GodotNext: metal_ray_shaders (#172). Ray-tracing builtins used across helper functions.
++	case BuiltInLaunchIdKHR:
++	case BuiltInLaunchSizeKHR:
++		return "uint3";
++	case BuiltInInstanceCustomIndexKHR:
++	case BuiltInRayGeometryIndexKHR:
++		return "int";
++	case BuiltInHitKindKHR:
++	case BuiltInIncomingRayFlagsKHR:
++		return "uint";
++	case BuiltInRayTminKHR:
++	case BuiltInRayTmaxKHR:
++	case BuiltInHitTNV:
++		return "float";
++	case BuiltInWorldRayOriginKHR:
++	case BuiltInWorldRayDirectionKHR:
++	case BuiltInObjectRayOriginKHR:
++	case BuiltInObjectRayDirectionKHR:
++		return "float3";
++	case BuiltInObjectToWorldKHR:
++	case BuiltInWorldToObjectKHR:
++		return "float4x3";
++
+ 	default:
+ 		return "unsupported-built-in-type";
+ 	}
 diff --git a/thirdparty/spirv-cross/spirv_msl.hpp b/thirdparty/spirv-cross/spirv_msl.hpp
-index 803247a1..8bb2ce8f 100644
+index 803247a..3eb94c7 100644
 --- a/thirdparty/spirv-cross/spirv_msl.hpp
 +++ b/thirdparty/spirv-cross/spirv_msl.hpp
 @@ -317,6 +317,10 @@ public:
@@ -713,7 +804,15 @@ index 803247a1..8bb2ce8f 100644
  	void emit_workgroup_initialization(const SPIRVariable &var) override;
  
  	// Allow Metal to use the array<T> template to make arrays a value type
-@@ -979,6 +989,14 @@ protected:
+@@ -941,6 +951,7 @@ protected:
+ 	std::string sampler_type(const SPIRType &type, uint32_t id, bool member);
+ 	std::string builtin_to_glsl(BuiltIn builtin, StorageClass storage) override;
+ 	std::string to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_t id) override;
++	void append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<std::string> &arglist) override;
+ 	std::string to_name(uint32_t id, bool allow_alias = true) const override;
+ 	std::string to_function_name(const TextureFunctionNameArguments &args) override;
+ 	std::string to_function_args(const TextureFunctionArguments &args, bool *p_forward) override;
+@@ -979,6 +990,14 @@ protected:
  	bool is_tesc_shader() const;
  	bool is_tese_shader() const;
  	bool is_mesh_shader() const;
@@ -728,3 +827,12 @@ index 803247a1..8bb2ce8f 100644
  
  	void preprocess_op_codes();
  	void localize_global_variables();
+@@ -988,6 +1007,8 @@ protected:
+ 	void mark_as_workgroup_struct(SPIRType &type);
+ 
+ 	std::unordered_map<uint32_t, std::set<uint32_t>> function_global_vars;
++	// GodotNext: metal_ray_shaders (#172). Helper functions that directly or transitively emit OpTraceRayKHR.
++	std::unordered_set<uint32_t> functions_using_trace_ray;
+ 	void extract_global_variables_from_function(uint32_t func_id, std::set<uint32_t> &added_arg_ids,
+ 	                                            std::unordered_set<uint32_t> &global_var_ids,
+ 	                                            std::unordered_set<uint32_t> &processed_func_ids);

@@ -120,14 +120,20 @@ func _run_gpu_check(options: Dictionary, max_wait_frames: int = 180) -> Dictiona
 
 func _check_tier_and_legacy_off(failures: PackedStringArray) -> Dictionary:
 	var tier_info := RenderingServer.megalights_get_tier_info()
-	_check(failures, str(tier_info.get("tier", "")) == "HWRT",
-			"tier_info: expected HWRT tier on RTX 5090, got %s" % str(tier_info.get("tier", "")))
-	_check(failures, not bool(tier_info.get("experimental", true)),
-			"tier_info: desktop Vulkan HWRT should not be flagged experimental")
-	_check(failures, bool(tier_info.get("retrace_supported", false)),
-			"tier_info: expected retrace_supported=true on RTX 5090")
+	var is_metal := RenderingServer.get_current_rendering_driver_name() == "metal"
+	var expected_tier := "HWRT_INLINE_ONLY" if is_metal else "HWRT"
+	_check(failures, str(tier_info.get("tier", "")) == expected_tier,
+			"tier_info: expected %s tier, got %s" % [expected_tier, str(tier_info.get("tier", ""))])
+	_check(failures, bool(tier_info.get("experimental", not is_metal)) == is_metal,
+			"tier_info: unexpected experimental flag %s for driver %s" % [str(tier_info.get("experimental", false)), RenderingServer.get_current_rendering_driver_name()])
+	if not is_metal:
+		_check(failures, bool(tier_info.get("retrace_supported", false)),
+				"tier_info: expected retrace_supported=true on Vulkan/D3D12 HWRT")
+	else:
+		_check(failures, not bool(tier_info.get("retrace_supported", true)),
+				"tier_info: expected retrace_supported=false on Metal inline ray query tier")
 	_check(failures, bool(tier_info.get("vsm_supported", false)),
-			"tier_info: expected vsm_supported=true on Forward+ Vulkan")
+			"tier_info: expected vsm_supported=true on Forward+")
 	_check(failures, bool(tier_info.get("screen_traces_enabled", false)),
 			"tier_info: expected screen_traces_enabled default true")
 
@@ -363,6 +369,8 @@ void fragment() {
 	omni.shadow_enabled = true
 	sub.add_child(omni)
 
+	var expect_retrace := bool(RenderingServer.megalights_get_tier_info().get("retrace_supported", false))
+
 	# Run with screen_traces=false first to guarantee rays hit both alpha & retrace casters cleanly.
 	var res_rt := await _run_gpu_check({
 		"mode": "visibility_chain",
@@ -373,14 +381,18 @@ void fragment() {
 		"dedupe": false,
 		"compare_bruteforce": true,
 		"wait_for_tlas": true,
-		"wait_for_retrace": true,
+		"wait_for_retrace": expect_retrace,
 	}, 240)
 	_check(failures, bool(res_rt.get("done", false)) and not res_rt.has("error"),
 			"alpha_retrace_rt: check failed (%s)" % str(res_rt.get("error", "")))
-	_check(failures, bool(res_rt.get("retrace_ran", false)),
-			"alpha_retrace_rt: expected #130 material retrace to execute")
-	_check(failures, int(res_rt.get("retrace_appended_count", 0)) > 0,
-			"alpha_retrace_rt: expected retrace_appended_count > 0")
+	if expect_retrace:
+		_check(failures, bool(res_rt.get("retrace_ran", false)),
+				"alpha_retrace_rt: expected #130 material retrace to execute")
+		_check(failures, int(res_rt.get("retrace_appended_count", 0)) > 0,
+				"alpha_retrace_rt: expected retrace_appended_count > 0")
+	else:
+		_check(failures, not bool(res_rt.get("retrace_ran", true)),
+				"alpha_retrace_rt: unexpected retrace on inline-only tier")
 	_check(failures, int(res_rt.get("visible_samples", 0)) > 0 and int(res_rt.get("occluded_samples", 0)) > 0,
 			"alpha_retrace_rt: expected both lit holes and occluded rings")
 	_check(failures, float(res_rt.get("match_rate", 0.0)) >= 0.995,
@@ -396,7 +408,7 @@ void fragment() {
 		"dedupe": true,
 		"compare_bruteforce": true,
 		"wait_for_tlas": true,
-		"wait_for_retrace": true,
+		"wait_for_retrace": expect_retrace,
 	}, 240)
 	_check(failures, bool(res_full.get("done", false)) and not res_full.has("error"),
 			"alpha_retrace_full: check failed (%s)" % str(res_full.get("error", "")))

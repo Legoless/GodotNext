@@ -55,22 +55,26 @@ config/custom_user_dir_name="godotnext-world-cache-check"
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt
 global_illumination/nextgi/quality=2
 global_illumination/nextgi/world_cache=$wc_bool
 global_illumination/nextgi/hardware_ray_tracing_mode=$hwrt_mode
 global_illumination/nextgi/hardware_ray_tracing_mode.windows=$hwrt_mode
 global_illumination/nextgi/hardware_ray_tracing_mode.linuxbsd=$hwrt_mode
+global_illumination/nextgi/hardware_ray_tracing_mode.macos=$hwrt_mode
 CFG
 
 set +e
 "$@" 2>&1 | tee "$log"
-status=$?
+status=${PIPESTATUS[0]}
 set -e
 
 result=$(grep -m1 '^GODOTNEXT_RESULT ' "$log" || true)
 errors=$(grep -c 'ERROR:' "$log" || true)
 validation=$(grep -ci 'Validation Error' "$log" || true)
-echo "GODOTNEXT_WORLD_CACHE_LOG {\"errors\":$errors,\"validation_errors\":$validation,\"status\":$status}"
+metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
+metal_shader=$(grep -c 'Error detected in' "$log" || true)
+echo "GODOTNEXT_WORLD_CACHE_LOG {\"errors\":$errors,\"validation_errors\":$validation,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
 if [[ "$result" != *'"pass":true'* ]]; then
 	echo "world_cache_check.sh: the World Cache check did not pass" >&2
 	exit 1
@@ -78,7 +82,7 @@ fi
 if [[ "$status" -ne 0 ]]; then
 	exit "$status"
 fi
-if [[ "$errors" -ne 0 || "$validation" -ne 0 ]]; then
+if [[ "$errors" -ne 0 || "$validation" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
 	echo "world_cache_check.sh: the run logged errors or validation lines; the bar is 0" >&2
 	exit 1
 fi

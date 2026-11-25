@@ -951,6 +951,7 @@ protected:
 	std::string sampler_type(const SPIRType &type, uint32_t id, bool member);
 	std::string builtin_to_glsl(BuiltIn builtin, StorageClass storage) override;
 	std::string to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_t id) override;
+	void append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<std::string> &arglist) override;
 	std::string to_name(uint32_t id, bool allow_alias = true) const override;
 	std::string to_function_name(const TextureFunctionNameArguments &args) override;
 	std::string to_function_args(const TextureFunctionArguments &args, bool *p_forward) override;
@@ -1006,6 +1007,8 @@ protected:
 	void mark_as_workgroup_struct(SPIRType &type);
 
 	std::unordered_map<uint32_t, std::set<uint32_t>> function_global_vars;
+	// GodotNext: metal_ray_shaders (#172). Helper functions that directly or transitively emit OpTraceRayKHR.
+	std::unordered_set<uint32_t> functions_using_trace_ray;
 	void extract_global_variables_from_function(uint32_t func_id, std::set<uint32_t> &added_arg_ids,
 	                                            std::unordered_set<uint32_t> &global_var_ids,
 	                                            std::unordered_set<uint32_t> &processed_func_ids);

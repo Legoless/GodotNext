@@ -35,7 +35,8 @@ extends Node3D
 ##   page in the last CONVERGED_FRAMES frames). The sun's resolution LOD bias, static and moving, is -1
 ##   (--lod-bias=N; --lod-bias=project keeps the project's), so that even a small view invalidates more
 ##   requested pages per frame than the budget.
-## - fog_atlas: a VSM spot light that volumetric fog shows keeps its shadow-atlas pass (#222); when a caster
+## - fog_atlas: a spot light that keeps its shadow-atlas pass while VSM is active (explicit
+##   SHADOW_METHOD_ATLAS after #215 moved VSM volumetric fog onto coarse pages); when a caster
 ##   moves, its atlas shadow is redrawn (the light's shadow version advances), as without VSM.
 ## - multimesh: MultiMesh slabs with a custom AABB (which suppresses the AABB notification) are moved, one with
 ##   set_instance_transform(), one by replacing its buffer (both AUTO), and a RIGID one: their shadows move
@@ -792,19 +793,29 @@ func _case_fog_atlas() -> void:
 	_environment.volumetric_fog_enabled = true
 	_environment.volumetric_fog_density = 0.02
 	_spot.light_volumetric_fog_energy = 1.0
+	# After #215 moved VSM volumetric fog to coarse pages, request an explicit atlas pass on the
+	# fog-lit spot light so R1's shadow-atlas dirty marking is still exercised while VSM is active.
+	_spot.shadow_method = Light3D.SHADOW_METHOD_ATLAS
 	var caster := _box("FogCaster", Vector3(1.0, 1.0, 1.0), Vector3(6.0, 2.0, 3.0), GeometryInstance3D.SHADOW_CACHE_INVALIDATION_AUTO)
 	await _frames(WARMUP_FRAMES)
 	var before: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(_spot.get_instance())
 	var projection: Dictionary = _info().get("projection", {})
+	var max_atlas_passes := int(projection.get("atlas_passes", 0))
 	var versions := [int(before.get("shadow_version", -1))]
 	for i in 3:
 		caster.position.x += 0.5
-		await _frames(SETTLE_FRAMES)
+		await _frames(1)
+		var move_projection: Dictionary = _info().get("projection", {})
+		if int(move_projection.get("atlas_passes", 0)) > max_atlas_passes:
+			max_atlas_passes = int(move_projection.get("atlas_passes", 0))
+			projection = move_projection
+		await _frames(SETTLE_FRAMES - 1)
 		var stats: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(_spot.get_instance())
 		versions.append(int(stats.get("shadow_version", -1)))
 	_result["shadow_versions"] = versions
 	_result["projection"] = projection
-	if int(projection.get("atlas_passes", 0)) <= 0:
+	_result["max_atlas_passes"] = max_atlas_passes
+	if max_atlas_passes <= 0:
 		_failures.append("the fog-lit spot light ran no shadow-atlas pass: %s" % str(projection))
 	for i in range(1, versions.size()):
 		if int(versions[i]) <= int(versions[i - 1]):

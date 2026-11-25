@@ -431,6 +431,36 @@ void main() {
 		CHECK(msl.contains("spvRTParams.device_sets[1]"));
 		CHECK_FALSE(msl.contains("[[buffer("));
 	}
+
+	SUBCASE("RayGenerationKHR forwards RT tables, SBT params, and launch builtins to helper functions calling traceRayEXT") {
+		const String helper_raygen_glsl = common + R"GLSL(
+layout(location = 0) rayPayloadEXT uvec4 payload;
+
+void inner_trace(vec3 origin, vec3 dir) {
+	traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 1, 0, origin, 0.001, dir, 50.0, 0);
+}
+
+void outer_helper() {
+	uint idx = gl_LaunchIDEXT.x + gl_LaunchSizeEXT.x * gl_LaunchIDEXT.y;
+	inner_trace(vec3(float(idx), 0.0, 0.0), vec3(0.0, 0.0, -1.0));
+}
+
+void main() {
+	payload = uvec4(0u);
+	outer_helper();
+	results.data[gl_LaunchIDEXT.x] = payload;
+}
+)GLSL";
+		uint32_t payload_size = 0;
+		const String msl = _compile_glsl_stage_to_msl(RenderingDeviceCommons::SHADER_STAGE_RAYGEN, helper_raygen_glsl, &payload_size);
+		REQUIRE_FALSE(msl.is_empty());
+		CHECK_EQ(payload_size, 16u);
+		CHECK_FALSE(msl.contains("unsupported-built-in-type"));
+		CHECK(msl.contains("visible_function_table<spvRTVisibleFn> spvRTVisibleTable, intersection_function_table<triangle_data, instancing, world_space_data> spvRTIntersectionTable, constant spvRTSBTParams& spvRTParams, thread const uint3& spvRTLaunchID, thread const uint3& spvRTLaunchSize"));
+		CHECK(msl.contains("spvHitInfo.launch_id = spvRTLaunchID;"));
+		CHECK(msl.contains("spvHitInfo.launch_size = spvRTLaunchSize;"));
+		CHECK(msl.contains("spvRTParams.instance_sbt_offsets[spvHit.instance_id * 18u + 14u]"));
+	}
 }
 
 #endif // MODULE_GLSLANG_ENABLED

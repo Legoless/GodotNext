@@ -34,6 +34,8 @@
 #include "drivers/metal/pixel_formats.h"
 
 static_assert(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) == RenderingDeviceDriver::METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
+static_assert(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) == 18u * sizeof(uint32_t));
+static_assert(offsetof(MTL::IndirectAccelerationStructureInstanceDescriptor, intersectionFunctionTableOffset) == 14u * sizeof(uint32_t));
 static_assert((int)MTL::VertexFormatFloat3 == (int)MTL::AttributeFormatFloat3);
 static_assert((uint32_t)MTL::AccelerationStructureInstanceOptionDisableTriangleCulling == (uint32_t)RenderingDeviceDriver::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT);
 static_assert((uint32_t)MTL::AccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise == (uint32_t)RenderingDeviceDriver::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT);
@@ -252,6 +254,8 @@ void RenderingDeviceDriverMetal::acceleration_structure_free(AccelerationStructu
 	ERR_FAIL_NULL(info);
 
 	info->as.reset();
+	info->last_instance_buffer.reset();
+	info->last_instance_offset = 0;
 	MetalAccelerationStructure resource;
 	resource.allocation = info->allocation;
 	info->allocation.invalidate();
@@ -345,6 +349,10 @@ void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer
 	build_desc->setInstanceDescriptorBufferOffset(instance_offset);
 	build_desc->setInstanceCountBuffer(count_buffer);
 	build_desc->setInstanceCountBufferOffset(count_offset);
+	// GodotNext: metal_ray_shaders (#172). Keep a reference to the active TLAS instance descriptors
+	// so raytracing_trace_rays() can bind their hit_sbt_offset values in spvRTSBTParams.
+	info->last_instance_buffer = NS::RetainPtr(instance_buffer);
+	info->last_instance_offset = instance_offset;
 	cb->defer_acceleration_structure_descriptor(build_desc);
 	// GodotNext: as_build_modes
 	if (p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE) {

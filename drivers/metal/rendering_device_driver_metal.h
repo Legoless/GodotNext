@@ -272,6 +272,10 @@ public:
 		// GodotNext: blas_compact
 		bool allow_compaction = false;
 		bool compacted = false;
+		// GodotNext: metal_ray_shaders (#172). Latest TLAS instance descriptor buffer so OpTraceRayKHR
+		// and AnyHit can read each instance's hit_sbt_offset (intersectionFunctionTableOffset) on GPU.
+		NS::SharedPtr<MTL::Buffer> last_instance_buffer;
+		uint64_t last_instance_offset = 0;
 	};
 
 	// GodotNext: blas_compact

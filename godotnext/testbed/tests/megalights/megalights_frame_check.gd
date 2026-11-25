@@ -174,10 +174,13 @@ func _check_gm9_off_identity(failures: PackedStringArray) -> Dictionary:
 			"gm9_off_identity: expected enabled=false in tier_info")
 	_check(failures, int(tier_info.get("memory_bytes", -1)) == 0,
 			"gm9_off_identity: expected memory_bytes=0 when disabled, got %d" % int(tier_info.get("memory_bytes", -1)))
-	_check(failures, str(tier_info.get("tier", "")) == "HWRT",
-			"gm9_off_identity: expected tier='HWRT', got '%s'" % str(tier_info.get("tier", "")))
-	_check(failures, str(tier_info.get("status_label", "")) == "Production",
-			"gm9_off_identity: expected status_label='Production', got '%s'" % str(tier_info.get("status_label", "")))
+	var is_metal := RenderingServer.get_current_rendering_driver_name() == "metal"
+	var expected_tier := "HWRT_INLINE_ONLY" if is_metal else "HWRT"
+	var expected_status := "Experimental" if is_metal else "Production"
+	_check(failures, str(tier_info.get("tier", "")) == expected_tier,
+			"gm9_off_identity: expected tier='%s', got '%s'" % [expected_tier, str(tier_info.get("tier", ""))])
+	_check(failures, str(tier_info.get("status_label", "")) == expected_status,
+			"gm9_off_identity: expected status_label='%s', got '%s'" % [expected_status, str(tier_info.get("status_label", ""))])
 
 	var sub := _make_viewport(VIEW_SIZE, false, 2048)
 	var cam := Camera3D.new()

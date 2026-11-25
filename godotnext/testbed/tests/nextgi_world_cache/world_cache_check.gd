@@ -13,6 +13,7 @@ extends Node3D
 ##   --expect=on-simplified    world_cache=true, HWRT mode Simplified Material: World Cache active using
 ##                             simplified surface colours with 0 material hit groups and 0 attribute stream bytes.
 ##   --expect=fallback-inline  world_cache=true, HWRT mode Inline: keeps SRC, reports INLINE_HWRT, 0 WC bytes.
+##   --expect=fallback-metal   world_cache=true, Metal HWRT: keeps SRC, reports METAL_UNSUPPORTED, 0 WC bytes.
 ##   --expect=fallback-swrt    world_cache=true, SWRT tier: keeps SRC, reports SOFTWARE_TIER, 0 WC bytes.
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure.
@@ -222,6 +223,17 @@ func _run() -> void:
 			_check(_result["world_cache_bytes"] == 0, "world_cache_bytes must be 0 in Inline fallback (%d)" % _result["world_cache_bytes"])
 			_check(_result["world_cache_src_allocated"], "SRC must remain allocated in Inline fallback")
 			_check(_result["src_relight_texels"] > 0 and _result["src_card_count"] > 0, "SRC must run in Inline fallback (cards=%d relight=%d)" % [_result["src_card_count"], _result["src_relight_texels"]])
+		"fallback-metal":
+			_check(_result["tier"] == "HWRT", "expected HWRT tier (%s)" % _result["tier"])
+			_check(_result["world_cache"], "world_cache requested must be true")
+			_check(not _result["world_cache_active"], "world_cache_active must be false on Metal")
+			_check(not _result["world_cache_replaces_src"], "world_cache_replaces_src must be false on Metal")
+			_check(_result["world_cache_reason"] == "METAL_UNSUPPORTED", "world_cache_reason must be METAL_UNSUPPORTED (%s)" % _result["world_cache_reason"])
+			_check(_result["status_world_cache_reason"] == "METAL_UNSUPPORTED", "status world_cache_reason must be METAL_UNSUPPORTED (%s)" % _result["status_world_cache_reason"])
+			_check(_result["world_cache_bytes"] == 0, "world_cache_bytes must be 0 on Metal fallback (%d)" % _result["world_cache_bytes"])
+			_check(_result["world_cache_dispatches"] == 0, "world_cache_dispatches must be 0 on Metal fallback (%d)" % _result["world_cache_dispatches"])
+			_check(_result["world_cache_src_allocated"], "SRC must remain allocated on Metal fallback")
+			_check(_result["src_relight_texels"] > 0 and _result["src_card_count"] > 0, "SRC must run on Metal fallback (cards=%d relight=%d)" % [_result["src_card_count"], _result["src_relight_texels"]])
 		"fallback-swrt":
 			_check(_result["tier"] == "SWRT", "expected SWRT tier (%s)" % _result["tier"])
 			_check(_result["world_cache"], "world_cache requested must be true")

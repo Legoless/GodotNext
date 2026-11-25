@@ -1461,7 +1461,7 @@ void CompilerMSL::emit_ray_tracing_entry_point_declarations()
 				if (!emitted_record_ptr)
 				{
 					statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? "
-					          "spvRTParams.instance_sbt_offsets[spvInstanceId] : spvUserInstanceId;");
+					          "spvRTParams.instance_sbt_offsets[spvInstanceId * 18u + 14u] : spvUserInstanceId;");
 					statement("uint spvSbtIndex = spvInstSbtOffset + spvGeometryId;");
 					statement("if (spvRTParams.hit_sbt_count > 0u && spvSbtIndex >= spvRTParams.hit_sbt_count)");
 					begin_scope();
@@ -2146,6 +2146,7 @@ void CompilerMSL::extract_global_variables_from_functions()
 		if (get<SPIRVariable>(var).storage != StorageClassFunction)
 			global_var_ids.insert(var);
 
+	functions_using_trace_ray.clear();
 	std::set<uint32_t> added_arg_ids;
 	unordered_set<uint32_t> processed_func_ids;
 	extract_global_variables_from_function(ir.default_entry_point, added_arg_ids, global_var_ids, processed_func_ids);
@@ -2232,6 +2233,8 @@ void CompilerMSL::extract_global_variables_from_function(uint32_t func_id, std::
 				extract_global_variables_from_function(inner_func_id, inner_func_args, global_var_ids,
 				                                       processed_func_ids);
 				added_arg_ids.insert(inner_func_args.begin(), inner_func_args.end());
+				if (functions_using_trace_ray.count(inner_func_id))
+					functions_using_trace_ray.insert(func_id);
 				break;
 			}
 
@@ -2273,6 +2276,7 @@ void CompilerMSL::extract_global_variables_from_function(uint32_t func_id, std::
 					added_arg_ids.insert(ops[0]);
 				if (global_var_ids.find(ops[10]) != global_var_ids.end())
 					added_arg_ids.insert(ops[10]);
+				functions_using_trace_ray.insert(func_id);
 				break;
 			}
 
@@ -10579,9 +10583,10 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 		statement("    spvIntersector.set_geometry_cull_mode(geometry_cull_mode::bounding_box);");
 		statement("auto spvHit = spvIntersector.intersect(spvRay, ", to_non_uniform_aware_expression(ops[0]), ", ",
 		          to_expression(ops[2]), ", spvRTIntersectionTable);");
+		const bool in_rt_entry = current_function == nullptr || current_function->self == ir.default_entry_point;
 		statement("spvRTHitInfo spvHitInfo = {};");
-		statement("spvHitInfo.launch_id = spvLaunchID;");
-		statement("spvHitInfo.launch_size = spvLaunchSize;");
+		statement("spvHitInfo.launch_id = ", in_rt_entry ? "spvLaunchID" : "spvRTLaunchID", ";");
+		statement("spvHitInfo.launch_size = ", in_rt_entry ? "spvLaunchSize" : "spvRTLaunchSize", ";");
 		statement("spvHitInfo.world_ray_origin = spvRayOrigin;");
 		statement("spvHitInfo.world_ray_direction = spvRayDir;");
 		statement("spvHitInfo.object_ray_origin = spvRayOrigin;");
@@ -10614,7 +10619,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 		statement("spvHitInfo.world_to_object = spvHit.world_to_object_transform;");
 		statement("spvHitInfo.object_ray_origin = (spvHit.world_to_object_transform * float4(spvRayOrigin, 1.0));");
 		statement("spvHitInfo.object_ray_direction = (spvHit.world_to_object_transform * float4(spvRayDir, 0.0));");
-		statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? spvRTParams.instance_sbt_offsets[spvHit.instance_id] : spvHit.user_instance_id;");
+		statement("uint spvInstSbtOffset = (spvRTParams.instance_sbt_offsets != nullptr) ? spvRTParams.instance_sbt_offsets[spvHit.instance_id * 18u + 14u] : spvHit.user_instance_id;");
 		statement("uint spvSbtIndex = spvInstSbtOffset + (", to_expression(ops[3]), ") + spvHit.geometry_id * (", to_expression(ops[4]), ");");
 		statement("if (spvRTParams.hit_sbt != nullptr && spvRTParams.hit_sbt_count > 0u)");
 		begin_scope();
@@ -12270,6 +12275,19 @@ void CompilerMSL::emit_function_prototype(SPIRFunction &func, const Bitset &)
 			decl += ", ";
 	}
 
+	// GodotNext: metal_ray_shaders (#172). Forward ray-tracing entry-point tables, SBT params, and launch
+	// dimensions to raygen helper functions that invoke OpTraceRayKHR directly or transitively.
+	if (!processing_entry_point && is_ray_generation_shader() && functions_using_trace_ray.count(func.self))
+	{
+		if (!func.arguments.empty() || (!type.array.empty() && msl_options.force_native_arrays))
+			decl += ", ";
+		decl += "visible_function_table<spvRTVisibleFn> spvRTVisibleTable, "
+		        "intersection_function_table<triangle_data, instancing, world_space_data> spvRTIntersectionTable, "
+		        "constant spvRTSBTParams& spvRTParams, "
+		        "thread const uint3& spvRTLaunchID, "
+		        "thread const uint3& spvRTLaunchSize";
+	}
+
 	decl += ")";
 	statement(decl);
 }
@@ -13392,6 +13410,21 @@ string CompilerMSL::to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_
 	}
 
 	return arg_str;
+}
+
+void CompilerMSL::append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<string> &arglist)
+{
+	CompilerGLSL::append_global_func_args(func, index, arglist);
+	// GodotNext: metal_ray_shaders (#172). Match raygen helper prototypes emitted by emit_function_prototype().
+	if (is_ray_generation_shader() && functions_using_trace_ray.count(func.self))
+	{
+		const bool in_rt_entry = current_function == nullptr || current_function->self == ir.default_entry_point;
+		arglist.push_back("spvRTVisibleTable");
+		arglist.push_back("spvRTIntersectionTable");
+		arglist.push_back("spvRTParams");
+		arglist.push_back(in_rt_entry ? "spvLaunchID" : "spvRTLaunchID");
+		arglist.push_back(in_rt_entry ? "spvLaunchSize" : "spvRTLaunchSize");
+	}
 }
 
 // If the ID represents a sampled image that has been assigned a sampler already,
@@ -18705,6 +18738,29 @@ string CompilerMSL::builtin_type_decl(BuiltIn builtin, uint32_t id)
 		return "uint2";
 	case BuiltInPrimitiveTriangleIndicesEXT:
 		return "uint3";
+
+	// GodotNext: metal_ray_shaders (#172). Ray-tracing builtins used across helper functions.
+	case BuiltInLaunchIdKHR:
+	case BuiltInLaunchSizeKHR:
+		return "uint3";
+	case BuiltInInstanceCustomIndexKHR:
+	case BuiltInRayGeometryIndexKHR:
+		return "int";
+	case BuiltInHitKindKHR:
+	case BuiltInIncomingRayFlagsKHR:
+		return "uint";
+	case BuiltInRayTminKHR:
+	case BuiltInRayTmaxKHR:
+	case BuiltInHitTNV:
+		return "float";
+	case BuiltInWorldRayOriginKHR:
+	case BuiltInWorldRayDirectionKHR:
+	case BuiltInObjectRayOriginKHR:
+	case BuiltInObjectRayDirectionKHR:
+		return "float3";
+	case BuiltInObjectToWorldKHR:
+	case BuiltInWorldToObjectKHR:
+		return "float4x3";
 
 	default:
 		return "unsupported-built-in-type";

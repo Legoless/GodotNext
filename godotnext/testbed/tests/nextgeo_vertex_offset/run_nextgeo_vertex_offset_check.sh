@@ -37,6 +37,9 @@ cat >"$override" <<CFG
 [rendering]
 
 global_illumination/nextgi/enabled=true
+global_illumination/nextgi/hardware_ray_tracing=0
+global_illumination/nextgi/hardware_ray_tracing.macos=0
+global_illumination/nextgi/quality=2
 CFG
 
 set +e

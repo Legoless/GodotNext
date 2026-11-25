@@ -2199,6 +2199,21 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 		} else {
 			raytracing.resource_tracker.merge_from(set->usage_to_resources);
 			arg_buf = set->arg_buffer.buffer.get();
+			// GodotNext: metal_ray_shaders (#172). Bind the TLAS instance descriptor buffer so
+			// OpTraceRayKHR and AnyHit read each instance's hit_sbt_offset rather than userID.
+			if (params.instance_sbt_offsets_address == 0) {
+				for (uint32_t i = 0; i < set->uniforms.size(); i++) {
+					const RDD::BoundUniform &uniform = set->uniforms[i];
+					if (uniform.type == RDD::UNIFORM_TYPE_ACCELERATION_STRUCTURE && !uniform.ids.is_empty()) {
+						const RDM::AccelerationStructureInfo *as_info = reinterpret_cast<const RDM::AccelerationStructureInfo *>(uniform.ids[0].id);
+						if (as_info != nullptr && as_info->top_level && as_info->last_instance_buffer.get() != nullptr) {
+							params.instance_sbt_offsets_address = as_info->last_instance_buffer->gpuAddress() + as_info->last_instance_offset;
+							enc->useResource(as_info->last_instance_buffer.get(), MTL::ResourceUsageRead);
+							break;
+						}
+					}
+				}
+			}
 			if (sync_mode != RDM::SyncMode::HazardTracking && layout_shader != nullptr && set_index < (uint32_t)layout_shader->sets.size()) {
 				const UniformSet &shader_set = layout_shader->sets[set_index];
 				const uint32_t uniform_count = MIN((uint32_t)set->uniforms.size(), (uint32_t)shader_set.uniforms.size());
