@@ -460,7 +460,9 @@ Error RenderingContextDriverVulkan::_initialize_instance_extensions() {
 #ifdef DEV_ENABLED
 	bool want_debug_utils = true;
 #else
-	bool want_debug_utils = OS::get_singleton()->is_stdout_verbose();
+	// GodotNext: pu_vk_extension_providers (#105). Enable VK_EXT_debug_utils whenever validation layers are
+	// active so object-attributed allowlisting and --gpu-abort work without requiring --verbose.
+	bool want_debug_utils = OS::get_singleton()->is_stdout_verbose() || _use_validation_layers();
 #endif
 	if (want_debug_utils) {
 		_register_requested_instance_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, false);

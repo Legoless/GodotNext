@@ -2866,6 +2866,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	if (rt_shadows_view) {
 		RendererRD::NextGIRTShadows *rt_shadows = next_gi.get_rt_shadows();
 		if (rt_shadows != nullptr) {
+			RENDER_TIMESTAMP("NextGI RT Shadows");
 			const RID nr_tex = p_normal_roughness_slices != nullptr ? p_normal_roughness_slices[0] : RID();
 			const bool vel_enabled = rb.is_valid() && rb->has_velocity_buffer(false);
 			const RID vel_tex = vel_enabled ? rb->get_velocity_buffer(false) : RID();
@@ -2985,6 +2986,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			ml_inputs.velocity_texture = ml_inputs.velocity_enabled ? rb->get_velocity_buffer(false) : RID();
 			ml_inputs.reset_temporal_history = view_reset_temporal_history;
 			ml_inputs.debug_draw = get_debug_draw_mode();
+			RENDER_TIMESTAMP("MegaLights");
 			mega_lights->render(ml_inputs, rb);
 			// GodotNext: megalights_frame (#143, plan §21.3 contract M6). Bind denoised demodulated diffuse & specular
 			// radiance into Forward+ Set 1 (bindings 69..71) only when rendering/megalights/enabled is active
@@ -3030,6 +3032,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 					fi.vsm_default_miss_buffer = vsm_projection_default_miss_buffer;
 					fi.quality_level = ml_inputs.quality_level;
 					fi.reset_temporal_history = view_reset_temporal_history;
+					RENDER_TIMESTAMP("MegaLights Froxel");
 					const RendererRD::MegaLights::FroxelResult fr = mega_lights->render_froxel(fi, rb);
 					megalights_froxel_fog_active = fr.fog_active;
 					ml_bind_froxel_fog = fr.fog_light_texture;
@@ -6575,6 +6578,7 @@ void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_d
 		front_layer.trace(p_render_data);
 	}
 	if (want_ml_fl) {
+		RENDER_TIMESTAMP("MegaLights Front Layer");
 		const RendererRD::MegaLights::FrontLayerResult flr = mega_lights->render_front_layer(ml_last_frame_inputs, front_layer.get_depth(), front_layer.get_normal_roughness(), rb);
 		megalights_front_layer_active = flr.active;
 		ml_bind_front_layer_diffuse = flr.diffuse_texture;

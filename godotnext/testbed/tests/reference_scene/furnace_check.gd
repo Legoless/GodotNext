@@ -40,7 +40,7 @@ func run() -> Dictionary:
 	box.size = Vector3(4, 4, 4)
 	mesh_instance.mesh = box
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.8, 0.8, 0.8)
+	material.albedo_color = Color(0.8, 0.8, 0.8).linear_to_srgb()
 	material.roughness = 1.0
 	material.metallic = 0.0
 	material.metallic_specular = 0.0

@@ -129,6 +129,12 @@ public:
 	// uninitializes.
 	static void unregister_provider(VulkanExtensionProvider *p_provider);
 	static uint32_t get_provider_count();
+#ifdef DEBUG_ENABLED
+	// Test-only isolation: detaches any providers registered at module init (e.g. modules/dlss)
+	// so unit tests can assert an empty registry and restore them afterwards.
+	static LocalVector<VulkanExtensionProvider *> detach_all_for_tests();
+	static void restore_for_tests(const LocalVector<VulkanExtensionProvider *> &p_saved);
+#endif
 
 	// Called by RenderingContextDriverVulkan: registration stays closed while any context exists.
 	static void lock_registration();

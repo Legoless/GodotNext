@@ -185,7 +185,7 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		float u = dot(rel, card.axis_u.xyz);
 		float v = dot(rel, card.axis_v.xyz);
 		float depth = -dot(rel, card.axis_n.xyz);
-		if (abs(u) > card.axis_u.w || abs(v) > card.axis_v.w) {
+		if (abs(u) > card.axis_u.w + 1e-4 || abs(v) > card.axis_v.w + 1e-4) {
 			continue;
 		}
 		float align = dot(face_normal, card.axis_n.xyz);
@@ -473,20 +473,18 @@ void nextgi_gather_main() {
 	if (params.sampling_mode == 0u) {
 		angle = nextgi_blue_noise_sample(ivec2(gl_GlobalInvocationID.xy), params.frame).x * 6.2831853;
 	}
-	float ca = cos(angle);
-	float sa = sin(angle);
 	uint uncovered_count = 0u;
 	float confidence_sum = 0.0;
 	for (uint i = 0u; i < params.ray_count; i++) {
 		uint ix = i % params.ray_stride;
 		uint iy = i / params.ray_stride;
-		vec2 uv = (vec2(ix, iy) + 0.5) / float(params.ray_stride);
-		uv = uv * 2.0 - 1.0;
-		uv = vec2(ca * uv.x - sa * uv.y, sa * uv.x + ca * uv.y);
-		vec3 dir = nextgi_orient(normal, oct_to_vec3(uv));
-		if (dot(dir, normal) < 0.0) {
-			dir = -dir;
-		}
+		// Exact stratified polar cosine-weighted hemisphere (Malley's method):
+		// E[r^2] = 0.5 exactly for every ray_stride, so mean(L_i) estimates E / PI directly.
+		float r2 = (float(iy) + 0.5) / float(params.ray_stride);
+		float disk_r = sqrt(r2);
+		float disk_phi = ((float(ix) + 0.5) / float(params.ray_stride)) * (2.0 * PI) + angle;
+		vec3 local_dir = vec3(disk_r * cos(disk_phi), disk_r * sin(disk_phi), sqrt(max(1.0 - r2, 0.0)));
+		vec3 dir = nextgi_orient(normal, local_dir);
 		NextGIHit hit;
 		vec3 radiance;
 		float ray_confidence = 0.0;
@@ -581,6 +579,7 @@ void nextgi_gather_main() {
 			radiance = nextgi_wrc_sample(trace_origin + dir * trace_tmax, dir);
 			if (!nextgi_wrc_hit_cache) {
 				radiance = nextgi_miss_radiance(dir);
+				ray_confidence = 1.0;
 				atomicAdd(counters.sky_samples, 1u);
 			} else {
 				ray_confidence = nextgi_wrc_confidence;
@@ -649,7 +648,7 @@ void nextgi_gather_main() {
 	if (uncovered_count > 0u) {
 		atomicAdd(counters.uncovered, uncovered_count);
 	}
-	confidence_data.data[probe.y * params.probes_x + probe.x] = confidence_sum / 16.0;
+	confidence_data.data[probe.y * params.probes_x + probe.x] = confidence_sum / float(max(params.ray_count, 1u));
 }
 
 void nextgi_integrate_main() {
@@ -681,7 +680,7 @@ void nextgi_integrate_main() {
 				continue;
 			}
 			float bilinear = (ox == 0 ? 1.0 - fract_p.x : fract_p.x) * (oy == 0 ? 1.0 - fract_p.y : fract_p.y);
-			vec4 probe = imageLoad(probe_image, id * 4);
+			vec4 probe = imageLoad(probe_image, id * int(params.ray_stride));
 			float depth_weight = probe.a <= 0.0 ? 0.0 : 1.0 / (1.0 + abs(length(world - params.camera_pos.xyz) - probe.a) * 4.0);
 			vec3 irradiance = vec3(0.0);
 			for (uint i = 0u; i < params.ray_stride * params.ray_stride; i++) {
@@ -697,7 +696,9 @@ void nextgi_integrate_main() {
 	}
 	vec3 out_irr = weight > 0.0 ? accum / weight : vec3(0.0);
 	float out_confidence = weight > 0.0 ? conf_accum / weight : 0.0;
-	imageStore(ambient_image, pixel, vec4(out_irr / PI, out_confidence));
+	// Cosine-weighted ray mean is already E / PI, matching scene_forward_clustered.glsl (ambient_light *= albedo.rgb)
+	// and nextgi_irradiance_field.glsl (Lumen Lite).
+	imageStore(ambient_image, pixel, vec4(out_irr, out_confidence));
 }
 
 void nextgi_feedback_main() {
@@ -716,15 +717,31 @@ void nextgi_feedback_main() {
 	// GodotNext: nextgi_card_normal (#251). The columns of the basis (its transpose) turned a
 	// rotated instance's card hemisphere the wrong way.
 	vec3 normal = normalize(nextgi_record_normal_to_world(rec, card_n));
+	// Place each 8x8 feedback block at its actual position on the card (instead of card.origin.xyz)
+	// so multi-room slabs (e.g. Floor/Ceiling spanning a shared wall) trace from inside each room.
+	vec2 block_uv = block.w != 0u ? vec2(float(block.w & 0xFFFFu), float(block.w >> 16u)) / 65535.0 : vec2(0.5);
+	float xu = (block_uv.x * 2.0 - 1.0) * card.axis_u.w;
+	float yv = (block_uv.y * 2.0 - 1.0) * card.axis_v.w;
+	float block_depth = 0.0;
+	if (rec.card_set != 0xFFFFFFFFu) {
+		NextGICardSet card_set = card_sets.data[rec.card_set];
+		vec2 card_size = max(vec2(card.atlas_rect.zw), vec2(1.0));
+		ivec2 mat_coord = ivec2(card.atlas_rect.xy) + ivec2(clamp(block_uv * card_size, vec2(0.0), card_size - 1.0));
+		float d = texelFetch(material_depth_tex, mat_coord, 0).r;
+		if (d > 0.0) {
+			block_depth = d * card_set.capture_scale;
+		}
+	}
+	vec3 block_obj = card.origin.xyz + card.axis_u.xyz * xu + card.axis_v.xyz * yv - card.axis_n.xyz * block_depth;
 #ifdef NEXTGI_TRACE_SDF
-	// GodotNext: ps_swrt_trace (#186 step 6). The card's world origin, offset 1.5 voxels of its level.
+	// GodotNext: ps_swrt_trace (#186 step 6). The block's world origin, offset 1.5 voxels of its level.
 	vec3 card_origin = vec3(
-			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), card.origin.xyz) + rec.object_to_world[3],
-			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), card.origin.xyz) + rec.object_to_world[7],
-			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), card.origin.xyz) + rec.object_to_world[11]);
+			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), block_obj) + rec.object_to_world[3],
+			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), block_obj) + rec.object_to_world[7],
+			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), block_obj) + rec.object_to_world[11]);
 	vec3 origin = swrt_offset_origin(card_origin, normal);
 #else
-	vec3 object_origin = card.origin.xyz + card.axis_n.xyz * rec.origin_offset;
+	vec3 object_origin = block_obj + card.axis_n.xyz * rec.origin_offset;
 	vec3 origin = vec3(
 			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), object_origin) + rec.object_to_world[3],
 			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), object_origin) + rec.object_to_world[7],

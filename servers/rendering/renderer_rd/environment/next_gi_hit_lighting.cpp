@@ -703,6 +703,8 @@ void nextgi_collect_direct_lights(RenderDataRD *p_render_data, NextGIRTScene *p_
 			} else if (type == RSE::LIGHT_SPOT) {
 				energy *= 1.0f / Math::PI;
 			}
+		} else {
+			energy *= float(Math::PI);
 		}
 		energy *= exposure;
 		const float range = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);

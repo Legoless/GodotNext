@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/math/aabb.h"
 #include "core/math/math_funcs.h"
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
@@ -152,6 +153,44 @@ _FORCE_INLINE_ void nextgi_sync_positional_light(T &r_dynamic, T &r_static, cons
 // STATIC lights are skipped for lightmapped receivers. DYNAMIC lights still reach them.
 _FORCE_INLINE_ bool nextgi_light_reaches_receiver(bool p_is_static, uint32_t p_rt_flags) {
 	return !(p_is_static && (p_rt_flags & NEXTGI_RT_FLAG_LIGHTMAPPED) != 0);
+}
+
+// Effective radiometric light energy matching Forward+ (LightStorage) and PathTracer:
+// non-physical lights scale by PI because diffuse BRDFs divide by PI.
+_FORCE_INLINE_ float nextgi_light_effective_energy(float p_base_energy, RenderingServerEnums::LightType p_type, bool p_physical, float p_intensity, bool p_ies_use_intensity, float p_ies_peak) {
+	float energy = p_base_energy;
+	if (p_ies_use_intensity) {
+		energy *= p_physical ? p_ies_peak : (float(Math::PI) * p_ies_peak);
+	} else if (p_physical) {
+		energy *= p_intensity;
+		if (p_type == RenderingServerEnums::LIGHT_OMNI) {
+			energy *= 1.0f / (float(Math::PI) * 4.0f);
+		} else if (p_type == RenderingServerEnums::LIGHT_AREA) {
+			energy *= 1.0f / (float(Math::PI) * 2.0f);
+		} else if (p_type == RenderingServerEnums::LIGHT_SPOT) {
+			energy *= 1.0f / float(Math::PI);
+		}
+	} else {
+		energy *= float(Math::PI);
+	}
+	return energy;
+}
+
+// Only spotlights project linearly through a single perspective camera in the positional shadow
+// atlas; omni (cubemap / dual-paraboloid) and area (dual-paraboloid) lights must trace SRC shadows.
+_FORCE_INLINE_ bool nextgi_positional_shadow_reusable(RenderingServerEnums::LightType p_type) {
+	return p_type == RenderingServerEnums::LIGHT_SPOT;
+}
+
+// Closest point on a card's world AABB to a positional light, used so large cards still rank
+// lights whose range covers part of the card even when the card center is farther away.
+_FORCE_INLINE_ Vector3 nextgi_card_positional_light_rank_point(const AABB &p_bounds, const Vector3 &p_light_pos) {
+	const Vector3 card_min = p_bounds.position;
+	const Vector3 card_max = p_bounds.position + p_bounds.size;
+	return Vector3(
+			CLAMP(p_light_pos.x, card_min.x, card_max.x),
+			CLAMP(p_light_pos.y, card_min.y, card_max.y),
+			CLAMP(p_light_pos.z, card_min.z, card_max.z));
 }
 
 // Godot's omni falloff: nd^4 window times inverse-distance decay.

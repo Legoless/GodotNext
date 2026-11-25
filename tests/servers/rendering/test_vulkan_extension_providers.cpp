@@ -251,10 +251,20 @@ public:
 	}
 };
 
+struct ScopedEmptyProviders {
+	LocalVector<VulkanExtensionProvider *> saved;
+	ScopedEmptyProviders() :
+			saved(VulkanExtensionProviders::detach_all_for_tests()) {}
+	~ScopedEmptyProviders() {
+		VulkanExtensionProviders::restore_for_tests(saved);
+	}
+};
+
 } // namespace TestVkProviders
 
 TEST_CASE("[Upscalers][VkProviders] Registration closes while a rendering context exists") {
 	using namespace TestVkProviders;
+	const ScopedEmptyProviders empty_providers;
 	const ScopedEnvironment no_test_provider("GODOTNEXT_VK_TEST_DEVICE_EXTENSION", String());
 	REQUIRE_FALSE(VulkanExtensionProviders::is_registration_locked());
 	REQUIRE_EQ(VulkanExtensionProviders::get_provider_count(), 0u);
@@ -299,6 +309,7 @@ TEST_CASE("[Upscalers][VkProviders] Registration closes while a rendering contex
 #ifdef DEBUG_ENABLED
 TEST_CASE("[Upscalers][VkProviders] GODOTNEXT_VK_TEST_DEVICE_EXTENSION registers the test provider while a context exists") {
 	using namespace TestVkProviders;
+	const ScopedEmptyProviders empty_providers;
 	REQUIRE_FALSE(VulkanExtensionProviders::is_registration_locked());
 	REQUIRE_EQ(VulkanExtensionProviders::get_provider_count(), 0u);
 
@@ -333,6 +344,7 @@ TEST_CASE("[Upscalers][VkProviders] GODOTNEXT_VK_TEST_DEVICE_EXTENSION registers
 
 TEST_CASE("[Upscalers][VkProviders] Merged extension lists reach the VulkanHooks owner once each") {
 	using namespace TestVkProviders;
+	const ScopedEmptyProviders empty_providers;
 	REQUIRE_EQ(VulkanExtensionProviders::get_provider_count(), 0u);
 
 	const VkInstance instance = (VkInstance)(uintptr_t)0x1000;
@@ -526,6 +538,7 @@ TEST_CASE("[Upscalers][VkProviders] Merged extension lists reach the VulkanHooks
 
 TEST_CASE("[Upscalers][VkProviders] A provider cannot break the device's pNext chain") {
 	using namespace TestVkProviders;
+	const ScopedEmptyProviders empty_providers;
 	REQUIRE_EQ(VulkanExtensionProviders::get_provider_count(), 0u);
 
 	const VkPhysicalDevice physical_device = (VkPhysicalDevice)(uintptr_t)0x2000;
@@ -600,6 +613,7 @@ TEST_CASE("[Upscalers][VkProviders] A provider cannot break the device's pNext c
 
 TEST_CASE("[Upscalers][VkProviders] A message about a GodotNext handle reaches no provider") {
 	using namespace TestVkProviders;
+	const ScopedEmptyProviders empty_providers;
 	REQUIRE_EQ(VulkanExtensionProviders::get_provider_count(), 0u);
 
 	const uint64_t godot_image = 0x51000;

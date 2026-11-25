@@ -562,15 +562,31 @@ void ShaderRD::_dump_spirv_if_requested(uint32_t p_variant, const Vector<RD::Sha
 		return;
 	}
 
+	// Multiple versions of the same ShaderRD (e.g. different material shaders) compile variants
+	// concurrently on worker threads. Include a content hash and serialize writes so distinct
+	// SPIR-V modules do not race on the same output file.
+	static Mutex dump_mutex;
+	MutexLock lock(dump_mutex);
 	DirAccess::make_dir_recursive_absolute(dir);
 	for (int i = 0; i < p_stages.size(); i++) {
-		const String path = dir.path_join(name + ".v" + itos(p_variant) + "." + _spirv_dump_stage_name(p_stages[i].shader_stage) + ".spv");
+		const Vector<uint8_t> &spv = p_stages[i].spirv;
+		uint64_t hash = 14695981039346656037ull;
+		const uint8_t *ptr = spv.ptr();
+		for (int j = 0; j < spv.size(); j++) {
+			hash ^= ptr[j];
+			hash *= 1099511628211ull;
+		}
+		const String hash_hex = String::num_uint64(hash & 0xFFFFFFFFull, 16).pad_zeros(8);
+		const String path = dir.path_join(name + ".v" + itos(p_variant) + "." + hash_hex + "." + _spirv_dump_stage_name(p_stages[i].shader_stage) + ".spv");
+		if (FileAccess::exists(path)) {
+			continue;
+		}
 		Ref<FileAccess> file = FileAccess::open(path, FileAccess::WRITE);
 		if (file.is_null()) {
 			ERR_PRINT("GODOTNEXT_SPIRV_DUMP_DIR: failed to write " + path);
 			continue;
 		}
-		file->store_buffer(p_stages[i].spirv);
+		file->store_buffer(spv);
 	}
 }
 

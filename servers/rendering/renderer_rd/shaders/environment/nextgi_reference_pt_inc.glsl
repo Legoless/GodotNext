@@ -10,6 +10,9 @@
 #ifndef NEXTGI_PT_MATERIAL
 #define NEXTGI_PT_MATERIAL(m) materials.data[m]
 #endif
+#ifndef NEXTGI_PT_SKY
+#define NEXTGI_PT_SKY(dir) ref_params.sky_color.rgb
+#endif
 
 const uint NEXTGI_PT_BOUNCE_CAP = 64u;
 const uint NEXTGI_PT_ROULETTE_FROM = 4u;
@@ -184,16 +187,42 @@ vec3 nextgi_pt_next_event(vec3 position, vec3 normal, vec3 view, uint material) 
 	vec3 lit = vec3(0.0);
 	uint light_count = min(ref_params.counts.y, 8u);
 	for (uint i = 0u; i < light_count; i++) {
-		vec4 position_range = lights.data[i * 3u];
-		vec4 color_energy = lights.data[i * 3u + 1u];
-		vec4 extra = lights.data[i * 3u + 2u];
+		vec4 position_range = lights.data[i * 4u];
+		vec4 color_energy = lights.data[i * 4u + 1u];
+		vec4 extra = lights.data[i * 4u + 2u];
+		vec4 spot_data = lights.data[i * 4u + 3u];
 		vec3 shadow_origin = position + normal * NEXTGI_PT_ORIGIN_OFFSET;
-		vec3 to_light = position_range.xyz - shadow_origin;
-		float dist = length(to_light);
-		if (dist <= 1e-6) {
+		vec3 light_dir;
+		float dist;
+		float attenuation;
+		if (extra.z > 0.5 && extra.z < 1.5) {
+			light_dir = normalize(position_range.xyz);
+			dist = 1.0e6;
+			attenuation = 1.0;
+		} else {
+			vec3 to_light = position_range.xyz - shadow_origin;
+			dist = length(to_light);
+			if (dist <= 1e-6) {
+				continue;
+			}
+			light_dir = to_light / dist;
+			attenuation = nextgi_pt_omni(dist, 1.0 / max(position_range.w, 1e-4), extra.x);
+			if (extra.z > 1.5) {
+				vec3 spot_dir = normalize(spot_data.xyz);
+				float cos_spot = extra.w;
+				float facing = dot(-light_dir, spot_dir);
+				if (facing <= cos_spot) {
+					continue;
+				}
+				float scos = max(facing, cos_spot);
+				float denom = max(1.0 - cos_spot, 1e-4);
+				float spot_rim = max(1e-4, (1.0 - scos) / denom);
+				attenuation *= max(1.0 - pow(spot_rim, spot_data.w), 0.0);
+			}
+		}
+		if (attenuation <= 0.0) {
 			continue;
 		}
-		vec3 light_dir = to_light / dist;
 		float n_dot_l = dot(normal, light_dir);
 		if (n_dot_l <= 0.0) {
 			continue;
@@ -202,7 +231,6 @@ vec3 nextgi_pt_next_event(vec3 position, vec3 normal, vec3 view, uint material) 
 		if (nextgi_trace(shadow_origin, light_dir, dist - NEXTGI_PT_ORIGIN_OFFSET, shadow_hit)) {
 			continue;
 		}
-		float attenuation = nextgi_pt_omni(dist, 1.0 / max(position_range.w, 1e-4), extra.x);
 		vec3 light_color = color_energy.rgb * color_energy.w * NEXTGI_PT_PI;
 		float specular_amount = extra.y * 2.0;
 		vec3 diffuse = light_color * attenuation * nextgi_pt_diffuse_nl(material, normal, view, light_dir, n_dot_l) * nextgi_pt_diffuse_albedo(material);
@@ -320,7 +348,7 @@ vec3 nextgi_pt_radiance_at(vec3 position, vec3 normal, vec3 wo, uint material, i
 		vec3 origin = position + normal * NEXTGI_PT_ORIGIN_OFFSET;
 		NextGIHit hit;
 		if (!nextgi_trace(origin, direction, 1.0e6, hit)) {
-			accumulated += throughput * ref_params.sky_color.rgb;
+			accumulated += throughput * NEXTGI_PT_SKY(direction);
 			break;
 		}
 		if (!nextgi_pt_hit_surface(hit, position, normal, material)) {
@@ -360,7 +388,7 @@ vec3 nextgi_pt_reflection(vec3 p_position, vec3 p_normal, vec3 p_view, uint p_ma
 	vec3 origin = p_position + p_normal * NEXTGI_PT_ORIGIN_OFFSET;
 	NextGIHit hit;
 	if (!nextgi_trace(origin, direction, 1.0e6, hit)) {
-		return ref_params.sky_color.rgb;
+		return NEXTGI_PT_SKY(direction);
 	}
 	r_distance = hit.t;
 	r_hit = 1.0;
@@ -368,7 +396,7 @@ vec3 nextgi_pt_reflection(vec3 p_position, vec3 p_normal, vec3 p_view, uint p_ma
 	vec3 normal;
 	uint material;
 	if (!nextgi_pt_hit_surface(hit, position, normal, material)) {
-		return ref_params.sky_color.rgb;
+		return NEXTGI_PT_SKY(direction);
 	}
 	return nextgi_pt_radiance_at(position, normal, -direction, material, p_rng);
 }
@@ -376,13 +404,13 @@ vec3 nextgi_pt_reflection(vec3 p_position, vec3 p_normal, vec3 p_view, uint p_ma
 vec3 nextgi_pt_radiance(vec3 origin, vec3 wo, inout uint rng) {
 	NextGIHit hit;
 	if (!nextgi_trace(origin, -wo, 0.2, hit)) {
-		return ref_params.sky_color.rgb;
+		return NEXTGI_PT_SKY(-wo);
 	}
 	vec3 position;
 	vec3 normal;
 	uint material;
 	if (!nextgi_pt_hit_surface(hit, position, normal, material)) {
-		return ref_params.sky_color.rgb;
+		return NEXTGI_PT_SKY(-wo);
 	}
 	return nextgi_pt_radiance_at(position, normal, wo, material, rng);
 }

@@ -87,6 +87,22 @@ public:
 	}
 };
 
+struct ScopedDLSSUpscalerSlot {
+	TemporalUpscaler *saved = nullptr;
+	ScopedDLSSUpscalerSlot() {
+		saved = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		if (saved != nullptr) {
+			TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		}
+	}
+	~ScopedDLSSUpscalerSlot() {
+		TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		if (saved != nullptr) {
+			TemporalUpscalerRegistry::register_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS, saved);
+		}
+	}
+};
+
 } // namespace
 
 TEST_CASE("[Upscalers] DLSS enum values and type") {
@@ -100,6 +116,7 @@ TEST_CASE("[Upscalers] DLSS enum values and type") {
 }
 
 TEST_CASE("[Upscalers] Registry and mode hint") {
+	const ScopedDLSSUpscalerSlot clean_dlss;
 	MockUpscaler mock;
 	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS) == nullptr);
 	const String without = TemporalUpscalerRegistry::build_mode_hint(true);
@@ -119,6 +136,7 @@ TEST_CASE("[Upscalers] Registry and mode hint") {
 }
 
 TEST_CASE("[Upscalers] Viewport status exposes the requested mode") {
+	const ScopedDLSSUpscalerSlot clean_dlss;
 	RenderingServer *rs = RenderingServer::get_singleton();
 	REQUIRE(rs != nullptr);
 	TemporalUpscalerRegistry::clear();
@@ -153,6 +171,7 @@ TEST_CASE("[Upscalers] Reason precedence") {
 }
 
 TEST_CASE("[Upscalers] Mock availability and server query") {
+	const ScopedDLSSUpscalerSlot clean_dlss;
 	MockUpscaler mock;
 	mock.reason = RSE::VIEWPORT_SCALING_3D_REASON_RUNTIME_MISSING;
 	mock.clamped_scale = 0.5f;
@@ -269,6 +288,7 @@ TEST_CASE("[Upscalers][TSR] Enum values, types, and mode hints") {
 	CHECK_EQ(int(Viewport::TSR_QUALITY_CINEMATIC), 4);
 	CHECK_EQ(int(Viewport::TSR_QUALITY_MAX), 5);
 
+	const ScopedDLSSUpscalerSlot clean_dlss;
 	TemporalUpscalerRegistry::clear();
 	const String non_metal_hint = TemporalUpscalerRegistry::build_mode_hint(false);
 	const String metal_hint = TemporalUpscalerRegistry::build_mode_hint(true);
@@ -1811,6 +1831,7 @@ TEST_CASE("[Upscalers][DynRes] RenderSceneBuffersRD internal-only fast path pres
 	rb_data.instantiate();
 	rb->set_custom_data(RB_SCOPE_FORWARD_CLUSTERED, rb_data);
 
+	const ScopedDLSSUpscalerSlot clean_dlss;
 	MockUpscaler mock_dlss;
 	TemporalUpscalerRegistry::register_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS, &mock_dlss);
 

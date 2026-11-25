@@ -2780,6 +2780,9 @@ TEST_CASE("[NextGI] reference accumulation reset key") {
 	changed.sky = Color(0.1, 0.2, 0.31);
 	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
 	changed = base;
+	changed.sky = Color(0.1, 0.2, 0.3, 0.5);
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
 	changed.tables = 0x1235;
 	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
 	// Full to Direct Only restarts it, so the harness's direct pass starts from zero samples.
@@ -5322,6 +5325,34 @@ TEST_CASE("[NextGI][NextGeo] VGD proxy planner packs Stage-2 group tables, outsi
 	CHECK_EQ(allocator.get_allocated_bytes(), uint64_t(0));
 }
 
+TEST_CASE("[NextGI] WRC sampling visibility, polar cosine gather and per-block SRC feedback") {
+	using namespace RendererRD;
+	// Verify per-block UV packing slot on ScheduledPage defaults to zero (center fallback).
+	const NextGIRelight::ScheduledPage page;
+	CHECK_EQ(page.uv_packed, 0u);
+
+	// Hardware and software gather shaders share polar cosine sampling, border-safe WRC
+	// visibility lookups, non-zero-sign octahedral mapping, and per-block feedback origins.
+	const String gather_hw = NextGIGather::build_shader_source(0);
+	const String gather_sw = NextGIGather::build_swrt_shader_source(0);
+	const String feedback_hw = NextGIGather::build_shader_source(2);
+	REQUIRE_FALSE(gather_hw.is_empty());
+	REQUIRE_FALSE(gather_sw.is_empty());
+	REQUIRE_FALSE(feedback_hw.is_empty());
+
+	for (const String &src : { gather_hw, gather_sw }) {
+		CHECK(src.contains("oct.x >= 0.0 ? 1.0 : -1.0"));
+		CHECK(src.contains("texelFetch(nextgi_wrc_visibility, ivec2(tile) * 8 + vis_local, 0).rg"));
+		CHECK(src.contains("nextgi_wrc_confidence = 0.99;"));
+		CHECK(src.contains("float radius = sqrt(uv.x);"));
+	}
+	// HWRT gather performs exact probe-to-hit wall occlusion against the TLAS.
+	CHECK(gather_hw.contains("nextgi_trace(p, -to_p / dist_to_p, dist_to_p - 0.01, probe_vis_hit)"));
+	// Per-block SRC feedback unpacks block.w and samples card depth instead of reusing card.origin.xyz.
+	CHECK(feedback_hw.contains("vec2 block_uv = block.w != 0u ?"));
+	CHECK(feedback_hw.contains("block_depth = d * card_set.capture_scale;"));
+}
+
 #endif // RD_ENABLED
 
 TEST_CASE("[NextGI] Max roughness to trace caps the quality preset") {
@@ -5374,4 +5405,31 @@ TEST_CASE("[NextGI] Translucency probe mapping and temporal history") {
 	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(false, Vector2(0.5, 0.5)), 0.0f));
 	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(true, Vector2(-0.1, 0.5)), 0.0f));
 	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(true, Vector2(0.5, 1.1)), 0.0f));
+}
+
+TEST_CASE("[NextGI] Relight radiometric light energy, shadow reuse eligibility and large-card ranking") {
+	using namespace RendererRD;
+	const float pi = float(Math::PI);
+	// Non-physical lights scale by PI to match Forward+ (LightStorage) and PathTracer.
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(1.0f, RSE::LIGHT_OMNI, false, 1000.0f, false, 1.0f), pi));
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(2.0f, RSE::LIGHT_DIRECTIONAL, false, 100000.0f, false, 1.0f), 2.0f * pi));
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(1.0f, RSE::LIGHT_SPOT, false, 1000.0f, true, 50.0f), 50.0f * pi));
+	// Physical lights convert luminous power/intensity as Forward+ does.
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(1.0f, RSE::LIGHT_OMNI, true, 4.0f * pi, false, 1.0f), 1.0f));
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(1.0f, RSE::LIGHT_AREA, true, 2.0f * pi, false, 1.0f), 1.0f));
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(1.0f, RSE::LIGHT_SPOT, true, pi, false, 1.0f), 1.0f));
+	CHECK(Math::is_equal_approx(nextgi_light_effective_energy(1.0f, RSE::LIGHT_SPOT, true, 100.0f, true, 50.0f), 50.0f));
+
+	// Only spotlights project linearly in the positional shadow atlas; omni and area lights trace.
+	CHECK(nextgi_positional_shadow_reusable(RSE::LIGHT_SPOT));
+	CHECK_FALSE(nextgi_positional_shadow_reusable(RSE::LIGHT_OMNI));
+	CHECK_FALSE(nextgi_positional_shadow_reusable(RSE::LIGHT_AREA));
+	CHECK_FALSE(nextgi_positional_shadow_reusable(RSE::LIGHT_DIRECTIONAL));
+
+	// Large-card closest-point ranking keeps a light near one end of a 40 m floor within range.
+	const AABB floor_40m(Vector3(-20.0f, -0.2f, -20.0f), Vector3(40.0f, 0.2f, 40.0f));
+	const Vector3 light_pos(-18.0f, 2.6f, 0.0f);
+	const Vector3 sample_point = nextgi_card_positional_light_rank_point(floor_40m, light_pos);
+	CHECK(sample_point.is_equal_approx(Vector3(-18.0f, 0.0f, 0.0f)));
+	CHECK_GT(nextgi_omni_attenuation(sample_point.distance_to(light_pos), 1.0f / 6.0f, 1.0f), 0.0f);
 }

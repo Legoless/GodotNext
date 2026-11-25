@@ -1216,7 +1216,7 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 			feedback.push_back(page.indirect_x | (page.indirect_y << 16));
 			feedback.push_back(page.record_index);
 			feedback.push_back(page.card_index);
-			feedback.push_back(0);
+			feedback.push_back(page.uv_packed);
 		}
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();

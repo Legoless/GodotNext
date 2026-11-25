@@ -108,6 +108,7 @@ _FORCE_INLINE_ uint64_t nextgi_reference_reset_hash(const NextGIReferenceResetKe
 	hash = nextgi_reference_hash_real(hash, p_key.sky.r);
 	hash = nextgi_reference_hash_real(hash, p_key.sky.g);
 	hash = nextgi_reference_hash_real(hash, p_key.sky.b);
+	hash = nextgi_reference_hash_real(hash, p_key.sky.a);
 	return nextgi_reference_hash_bytes(hash, &p_key.tables, sizeof(p_key.tables));
 }
 
@@ -125,6 +126,8 @@ class NextGIReference {
 	RID params_buffer;
 	RID uniform_set;
 	RID dummy_buffer;
+	RID dummy_sky_texture;
+	RID sky_sampler;
 	uint32_t width = 0;
 	uint32_t height = 0;
 	uint32_t samples = 0;

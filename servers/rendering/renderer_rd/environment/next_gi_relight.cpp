@@ -1418,18 +1418,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		const bool ies_use_intensity = ies_active && light_storage->light_get_ies_use_intensity(light);
 		const float ies_scale = ies_active ? light_storage->light_get_ies_intensity_scale(light) : 1.0f;
 
-		if (ies_use_intensity) {
-			energy *= ies_peak;
-		} else if (physical) {
-			energy *= RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_INTENSITY);
-			if (type == RSE::LIGHT_OMNI) {
-				energy *= 1.0f / (Math::PI * 4.0f);
-			} else if (type == RSE::LIGHT_AREA) {
-				energy *= 1.0f / (Math::PI * 2.0f);
-			} else if (type == RSE::LIGHT_SPOT) {
-				energy *= 1.0f / Math::PI;
-			}
-		}
+		energy = nextgi_light_effective_energy(energy, type, physical, RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_INTENSITY), ies_use_intensity, ies_peak);
 		energy *= exposure;
 		Vector2 area_size;
 		Rect2 area_tex_rect;
@@ -1578,7 +1567,10 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			for (int split = 0; split < 4; split++) {
 				push_entry(light_storage->light_instance_get_shadow_camera(cpu.instance, split), light_storage->light_instance_get_directional_shadow_atlas_rect(cpu.instance, split), NEXTGI_REUSE_DIRECTIONAL, split);
 			}
-		} else if (rendered && !cpu.directional && p_render_data->shadow_atlas.is_valid() && light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, cpu.instance)) {
+		} else if (rendered && !cpu.directional && nextgi_positional_shadow_reusable(light_storage->light_get_type(light_storage->light_instance_get_base_light(cpu.instance))) && p_render_data->shadow_atlas.is_valid() && light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, cpu.instance)) {
+			// Only spotlights project linearly through a single perspective camera in the positional
+			// shadow atlas; omni (cubemap / dual-paraboloid) and area (dual-paraboloid) lights use
+			// ray-traced SRC shadows instead.
 			Vector2i omni_offset;
 			const Rect2 atlas = light_storage->light_instance_get_shadow_atlas_rect(cpu.instance, p_render_data->shadow_atlas, omni_offset);
 			push_entry(light_storage->light_instance_get_shadow_camera(cpu.instance, 0), atlas, NEXTGI_REUSE_POSITIONAL, 0);
@@ -1766,22 +1758,41 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			if (cpu.directional) {
 				ndotl = normal.dot(-travel);
 			} else {
-				const Vector3 delta = light_position - center;
+				// Rank positional lights using the closest point on the card's world AABB so large
+				// cards (e.g. 40 m floors/ceilings) still receive lights whose range or hemisphere
+				// covers part of the card even when the card center is farther away or offset by
+				// the capture margin.
+				const Vector3 sample_point = nextgi_card_positional_light_rank_point(bounds, light_position);
+				const Vector3 delta = light_position - sample_point;
 				const float distance = delta.length();
-				const Vector3 to_light = distance > 0.0f ? delta / distance : Vector3(0, 1, 0);
-				ndotl = normal.dot(to_light);
+				const Vector3 to_light = distance > 1e-4f ? delta / distance : normal;
+				const Vector3 center_delta = light_position - center;
+				const float center_dist = center_delta.length();
+				const Vector3 center_to_light = center_dist > 1e-4f ? center_delta / center_dist : normal;
+				const float card_depth_world = (_record_basis(instance_pages.record).xform(Vector3(card.axis_n[0], card.axis_n[1], card.axis_n[2])) * card.axis_n[3]).length();
+				const float signed_from_back = (light_position - (center - normal * card_depth_world)).dot(normal);
+				if (signed_from_back > 0.0f) {
+					ndotl = MAX(MAX(normal.dot(to_light), normal.dot(center_to_light)), 0.1f);
+				} else {
+					ndotl = 0.0f;
+				}
 				const int type = int(cpu.gpu.direction_type[3] + 0.5f);
 				if (type == RSE::LIGHT_SPOT) {
-					atten = nextgi_spot_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation, (-to_light).dot(travel), cpu.gpu.cos_spot, cpu.gpu.inv_spot_atten);
+					const float spot_atten = MAX(
+							nextgi_spot_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation, (-to_light).dot(travel), cpu.gpu.cos_spot, cpu.gpu.inv_spot_atten),
+							nextgi_spot_attenuation(center_dist, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation, (-center_to_light).dot(travel), cpu.gpu.cos_spot, cpu.gpu.inv_spot_atten));
+					// A spotlight whose cone intersects the card bounds can miss both sample_point
+					// and center on large cards; keep a small floor if its AABB intersects.
+					atten = spot_atten > 0.0f ? spot_atten : (nextgi_omni_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation) * 0.01f);
 				} else if (type == RSE::LIGHT_AREA) {
 					// GodotNext: light_source_parity (#140). Measure distance from closest point on area rect.
 					const Vector3 ax(cpu.parity.axis_x_width[0], cpu.parity.axis_x_width[1], cpu.parity.axis_x_width[2]);
 					const Vector3 ay(cpu.parity.axis_y_height[0], cpu.parity.axis_y_height[1], cpu.parity.axis_y_height[2]);
-					const Vector3 rel = center - light_position;
+					const Vector3 rel = sample_point - light_position;
 					const float hx = cpu.parity.axis_x_width[3] * 0.5f;
 					const float hy = cpu.parity.axis_y_height[3] * 0.5f;
 					const Vector3 closest = light_position + ax * CLAMP(rel.dot(ax), -hx, hx) + ay * CLAMP(rel.dot(ay), -hy, hy);
-					const Vector3 c_delta = closest - center;
+					const Vector3 c_delta = closest - sample_point;
 					const float c_dist = c_delta.length();
 					const Vector3 c_to_light = c_dist > 1e-4f ? c_delta / c_dist : -travel;
 					ndotl = MAX(normal.dot(c_to_light), ndotl);
@@ -1833,12 +1844,15 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		const uint32_t blocks_x = MAX((card_page.radiance_w + 7u) / 8u, 1u);
 		const uint32_t blocks_y = MAX((card_page.radiance_h + 7u) / 8u, 1u);
 		for (uint32_t by = 0; by < blocks_y; by++) {
+			const uint32_t v_q = uint32_t(CLAMP(int(((float(by) + 0.5f) / float(blocks_y)) * 65535.0f), 0, 65535));
 			for (uint32_t bx = 0; bx < blocks_x; bx++) {
+				const uint32_t u_q = uint32_t(CLAMP(int(((float(bx) + 0.5f) / float(blocks_x)) * 65535.0f), 0, 65535));
 				ScheduledPage scheduled_page;
 				scheduled_page.indirect_x = (card_page.radiance_x / 8u) + bx;
 				scheduled_page.indirect_y = (card_page.radiance_y / 8u) + by;
 				scheduled_page.record_index = instance_pages.record_index;
 				scheduled_page.card_index = card_page.card_index;
+				scheduled_page.uv_packed = u_q | (v_q << 16u);
 				scheduled_pages.push_back(scheduled_page);
 			}
 		}

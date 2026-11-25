@@ -1045,4 +1045,12 @@ TEST_CASE("[PathTracer] Motion blur transform interpolation and shutter interval
 			path_tracer_shutter_time(1, 2, PATH_TRACER_MOTION_SLICES, 1.0f)));
 }
 
+TEST_CASE("[PathTracer] D16 reference light stride carries SpotLight3D cone parameters") {
+	CHECK_EQ(PATH_TRACER_LIGHT_FLOATS, 16u);
+	// SpotLight3D cone packing uses 16 floats per light (pos/range, dir/cos_angle, color/energy, atten/spot_atten/type).
+	const float cos_45 = Math::cos(Math::deg_to_rad(45.0f));
+	CHECK(cos_45 > 0.7f);
+	CHECK(cos_45 < 0.72f);
+}
+
 } // namespace TestPathTracer

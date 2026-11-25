@@ -34,6 +34,7 @@
 #include "servers/rendering/renderer_rd/effects/path_tracer.h" // GodotNext: path_tracer (#167)
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -106,6 +107,12 @@ void NextGIReference::free() {
 		if (dummy_buffer.is_valid()) {
 			rd->free_rid(dummy_buffer);
 		}
+		if (dummy_sky_texture.is_valid()) {
+			rd->free_rid(dummy_sky_texture);
+		}
+		if (sky_sampler.is_valid()) {
+			rd->free_rid(sky_sampler);
+		}
 	}
 	accumulation = RID();
 	reflection_guides = RID();
@@ -115,6 +122,8 @@ void NextGIReference::free() {
 	params_buffer = RID();
 	estimator_buffer = RID();
 	dummy_buffer = RID();
+	dummy_sky_texture = RID();
+	sky_sampler = RID();
 	tables_current = false;
 	samples = 0;
 	_nextgi_reference_samples = 0;
@@ -194,7 +203,17 @@ uint64_t NextGIReference::_scene_hash(const RenderDataRD *p_render_data) const {
 	}
 	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
 	if (scene != nullptr && p_render_data != nullptr && p_render_data->environment.is_valid()) {
-		key.sky = scene->environment_get_bg_color(p_render_data->environment) * scene->environment_get_bg_energy_multiplier(p_render_data->environment);
+		const RID env = p_render_data->environment;
+		const float bg_energy = scene->environment_get_bg_energy_multiplier(env);
+		key.sky = scene->environment_get_bg_color(env) * bg_energy;
+		key.sky.a = 0.0f;
+		if (scene->environment_get_background(env) == RSE::ENV_BG_SKY) {
+			const RID sky = scene->environment_get_sky(env);
+			SkyRD *sky_rd = scene->get_sky();
+			if (sky.is_valid() && sky_rd != nullptr && sky_rd->sky_get_radiance_texture_2d(sky).is_valid()) {
+				key.sky.a = bg_energy;
+			}
+		}
 	}
 	key.tables = tables_hash;
 	return nextgi_reference_reset_hash(key);
@@ -344,6 +363,24 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	if (!dummy_buffer.is_valid()) {
 		dummy_buffer = rd->storage_buffer_create(16);
 	}
+	if (!dummy_sky_texture.is_valid()) {
+		RD::TextureFormat sky_fmt;
+		sky_fmt.width = 1;
+		sky_fmt.height = 1;
+		sky_fmt.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		sky_fmt.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		dummy_sky_texture = rd->texture_create(sky_fmt, RD::TextureView());
+		rd->texture_clear(dummy_sky_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+	if (!sky_sampler.is_valid()) {
+		RD::SamplerState sampler_state;
+		sampler_state.mag_filter = RD::SAMPLER_FILTER_LINEAR;
+		sampler_state.min_filter = RD::SAMPLER_FILTER_LINEAR;
+		sampler_state.mip_filter = RD::SAMPLER_FILTER_LINEAR;
+		sampler_state.repeat_u = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		sampler_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
+		sky_sampler = rd->sampler_create(sampler_state);
+	}
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	RID chunks[4] = { dummy_buffer, dummy_buffer, dummy_buffer, dummy_buffer };
 	if (mesh_storage != nullptr) {
@@ -374,12 +411,27 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	params.clear = reset ? 1.0f : 0.0f;
 	params.samples_per_pixel = 32.0f;
 	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+	RID sky_tex = dummy_sky_texture;
 	if (scene != nullptr && p_render_data->environment.is_valid()) {
-		const Color bg = scene->environment_get_bg_color(p_render_data->environment);
-		const float energy = scene->environment_get_bg_energy_multiplier(p_render_data->environment);
+		const RID env = p_render_data->environment;
+		const Color bg = scene->environment_get_bg_color(env);
+		const float energy = scene->environment_get_bg_energy_multiplier(env);
 		params.sky_color[0] = bg.r * energy;
 		params.sky_color[1] = bg.g * energy;
 		params.sky_color[2] = bg.b * energy;
+		params.sky_color[3] = 0.0f;
+		if (scene->environment_get_background(env) == RSE::ENV_BG_SKY) {
+			const RID sky = scene->environment_get_sky(env);
+			SkyRD *sky_rd = scene->get_sky();
+			if (sky.is_valid() && sky_rd != nullptr) {
+				const RID radiance = sky_rd->sky_get_radiance_texture_2d(sky);
+				if (radiance.is_valid()) {
+					sky_tex = radiance;
+					const float baked_exp = MAX(sky_rd->sky_get_baked_exposure(sky), 1e-4f);
+					params.sky_color[3] = energy / MAX(baked_exp * params.exposure, 1e-6f);
+				}
+			}
+		}
 	}
 	if (!params_buffer.is_valid()) {
 		params_buffer = rd->storage_buffer_create(sizeof(NextGIRefGPUParams));
@@ -395,7 +447,8 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	if (!surfaces.is_valid()) {
 		surfaces = dummy_buffer;
 	}
-	RD::Uniform uniforms[14] = {
+	RD::Uniform sky_uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 14, Vector<RID>({ sky_sampler, sky_tex }));
+	RD::Uniform uniforms[15] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, accumulation),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, accumulation),
@@ -410,8 +463,9 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, reflection_guides),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, reflection_distance),
+		sky_uniform,
 	};
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 14), shader->shader.version_get_shader(shader->version, 0), 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 15), shader->shader.version_get_shader(shader->version, 0), 0);
 	if (!uniform_set.is_valid()) {
 		return;
 	}
@@ -548,7 +602,8 @@ void NextGIReference::composite(RID p_color) {
 			}
 		}
 	}
-	RD::Uniform uniforms[14] = {
+	RD::Uniform sky_uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 14, Vector<RID>({ sky_sampler, dummy_sky_texture }));
+	RD::Uniform uniforms[15] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, accumulation),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_color),
@@ -563,8 +618,9 @@ void NextGIReference::composite(RID p_color) {
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, reflection_guides),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, reflection_distance),
+		sky_uniform,
 	};
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 14), shader->shader.version_get_shader(shader->version, 1), 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 15), shader->shader.version_get_shader(shader->version, 1), 0);
 	if (!uniform_set.is_valid()) {
 		return;
 	}

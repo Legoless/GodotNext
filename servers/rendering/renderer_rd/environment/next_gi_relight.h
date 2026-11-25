@@ -233,6 +233,7 @@ public:
 		uint32_t indirect_y = 0;
 		uint32_t record_index = 0;
 		uint32_t card_index = 0;
+		uint32_t uv_packed = 0;
 		uint32_t block_count = 0;
 	};
 

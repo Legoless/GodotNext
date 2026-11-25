@@ -20,6 +20,7 @@ layout(rgba16f, set = 0, binding = 2) restrict uniform image2D color_image;
 // rgb = distance sum, a unused; the composite writes mean distance and hit fraction.
 layout(rgba32f, set = 0, binding = 12) restrict uniform image2D reflection_guides;
 layout(rgba16f, set = 0, binding = 13) restrict uniform image2D reflection_distance;
+layout(set = 0, binding = 14) uniform sampler2D sky_tex;
 
 struct NextGIRefMaterial {
 	vec4 albedo_metal;
@@ -76,6 +77,20 @@ layout(set = 0, binding = 11, std430) readonly buffer NextGIRefParamsBuffer {
 }
 ref_params;
 
+vec2 nextgi_ref_vec3_to_oct(vec3 p_n) {
+	vec3 n = p_n / max(abs(p_n.x) + abs(p_n.y) + abs(p_n.z), 1e-6);
+	vec2 oct = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * mix(vec2(-1.0), vec2(1.0), greaterThanEqual(n.xy, vec2(0.0)));
+	return oct * 0.5 + 0.5;
+}
+
+vec3 nextgi_ref_sky(vec3 p_dir) {
+	if (ref_params.sky_color.a > 0.0) {
+		return max(textureLod(sky_tex, nextgi_ref_vec3_to_oct(normalize(p_dir)), 0.0).rgb * ref_params.sky_color.a, vec3(0.0));
+	}
+	return ref_params.sky_color.rgb;
+}
+
+#define NEXTGI_PT_SKY(dir) nextgi_ref_sky(dir)
 #include "nextgi_reference_pt_inc.glsl"
 
 vec3 nextgi_ref_camera_dir(uvec2 pixel) {
@@ -108,7 +123,7 @@ void main() {
 	vec3 guide_sum = vec3(0.0);
 	for (uint s = 0u; s < spp; s++) {
 		uint rng = nextgi_pt_hash(index ^ ref_params.counts.x ^ (ref_params.dispatch.z + s));
-		vec3 sample_radiance = ref_params.sky_color.rgb;
+		vec3 sample_radiance = NEXTGI_PT_SKY(direction);
 		vec3 guide_sample = vec3(0.0);
 		NextGIHit hit;
 		if (nextgi_trace(origin, direction, 1.0e6, hit)) {

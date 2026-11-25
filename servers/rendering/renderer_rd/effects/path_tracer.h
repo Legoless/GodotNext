@@ -279,8 +279,8 @@ struct PathTracerGPUMaterial {
 };
 static_assert(sizeof(PathTracerGPUMaterial) == 48, "The D16 material table entry is 48 bytes (NextGIRefMaterial).");
 
-// The D16 tables of one frame: a material per TLAS surface record, in record order, and up to 8 omni lights
-// (12 floats each).
+// The D16 tables of one frame: a material per TLAS surface record, in record order, and up to 8 omni,
+// spot, or directional lights (16 floats each).
 struct PathTracerTables {
 	LocalVector<PathTracerGPUMaterial> materials;
 	LocalVector<float> lights;
@@ -290,7 +290,7 @@ struct PathTracerTables {
 	uint64_t hash = 0; // The instance transforms and the table bytes (#263's reset key).
 };
 static constexpr uint32_t PATH_TRACER_MAX_LIGHTS = 8;
-static constexpr uint32_t PATH_TRACER_LIGHT_FLOATS = 12;
+static constexpr uint32_t PATH_TRACER_LIGHT_FLOATS = 16;
 
 // GodotNext: path_tracer_lights_camera (#169). Product light table (all Godot light types, scenario-wide
 // deterministic order including bake-disabled lights), sky 2D CDF, FogVolumes, thin-lens DOF, and motion blur.

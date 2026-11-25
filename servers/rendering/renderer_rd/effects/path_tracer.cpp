@@ -1021,9 +1021,9 @@ static RSE::CullMode _path_tracer_cull_mode(RID p_material) {
 	return shader_data != nullptr ? shader_data->get_cull_mode() : RSE::CULL_MODE_BACK;
 }
 
-// The D16 table entry of a material (#27): StandardMaterial3D's constant parameters, without textures. The D16
-// reference takes the color parameters' values as they are; the product (p_linear_colors) converts them to linear,
-// as the renderer does for the material shaders (and so for the hit groups).
+// The D16 table entry of a material (#27): StandardMaterial3D's constant parameters, without textures.
+// Converts sRGB color parameters to linear (p_linear_colors = true) so both the D16 reference and the
+// product path tracer match the Forward+ material shaders and SRC material atlas.
 static PathTracerGPUMaterial _path_tracer_table_material(RID p_material, uint32_t &r_textured, bool p_linear_colors) {
 	PathTracerGPUMaterial gpu;
 	if (p_material.is_valid() && (_path_tracer_has_texture(p_material, "texture_albedo") || _path_tracer_has_texture(p_material, "texture_emission"))) {
@@ -1325,7 +1325,7 @@ static uint32_t _path_tracer_build_product_lights(const RenderDataRD *p_render_d
 	return gpu_lights.size();
 }
 
-// Up to PATH_TRACER_MAX_LIGHTS omni and spot lights, 12 floats each (the D16 reference light table).
+// Up to PATH_TRACER_MAX_LIGHTS omni, spot and directional lights, 16 floats each (the D16 reference light table).
 static uint32_t _path_tracer_build_lights(const RenderDataRD *p_render_data, LocalVector<float> &r_lights) {
 	r_lights.resize(PATH_TRACER_MAX_LIGHTS * PATH_TRACER_LIGHT_FLOATS);
 	for (uint32_t i = 0; i < r_lights.size(); i++) {
@@ -1333,33 +1333,83 @@ static uint32_t _path_tracer_build_lights(const RenderDataRD *p_render_data, Loc
 	}
 	uint32_t light_count = 0;
 	LightStorage *light_storage = LightStorage::get_singleton();
-	if (light_storage == nullptr || p_render_data->lights == nullptr) {
+	if (light_storage == nullptr) {
 		return 0;
 	}
-	for (uint32_t i = 0; i < p_render_data->lights->size() && light_count < PATH_TRACER_MAX_LIGHTS; i++) {
-		const RID instance = (*p_render_data->lights)[i];
-		const RID light = light_storage->light_instance_get_base_light(instance);
-		if (!light.is_valid() || light_storage->light_get_type(light) == RSE::LIGHT_DIRECTIONAL) {
-			continue;
+	if (p_render_data->lights != nullptr) {
+		for (uint32_t i = 0; i < p_render_data->lights->size() && light_count < PATH_TRACER_MAX_LIGHTS; i++) {
+			const RID instance = (*p_render_data->lights)[i];
+			const RID light = light_storage->light_instance_get_base_light(instance);
+			if (!light.is_valid()) {
+				continue;
+			}
+			const RSE::LightType type = light_storage->light_get_type(light);
+			if (type == RSE::LIGHT_DIRECTIONAL) {
+				continue;
+			}
+			const Transform3D xform = light_storage->light_instance_get_base_transform(instance);
+			const Color color = light_storage->light_get_color(light);
+			const float energy = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY);
+			const float range = MAX(light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE), 0.001f);
+			const float decay = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION);
+			const float specular = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPECULAR);
+			const uint32_t base = light_count * PATH_TRACER_LIGHT_FLOATS;
+			r_lights[base + 0] = xform.origin.x;
+			r_lights[base + 1] = xform.origin.y;
+			r_lights[base + 2] = xform.origin.z;
+			r_lights[base + 3] = range;
+			r_lights[base + 4] = color.r;
+			r_lights[base + 5] = color.g;
+			r_lights[base + 6] = color.b;
+			r_lights[base + 7] = energy;
+			r_lights[base + 8] = decay;
+			r_lights[base + 9] = specular;
+			if (type == RSE::LIGHT_SPOT) {
+				const Vector3 spot_dir = -xform.basis.get_column(Vector3::AXIS_Z).normalized();
+				const float spot_deg = CLAMP(light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ANGLE), 0.01f, 89.9f);
+				const float cos_spot = Math::cos(Math::deg_to_rad(spot_deg));
+				const float inv_spot_atten = 1.0f / MAX(light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ATTENUATION), 1e-4f);
+				r_lights[base + 10] = 2.0f; // extra.z > 1.5 marks spotlight in nextgi_reference_pt_inc.glsl
+				r_lights[base + 11] = cos_spot;
+				r_lights[base + 12] = spot_dir.x;
+				r_lights[base + 13] = spot_dir.y;
+				r_lights[base + 14] = spot_dir.z;
+				r_lights[base + 15] = inv_spot_atten;
+			}
+			light_count++;
 		}
-		const Transform3D xform = light_storage->light_instance_get_base_transform(instance);
-		const Color color = light_storage->light_get_color(light);
-		const float energy = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY);
-		const float range = MAX(light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE), 0.001f);
-		const float decay = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION);
-		const float specular = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPECULAR);
-		const uint32_t base = light_count * PATH_TRACER_LIGHT_FLOATS;
-		r_lights[base + 0] = xform.origin.x;
-		r_lights[base + 1] = xform.origin.y;
-		r_lights[base + 2] = xform.origin.z;
-		r_lights[base + 3] = range;
-		r_lights[base + 4] = color.r;
-		r_lights[base + 5] = color.g;
-		r_lights[base + 6] = color.b;
-		r_lights[base + 7] = energy;
-		r_lights[base + 8] = decay;
-		r_lights[base + 9] = specular;
-		light_count++;
+	}
+	// Include DirectionalLight3D instances (e.g. Concave Courtyard sun) so D16 references light outdoor scenes.
+	const RendererSceneRender::RenderSDFGIUpdateData *update = p_render_data->sdfgi_update_data;
+	if (update != nullptr && update->directional_lights != nullptr) {
+		for (int i = 0; i < update->directional_lights->size() && light_count < PATH_TRACER_MAX_LIGHTS; i++) {
+			const RID instance = (*update->directional_lights)[i];
+			const RID light = light_storage->light_instance_get_base_light(instance);
+			if (!light.is_valid() || light_storage->light_get_type(light) != RSE::LIGHT_DIRECTIONAL) {
+				continue;
+			}
+			if (light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+				continue;
+			}
+			const Transform3D xform = light_storage->light_instance_get_base_transform(instance);
+			const Vector3 to_light = xform.basis.get_column(Vector3::AXIS_Z).normalized();
+			const Color color = light_storage->light_get_color(light);
+			const float energy = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY);
+			const float specular = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPECULAR);
+			const uint32_t base = light_count * PATH_TRACER_LIGHT_FLOATS;
+			r_lights[base + 0] = to_light.x;
+			r_lights[base + 1] = to_light.y;
+			r_lights[base + 2] = to_light.z;
+			r_lights[base + 3] = -1.0f;
+			r_lights[base + 4] = color.r;
+			r_lights[base + 5] = color.g;
+			r_lights[base + 6] = color.b;
+			r_lights[base + 7] = energy;
+			r_lights[base + 8] = 0.0f;
+			r_lights[base + 9] = specular;
+			r_lights[base + 10] = 1.0f; // extra.z > 0.5 marks directional light in nextgi_reference_pt_inc.glsl
+			light_count++;
+		}
 	}
 	return light_count;
 }
@@ -1545,7 +1595,7 @@ void PathTracer::build_reference_tables(const RenderDataRD *p_render_data, PathT
 					continue;
 				}
 				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
-					r_tables.materials.push_back(_path_tracer_table_material(_path_tracer_surface_material(geometry, mesh, part_geometry.surface), r_tables.textured_materials, false));
+					r_tables.materials.push_back(_path_tracer_table_material(_path_tracer_surface_material(geometry, mesh, part_geometry.surface), r_tables.textured_materials, true));
 				}
 			}
 		}

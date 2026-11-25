@@ -430,10 +430,12 @@ Error RenderingDevice::_scratch_ring_allocate(uint64_t p_size, RDD::BufferID &r_
 	Frame &slot = frames[frame];
 	// Vulkan reports its scratch alignment; Metal and the minimum use 256 bytes.
 	const uint64_t alignment = MAX(driver->limit_get(LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT), uint64_t(256));
+	const uint64_t aligned_size = (p_size + alignment - 1) / alignment * alignment;
+	slot.scratch_ring_frame_total += aligned_size;
 	uint64_t offset = slot.scratch_ring ? (slot.scratch_ring_used + alignment - 1) / alignment * alignment : 0;
 	if (!slot.scratch_ring || offset + p_size > slot.scratch_ring_size) {
 		// Big enough for the whole frame's demand so far, so the next frame fits without growing.
-		const uint64_t need = offset + p_size;
+		const uint64_t need = MAX(offset + p_size, slot.scratch_ring_frame_total);
 		uint64_t size = 64 * 1024;
 		while (size < need) {
 			size <<= 1;
@@ -9927,7 +9929,31 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 	GodotProfileZoneGrouped(_profile_zone, "_free_pending_resources");
 	_free_pending_resources(frame);
 	// GodotNext: rq_substrate (#22). This slot's previous frame has finished; its scratch is free.
+	// If the previous frame spanned multiple geometric growths so its total demand exceeded the final
+	// ring size, right-size the ring now (while GPU work for this slot is complete) so the next
+	// identical frame fits in a single allocation without another mid-frame resize.
+	if (frames[frame].scratch_ring_frame_total > frames[frame].scratch_ring_size) {
+		uint64_t size = 64 * 1024;
+		while (size < frames[frame].scratch_ring_frame_total) {
+			size <<= 1;
+		}
+		if (size <= UINT32_MAX) {
+			if (frames[frame].scratch_ring) {
+				driver->buffer_free(frames[frame].scratch_ring);
+				buffer_memory.sub(frames[frame].scratch_ring_size);
+				frames[frame].scratch_ring = RDD::BufferID();
+				frames[frame].scratch_ring_size = 0;
+			}
+			RDD::BufferID resized = driver->buffer_create(size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+			if (resized) {
+				frames[frame].scratch_ring = resized;
+				frames[frame].scratch_ring_size = size;
+				buffer_memory.add(size);
+			}
+		}
+	}
 	frames[frame].scratch_ring_used = 0;
+	frames[frame].scratch_ring_frame_total = 0;
 
 	// GodotNext: blas_compact
 	// The size-query fence has passed (the stall above) and this slot's deferred frees have run.

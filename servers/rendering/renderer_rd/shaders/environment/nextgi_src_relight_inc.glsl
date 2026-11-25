@@ -298,6 +298,13 @@ void main() {
 					lit = !nextgi_shadow_ray_to_light(origin, to_light, tmax, light_type, page_lights.data[page.light_offset + light_slot]);
 #else
 					vec3 origin = world + normal * rec.origin_offset;
+					if (light_type != 0u) {
+						to_light = light.position_inv_range.xyz - origin;
+						tmax = length(to_light);
+						if (tmax > 0.0) {
+							to_light /= tmax;
+						}
+					}
 					// GodotNext: nextgi_shadow_policy (#145). The light's caster mask and the alpha-tested casters apply.
 					uint light_index = page_lights.data[page.light_offset + light_slot];
 					lit = !nextgi_shadow_ray(origin, to_light, tmax, light_index);

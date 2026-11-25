@@ -182,6 +182,7 @@ class NextGIWRC {
 	Vector3 previous_origin;
 	bool has_previous_origin = false;
 	uint32_t fresh_frames[4] = {};
+	uint32_t settle_sweeps_remaining = 0;
 	uint32_t frame = 0;
 	uint32_t last_rays = 0;
 	uint32_t last_hits = 0;

@@ -2078,6 +2078,7 @@ private:
 		RDD::BufferID scratch_ring;
 		uint64_t scratch_ring_size = 0;
 		uint64_t scratch_ring_used = 0;
+		uint64_t scratch_ring_frame_total = 0;
 
 		// List in usage order, from last to free to first to free.
 		List<Buffer> buffers_to_dispose_of;
