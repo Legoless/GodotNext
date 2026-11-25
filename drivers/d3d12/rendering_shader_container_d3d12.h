@@ -105,6 +105,9 @@ public:
 	// marks non-uniform resource indices (25.3.1-gn4 or later, see marks_non_uniform_resource_indices()). Shader caches
 	// rebuild containers of the other format versions once, as for FORMAT_VERSION_ATOMICS_WITHOUT_READNONE.
 	static constexpr uint32_t FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX = 6;
+	// GodotNext: rd_atomics64 (#175). The layout of FORMAT_VERSION, with DXIL from a Mesa NIR library that also
+	// emits Shader Model 6.6 64-bit integer atomics (25.3.1-gn5 or later, see is_int64_atomics_supported()).
+	static constexpr uint32_t FORMAT_VERSION_INT64_ATOMICS = 7;
 	static constexpr uint32_t RAYTRACING_STAGE_DATA_FORMAT_VERSION = 4;
 	// GodotNext: d3d12_rt_pipelines (#121). A hit group's shader record (shaderRecordEXT) is the constant buffer at
 	// register SHADER_RECORD_REGISTER in ROOT_CONSTANT_SPACE, filled by the root constants of a local root signature
@@ -144,6 +147,8 @@ public:
 	static constexpr uint32_t BASE_INSTANCE_NATIVE_SHADER_MODEL = 0x68; // D3D_SHADER_MODEL_6_8
 	// GodotNext: dxil_mesh_shaders (#122). Amplification and mesh shaders (as_6_5 and ms_6_5) need shader model 6.5.
 	static constexpr uint32_t MESH_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5
+	// GodotNext: rd_atomics64 (#175). 64-bit integer atomics need shader model 6.6.
+	static constexpr uint32_t INT64_ATOMICS_SHADER_MODEL = 0x66; // D3D_SHADER_MODEL_6_6
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
@@ -309,6 +314,9 @@ public:
 	// GodotNext: dxil_mesh_shaders (#122). Whether the linked library translates SPIR-V task and mesh stages to DXIL
 	// amplification and mesh shaders (the GodotNext Mesa NIR library 25.3.1-gn4 or later).
 	static bool is_mesh_shading_supported();
+	// GodotNext: rd_atomics64 (#175). Whether the linked library emits Shader Model 6.6 64-bit integer atomics and
+	// r64ui storage-image access (the GodotNext Mesa NIR library 25.3.1-gn5 or later).
+	static bool is_int64_atomics_supported();
 
 	// GodotNext: dxil_toolchain (#123). The debug-only DXIL validator (GODOT_D3D12_DXIL_VALIDATE=1 in a build with
 	// DEBUG_ENABLED). requested: the variable is set. active: dxil.dll is loaded; asking loads it when it was
@@ -354,6 +362,9 @@ public:
 	virtual bool supports_acceleration_structures() const override;
 	// GodotNext: dxil_mesh_shaders (#122). Likewise for task and mesh shader stages.
 	virtual bool supports_mesh_shaders() const override;
+	// GodotNext: rd_atomics64 (#175). Likewise for 64-bit image and storage-buffer atomics.
+	virtual bool supports_image_int64_atomics() const override;
+	virtual bool supports_buffer_int64_atomics() const override;
 	RenderingShaderContainerFormatD3D12();
 	virtual ~RenderingShaderContainerFormatD3D12();
 };

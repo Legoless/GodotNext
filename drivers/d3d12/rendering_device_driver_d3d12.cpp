@@ -526,7 +526,31 @@ uint32_t RenderingDeviceDriverD3D12::SubgroupCapabilities::supported_operations_
 	}
 }
 
+static bool _d3d12_is_muted_debug_message(D3D12_MESSAGE_SEVERITY p_severity, D3D12_MESSAGE_ID p_id) {
+	if (p_severity == D3D12_MESSAGE_SEVERITY_INFO) {
+		return true;
+	}
+	switch (p_id) {
+		case D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE:
+		case D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE:
+		// These happen due to how D3D12MA manages buffers; seems benign.
+		case D3D12_MESSAGE_ID_HEAP_ADDRESS_RANGE_HAS_NO_RESOURCE:
+		case D3D12_MESSAGE_ID_HEAP_ADDRESS_RANGE_INTERSECTS_MULTIPLE_BUFFERS:
+		// Seemingly a false positive.
+		case D3D12_MESSAGE_ID_DATA_STATIC_WHILE_SET_AT_EXECUTE_DESCRIPTOR_INVALID_DATA_CHANGE:
+		// Agility SDK 1.714+ optimization hint (D3D12_MESSAGE_ID_NON_OPTIMAL_BARRIER_ONLY_EXECUTE_COMMAND_LISTS)
+		// emitted on Godot's startup/shutdown barrier-only setup command lists.
+		case static_cast<D3D12_MESSAGE_ID>(1356):
+			return true;
+		default:
+			return false;
+	}
+}
+
 void RenderingDeviceDriverD3D12::_debug_message_func(D3D12_MESSAGE_CATEGORY p_category, D3D12_MESSAGE_SEVERITY p_severity, D3D12_MESSAGE_ID p_id, LPCSTR p_description, void *p_context) {
+	if (_d3d12_is_muted_debug_message(p_severity, p_id)) {
+		return;
+	}
 	String type_string;
 	switch (p_category) {
 		case D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED:
@@ -652,6 +676,22 @@ void RenderingDeviceDriverD3D12::_resource_transition_batch(CommandBufferInfo *p
 				if (subres_already_there) {
 					final_states = br.groups[curr_group_idx].states;
 					final_states |= p_new_state;
+					// D3D12 legacy states disallow combining any write state with another state bit.
+					// If a resource transitions between incompatible states within one unflushed batch,
+					// flush the earlier transitions first and start a clean batch for this state.
+					constexpr uint32_t WRITE_STATES = D3D12_RESOURCE_STATE_RENDER_TARGET |
+							D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+							D3D12_RESOURCE_STATE_DEPTH_WRITE |
+							D3D12_RESOURCE_STATE_STREAM_OUT |
+							D3D12_RESOURCE_STATE_COPY_DEST |
+							D3D12_RESOURCE_STATE_RESOLVE_DEST |
+							D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+					const uint32_t combined = static_cast<uint32_t>(final_states);
+					if ((combined & WRITE_STATES) != 0u && (combined & (combined - 1u)) != 0u) {
+						_resource_transitions_flush(p_command_buffer);
+						_resource_transition_batch(p_command_buffer, p_resource, p_subresource, p_num_planes, p_new_state);
+						return;
+					}
 					bool subres_alone = true;
 					for (uint8_t i = 0; i < br.subres_mask_qwords; i++) {
 						if (i == subres_qword) {
@@ -1603,11 +1643,11 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 			res = allocator->CreateResource(
 					&allocation_desc,
 					(D3D12_RESOURCE_DESC *)&resource_desc,
-					D3D12_RESOURCE_STATE_COPY_DEST,
+					D3D12_RESOURCE_STATE_COMMON,
 					clear_value_ptr,
 					allocation.GetAddressOf(),
 					IID_PPV_ARGS(main_texture.GetAddressOf()));
-			initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
+			initial_state = D3D12_RESOURCE_STATE_COMMON;
 		}
 		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), TextureID(), "CreateResource failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 		texture = main_texture.Get();
@@ -2483,9 +2523,14 @@ static void _rd_stages_and_access_to_d3d12(BitField<RDD::PipelineStageBits> p_st
 	_rd_stages_to_d3d12(p_stages, r_sync);
 
 	// GodotNext: d3d12_dxr (#118). Ray queries in vertex or pixel shaders read acceleration structures
-	// in ALL_SHADING, the only graphics scope those accesses allow.
-	if ((p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT) || p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT)) && (r_sync & (D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING))) {
+	// in ALL_SHADING, the only graphics scope those accesses allow. Include SHADER_RESOURCE alongside
+	// RAYTRACING_ACCELERATION_STRUCTURE_READ so graphics-stage shader caches invalidate before a
+	// vertex/pixel ray query reads a freshly built acceleration structure.
+	if ((p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT) || p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT)) && (r_sync & (D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_DRAW))) {
 		r_sync |= D3D12_BARRIER_SYNC_ALL_SHADING;
+		if (p_texture_layout == RDD::TEXTURE_LAYOUT_MAX && p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT)) {
+			r_access |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+		}
 	}
 
 	// Only enable synchronization stages compatible with the access bits that were used.
@@ -2623,8 +2668,12 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		buffer_barriers.push_back(buffer_barrier_d3d12);
 	}
 
-	D3D12_TEXTURE_BARRIER texture_barrier_d3d12 = {};
 	for (uint32_t i = 0; i < p_texture_barriers.size(); i++) {
+		// GodotNext: d3d12_gpu_based_validation (#204). Zero-initialize every texture barrier inside
+		// the loop so partial-subresource fields (FirstArraySlice, NumArraySlices, FirstPlane,
+		// NumPlanes) from an earlier barrier cannot leak into a subsequent covers_all barrier
+		// (IndexOrFirstMipLevel = 0xffffffff, NumMipLevels = 0), which D3D12 GBV otherwise rejects.
+		D3D12_TEXTURE_BARRIER texture_barrier_d3d12 = {};
 		const TextureBarrier &texture_barrier_rd = p_texture_barriers[i];
 		TextureInfo *texture_info = (TextureInfo *)(texture_barrier_rd.texture.id);
 		if (texture_info->main_texture) {
@@ -4290,10 +4339,17 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 		}
 	}
 
+	ERR_FAIL_COND_V_MSG(p_uniforms.size() > UniformSetInfo::MAX_STATE_REQUIREMENT_UNIFORMS, UniformSetID(),
+			vformat("Uniform set exceeds the D3D12 maximum of %d bindings (%d).", UniformSetInfo::MAX_STATE_REQUIREMENT_UNIFORMS, p_uniforms.size()));
+
 	struct NeededState {
 		bool is_buffer = false;
-		uint64_t shader_uniform_idx_mask = 0;
+		uint64_t shader_uniform_idx_mask[UniformSetInfo::STATE_REQUIREMENT_MASK_WORDS] = {};
 		D3D12_RESOURCE_STATES states = {};
+
+		_FORCE_INLINE_ void mark_uniform(uint32_t p_idx) {
+			shader_uniform_idx_mask[p_idx >> 6] |= (uint64_t(1) << (p_idx & 63));
+		}
 	};
 	HashMap<ResourceInfo *, NeededState> resource_states;
 
@@ -4321,7 +4377,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + (j / 2), resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
-					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
+					ns.mark_uniform(i);
 					ns.states |= D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
 				}
 			} break;
@@ -4331,7 +4387,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
-					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
+					ns.mark_uniform(i);
 					ns.states |= D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
 				}
 			} break;
@@ -4341,7 +4397,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					device->CreateUnorderedAccessView(texture_info->resource, nullptr, &texture_info->view_descs.uav, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
-					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
+					ns.mark_uniform(i);
 					ns.states |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 				}
 			} break;
@@ -4378,7 +4434,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 
 				NeededState &ns = resource_states[buf_info];
 				ns.is_buffer = true;
-				ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
+				ns.mark_uniform(i);
 				ns.states |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
 			} break;
 			case UNIFORM_TYPE_STORAGE_BUFFER:
@@ -4424,7 +4480,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 				}
 
 				NeededState &ns = resource_states[buf_info];
-				ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
+				ns.mark_uniform(i);
 				ns.is_buffer = true;
 				ns.states |= (binding.writable ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 			} break;
@@ -4435,7 +4491,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
-					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
+					ns.mark_uniform(i);
 					ns.states |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 				}
 			} break;
@@ -4470,7 +4526,9 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 			sr.resource = E.key;
 			sr.is_buffer = E.value.is_buffer;
 			sr.states = E.value.states;
-			sr.shader_uniform_idx_mask = E.value.shader_uniform_idx_mask;
+			for (uint32_t w = 0; w < UniformSetInfo::STATE_REQUIREMENT_MASK_WORDS; w++) {
+				sr.shader_uniform_idx_mask[w] = E.value.shader_uniform_idx_mask[w];
+			}
 			uniform_set_info->resource_states.push_back(sr);
 		}
 	}
@@ -4550,29 +4608,36 @@ void RenderingDeviceDriverD3D12::command_uniform_set_prepare_for_use(CommandBuff
 			bool writable = false;
 			// Doing the full loop for debugging since the real one below may break early,
 			// but we want an exhaustive check
-			uint64_t inv_uniforms_mask = ~sr.shader_uniform_idx_mask; // Inverting the mask saves operations.
-			for (uint8_t bit = 0; inv_uniforms_mask != UINT64_MAX; bit++) {
-				uint64_t bit_mask = ((uint64_t)1 << bit);
-				if (likely((inv_uniforms_mask & bit_mask))) {
-					continue;
-				}
-				inv_uniforms_mask |= bit_mask;
+			for (uint32_t word = 0; word < UniformSetInfo::STATE_REQUIREMENT_MASK_WORDS; word++) {
+				uint64_t inv_uniforms_mask = ~sr.shader_uniform_idx_mask[word]; // Inverting the mask saves operations.
+				for (uint32_t bit = 0; inv_uniforms_mask != UINT64_MAX; bit++) {
+					uint64_t bit_mask = ((uint64_t)1 << bit);
+					if (likely((inv_uniforms_mask & bit_mask))) {
+						continue;
+					}
+					inv_uniforms_mask |= bit_mask;
 
-				const ShaderInfo::UniformBindingInfo &binding = shader_set.bindings[bit];
-				if (unlikely(!binding.stages)) {
-					continue;
-				}
+					uint32_t uniform_idx = word * 64 + bit;
+					if (unlikely(uniform_idx >= shader_set.bindings.size())) {
+						break;
+					}
 
-				if (stages) { // Second occurrence at least?
-					CRASH_COND_MSG(binding.writable != writable, "A resource is used in the same uniform set both as R/O and R/W. That's not supported and shouldn't happen.");
-					CRASH_COND_MSG(sr.states != wanted_state, "A resource is used in the same uniform set with different resource states. The code needs to be enhanced to support that.");
-				} else {
-					wanted_state = sr.states;
-					stages |= binding.stages;
-					writable = binding.writable;
-				}
+					const ShaderInfo::UniformBindingInfo &binding = shader_set.bindings[uniform_idx];
+					if (unlikely(!binding.stages)) {
+						continue;
+					}
 
-				DEV_ASSERT((wanted_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) == (bool)(wanted_state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+					if (stages) { // Second occurrence at least?
+						CRASH_COND_MSG(binding.writable != writable, "A resource is used in the same uniform set both as R/O and R/W. That's not supported and shouldn't happen.");
+						CRASH_COND_MSG(sr.states != wanted_state, "A resource is used in the same uniform set with different resource states. The code needs to be enhanced to support that.");
+					} else {
+						wanted_state = sr.states;
+						stages |= binding.stages;
+						writable = binding.writable;
+					}
+
+					DEV_ASSERT((wanted_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) == (bool)(wanted_state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+				}
 			}
 		}
 #endif
@@ -4588,37 +4653,60 @@ void RenderingDeviceDriverD3D12::command_uniform_set_prepare_for_use(CommandBuff
 
 		uint32_t stages = 0;
 		D3D12_RESOURCE_STATES wanted_state = {};
-		uint64_t inv_uniforms_mask = ~sr.shader_uniform_idx_mask; // Inverting the mask saves operations.
-		for (uint8_t bit = 0; inv_uniforms_mask != UINT64_MAX; bit++) {
-			uint64_t bit_mask = ((uint64_t)1 << bit);
-			if (likely((inv_uniforms_mask & bit_mask))) {
-				continue;
-			}
-			inv_uniforms_mask |= bit_mask;
+		for (uint32_t word = 0; word < UniformSetInfo::STATE_REQUIREMENT_MASK_WORDS; word++) {
+			uint64_t inv_uniforms_mask = ~sr.shader_uniform_idx_mask[word]; // Inverting the mask saves operations.
+			for (uint32_t bit = 0; inv_uniforms_mask != UINT64_MAX; bit++) {
+				uint64_t bit_mask = ((uint64_t)1 << bit);
+				if (likely((inv_uniforms_mask & bit_mask))) {
+					continue;
+				}
+				inv_uniforms_mask |= bit_mask;
 
-			const ShaderInfo::UniformBindingInfo &binding = shader_set.bindings[bit];
-			if (unlikely(!binding.stages)) {
-				continue;
-			}
-
-			if (!stages) {
-				wanted_state = sr.states;
-
-				if (!(wanted_state & D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE)) {
-					// By now, we already know the resource is used, and with no PS/NON_PS disjuntive; no need to check further.
+				uint32_t uniform_idx = word * 64 + bit;
+				if (unlikely(uniform_idx >= shader_set.bindings.size())) {
 					break;
 				}
-			}
 
-			stages |= binding.stages;
+				const ShaderInfo::UniformBindingInfo &binding = shader_set.bindings[uniform_idx];
+				if (unlikely(!binding.stages)) {
+					continue;
+				}
 
-			if (stages == (SHADER_STAGE_VERTEX_BIT | SHADER_STAGE_FRAGMENT_BIT) || stages == SHADER_STAGE_COMPUTE_BIT) {
-				// By now, we already know the resource is used, and as both PS/NON_PS; no need to check further.
-				break;
+				D3D12_RESOURCE_STATES binding_state = {};
+				switch (binding.type) {
+					case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE:
+					case UNIFORM_TYPE_TEXTURE: {
+						binding_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+					} break;
+					case UNIFORM_TYPE_IMAGE: {
+						binding_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+					} break;
+					case UNIFORM_TYPE_UNIFORM_BUFFER:
+					case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
+						binding_state = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+					} break;
+					case UNIFORM_TYPE_STORAGE_BUFFER:
+					case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
+						binding_state = binding.writable ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+					} break;
+					case UNIFORM_TYPE_INPUT_ATTACHMENT: {
+						binding_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+					} break;
+					default: {
+						binding_state = sr.states;
+					} break;
+				}
+
+				wanted_state |= binding_state;
+				stages |= binding.stages;
 			}
 		}
 
 		if (likely(wanted_state)) {
+			if ((wanted_state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) && wanted_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+				// Never emit an illegal UAV | read state combination to ResourceBarrier.
+				wanted_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+			}
 			if ((wanted_state & D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE)) {
 				if (stages == SHADER_STAGE_VERTEX_BIT || stages == SHADER_STAGE_COMPUTE_BIT) {
 					D3D12_RESOURCE_STATES unneeded_states = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -4890,7 +4978,7 @@ void RenderingDeviceDriverD3D12::command_copy_buffer(CommandBufferID p_cmd_buffe
 	BufferInfo *src_buf_info = (BufferInfo *)p_src_buffer.id;
 	BufferInfo *buf_loc_info = (BufferInfo *)p_buf_locfer.id;
 
-	if (!barrier_capabilities.enhanced_barriers_supported) {
+	if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
 		_resource_transition_batch(cmd_buf_info, src_buf_info, 0, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
 		_resource_transition_batch(cmd_buf_info, buf_loc_info, 0, 1, D3D12_RESOURCE_STATE_COPY_DEST);
 		_resource_transitions_flush(cmd_buf_info);
@@ -4906,7 +4994,7 @@ void RenderingDeviceDriverD3D12::command_copy_texture(CommandBufferID p_cmd_buff
 	TextureInfo *src_tex_info = (TextureInfo *)p_src_texture.id;
 	TextureInfo *dst_tex_info = (TextureInfo *)p_dst_texture.id;
 
-	if (!barrier_capabilities.enhanced_barriers_supported) {
+	if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
 		// Batch all barrier transitions for the textures before performing the copies.
 		for (uint32_t i = 0; i < p_regions.size(); i++) {
 			uint32_t layer_count = MIN(p_regions[i].src_subresources.layer_count, p_regions[i].dst_subresources.layer_count);
@@ -5119,7 +5207,7 @@ void RenderingDeviceDriverD3D12::command_copy_buffer_to_texture(CommandBufferID 
 	BufferInfo *buf_info = (BufferInfo *)p_src_buffer.id;
 	TextureInfo *tex_info = (TextureInfo *)p_dst_texture.id;
 
-	if (!barrier_capabilities.enhanced_barriers_supported) {
+	if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
 		_resource_transition_batch(cmd_buf_info, buf_info, 0, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
 	}
 
@@ -5148,7 +5236,7 @@ void RenderingDeviceDriverD3D12::command_copy_buffer_to_texture(CommandBufferID 
 				tex_info->desc.MipLevels,
 				tex_info->desc.ArraySize());
 
-		if (!barrier_capabilities.enhanced_barriers_supported) {
+		if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
 			_resource_transition_batch(cmd_buf_info, tex_info, dst_subresource, 1, D3D12_RESOURCE_STATE_COPY_DEST);
 			_resource_transitions_flush(cmd_buf_info);
 		}
@@ -5170,7 +5258,7 @@ void RenderingDeviceDriverD3D12::command_copy_texture_to_buffer(CommandBufferID 
 	TextureInfo *tex_info = (TextureInfo *)p_src_texture.id;
 	BufferInfo *buf_info = (BufferInfo *)p_buf_locfer.id;
 
-	if (!barrier_capabilities.enhanced_barriers_supported) {
+	if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
 		_resource_transition_batch(cmd_buf_info, buf_info, 0, 1, D3D12_RESOURCE_STATE_COPY_DEST);
 	}
 
@@ -5188,7 +5276,7 @@ void RenderingDeviceDriverD3D12::command_copy_texture_to_buffer(CommandBufferID 
 				tex_info->desc.MipLevels,
 				tex_info->desc.ArraySize());
 
-		if (!barrier_capabilities.enhanced_barriers_supported) {
+		if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
 			_resource_transition_batch(cmd_buf_info, tex_info, src_subresource, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
 			_resource_transitions_flush(cmd_buf_info);
 		}
@@ -5933,12 +6021,18 @@ void RenderingDeviceDriverD3D12::command_bind_render_uniform_sets(CommandBufferI
 
 void RenderingDeviceDriverD3D12::command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_resource_transitions_flush(cmd_buf_info);
+	}
 	_bind_vertex_buffers(cmd_buf_info);
 	cmd_buf_info->cmd_list->DrawInstanced(p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
 }
 
 void RenderingDeviceDriverD3D12::command_render_draw_indexed(CommandBufferID p_cmd_buffer, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_vertex_offset, uint32_t p_first_instance) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_resource_transitions_flush(cmd_buf_info);
+	}
 	_bind_vertex_buffers(cmd_buf_info);
 	cmd_buf_info->cmd_list->DrawIndexedInstanced(p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
 }
@@ -6011,6 +6105,9 @@ void RenderingDeviceDriverD3D12::command_render_draw_indirect_count(CommandBuffe
 void RenderingDeviceDriverD3D12::command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL_MSG(cmd_buf_info->cmd_list_6.Get(), "DispatchMesh() needs ID3D12GraphicsCommandList6.");
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_resource_transitions_flush(cmd_buf_info);
+	}
 	if (cmd_buf_info->nir_graphics_runtime_data_root_param_idx != UINT32_MAX) {
 		dxil_spirv_compute_runtime_data runtime_data = {};
 		runtime_data.group_count_x = p_group_count_x;
@@ -6404,6 +6501,7 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			bd.DestBlendAlpha = RD_TO_D3D12_BLEND_FACTOR[bs.dst_alpha_blend_factor];
 			bd.BlendOpAlpha = RD_TO_D3D12_BLEND_OP[bs.alpha_blend_op];
 
+			bd.RenderTargetWriteMask = 0;
 			if (bs.write_r) {
 				bd.RenderTargetWriteMask |= D3D12_COLOR_WRITE_ENABLE_RED;
 			}
@@ -6418,7 +6516,7 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			}
 
 			if (i > 0 && all_attachments_same_blend) {
-				all_attachments_same_blend = &(&pipeline_desc.BlendState)->RenderTarget[i] == &(&pipeline_desc.BlendState)->RenderTarget[0];
+				all_attachments_same_blend = memcmp(&(&pipeline_desc.BlendState)->RenderTarget[i], &(&pipeline_desc.BlendState)->RenderTarget[0], sizeof(D3D12_RENDER_TARGET_BLEND_DESC)) == 0;
 			}
 		}
 
@@ -7452,6 +7550,13 @@ void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer
 	cmd_buf_info->cmd_list_4->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
 
 	_acceleration_structure_uav_barrier(cmd_buf_info, as_info);
+	if (!barrier_capabilities.enhanced_barriers_supported && cmd_buf_info->list_type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+		// Flush/invalidate graphics shader-read caches after a TLAS build so pixel/vertex ray queries
+		// on the same direct list see the new structure (a UAV barrier alone synchronizes compute/RT
+		// reads but can leave graphics SRV caches stale).
+		_resource_transition_batch(cmd_buf_info, scratch_buffer, 0, 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		_resource_transitions_flush(cmd_buf_info);
+	}
 }
 
 void RenderingDeviceDriverD3D12::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
@@ -8056,13 +8161,17 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 		// states inside the driver per command list, which this does not cover yet.
 		case SUPPORTS_ASYNC_COMPUTE:
 			return barrier_capabilities.enhanced_barriers_supported;
-		// GodotNext: rd_atomics64 (#175). int64_atomics_capabilities holds what the device supports, but the
-		// Mesa NIR-to-DXIL library cannot emit 64-bit atomics, and the container does not ask for shader
-		// model 6.6 for them. Both come with the GodotNext DXIL toolchain (#123).
+		// GodotNext: rd_atomics64 (#175). Shader Model 6.6 + OPTIONS1/9/11 device capabilities paired with a
+		// Mesa NIR-to-DXIL library that emits 64-bit atomics (25.3.1-gn5 or later).
 		case SUPPORTS_BUFFER_INT64_ATOMICS:
+			return RenderingShaderContainerD3D12::is_int64_atomics_supported() &&
+					shader_capabilities.shader_model >= D3D_SHADER_MODEL(RenderingShaderContainerD3D12::INT64_ATOMICS_SHADER_MODEL) &&
+					int64_atomics_capabilities.int64_shader_ops &&
+					int64_atomics_capabilities.descriptor_heap_resource_supported;
 		case SUPPORTS_IMAGE_INT64_ATOMICS:
+			return has_feature(SUPPORTS_BUFFER_INT64_ATOMICS) && int64_atomics_capabilities.typed_resource_supported;
 		case SUPPORTS_INT64_ATOMIC_ARITH:
-			return false;
+			return has_feature(SUPPORTS_BUFFER_INT64_ATOMICS) && int64_atomics_capabilities.group_shared_supported;
 		// GodotNext: rd_bindless (#176)
 		case SUPPORTS_BINDLESS:
 			return bindless_capabilities.supported && bindless_capabilities.resource_descriptors >= RDBindless::MIN_SLOTS && bindless_capabilities.sampler_descriptors >= RDBindless::MIN_SAMPLER_SLOTS;
@@ -8259,9 +8368,10 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 			// argument is not optional and the function will fail if it's not specified.
 			DWORD callback_cookie;
 			info_queue_1->SetMuteDebugOutput(TRUE);
-			// GodotNext: d3d12_debug_messages (#268). The storage filter below applies, so the mute
-			// list (known false positives) stays quiet in the log as it was in the debugger.
-			res = info_queue_1->RegisterMessageCallback(&_debug_message_func, D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &callback_cookie);
+			// GodotNext: d3d12_debug_messages (#268). SetMuteDebugOutput(TRUE) suppresses
+			// FLAG_NONE callbacks in the Agility SDK debug layer, so register with IGNORE_FILTERS
+			// and apply the mute list directly in _debug_message_func().
+			res = info_queue_1->RegisterMessageCallback(&_debug_message_func, D3D12_MESSAGE_CALLBACK_IGNORE_FILTERS, nullptr, &callback_cookie);
 			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
 			print_line("D3D12: Debug layer messages go to the log.");
 		} else
@@ -8292,6 +8402,9 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 			D3D12_MESSAGE_ID_HEAP_ADDRESS_RANGE_INTERSECTS_MULTIPLE_BUFFERS,
 			// Seemingly a false positive.
 			D3D12_MESSAGE_ID_DATA_STATIC_WHILE_SET_AT_EXECUTE_DESCRIPTOR_INVALID_DATA_CHANGE,
+			// Agility SDK 1.714+ optimization hint (D3D12_MESSAGE_ID_NON_OPTIMAL_BARRIER_ONLY_EXECUTE_COMMAND_LISTS)
+			// emitted on Godot's startup/shutdown barrier-only setup command lists.
+			static_cast<D3D12_MESSAGE_ID>(1356),
 		};
 
 		D3D12_INFO_QUEUE_FILTER filter = {};
@@ -8394,6 +8507,9 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 			}
 			if (RenderingShaderContainerD3D12::is_mesh_shading_supported()) {
 				mesa_features.push_back("mesh and amplification shaders");
+			}
+			if (RenderingShaderContainerD3D12::is_int64_atomics_supported()) {
+				mesa_features.push_back("64-bit integer atomics");
 			}
 			print_verbose(vformat("  Mesa NIR library: GodotNext %s, with %s", RenderingShaderContainerD3D12::get_mesa_label(), String(", ").join(mesa_features)));
 		} else {
@@ -8565,7 +8681,8 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	print_verbose(String("- D3D12 16-bit ops supported: ") + (shader_capabilities.native_16bit_ops ? "yes" : "no"));
 	// GodotNext: rd_atomics64 (#175)
-	print_verbose(vformat("- D3D12 64-bit atomics (not used until the DXIL toolchain emits them): int64 shader ops %s, typed resources %s, group shared %s, descriptor heap resources %s",
+	print_verbose(vformat("- D3D12 64-bit atomics (DXIL toolchain %s): int64 shader ops %s, typed resources %s, group shared %s, descriptor heap resources %s",
+			RenderingShaderContainerD3D12::is_int64_atomics_supported() ? "enabled" : "unavailable",
 			int64_atomics_capabilities.int64_shader_ops ? "yes" : "no",
 			int64_atomics_capabilities.typed_resource_supported ? "yes" : "no",
 			int64_atomics_capabilities.group_shared_supported ? "yes" : "no",

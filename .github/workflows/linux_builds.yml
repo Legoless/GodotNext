@@ -294,6 +294,12 @@ jobs:
           bin: ${{ matrix.bin }}
           reftags: "4.5-stable,4.4-stable"
 
+      - name: Test vendor-seam GDExtension (SeamCopy and SeamPassthrough)
+        uses: ./.github/actions/godot-vendor-seam-test
+        if: matrix.api-compat
+        with:
+          bin: ${{ matrix.bin }}
+
       # Download and run the test project
       - name: Test Godot project
         uses: ./.github/actions/godot-project-test

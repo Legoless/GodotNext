@@ -157,6 +157,9 @@ if mesa_label_file.is_file():
     # GodotNext: dxil_mesh_shaders (#122). 25.3.1-gn4 and later also translate SPIR-V task and mesh shader stages to
     # DXIL amplification and mesh shaders (shader model 6.5).
     mesa_mesh_shaders = mesa_label_version >= (25, 3, 1, 4)
+    # GodotNext: rd_atomics64 (#175). 25.3.1-gn5 and later also emit Shader Model 6.6 64-bit integer atomics and
+    # r64ui storage-image access.
+    mesa_int64_atomics = mesa_label_version >= (25, 3, 1, 5)
     mesa_features = ["ray query and ray-tracing stages"]
     if mesa_atomics_without_readnone:
         mesa_features += ["atomics without readnone"]
@@ -164,6 +167,8 @@ if mesa_label_file.is_file():
         mesa_features += ["non-uniform resource indices"]
     if mesa_mesh_shaders:
         mesa_features += ["mesh and amplification shaders"]
+    if mesa_int64_atomics:
+        mesa_features += ["64-bit integer atomics"]
     print_info(f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} ({', '.join(mesa_features)}).")
     extra_defines += [
         "NIR_RAYTRACING_ENABLED",
@@ -175,6 +180,8 @@ if mesa_label_file.is_file():
         extra_defines += ["NIR_NONUNIFORM_RESOURCE_INDEX"]
     if mesa_mesh_shaders:
         extra_defines += ["NIR_MESH_SHADERS_ENABLED"]
+    if mesa_int64_atomics:
+        extra_defines += ["NIR_INT64_ATOMICS_ENABLED"]
 
 # These defines are inspired by the Meson build scripts in the original repo.
 extra_defines += [

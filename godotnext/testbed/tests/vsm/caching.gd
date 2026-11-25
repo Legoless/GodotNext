@@ -35,9 +35,9 @@ extends Node3D
 ##   page in the last CONVERGED_FRAMES frames). The sun's resolution LOD bias, static and moving, is -1
 ##   (--lod-bias=N; --lod-bias=project keeps the project's), so that even a small view invalidates more
 ##   requested pages per frame than the budget.
-## - fog_atlas: a spot light that keeps its shadow-atlas pass while VSM is active (explicit
-##   SHADOW_METHOD_ATLAS after #215 moved VSM volumetric fog onto coarse pages); when a caster
-##   moves, its atlas shadow is redrawn (the light's shadow version advances), as without VSM.
+## - fog_atlas: under VSM + volumetric fog (#215), a VSM spot light skips the shadow-atlas pass
+##   (atlas_passes == 0) and updates VSM pages when a caster moves; switching the same light to
+##   SHADOW_METHOD_ATLAS restores its atlas pass (atlas_passes > 0) and advances shadow_version on each move.
 ## - multimesh: MultiMesh slabs with a custom AABB (which suppresses the AABB notification) are moved, one with
 ##   set_instance_transform(), one by replacing its buffer (both AUTO), and a RIGID one: their shadows move
 ##   while they are dynamic, after they settle, and when they move back (image).
@@ -793,33 +793,50 @@ func _case_fog_atlas() -> void:
 	_environment.volumetric_fog_enabled = true
 	_environment.volumetric_fog_density = 0.02
 	_spot.light_volumetric_fog_energy = 1.0
-	# After #215 moved VSM volumetric fog to coarse pages, request an explicit atlas pass on the
-	# fog-lit spot light so R1's shadow-atlas dirty marking is still exercised while VSM is active.
-	_spot.shadow_method = Light3D.SHADOW_METHOD_ATLAS
 	var caster := _box("FogCaster", Vector3(1.0, 1.0, 1.0), Vector3(6.0, 2.0, 3.0), GeometryInstance3D.SHADOW_CACHE_INVALIDATION_AUTO)
 	await _frames(WARMUP_FRAMES)
-	var before: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(_spot.get_instance())
-	var projection: Dictionary = _info().get("projection", {})
-	var max_atlas_passes := int(projection.get("atlas_passes", 0))
-	var versions := [int(before.get("shadow_version", -1))]
+	# Phase 1 (#215): VSM spot light in volumetric fog samples coarse VSM pages and runs 0 atlas passes.
+	var vsm_projection: Dictionary = _info().get("projection", {})
+	var vsm_invalidations_before := int(_caching().get("total_invalidation_boxes", 0))
 	for i in 3:
 		caster.position.x += 0.5
+		await _frames(SETTLE_FRAMES)
+	var vsm_invalidations_after := int(_caching().get("total_invalidation_boxes", 0))
+	var vsm_projection_after: Dictionary = _info().get("projection", {})
+	await _page_check("fog_atlas vsm")
+
+	# Phase 2 (#212): an explicit SHADOW_METHOD_ATLAS light still runs its atlas pass and advances
+	# shadow_version on every move (VSM caching does not suppress upstream atlas dirty marking).
+	_spot.shadow_method = Light3D.SHADOW_METHOD_ATLAS
+	await _frames(SETTLE_FRAMES * 2)
+	var before: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(_spot.get_instance())
+	var versions := [int(before.get("shadow_version", -1))]
+	var atlas_projection: Dictionary = {}
+	var max_atlas_passes := 0
+	for i in 3:
+		caster.position.x -= 0.5
 		await _frames(1)
-		var move_projection: Dictionary = _info().get("projection", {})
-		if int(move_projection.get("atlas_passes", 0)) > max_atlas_passes:
-			max_atlas_passes = int(move_projection.get("atlas_passes", 0))
-			projection = move_projection
+		var p: Dictionary = _info().get("projection", {})
+		if int(p.get("atlas_passes", 0)) >= max_atlas_passes:
+			max_atlas_passes = int(p.get("atlas_passes", 0))
+			atlas_projection = p
 		await _frames(SETTLE_FRAMES - 1)
 		var stats: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(_spot.get_instance())
 		versions.append(int(stats.get("shadow_version", -1)))
-	_result["shadow_versions"] = versions
-	_result["projection"] = projection
+	_result["vsm_projection"] = vsm_projection_after
+	_result["vsm_invalidation_boxes_delta"] = vsm_invalidations_after - vsm_invalidations_before
+	_result["atlas_projection"] = atlas_projection
 	_result["max_atlas_passes"] = max_atlas_passes
+	_result["shadow_versions"] = versions
+	if int(vsm_projection.get("atlas_passes", -1)) != 0 or int(vsm_projection_after.get("atlas_passes", -1)) != 0:
+		_failures.append("the VSM fog-lit spot light unexpectedly ran a shadow-atlas pass: before=%s after=%s" % [str(vsm_projection), str(vsm_projection_after)])
+	if vsm_invalidations_after <= vsm_invalidations_before:
+		_failures.append("moving FogCaster under VSM fog emitted no invalidation boxes (%d -> %d)" % [vsm_invalidations_before, vsm_invalidations_after])
 	if max_atlas_passes <= 0:
-		_failures.append("the fog-lit spot light ran no shadow-atlas pass: %s" % str(projection))
+		_failures.append("the SHADOW_METHOD_ATLAS spot light ran no shadow-atlas pass: %s" % str(atlas_projection))
 	for i in range(1, versions.size()):
 		if int(versions[i]) <= int(versions[i - 1]):
-			_failures.append("move %d: the fog-lit spot light's atlas shadow was not redrawn (shadow versions %s)" % [i, str(versions)])
+			_failures.append("move %d: the SHADOW_METHOD_ATLAS spot light's atlas shadow was not redrawn (shadow versions %s)" % [i, str(versions)])
 			break
 
 

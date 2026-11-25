@@ -1,0 +1,28 @@
+name: Godot vendor-seam GDExtension test
+description: Build and run the test-only C GDExtension vendor-seam sample (SeamCopy and SeamPassthrough) headlessly (#210).
+
+inputs:
+  bin:
+    description: Path to the Godot binary.
+    required: true
+    type: string
+
+runs:
+  using: composite
+  steps:
+    - name: Extract GDExtension interface
+      shell: sh
+      run: |
+        ${{ inputs.bin }} --headless --dump-gdextension-interface
+        mkdir -p tests/vendor_seam_test/src/deps/
+        mv gdextension_interface.h tests/vendor_seam_test/src/deps/
+
+    - name: Build vendor-seam C GDExtension
+      shell: sh
+      run: scons --directory=./tests/vendor_seam_test
+
+    - name: Run headless vendor-seam check
+      shell: sh
+      env:
+        GODOT4_BIN: ${{ inputs.bin }}
+      run: ./tests/vendor_seam_test/run_vendor_seam_test.py

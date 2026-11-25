@@ -940,9 +940,18 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader mod
 	}
 	// GodotNext: dxil_mesh_shaders (#122). 25.3.1-gn4 and later also translate task and mesh stages to DXIL.
 	CHECK(RenderingShaderContainerD3D12::is_mesh_shading_supported() == mesa_label_is_at_least(RenderingShaderContainerD3D12::get_mesa_label(), 4));
-	const uint32_t format_version = non_uniform_resource_indices
-			? RenderingShaderContainerD3D12::FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX
-			: (atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : RenderingShaderContainerD3D12::FORMAT_VERSION);
+	// GodotNext: rd_atomics64 (#175). 7 when the library also emits SM 6.6 64-bit integer atomics (25.3.1-gn5 or later).
+	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION_INT64_ATOMICS == 7);
+	const bool int64_atomics_supported = RenderingShaderContainerD3D12::is_int64_atomics_supported();
+	CHECK(int64_atomics_supported == mesa_label_is_at_least(RenderingShaderContainerD3D12::get_mesa_label(), 5));
+	if (int64_atomics_supported) {
+		CHECK(non_uniform_resource_indices);
+	}
+	const uint32_t format_version = int64_atomics_supported
+			? RenderingShaderContainerD3D12::FORMAT_VERSION_INT64_ATOMICS
+			: (non_uniform_resource_indices
+							? RenderingShaderContainerD3D12::FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX
+							: (atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : RenderingShaderContainerD3D12::FORMAT_VERSION));
 	CHECK(RenderingShaderContainerD3D12::get_library_format_version() == format_version);
 
 	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
@@ -987,7 +996,7 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader mod
 		CHECK_FALSE(Object::cast_to<RenderingShaderContainerD3D12>(loaded.ptr())->get_shader_reflection_d3d12().has_raytracing_stage_data);
 	}
 	// A container another kind of library wrote is not current, so shader caches rebuild it.
-	const uint32_t library_format_versions[] = { 4, 5, 6 };
+	const uint32_t library_format_versions[] = { 4, 5, 6, 7 };
 	for (const uint32_t other_format_version : library_format_versions) {
 		if (other_format_version == format_version) {
 			continue;
@@ -2580,6 +2589,100 @@ TEST_CASE("[ShaderContainer][D3D12] Table reads at a nonuniformEXT index in ray-
 				CHECK_MESSAGE(lines.non_uniform == 0, vformat("%s %s: %d getelementptr lines carry !dx.nonuniform:\n%s", hit_case.name, RDC::SHADER_STAGE_NAMES[stage], lines.non_uniform, disassembly));
 			}
 		}
+	}
+	check_dxil_validation(validation_before, blobs);
+}
+
+// GodotNext: rd_atomics64 (#175). 25.3.1-gn5 and later emit SM 6.6 64-bit integer atomics on raw buffers,
+// R64_UINT storage images and group-shared memory, plus r64ui imageLoad/imageStore for NextGeo (#162).
+TEST_CASE("[ShaderContainer][D3D12][Atomics64] 64-bit atomics and r64ui images compile to SM 6.6 DXIL with 25.3.1-gn5+") {
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+	const bool supported = RenderingShaderContainerD3D12::is_int64_atomics_supported();
+	CHECK(format.supports_image_int64_atomics() == supported);
+	CHECK(format.supports_buffer_int64_atomics() == supported);
+
+	static const char *ATOMICS64_BUF_GLSL = R"(#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) buffer Out { uint64_t data[]; } out_buf;
+shared uint64_t s_max;
+void main() {
+	uint64_t v = (uint64_t(gl_GlobalInvocationID.x) << 32) | uint64_t(1u);
+	atomicMax(out_buf.data[gl_GlobalInvocationID.x], v);
+	atomicMin(out_buf.data[gl_GlobalInvocationID.x], v);
+	atomicAdd(out_buf.data[gl_GlobalInvocationID.x], uint64_t(1u));
+	atomicCompSwap(out_buf.data[gl_GlobalInvocationID.x], v, v + uint64_t(1u));
+	atomicMax(s_max, v);
+}
+)";
+	static const char *ATOMICS64_IMG_GLSL = R"(#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_image_int64 : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, r64ui) uniform u64image2D img;
+layout(set = 0, binding = 1, std430) buffer Out { uint64_t data[]; } out_buf;
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	uint64_t v = (uint64_t(p.x) << 32) | uint64_t(p.y);
+	imageStore(img, p, u64vec4(uint64_t(0u)));
+	imageAtomicMax(img, p, v);
+	imageAtomicMin(img, p, v);
+	out_buf.data[p.y * 8 + p.x] = imageLoad(img, p).x;
+}
+)";
+	static const char *R64UI_RW_GLSL = R"(#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_image_int64 : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, r64ui) uniform restrict readonly u64image2D src_img;
+layout(set = 0, binding = 1, r64ui) uniform restrict writeonly u64image2D dst_img;
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	uint64_t v = imageLoad(src_img, p).x;
+	imageStore(dst_img, p, u64vec4(v + uint64_t(1u), 0, 0, 0));
+}
+)";
+
+	struct CaseDef {
+		const char *name;
+		const char *glsl;
+		bool requires_sm66;
+	};
+	const CaseDef cases[] = {
+		{ "atomics64_buf", ATOMICS64_BUF_GLSL, true },
+		{ "atomics64_img", ATOMICS64_IMG_GLSL, true },
+		{ "r64ui_rw", R64UI_RW_GLSL, false },
+	};
+
+	const DXILValidationStats validation_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+	uint32_t blobs = 0;
+	for (const CaseDef &c : cases) {
+		Vector<RDC::ShaderStageSPIRVData> stages;
+		stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_COMPUTE, c.glsl));
+		REQUIRE_FALSE(stages[0].spirv.is_empty());
+		Ref<RenderingShaderContainer> container = format.create_container();
+		if (!supported) {
+			if (!c.requires_sm66) {
+				continue;
+			}
+			ErrorCapture capture;
+			CHECK_FALSE(container->set_code_from_spirv(c.name, stages));
+			CHECK(capture.count == 1);
+			CHECK_MESSAGE(capture.first_message.contains("uses 64-bit integer atomics"), capture.first_message);
+			continue;
+		}
+		ErrorCapture capture;
+		REQUIRE(container->set_code_from_spirv(c.name, stages));
+		CHECK_MESSAGE(capture.count == 0, capture.first_message);
+		REQUIRE(container->shaders.size() == 1);
+		if (c.requires_sm66) {
+			CHECK(dxil_program_version(decompressed_code(container, 0)) == ((5u << 16) | 0x66));
+		}
+		blobs++;
 	}
 	check_dxil_validation(validation_before, blobs);
 }

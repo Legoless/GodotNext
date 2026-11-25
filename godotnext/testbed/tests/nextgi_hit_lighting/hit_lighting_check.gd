@@ -143,19 +143,32 @@ func _build_scene() -> void:
 	mirror2.rotation_degrees = Vector3(0.0, -45.0, 0.0)
 	add_child(mirror2)
 
-	# Bright emissive green beacon visible ONLY via primary mirror -> secondary mirror (2nd bounce).
+	# Dark matte backing wall behind the beacon so coarse 1-bounce WRC fallback sees a dark +X hemisphere
+	# rather than clipping SDR green to 1.0, while a sharp 2nd-bounce ray hits the compact green beacon dead-on.
+	var beacon_back := MeshInstance3D.new()
+	var beacon_back_box := BoxMesh.new()
+	beacon_back_box.size = Vector3(0.2, 4.5, 5.0)
+	beacon_back.mesh = beacon_back_box
+	var beacon_back_mat := StandardMaterial3D.new()
+	beacon_back_mat.albedo_color = Color(0.02, 0.02, 0.02)
+	beacon_back_mat.roughness = 0.95
+	beacon_back.material_override = beacon_back_mat
+	beacon_back.position = Vector3(4.75, 1.5, 3.5)
+	add_child(beacon_back)
+
+	# Compact emissive green beacon visible ONLY via primary mirror -> secondary mirror (2nd bounce).
 	var beacon := MeshInstance3D.new()
 	var beacon_box := BoxMesh.new()
-	beacon_box.size = Vector3(0.3, 3.2, 3.2)
+	beacon_box.size = Vector3(0.2, 1.1, 1.1)
 	beacon.mesh = beacon_box
 	var beacon_mat := StandardMaterial3D.new()
-	beacon_mat.albedo_color = Color(0.05, 0.95, 0.1)
+	beacon_mat.albedo_color = Color(0.04, 0.9, 0.08)
 	beacon_mat.emission_enabled = true
-	beacon_mat.emission = Color(0.05, 1.0, 0.1)
-	beacon_mat.emission_energy_multiplier = 5.0
+	beacon_mat.emission = Color(0.04, 1.0, 0.08)
+	beacon_mat.emission_energy_multiplier = 0.9
 	beacon_mat.roughness = 0.8
 	beacon.material_override = beacon_mat
-	beacon.position = Vector3(4.5, 1.5, 3.6)
+	beacon.position = Vector3(4.5, 1.5, 3.5)
 	add_child(beacon)
 
 	# Shadow-casting occluder slab placed ABOVE the mirror-to-wall sightline (y = 3.15 > 2.8) so it shadows

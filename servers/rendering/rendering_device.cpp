@@ -7404,22 +7404,22 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 					valid_set_count++;
 				}
 
-				UniformSet *uniform_set = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
-				ERR_FAIL_NULL(uniform_set);
-				_uniform_set_update_shared(uniform_set);
-				_uniform_set_update_clears(uniform_set);
-
-				draw_graph.add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
-				// GodotNext: rd_bindless (#176)
-				if (uniform_set->bindless_table_tracker != nullptr) {
-					draw_graph.add_draw_list_bindless_table(uniform_set->bindless_table_tracker);
-				}
-				draw_list.state.sets[i].bound = true;
-
 				last_set_index = i;
 			} else {
 				draw_graph.add_draw_list_bind_uniform_set(draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
 			}
+
+			UniformSet *uniform_set = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
+			ERR_FAIL_NULL(uniform_set);
+			_uniform_set_update_shared(uniform_set);
+			_uniform_set_update_clears(uniform_set);
+
+			draw_graph.add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+			// GodotNext: rd_bindless (#176)
+			if (uniform_set->bindless_table_tracker != nullptr) {
+				draw_graph.add_draw_list_bindless_table(uniform_set->bindless_table_tracker);
+			}
+			draw_list.state.sets[i].bound = true;
 		}
 	}
 

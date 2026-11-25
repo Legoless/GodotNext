@@ -715,8 +715,8 @@ TEST_CASE("[NextGeo][ShaderCompilerRaster] ShaderBakerExportPlugin gates 64-bit-
 #endif
 #ifdef D3D12_ENABLED
 	RenderingShaderContainerFormatD3D12 d3d12_format;
-	CHECK_FALSE(d3d12_format.supports_image_int64_atomics());
-	CHECK_FALSE(d3d12_format.supports_buffer_int64_atomics());
+	CHECK_EQ(d3d12_format.supports_image_int64_atomics(), RenderingShaderContainerD3D12::is_int64_atomics_supported());
+	CHECK_EQ(d3d12_format.supports_buffer_int64_atomics(), RenderingShaderContainerD3D12::is_int64_atomics_supported());
 	CHECK_EQ(RenderingShaderContainerD3D12::FORMAT_VERSION, 4u);
 #endif
 }

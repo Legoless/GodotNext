@@ -831,11 +831,14 @@ private:
 
 		TightLocalVector<DynamicBuffer> dynamic_buffers;
 
+		static constexpr uint32_t MAX_STATE_REQUIREMENT_UNIFORMS = 128;
+		static constexpr uint32_t STATE_REQUIREMENT_MASK_WORDS = MAX_STATE_REQUIREMENT_UNIFORMS / 64;
+
 		struct StateRequirement {
 			ResourceInfo *resource = nullptr;
 			bool is_buffer = false;
 			D3D12_RESOURCE_STATES states = {};
-			uint64_t shader_uniform_idx_mask = 0;
+			uint64_t shader_uniform_idx_mask[STATE_REQUIREMENT_MASK_WORDS] = {};
 		};
 
 		TightLocalVector<StateRequirement> resource_states;

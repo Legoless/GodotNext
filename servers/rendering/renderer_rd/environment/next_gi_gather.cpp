@@ -344,7 +344,7 @@ void NextGIGather::free_resources() {
 		rd->free_rid(readback_buffer);
 		readback_buffer = RID();
 	}
-	RID resources[30] = { blue_noise_texture, specular_debug_variance, specular_debug_rejected, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, front_hit_distance, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[31] = { blue_noise_texture, specular_debug_variance, specular_debug_rejected, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, front_hit_distance, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer, dummy_rw_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -381,6 +381,7 @@ void NextGIGather::free_resources() {
 	dummy_color = RID();
 	dummy_storage = RID();
 	dummy_buffer = RID();
+	dummy_rw_buffer = RID();
 	sampler = RID();
 	sampler_nearest = RID();
 }
@@ -508,6 +509,9 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	}
 	if (!dummy_buffer.is_valid()) {
 		dummy_buffer = rd->storage_buffer_create(16);
+	}
+	if (!dummy_rw_buffer.is_valid()) {
+		dummy_rw_buffer = rd->storage_buffer_create(16);
 	}
 	if (!params_buffer.is_valid()) {
 		params_buffer = rd->storage_buffer_create(sizeof(GatherParamsGPU));
@@ -1027,7 +1031,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		debug_tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
 	}
-	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
+	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_rw_buffer;
 	const NextGIFarField *far_field = swrt ? nullptr : next_gi->get_rt_scene()->get_far_field();
 	const RID far_tlas = far_field != nullptr && far_field->is_trace_ready() ? far_field->get_tlas() : tlas;
 	// GodotNext: pu_dlss_rr (#206). Capture per-rb bypass state for this frame's line-8 passes.
@@ -1066,10 +1070,10 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 31, Vector<RID>({ sampler, last_frame_texture })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 32, Vector<RID>({ sampler_nearest, normal_roughness })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ specular_raw.is_valid() ? specular_raw : probe_image })),
-		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_rw_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ last_specular_hit.is_valid() ? last_specular_hit : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
-		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, clamp_totals_buffer.is_valid() ? clamp_totals_buffer : dummy_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, clamp_totals_buffer.is_valid() ? clamp_totals_buffer : dummy_rw_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 38, Vector<RID>({ sampler_nearest, blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color })),
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 39, far_tlas),
 	};

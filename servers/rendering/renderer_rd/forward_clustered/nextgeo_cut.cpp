@@ -592,6 +592,7 @@ bool NextGeoCut::_ensure() {
 	dummy_zero.resize(256);
 	dummy_zero.fill(0);
 	dummy_page_buf = rd->storage_buffer_create(256, dummy_zero);
+	dummy_rw_buf = rd->storage_buffer_create(256, dummy_zero);
 	multimesh_expand_params = _storage(80);
 	assembly_counter_buf = rd->storage_buffer_create(16, dummy_zero.slice(0, 16));
 
@@ -614,7 +615,7 @@ bool NextGeoCut::_ensure() {
 	sampler_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	sampler_state.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	dummy_sampler = rd->sampler_create(sampler_state);
-	initialized = params.is_valid() && raster_params.is_valid() && counters.is_valid() && aux_counters.is_valid() && shadow_params.is_valid() && shadow_raster_params.is_valid() && shadow_counters.is_valid() && counters_ring[0].is_valid() && counters_ring[1].is_valid() && counters_ring[2].is_valid() && shadow_counters_ring[0].is_valid() && shadow_counters_ring[1].is_valid() && shadow_counters_ring[2].is_valid() && request_ring[0].is_valid() && request_ring[1].is_valid() && request_ring[2].is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && shadow_nodes.is_valid() && shadow_level_a.is_valid() && shadow_level_b.is_valid() && shadow_groups.is_valid() && shadow_clusters.is_valid() && bvh_args[0].is_valid() && bvh_args[1].is_valid() && draw_args.is_valid() && shadow_bvh_args[0].is_valid() && shadow_bvh_args[1].is_valid() && shadow_draw_args.is_valid() && dummy_page_buf.is_valid() && multimesh_expand_params.is_valid() && assembly_counter_buf.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
+	initialized = params.is_valid() && raster_params.is_valid() && counters.is_valid() && aux_counters.is_valid() && shadow_params.is_valid() && shadow_raster_params.is_valid() && shadow_counters.is_valid() && counters_ring[0].is_valid() && counters_ring[1].is_valid() && counters_ring[2].is_valid() && shadow_counters_ring[0].is_valid() && shadow_counters_ring[1].is_valid() && shadow_counters_ring[2].is_valid() && request_ring[0].is_valid() && request_ring[1].is_valid() && request_ring[2].is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && shadow_nodes.is_valid() && shadow_level_a.is_valid() && shadow_level_b.is_valid() && shadow_groups.is_valid() && shadow_clusters.is_valid() && bvh_args[0].is_valid() && bvh_args[1].is_valid() && draw_args.is_valid() && shadow_bvh_args[0].is_valid() && shadow_bvh_args[1].is_valid() && shadow_draw_args.is_valid() && dummy_page_buf.is_valid() && dummy_rw_buf.is_valid() && multimesh_expand_params.is_valid() && assembly_counter_buf.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
 	if (!initialized) {
 		failed = true;
 		return false;
@@ -1911,7 +1912,7 @@ void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, params));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, residency_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_counters));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_rw_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, p_hiz_tex.is_valid() ? p_hiz_tex : dummy_hiz })));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_input));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_output));
@@ -1920,7 +1921,7 @@ void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, p_bvh_args_out));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, draw_args));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, p_request_buf.is_valid() ? p_request_buf : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, p_request_buf.is_valid() ? p_request_buf : dummy_rw_buf));
 	if (p_include_splines) {
 		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, RSG::virtual_mesh_storage->get_spline_buffer()));
 		const RID wind_params_buf = RSG::virtual_mesh_storage->get_wind_params_buffer().is_valid() ? RSG::virtual_mesh_storage->get_wind_params_buffer() : dummy_page_buf;
@@ -1942,7 +1943,7 @@ void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, shadow_params));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, residency_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_counters));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_rw_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, dummy_hiz })));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_input));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_output));
@@ -1951,7 +1952,7 @@ void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, p_bvh_args_out));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, shadow_draw_args));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, dummy_rw_buf));
 	if (p_include_splines) {
 		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, RSG::virtual_mesh_storage->get_spline_buffer()));
 		const RID wind_params_buf = RSG::virtual_mesh_storage->get_wind_params_buffer().is_valid() ? RSG::virtual_mesh_storage->get_wind_params_buffer() : dummy_page_buf;
@@ -1963,18 +1964,18 @@ void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 
 // GodotNext: nextgeo_sw_raster (#162). The main-view CLUSTER_CULL variant's raster-bin outputs.
 void NextGeoCut::_set_raster_bin_uniforms(LocalVector<RD::Uniform> &r_uniforms) {
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, raster_args.is_valid() ? raster_args : dummy_page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, raster_counts.is_valid() ? raster_counts : dummy_page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, raster_lists.is_valid() ? raster_lists : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, raster_args.is_valid() ? raster_args : dummy_rw_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, raster_counts.is_valid() ? raster_counts : dummy_rw_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, raster_lists.is_valid() ? raster_lists : dummy_rw_buf));
 	// GodotNext: nextgeo_raster_bins (#155). Read only under NEXTGEO_CUT_FLAG_PROGRAMMABLE_BINS.
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer();
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, raster_bins_active && cluster_buf.is_valid() ? cluster_buf : dummy_page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, raster_bins_active ? raster_bin_table_buffer : dummy_page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, raster_bins_active ? raster_bin_append : dummy_page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, raster_bins_active ? raster_bin_state : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, raster_bins_active ? raster_bin_append : dummy_rw_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, raster_bins_active ? raster_bin_state : dummy_rw_buf));
 	// GodotNext: nextgeo_voxels (#165). Bindings 29..30 (skipping 27..28 reserved for #152).
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, (voxels_active && voxel_bricks.is_valid()) ? voxel_bricks : dummy_page_buf));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, (voxels_active && voxel_raster_args.is_valid()) ? voxel_raster_args : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, (voxels_active && voxel_bricks.is_valid()) ? voxel_bricks : dummy_rw_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, (voxels_active && voxel_raster_args.is_valid()) ? voxel_raster_args : dummy_rw_buf));
 }
 
 void NextGeoCut::_harvest_shadow_timestamps() {
@@ -4577,8 +4578,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 	ERR_FAIL_COND_V_MSG(max_storage_range > 0 && p_storage->get_page_buffer().is_valid() && p_storage->get_page_arena_allocation_bytes() > max_storage_range, false,
 			vformat("VSM NextGeo: page arena (%d B) exceeds device maxStorageBufferRange (%d B).", p_storage->get_page_arena_allocation_bytes(), max_storage_range));
 	const RID bin_table_buf = (use_bins && vsm_bin_table_buffer.is_valid()) ? vsm_bin_table_buffer : dummy_page_buf;
-	const RID bin_append_buf = (use_bins && vsm_bin_append.is_valid()) ? vsm_bin_append : dummy_page_buf;
-	const RID bin_state_buf = (use_bins && vsm_bin_state.is_valid()) ? vsm_bin_state : dummy_page_buf;
+	const RID bin_append_buf = (use_bins && vsm_bin_append.is_valid()) ? vsm_bin_append : dummy_rw_buf;
+	const RID bin_state_buf = (use_bins && vsm_bin_state.is_valid()) ? vsm_bin_state : dummy_rw_buf;
 	const bool use_indirect_count = rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT);
 	const float sw_threshold = RendererRD::nextgeo_vsm_sw_switch_texels(p_inputs.sw_max_edge_texels);
 
@@ -4811,8 +4812,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, wind_params_buf));
 			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, wind_meshes_buf));
 			// GodotNext: nextgeo_voxels (#165). Bindings 29..30 (skipping 27..28 reserved for #152).
-			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, (vsm_voxels_active && vsm_voxel_bricks.is_valid()) ? vsm_voxel_bricks : dummy_page_buf));
-			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, (vsm_voxels_active && vsm_voxel_args.is_valid()) ? vsm_voxel_args : dummy_page_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, (vsm_voxels_active && vsm_voxel_bricks.is_valid()) ? vsm_voxel_bricks : dummy_rw_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, (vsm_voxels_active && vsm_voxel_args.is_valid()) ? vsm_voxel_args : dummy_rw_buf));
 			const RID set = uniform_set_cache->get_cache_vec(leaf_sh, 0, u);
 			if (set.is_null()) {
 				continue;
@@ -5228,7 +5229,7 @@ void NextGeoCut::free_resources() {
 	cluster_shadow_hash = RID();
 	hiz_pipeline = RID();
 	clear_vis_pipeline = RID();
-	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &multimesh_expand_params, &assembly_counter_buf, &raster_args, &raster_counts, &raster_lists, &raster_bin_state, &raster_bin_args, &raster_bin_hw_counts, &raster_bin_append, &raster_bin_lists, &raster_bin_table_buffer }) {
+	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &dummy_rw_buf, &multimesh_expand_params, &assembly_counter_buf, &raster_args, &raster_counts, &raster_lists, &raster_bin_state, &raster_bin_args, &raster_bin_hw_counts, &raster_bin_append, &raster_bin_lists, &raster_bin_table_buffer }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();

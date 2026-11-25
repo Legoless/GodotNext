@@ -84,6 +84,7 @@ struct NextGIVoxelLighting::GPUState {
 	RID weights;
 	RID staging;
 	RID dummy;
+	RID dummy_rw;
 	RID debug;
 	RID fallback_texture;
 	RID sampler;
@@ -834,7 +835,7 @@ void NextGIVoxelLighting::_free_gpu() {
 		if (gpu->version.is_valid()) {
 			gpu->shader.version_free(gpu->version);
 		}
-		const RID owned[] = { gpu->radiance, gpu->weights, gpu->staging, gpu->dummy, gpu->debug, gpu->fallback_texture, gpu->sampler };
+		const RID owned[] = { gpu->radiance, gpu->weights, gpu->staging, gpu->dummy, gpu->dummy_rw, gpu->debug, gpu->fallback_texture, gpu->sampler };
 		for (const RID &rid : owned) {
 			if (rid.is_valid()) {
 				rd->free_rid(rid);
@@ -1652,9 +1653,11 @@ bool NextGIVoxelLighting::_dispatch_gpu(const ShadeBindings &p_bindings, bool p_
 		gpu->radiance = rd->storage_buffer_create(uint32_t(radiance_buffer_bytes()));
 		gpu->weights = rd->storage_buffer_create(uint32_t(weight_buffer_bytes()));
 		gpu->staging = rd->storage_buffer_create(uint32_t(staging_buffer_bytes()));
-		// Stands in for the page rects, cards, card sets and debug buffer: one card record.
+		// Stands in for the read-only page rects, cards, and card sets: one card record.
 		gpu->dummy = rd->storage_buffer_create(sizeof(RendererRD::NextGICard));
-		if (!gpu->radiance.is_valid() || !gpu->weights.is_valid() || !gpu->staging.is_valid() || !gpu->dummy.is_valid()) {
+		// Separate stand-in for the writable debug buffer so one buffer is never bound as both SRV and UAV.
+		gpu->dummy_rw = rd->storage_buffer_create(16);
+		if (!gpu->radiance.is_valid() || !gpu->weights.is_valid() || !gpu->staging.is_valid() || !gpu->dummy.is_valid() || !gpu->dummy_rw.is_valid()) {
 			gpu->failed = true;
 			WARN_PRINT("NextGI voxel lighting volumes failed to allocate; global-SDF hits fall back to the WRC.");
 			return false;
@@ -1726,7 +1729,7 @@ bool NextGIVoxelLighting::_dispatch_gpu(const ShadeBindings &p_bindings, bool p_
 	bound[GPUState::BOUND_MATERIAL_DEPTH] = src_ok ? bindings.material_depth : gpu->fallback_texture;
 	bound[GPUState::BOUND_CARDS] = src_ok ? bindings.cards : gpu->dummy;
 	bound[GPUState::BOUND_CARD_SETS] = src_ok ? bindings.card_sets : gpu->dummy;
-	bound[GPUState::BOUND_DEBUG] = readback ? gpu->debug : gpu->dummy;
+	bound[GPUState::BOUND_DEBUG] = readback ? gpu->debug : gpu->dummy_rw;
 	bool rebind = !gpu->uniform_set.is_valid();
 	for (uint32_t index = 0; index < GPUState::BOUND_MAX; index++) {
 		rebind = rebind || bound[index] != gpu->bound[index];

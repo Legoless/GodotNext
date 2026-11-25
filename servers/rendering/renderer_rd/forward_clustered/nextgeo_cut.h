@@ -466,6 +466,7 @@ private:
 	bool request_ring_pending[3] = { false, false, false };
 	LocalVector<uint64_t> pending_readback_tokens;
 	RID dummy_page_buf;
+	RID dummy_rw_buf;
 	RID dummy_hiz;
 	RID dummy_sampler;
 

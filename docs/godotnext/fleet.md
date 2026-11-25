@@ -82,24 +82,26 @@ D3D12 12_0 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 4080 SUPER
 
 ### The RTX 5090 machine (#227, plan v3.9.20)
 
-The second test machine of the v1 fleet (plan §23.2) is the lead's Threadripper workstation, in use from 2026-11-23 (lead decision, plan v3.9.20). For now it runs Linux Vulkan only. Its Windows 11 lines (D3D12, DLSS, frame generation, MFG, Reflex, PresentMon and the UE 5.9 comparison) come later in a Windows 11 VM on the same machine with the RTX 5090 passed through (#227). It is the lead's workstation and hosts other work: GodotNext runs stay in their own folders, one GPU job at a time, and its name, address and helper scripts are in the git-ignored `local/` folder.
+The second test machine of the v1 fleet (plan §23.2) is the lead's Threadripper workstation, in use from 2026-11-23 (lead decision, plan v3.9.20). It runs Linux Vulkan directly on the host and Windows 11 (D3D12, Vulkan, DLSS, Ray Reconstruction, Frame Generation, MFG, Reflex and real OIDN) in a KVM Windows 11 VM on the same machine with the RTX 5090 passed through exclusively via VFIO (`#227`; the card returns to the Linux host between Windows sessions; UE 5.9 is not yet installed in the Windows VM). It is the lead's workstation and hosts other work: GodotNext runs stay in their own folders, one GPU job at a time, and its name, address and helper scripts are in the git-ignored `local/` folder.
 
-| Host | OS | GPU | Compiler | Build command | Editor binary | Wall time | `--headless --test` | Vulkan validation and tools |
+| Host | OS | GPU | Compiler | Build command | Editor binary | Wall time | `--headless --test` | Validation and tools |
 |---|---|---|---|---|---|---|---|---|
-| the RTX 5090 machine | Ubuntu 26.04.1 LTS, kernel 7.0.0-44 (AMD Ryzen Threadripper PRO 9985WX, 64 cores, 128 GB) | NVIDIA GeForce RTX 5090, 32 GB, driver 595.99.02 (Vulkan 1.4.329), plus llvmpipe | GCC 15.2.0 | `scons platform=linuxbsd target=editor dev_mode=yes -j56` (SCons 4.11.1, Python 3.14) | `bin/godot.linuxbsd.editor.x86_64` | 1m 35s cold (empty SCons cache) | 2223 passed, 0 failed (3 pre-existing skips), master `d1f126ee` | Khronos validation layer 1.4.363.1 and `vulkaninfo` 1.4.363.1 from the LunarG SDK, loaded through `VK_LAYER_PATH` (no system SDK) |
+| the RTX 5090 machine (Linux) | Ubuntu 26.04.1 LTS, kernel 7.0.0-44 (AMD Ryzen Threadripper PRO 9985WX, 64 cores, 128 GB) | NVIDIA GeForce RTX 5090, 32 GB, driver 595.99.02 (Vulkan 1.4.329), plus llvmpipe | GCC 15.2.0 | `scons platform=linuxbsd target=editor dev_mode=yes -j56` (SCons 4.11.1, Python 3.14) | `bin/godot.linuxbsd.editor.x86_64` | 1m 35s cold (empty SCons cache) | 2223 passed, 0 failed (3 pre-existing skips), master `d1f126ee` | Khronos validation layer 1.4.363.1 and `vulkaninfo` 1.4.363.1 from the LunarG SDK, loaded through `VK_LAYER_PATH` (no system SDK) |
+| the RTX 5090 machine (Windows 11 VM, VFIO passthrough) | Windows 11 Pro x64 (16 vCPU, 32 GB RAM, PCIe Gen 5 x16 passthrough) | NVIDIA GeForce RTX 5090, 32 GB, driver `621.40` (`D3D12:4318:11141:32.0.16.2140`), DXR Tier 1.2, Mesh Shader Tier 1, SM 6.8 | MSVC 2022 (`19.44`, `/W4 /WX`) | `scons platform=windows target=editor d3d12=yes vulkan=yes angle=no dev_mode=yes tests=yes mesa_libs=<mesa-25.3.1-gn5> -j16` (plus optional NGX `v310.9.16`, Streamline `v2.14.16`, OIDN `v2.5.1` builds) | `bin\godot.windows.editor.x86_64.console.exe` | ~30s incremental | 2416+ passed, 0 failed | D3D12 Debug Layer + Agility SDK + GBV + `dxil.dll` 1.8 validator; interactive desktop Session 1 (`--gpu-index 0`, `--audio-driver Dummy`) |
 
-Recorded on 2026-11-23 at `d1f126ee`.
+Recorded on 2026-11-23 (Linux, `d1f126ee`) and 2026-11-25 (Windows 11 VM).
 
-- **Device:** `vendorID` 0x10DE, `deviceID` 0x2B85, `rayQuery` true, `maxInstanceCount` 16,777,215, mesh and task shaders. Archive: `fleet/vulkaninfo/g0/the RTX 5090 machine-rtx5090.json` (`vulkaninfo --json=0`).
-- **PCIe:** Gen 5 x16 maximum (`nvidia-smi --query-gpu=pcie.link.gen.max,pcie.link.width.max`); the link drops to Gen 1 at idle.
-- **Clocks and power:** maximum graphics 3105 MHz, memory 14001 MHz, power limit 600 W, VBIOS 98.02.2E.80.39. Clock locks for timing runs are set in PQ.
-- **Display:** rendered runs use a private Xvfb display (1920x1080x24, no TCP) that each run starts and stops; NVIDIA's Vulkan driver presents to it. Pass `--audio-driver Dummy`.
-- **Smoke (2026-11-23, master `d1f126ee`, Vulkan with `--gpu-validation`):** `scenes/nextgi_perf/nextgi_perf.tscn` (NextGI on, `tier=HWRT reason=NONE quality=HIGH`) and `scenes/vsm_flythrough/vsm_flythrough.tscn`, 300 frames each, 0 errors and 0 validation messages. The first headless `--import` of a fresh checkout logs the known editor-thread `is_visible_in_tree()` error.
+- **Device:** `vendorID` 0x10DE, `deviceID` 0x2B85, `rayQuery` true, `maxInstanceCount` 16,777,215, mesh and task shaders, 64-bit integer atomics (SM 6.6). Archive: `fleet/vulkaninfo/g0/the RTX 5090 machine-rtx5090.json` (`vulkaninfo --json=0`).
+- **PCIe:** Gen 5 x16 maximum (`nvidia-smi --query-gpu=pcie.link.gen.max,pcie.link.width.max`, preserved inside the Windows 11 VFIO VM); the link drops to Gen 1 at idle.
+- **Clocks and power:** maximum graphics 3105 MHz (Linux) / 3090 MHz (Windows VM), memory 14001 MHz, power limit 600 W, VBIOS 98.02.2E.80.39. Clock locks for timing runs are set in PQ.
+- **Display:** Linux rendered runs use a private Xvfb display (1920x1080x24, no TCP) that each run starts and stops; Windows 11 VM rendered runs use interactive desktop Session 1. Pass `--audio-driver Dummy` on both.
+- **Smoke (2026-11-23 Linux Vulkan `d1f126ee`, `--gpu-validation`):** `scenes/nextgi_perf/nextgi_perf.tscn` (NextGI on, `tier=HWRT reason=NONE quality=HIGH`) and `scenes/vsm_flythrough/vsm_flythrough.tscn`, 300 frames each, 0 errors and 0 validation messages. The first headless `--import` of a fresh checkout logs the known editor-thread `is_visible_in_tree()` error.
+- **Windows 11 VM D3D12 / DLSS smoke (2026-11-25, driver `621.40`, un-muted D3D12 Debug Layer + `--gpu-abort`):** `nextgi_perf` (NextGI HWRT High & Epic, Enhanced & Legacy Barriers), `cbr_a` (NextGI Epic + DLSS-RR Enhanced & Legacy + GBV), `vsm_flythrough`, `mega_lights_hall`, `cbr_a_vg`, Path Tracer + real OIDN `v2.5.1`, Streamline Reflex / DLSS-G 2× / MFG 4× & 6× / Dynamic MFG, `atomics64` (Mesa NIR `25.3.1-gn5`), all 15 PN NextGeo checks, all PV VSM checks, and `vendor_seam_test` C GDExtension pass with `0` D3D12 errors.
 
-| Device name | v1 role | Godot Vulkan `--gpu-index` | `nvidia-smi -i` | `vulkaninfo --json=<n>` |
-|---|---|---|---|---|
-| `NVIDIA GeForce RTX 5090` | Second fleet device: Linux Vulkan now, Windows 11 VM later; every NVIDIA line in PQ | `0` | `0` | `0` |
-| `llvmpipe (LLVM 21.1.8, 256 bits)` | Software rasterizer, not a test device | `1` | n/a | `1` |
+| Device name | v1 role | Godot Linux Vulkan `--gpu-index` | Godot Windows Session-1 D3D12/Vulkan `--gpu-index` | `nvidia-smi -i` | `vulkaninfo --json=<n>` |
+|---|---|---|---|---|---|
+| `NVIDIA GeForce RTX 5090` | Second fleet device: Linux Vulkan and Windows 11 VM (VFIO passthrough); every NVIDIA line in PQ | `0` | `0` | `0` | `0` |
+| `llvmpipe (LLVM 21.1.8, 256 bits)` | Software rasterizer (Linux), not a test device | `1` | n/a | n/a | `1` |
 
 ### Cloud L4 VMs (v3.8, build-time only)
 

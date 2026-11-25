@@ -13,7 +13,8 @@
 # - move_toggle: moving or toggling a static caster's shadow updates it (#222), read from the image;
 # - budget: deferred_invalidation_budget 512 while the sun turns (sun LOD bias -1): pages are deferred, the
 #   GPU counters equal the CPU model, and the cache converges once the sun stops;
-# - fog_atlas: a fog-lit VSM spot light's atlas shadow is redrawn when a caster moves;
+# - fog_atlas: under VSM + volumetric fog (#215) a VSM spot light skips the atlas and updates VSM pages;
+#   an explicit SHADOW_METHOD_ATLAS spot light still runs its atlas pass and redraws when a caster moves;
 # - multimesh: MultiMesh slabs with a custom AABB (AUTO by instance transform, AUTO by buffer, RIGID) move their
 #   shadows when moved, after settling and when moved back, read from the image;
 # - range_swap: two slabs swapped by their visibility ranges swap their shadows, read from the image.

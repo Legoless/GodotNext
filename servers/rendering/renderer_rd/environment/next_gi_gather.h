@@ -201,6 +201,7 @@ class NextGIGather {
 	RID dummy_color;
 	RID dummy_storage;
 	RID dummy_buffer;
+	RID dummy_rw_buffer;
 	RID sampler;
 	RID sampler_nearest;
 	uint32_t probe_w = 0;

@@ -249,6 +249,7 @@ struct NextGISWRTTrace::GpuState {
 	RID dummy_depth;
 	RID dummy_color;
 	RID dummy_buffer;
+	RID dummy_rw_buffer;
 	RID counter_buffer;
 	RID params_buffer;
 	// The shadow kernel's own params: the scene fields only, so it never reads a view's.
@@ -327,7 +328,7 @@ NextGISWRTTrace::~NextGISWRTTrace() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (gpu != nullptr && rd != nullptr) {
-		RID *rids[] = { &gpu->shadow_pipeline, &gpu->nearest_sampler, &gpu->linear_sampler, &gpu->dummy_depth, &gpu->dummy_color, &gpu->dummy_buffer, &gpu->counter_buffer, &gpu->params_buffer, &gpu->shadow_params_buffer, &gpu->scene_params_buffer, &gpu->view_params_buffer, &gpu->instance_buffer, &gpu->record_buffer, &gpu->two_sided_buffer, &gpu->mesh_info_buffer, &gpu->mesh_page_buffer, &gpu->mesh_brick_buffer, &gpu->froxel_buffer, &gpu->requests_buffer, &gpu->results_buffer, &gpu->lights_buffer };
+		RID *rids[] = { &gpu->shadow_pipeline, &gpu->nearest_sampler, &gpu->linear_sampler, &gpu->dummy_depth, &gpu->dummy_color, &gpu->dummy_buffer, &gpu->dummy_rw_buffer, &gpu->counter_buffer, &gpu->params_buffer, &gpu->shadow_params_buffer, &gpu->scene_params_buffer, &gpu->view_params_buffer, &gpu->instance_buffer, &gpu->record_buffer, &gpu->two_sided_buffer, &gpu->mesh_info_buffer, &gpu->mesh_page_buffer, &gpu->mesh_brick_buffer, &gpu->froxel_buffer, &gpu->requests_buffer, &gpu->results_buffer, &gpu->lights_buffer };
 		for (RID *rid : rids) {
 			_free_rid(rd, *rid);
 		}
@@ -436,12 +437,13 @@ bool NextGISWRTTrace::_ensure_gpu() {
 	zeros.resize(256);
 	zeros.fill(0);
 	gpu->dummy_buffer = rd->storage_buffer_create(zeros.size(), zeros);
+	gpu->dummy_rw_buffer = rd->storage_buffer_create(zeros.size(), zeros);
 	gpu->counter_buffer = rd->storage_buffer_create(sizeof(Counters));
 	gpu->params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
 	gpu->shadow_params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
 	gpu->scene_params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
 	gpu->view_params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
-	gpu->ready = gpu->nearest_sampler.is_valid() && gpu->linear_sampler.is_valid() && gpu->dummy_depth.is_valid() && gpu->dummy_color.is_valid() && gpu->dummy_buffer.is_valid() && gpu->counter_buffer.is_valid() && gpu->params_buffer.is_valid() && gpu->shadow_params_buffer.is_valid() && gpu->scene_params_buffer.is_valid() && gpu->view_params_buffer.is_valid();
+	gpu->ready = gpu->nearest_sampler.is_valid() && gpu->linear_sampler.is_valid() && gpu->dummy_depth.is_valid() && gpu->dummy_color.is_valid() && gpu->dummy_buffer.is_valid() && gpu->dummy_rw_buffer.is_valid() && gpu->counter_buffer.is_valid() && gpu->params_buffer.is_valid() && gpu->shadow_params_buffer.is_valid() && gpu->scene_params_buffer.is_valid() && gpu->view_params_buffer.is_valid();
 	if (!gpu->ready) {
 		pipelines_failed = true;
 		ERR_PRINT("NextGI software ray tracing failed to allocate its buffers.");
@@ -991,7 +993,7 @@ void NextGISWRTTrace::_append_core_uniforms(Vector<RD::Uniform> &r_uniforms, RID
 	buffer(22, gpu->mesh_info_buffer);
 	buffer(23, gpu->mesh_page_buffer);
 	buffer(24, gpu->mesh_brick_buffer);
-	buffer(25, gpu->froxel_buffer);
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, gpu->froxel_buffer.is_valid() ? gpu->froxel_buffer : gpu->dummy_rw_buffer));
 	buffer(26, gpu->two_sided_buffer);
 	// GodotNext: global_sdf_coarse_bound (#257). Every level's coarse bound.
 	buffer(30, field != nullptr ? field->get_coarse_buffer() : RID());
@@ -1112,9 +1114,9 @@ void NextGISWRTTrace::_build_detail_froxels_internal(RenderDataRD *p_render_data
 	Vector<RD::Uniform> common;
 	_append_core_uniforms(common, gpu->view_params_buffer, p_lighting, true);
 	_append_view_uniforms(common, RID(), true, false);
-	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, gpu->dummy_buffer));
-	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, gpu->dummy_buffer));
-	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, gpu->dummy_buffer));
+	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, gpu->dummy_rw_buffer));
+	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, gpu->dummy_rw_buffer));
+	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, gpu->dummy_rw_buffer));
 	const RID mark_set = rd->uniform_set_create(common, gpu->gather_shader.version_get_shader(gpu->gather_version, VARIANT_FROXEL_MARK), 0);
 	const RID cull_set = rd->uniform_set_create(common, gpu->gather_shader.version_get_shader(gpu->gather_version, VARIANT_FROXEL_CULL), 0);
 	if (mark_set.is_valid() && cull_set.is_valid()) {
@@ -1369,9 +1371,9 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 	LocalVector<RID> sets;
 	auto make_set = [&](TraceVariant p_variant, RID p_rays) -> RID {
 		Vector<RD::Uniform> uniforms = common;
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, p_rays.is_valid() ? p_rays : gpu->dummy_buffer));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, gpu->dummy_buffer));
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, readback && gpu->requests_buffer.is_valid() ? gpu->requests_buffer : gpu->dummy_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, p_rays.is_valid() ? p_rays : gpu->dummy_rw_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, gpu->dummy_rw_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, readback && gpu->requests_buffer.is_valid() ? gpu->requests_buffer : gpu->dummy_rw_buffer));
 		const RID set = rd->uniform_set_create(uniforms, gpu->gather_shader.version_get_shader(gpu->gather_version, p_variant), 0);
 		if (set.is_valid()) {
 			sets.push_back(set);

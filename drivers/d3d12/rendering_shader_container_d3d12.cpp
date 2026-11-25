@@ -950,6 +950,11 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(MESH_SHADER_MODEL)));
 		}
 
+		// GodotNext: rd_atomics64 (#175). 64-bit integer atomics need Shader Model 6.6 across every stage of the pipeline.
+		if (reflection_data.int64_atomics != 0) {
+			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(INT64_ATOMICS_SHADER_MODEL)));
+		}
+
 		// GodotNext: rd_indirect_count (#177). Every stage, so the pipeline's stages share one shader model.
 		if (base_instance_native) {
 			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(BASE_INSTANCE_NATIVE_SHADER_MODEL)));
@@ -1580,6 +1585,10 @@ bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_
 	const bool uses_mesh_stages = p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_TASK_BIT) || p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_MESH_BIT);
 	ERR_FAIL_COND_V_MSG(uses_mesh_stages && !is_mesh_shading_supported(), false,
 			vformat("Shader '%s' has task or mesh shader stages. Direct3D 12 compiles it only with the GodotNext Mesa NIR library (label 25.3.1-gn4 or later), and this build links %s.", String::utf8(shader_name.get_data()), is_raytracing_supported() ? vformat("label %s", get_mesa_label()) : String("the upstream library")));
+	// GodotNext: rd_atomics64 (#175). Only the GodotNext Mesa NIR library 25.3.1-gn5 or later emits Shader Model 6.6
+	// 64-bit integer atomics; older libraries refuse them here with one named error.
+	ERR_FAIL_COND_V_MSG(p_shader.int64_atomics != 0 && !is_int64_atomics_supported(), false,
+			vformat("Shader '%s' uses 64-bit integer atomics. Direct3D 12 compiles it only with the GodotNext Mesa NIR library (label 25.3.1-gn5 or later), and this build links %s.", String::utf8(shader_name.get_data()), is_raytracing_supported() ? vformat("label %s", get_mesa_label()) : String("the upstream library")));
 	// GodotNext: dxil_mesh_shaders (#122). gl_NumWorkGroups in a task or mesh stage reads the group counts of the draw
 	// from the NIR runtime data root constants (HLSL has no such system value). Behind a task stage, the mesh stage's
 	// counts are the task stage's EmitMeshTasksEXT() arguments, which only the GPU knows, so that read is refused.
@@ -1723,8 +1732,11 @@ bool RenderingShaderContainerD3D12::marks_non_uniform_resource_indices() {
 #endif
 }
 
-// GodotNext: dxil_nonuniform (#293).
+// GodotNext: dxil_nonuniform (#293), rd_atomics64 (#175).
 uint32_t RenderingShaderContainerD3D12::get_library_format_version() {
+	if (is_int64_atomics_supported()) {
+		return FORMAT_VERSION_INT64_ATOMICS;
+	}
 	if (marks_non_uniform_resource_indices()) {
 		return FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX;
 	}
@@ -1734,6 +1746,15 @@ uint32_t RenderingShaderContainerD3D12::get_library_format_version() {
 // GodotNext: dxil_mesh_shaders (#122). drivers/d3d12/SCsub defines NIR_MESH_SHADERS_ENABLED for 25.3.1-gn4 and later.
 bool RenderingShaderContainerD3D12::is_mesh_shading_supported() {
 #ifdef NIR_MESH_SHADERS_ENABLED
+	return true;
+#else
+	return false;
+#endif
+}
+
+// GodotNext: rd_atomics64 (#175). drivers/d3d12/SCsub defines NIR_INT64_ATOMICS_ENABLED for 25.3.1-gn5 and later.
+bool RenderingShaderContainerD3D12::is_int64_atomics_supported() {
+#ifdef NIR_INT64_ATOMICS_ENABLED
 	return true;
 #else
 	return false;
@@ -1865,6 +1886,15 @@ bool RenderingShaderContainerFormatD3D12::supports_acceleration_structures() con
 // GodotNext: dxil_mesh_shaders (#122)
 bool RenderingShaderContainerFormatD3D12::supports_mesh_shaders() const {
 	return RenderingShaderContainerD3D12::is_mesh_shading_supported();
+}
+
+// GodotNext: rd_atomics64 (#175)
+bool RenderingShaderContainerFormatD3D12::supports_image_int64_atomics() const {
+	return RenderingShaderContainerD3D12::is_int64_atomics_supported();
+}
+
+bool RenderingShaderContainerFormatD3D12::supports_buffer_int64_atomics() const {
+	return RenderingShaderContainerD3D12::is_int64_atomics_supported();
 }
 
 RenderingShaderContainerFormatD3D12::RenderingShaderContainerFormatD3D12() {
