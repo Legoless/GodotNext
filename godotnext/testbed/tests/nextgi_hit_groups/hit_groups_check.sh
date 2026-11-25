@@ -54,6 +54,7 @@ config/custom_user_dir_name="godotnext-hit-groups-check"
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=0
+global_illumination/nextgi/hardware_ray_tracing.macos=0
 global_illumination/nextgi/quality=2
 CFG
 mode="${HIT_GROUPS_HWRT_MODE:-}"
@@ -62,6 +63,7 @@ if [[ -n "$mode" ]]; then
 global_illumination/nextgi/hardware_ray_tracing_mode=$mode
 global_illumination/nextgi/hardware_ray_tracing_mode.windows=$mode
 global_illumination/nextgi/hardware_ray_tracing_mode.linuxbsd=$mode
+global_illumination/nextgi/hardware_ray_tracing_mode.macos=$mode
 CFG
 fi
 

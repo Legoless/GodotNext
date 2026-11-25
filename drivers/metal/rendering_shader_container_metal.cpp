@@ -861,6 +861,12 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 		std::unordered_set<VariableID> active = compiler.get_active_interface_variables();
 		ShaderResources resources = compiler.get_shader_resources();
 
+		// Check entry points before compile(): CompilerMSL::emit_mesh_entry_point() adds an
+		// internal proxy entry point into ir.entry_points during compile() for MeshEXT stages (#178).
+		SmallVector<EntryPoint> entry_pts_stages = compiler.get_entry_points_and_stages();
+		ERR_FAIL_COND_V_MSG(entry_pts_stages.size() != 1, false, "Expected a single entry point and stage.");
+		EntryPoint entry_point_stage = entry_pts_stages.front();
+
 		std::string source;
 		try {
 			source = compiler.compile();
@@ -868,10 +874,6 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 			ERR_FAIL_V_MSG(false, "Failed to compile stage " + String(RDC::SHADER_STAGE_NAMES[stage]) + ": " + e.what());
 		}
 
-		ERR_FAIL_COND_V_MSG(compiler.get_entry_points_and_stages().size() != 1, false, "Expected a single entry point and stage.");
-
-		SmallVector<EntryPoint> entry_pts_stages = compiler.get_entry_points_and_stages();
-		EntryPoint &entry_point_stage = entry_pts_stages.front();
 		SPIREntryPoint &entry_point = compiler.get_entry_point(entry_point_stage.name, entry_point_stage.execution_model);
 
 		for (auto ext : compiler.get_declared_extensions()) {

@@ -1621,7 +1621,9 @@ void PathTracer::build_tables(const RenderDataRD *p_render_data, const NextGIRTS
 			if (geometry != nullptr && geometry->data != nullptr && source.surface != UINT32_MAX) {
 				material = _path_tracer_surface_material(geometry, source.mesh, source.surface);
 			}
-			r_tables.materials[i] = _path_tracer_table_material(material, r_tables.textured_materials, p_linear_colors);
+			// Both the D16 reference (build_reference_tables) and the product path tracer convert sRGB
+			// material color parameters to linear so reference_match compares identical material tables.
+			r_tables.materials[i] = _path_tracer_table_material(material, r_tables.textured_materials, true);
 		}
 	}
 	if (p_linear_colors) {
@@ -2436,10 +2438,24 @@ void PathTracer::render(const RenderDataRD *p_render_data, NextGIRTScene *p_rt_s
 			}
 		}
 		const float fog_scalars[18] = {
-			float(fog_mode), vfog_density, vfog_anisotropy, vfog_length, vfog_sky_affect,
-			vfog_scattering.r, vfog_scattering.g, vfog_scattering.b, vfog_emission.r, vfog_emission.g, vfog_emission.b,
-			fog_legacy_color.r, fog_legacy_color.g, fog_legacy_color.b, fog_legacy_density,
-			fog_legacy_height, fog_legacy_height_density, fog_legacy_depth_end,
+			float(fog_mode),
+			vfog_density,
+			vfog_anisotropy,
+			vfog_length,
+			vfog_sky_affect,
+			vfog_scattering.r,
+			vfog_scattering.g,
+			vfog_scattering.b,
+			vfog_emission.r,
+			vfog_emission.g,
+			vfog_emission.b,
+			fog_legacy_color.r,
+			fog_legacy_color.g,
+			fog_legacy_color.b,
+			fog_legacy_density,
+			fog_legacy_height,
+			fog_legacy_height_density,
+			fog_legacy_depth_end,
 		};
 		fog_state_hash = path_tracer_hash_bytes(fog_state_hash, fog_scalars, sizeof(fog_scalars));
 		const float fog_scalars2[4] = { fog_legacy_depth_begin, fog_legacy_depth_curve, fog_legacy_sky_affect, float(fog_legacy_depth_mode) };

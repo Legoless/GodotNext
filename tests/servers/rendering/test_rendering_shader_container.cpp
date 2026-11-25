@@ -769,7 +769,7 @@ TEST_CASE("[ShaderContainer][Metal] Task and mesh stages compile to object and m
 	const MetalDeviceProfile *ios15 = MetalDeviceProfile::get_profile(MetalDeviceProfile::Platform::iOS, MetalDeviceProfile::GPU::Apple7, os_version::IOS_15_0);
 	REQUIRE(ios15 != nullptr);
 	CHECK_FALSE(RenderingShaderContainerFormatMetal(ios15).supports_mesh_shaders());
-	CHECK(RenderingShaderContainerMetal::FORMAT_VERSION == 4);
+	CHECK(RenderingShaderContainerMetal::FORMAT_VERSION == 5);
 
 	Ref<RenderingShaderContainerMetal> container = format.create_container();
 	REQUIRE(container.is_valid());
@@ -778,7 +778,33 @@ TEST_CASE("[ShaderContainer][Metal] Task and mesh stages compile to object and m
 	CHECK(container->mtl_reflection_data.task_payload_size == 128);
 	REQUIRE(container->shaders.size() == 3);
 	CHECK(metal_source(container, 0).contains("[[object]]"));
-	CHECK(metal_source(container, 1).contains("[[mesh]]"));
+	const String mesh_msl = metal_source(container, 1);
+	CHECK(mesh_msl.contains("[[mesh]]"));
+	CHECK_FALSE(mesh_msl.contains("gl_WorkGroupSize [[maybe_unused]] = uint3(0, 0, 0)"));
+
+	// SPIR-V 1.6 emits OpExecutionModeId LocalSizeId rather than LocalSize; Metal mesh output loops must still get the real workgroup size.
+	{
+		Vector<RDC::ShaderStageSPIRVData> spv16_stages;
+		String err;
+		RDC::ShaderStageSPIRVData mesh16;
+		mesh16.shader_stage = RDC::SHADER_STAGE_MESH;
+		mesh16.spirv = compile_glslang_shader(RDC::SHADER_STAGE_MESH, String::utf8(MESH_ONLY_GLSL), RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_6, &err);
+		REQUIRE_MESSAGE(!mesh16.spirv.is_empty(), err);
+		spv16_stages.push_back(mesh16);
+		RDC::ShaderStageSPIRVData frag16;
+		frag16.shader_stage = RDC::SHADER_STAGE_FRAGMENT;
+		frag16.spirv = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, String::utf8(MESH_FRAGMENT_GLSL), RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_6, &err);
+		REQUIRE_MESSAGE(!frag16.spirv.is_empty(), err);
+		spv16_stages.push_back(frag16);
+
+		Ref<RenderingShaderContainerMetal> c16 = format.create_container();
+		REQUIRE(c16->set_code_from_spirv("mesh_only_spv16", spv16_stages));
+		REQUIRE(c16->shaders.size() == 2);
+		const String mesh16_msl = metal_source(c16, 0);
+		CHECK(mesh16_msl.contains("[[mesh]]"));
+		CHECK_FALSE(mesh16_msl.contains("uint3(0, 0, 0)"));
+		CHECK(mesh16_msl.contains("uint3(64u, 1u, 1u)"));
+	}
 
 	Ref<RenderingShaderContainerMetal> loaded = format.create_container();
 	REQUIRE(loaded->from_bytes(container->to_bytes()));

@@ -171,8 +171,12 @@ func _process(_delta: float) -> void:
 				_baseline = _memory()
 			elif _step_frame >= STABLE_FRAMES:
 				var again := _memory()
-				_result["baseline_stable"] = again == _baseline
-				if again != _baseline:
+				# MEMORY_TOTAL on Metal queries MTLDevice.currentAllocatedSize(), which includes
+				# driver-internal and GPU-validation scratch heaps; match _check_memory() and check
+				# RenderingDevice's tracked buffer and texture allocations.
+				var stable := int(again["buffers"]) == int(_baseline["buffers"]) and int(again["textures"]) == int(_baseline["textures"])
+				_result["baseline_stable"] = stable
+				if not stable:
 					_failures.append("RenderingDevice memory changed with nothing happening: %s then %s" % [_baseline, again])
 				_baseline = again
 				_run_self_check()

@@ -57,7 +57,7 @@ extends Node
 const SceneArgs = preload("res://scenes/scene_args.gd")
 
 # The drivers that have no shader execution reordering by the plan (§21.1), and so do not fail without it.
-const DRIVERS_WITHOUT_REORDER := ["d3d12"]
+const DRIVERS_WITHOUT_REORDER := ["d3d12", "metal"]
 
 const WIDTH := 256
 const HEIGHT := 256
@@ -379,7 +379,7 @@ func _run() -> Dictionary:
 		# Each missing feature fails the run with its reason; the variants that need it did not run.
 		for feature in [["reorder", "NO_REORDER", "SUPPORTS_RAYTRACING_REORDER"], ["indirect", "NO_INDIRECT", "SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT"], ["libraries", "NO_LIBRARIES", "SUPPORTS_RAYTRACING_PIPELINE_LIBRARY"]]:
 			if feature[0] == "reorder" and not result["supported"]["reorder"] and DRIVERS_WITHOUT_REORDER.has(result["driver"]):
-				result["reorder"] = "not on D3D12"
+				result["reorder"] = "not on D3D12" if result["driver"] == "d3d12" else "not on Metal"
 				continue
 			if not result["supported"][feature[0]]:
 				result["reason"] = feature[1]

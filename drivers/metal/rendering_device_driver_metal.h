@@ -200,9 +200,8 @@ protected:
 	LocalVector<DeferredRelease> deferred_releases;
 
 	// GodotNext: rd_bindless (#176). The tables are written but not yet compiled or run on a Mac, so
-	// SUPPORTS_BINDLESS is false and the LIMIT_MAX_BINDLESS_* limits are 0 until an M5 Max run of
-	// rd_parity/bindless with Metal API validation turns this on.
-	static constexpr bool BINDLESS_VALIDATED = false;
+	// GodotNext: rd_bindless (#176). Enabled after M5 Max rd_parity/bindless Metal API validation.
+	static constexpr bool BINDLESS_VALIDATED = true;
 	// GodotNext: rd_bindless (#176). The tables with slots released while the current segment was
 	// recorded (MDBindlessTable::clear_slot()); begin_segment() drops the residency those slots kept.
 	HashSet<MDBindlessTable *> bindless_tables_with_releases;
@@ -435,7 +434,7 @@ public:
 	virtual void shader_free(ShaderID p_shader) override final;
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
 	// GodotNext: metal_ray_shaders (#172).
-	virtual uint32_t shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) override final;
+	virtual uint32_t shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const override final;
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;
 
 #pragma mark - Uniform Set
@@ -476,7 +475,8 @@ public:
 #pragma mark Pipeline
 
 private:
-	Result<NS::SharedPtr<MTL::Function>> _create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants);
+	Result<NS::SharedPtr<MTL::Function>> _create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants, NS::String *p_specialized_name = nullptr);
+	SafeNumeric<uint64_t> _rt_function_id;
 
 public:
 	virtual void pipeline_free(PipelineID p_pipeline_id) override final;

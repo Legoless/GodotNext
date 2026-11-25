@@ -1282,7 +1282,7 @@ func _check_reference_match() -> void:
 	_result["reference_match"] = row
 	# The same integrator, the same inputs: every value equal (close_fraction and worst_relative are reported).
 	if row.exact_fraction != 1.0:
-		_fail("reference match: %.6f of the pixels equal the reference's exactly (%.6f within %.0e), expected all" % [row.exact_fraction, row.close_fraction, MATCH_TOLERANCE])
+		_fail("reference match: %.6f of the pixels equal the reference's exactly (%.6f within %s), expected all" % [row.exact_fraction, row.close_fraction, str(MATCH_TOLERANCE)])
 
 
 func _check_streaks() -> void:

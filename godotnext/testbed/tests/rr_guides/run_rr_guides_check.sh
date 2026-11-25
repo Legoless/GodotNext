@@ -95,7 +95,7 @@ trap cleanup EXIT
 no_cache=$'[rendering]\n\nshader_compiler/shader_cache/enabled=false\n'
 # The RR mode runs NextGI HWRT at Epic. The reference path tracer's reflections-only mode gives
 # the hit distance to compare with.
-nextgi_epic=$'[rendering]\n\nglobal_illumination/nextgi/enabled=true\nglobal_illumination/nextgi/hardware_ray_tracing=0\nglobal_illumination/nextgi/quality=3\n'
+nextgi_epic=$'[rendering]\n\nglobal_illumination/nextgi/enabled=true\nglobal_illumination/nextgi/hardware_ray_tracing=0\nglobal_illumination/nextgi/hardware_ray_tracing.macos=0\nglobal_illumination/nextgi/quality=3\n'
 upscaled=$'scaling_3d/scale=0.67\n'
 nextgi_epic_reference="${nextgi_epic}global_illumination/nextgi/debug/reference_mode=3
 global_illumination/nextgi/debug/reference_readback=true
@@ -189,8 +189,10 @@ run_pass cbr_a_vg 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/color_b
 run_pass corridor_cam0 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=Cam0
 run_pass corridor_capturecam 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam
 run_pass cbr_a_fsr2 1 "${nextgi_epic}scaling_3d/mode=2
+scaling_3d/mode.macos=2
 $upscaled" --rr-check=scene --scene=res://scenes/color_box_room/cbr_a.tscn --camera=CaptureCam
 run_pass corridor_tsr 1 "${nextgi_epic}scaling_3d/mode=7
+scaling_3d/mode.macos=7
 $upscaled" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam
 # Roughness Corridor's CaptureCam sees the sky, where the guides must hold their clear values.
 run_pass corridor_velocity 1 "" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --motion-vectors=true

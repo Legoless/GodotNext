@@ -669,14 +669,14 @@ public:
 		float displacement_center = 0.5f;
 		// GodotNext: nextgeo_vertex_offset (#164, plan §21.4 N5). -1.0 inherits project default.
 		float vertex_offset_max = -1.0f;
-		virtual void set_render_priority(int p_priority);
-		virtual void set_next_pass(RID p_pass);
+		virtual void set_render_priority(int p_priority) override;
+		virtual void set_next_pass(RID p_pass) override;
 		virtual void set_displacement(float p_magnitude, float p_center) override;
 		virtual void set_vertex_offset_max(float p_vertex_offset_max) override;
 		float get_effective_vertex_offset_max(float p_project_default) const;
 		virtual bool get_rt_vertex_offset_uniforms(Vector<RD::Uniform> &r_uniforms) const override;
 		uint32_t get_raster_features() const;
-		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty);
+		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) override;
 		virtual ~MaterialData();
 	};
 

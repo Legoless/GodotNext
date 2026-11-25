@@ -24,5 +24,6 @@ window/size/viewport_height=360
 [rendering]
 
 scaling_3d/mode=8
+scaling_3d/mode.macos=8
 scaling_3d/custom_upscaler="SeamCopy"
 frame_generation/provider="SeamPassthrough"

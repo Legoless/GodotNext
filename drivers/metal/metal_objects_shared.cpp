@@ -107,7 +107,7 @@ typedef struct {
 
 	char line[128];
 	for (uint32_t caIdx = 0; caIdx < ClearAttKey::COLOR_COUNT; caIdx++) {
-		if (p_key.is_enabled(caIdx)) {
+		if (p_key.is_color_clear_enabled(caIdx)) {
 			const char *typeStr = get_format_type_string((MTL::PixelFormat)p_key.pixel_formats[caIdx]);
 			snprintf(line, sizeof(line), "    %s4 color%u [[color(%u)]];\n", typeStr, caIdx, caIdx);
 			msl += line;
@@ -120,7 +120,7 @@ fragment ClearColorsOut fragClear(VaryingsPos varyings [[stage_in]], constant Cl
     ClearColorsOut ccOut;
 )";
 	for (uint32_t caIdx = 0; caIdx < ClearAttKey::COLOR_COUNT; caIdx++) {
-		if (p_key.is_enabled(caIdx)) {
+		if (p_key.is_color_clear_enabled(caIdx)) {
 			const char *typeStr = get_format_type_string((MTL::PixelFormat)p_key.pixel_formats[caIdx]);
 			snprintf(line, sizeof(line), "    ccOut.color%u = %s4(ccIn.colors[%u]);\n", caIdx, typeStr, caIdx);
 			msl += line;
@@ -191,7 +191,7 @@ NS::SharedPtr<MTL::RenderPipelineState> MDResourceFactory::new_clear_pipeline_st
 	for (uint32_t caIdx = 0; caIdx < ClearAttKey::COLOR_COUNT; caIdx++) {
 		MTL::RenderPipelineColorAttachmentDescriptor *colorDesc = plDesc->colorAttachments()->object(caIdx);
 		colorDesc->setPixelFormat((MTL::PixelFormat)p_key.pixel_formats[caIdx]);
-		colorDesc->setWriteMask(p_key.is_enabled(caIdx) ? MTL::ColorWriteMaskAll : MTL::ColorWriteMaskNone);
+		colorDesc->setWriteMask(p_key.is_color_clear_enabled(caIdx) ? MTL::ColorWriteMaskAll : MTL::ColorWriteMaskNone);
 	}
 
 	MTL::PixelFormat mtlDepthFormat = (MTL::PixelFormat)p_key.depth_format();

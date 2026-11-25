@@ -52,6 +52,7 @@ config/custom_user_dir_name="godotnext-path-tracer-check"
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=0
+global_illumination/nextgi/hardware_ray_tracing.macos=0
 CFG
 mode="${PATH_TRACER_HWRT_MODE:-}"
 if [[ -n "$mode" ]]; then
@@ -59,6 +60,7 @@ if [[ -n "$mode" ]]; then
 global_illumination/nextgi/hardware_ray_tracing_mode=$mode
 global_illumination/nextgi/hardware_ray_tracing_mode.windows=$mode
 global_illumination/nextgi/hardware_ray_tracing_mode.linuxbsd=$mode
+global_illumination/nextgi/hardware_ray_tracing_mode.macos=$mode
 CFG
 fi
 

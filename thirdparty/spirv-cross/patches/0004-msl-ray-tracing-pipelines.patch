@@ -356,7 +356,7 @@ index c3710460..57863fff 100644
 +		statement("float3 spvRayDir = ", to_expression(ops[8]), ";");
 +		statement("float spvRayTmax = ", to_expression(ops[9]), ";");
 +		statement("ray spvRay(spvRayOrigin, spvRayDir, spvRayTmin, spvRayTmax);");
-+		statement("intersector<triangle_data, instancing> spvIntersector;");
++		statement("intersector<triangle_data, instancing, world_space_data> spvIntersector;");
 +		statement("if ((spvRayFlags & ", RayFlagsOpaqueKHRMask, "u) != 0u)");
 +		statement("    spvIntersector.force_opacity(forced_opacity::opaque);");
 +		statement("if ((spvRayFlags & ", RayFlagsNoOpaqueKHRMask, "u) != 0u)");
@@ -448,7 +448,7 @@ index c3710460..57863fff 100644
 +		entry_type = "[[visible]]";
 +		break;
 +	case ExecutionModelAnyHitKHR:
-+		entry_type = "[[intersection(triangle, triangle_data, instancing)]]";
++		entry_type = "[[intersection(triangle, triangle_data, instancing, world_space_data)]]";
 +		return_type = "bool";
 +		break;
  	default:
@@ -550,7 +550,7 @@ index c3710460..57863fff 100644
 +			ep_args += ", ";
 +		ep_args += join("visible_function_table<spvRTVisibleFn> spvRTVisibleTable [[buffer(",
 +		                msl_options.rt_visible_function_table_index, ")]], ",
-+		                "intersection_function_table<triangle_data, instancing> spvRTIntersectionTable [[buffer(",
++		                "intersection_function_table<triangle_data, instancing, world_space_data> spvRTIntersectionTable [[buffer(",
 +		                msl_options.rt_intersection_function_table_index, ")]], ",
 +		                "constant spvRTSBTParams& spvRTParams [[buffer(",
 +		                msl_options.rt_sbt_params_buffer_index, ")]], ",
@@ -567,7 +567,7 @@ index c3710460..57863fff 100644
 +		                "uint spvGeometryId [[geometry_id]], ",
 +		                "uint spvInstanceId [[instance_id]], ",
 +		                "uint spvUserInstanceId [[user_instance_id]], ",
-+		                "bool spvFrontFacing [[triangle_front_facing]], ",
++		                "bool spvFrontFacing [[front_facing]], ",
 +		                "float spvDistance [[distance]], ",
 +		                "float3 spvRayOrigin [[origin]], ",
 +		                "float3 spvRayDirection [[direction]], ",

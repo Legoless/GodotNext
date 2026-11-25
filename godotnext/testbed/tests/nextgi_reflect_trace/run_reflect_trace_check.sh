@@ -96,6 +96,7 @@ cat >"$override" <<EOF
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt_value
 global_illumination/nextgi/quality=$quality_value
 global_illumination/nextgi/medium_gather=$medium_gather
 EOF
