@@ -278,7 +278,7 @@ void CompilerMSL::build_implicit_builtins()
 	bool need_local_invocation_index =
 		(msl_options.emulate_subgroups && active_input_builtins.get(BuiltInSubgroupId)) || is_mesh_shader() ||
 		needs_workgroup_zero_init || needs_local_invocation_index;
-	bool need_workgroup_size = msl_options.emulate_subgroups && active_input_builtins.get(BuiltInNumSubgroups);
+	bool need_workgroup_size = (msl_options.emulate_subgroups && active_input_builtins.get(BuiltInNumSubgroups)) || is_mesh_shader();
 	bool force_frag_depth_passthrough =
 	    get_execution_model() == ExecutionModelFragment && !uses_explicit_early_fragment_test() && need_subpass_input &&
 	    msl_options.enable_frag_depth_builtin && msl_options.input_attachment_is_ds_attachment;
@@ -8531,9 +8531,20 @@ void CompilerMSL::emit_specialization_constants_and_structs()
 	if (workgroup_size_id == 0 && is_mesh_shader())
 	{
 		auto &execution = get_entry_point();
-		statement("constant uint3 ", builtin_to_glsl(BuiltInWorkgroupSize, StorageClassWorkgroup),
-		          " [[maybe_unused]] = ", "uint3(", execution.workgroup_size.x, ", ", execution.workgroup_size.y, ", ",
-		          execution.workgroup_size.z, ");");
+		if (execution.flags.get(ExecutionModeLocalSizeId))
+		{
+			statement("constant uint3 ", builtin_to_glsl(BuiltInWorkgroupSize, StorageClassWorkgroup),
+			          " [[maybe_unused]] = uint3(",
+			          to_expression(execution.workgroup_size.id_x), ", ",
+			          to_expression(execution.workgroup_size.id_y), ", ",
+			          to_expression(execution.workgroup_size.id_z), ");");
+		}
+		else
+		{
+			statement("constant uint3 ", builtin_to_glsl(BuiltInWorkgroupSize, StorageClassWorkgroup),
+			          " [[maybe_unused]] = ", "uint3(", execution.workgroup_size.x, ", ", execution.workgroup_size.y, ", ",
+			          execution.workgroup_size.z, ");");
+		}
 		statement("");
 	}
 
@@ -10547,7 +10558,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 		statement("float3 spvRayDir = ", to_expression(ops[8]), ";");
 		statement("float spvRayTmax = ", to_expression(ops[9]), ";");
 		statement("ray spvRay(spvRayOrigin, spvRayDir, spvRayTmin, spvRayTmax);");
-		statement("intersector<triangle_data, instancing> spvIntersector;");
+		statement("intersector<triangle_data, instancing, world_space_data> spvIntersector;");
 		statement("if ((spvRayFlags & ", RayFlagsOpaqueKHRMask, "u) != 0u)");
 		statement("    spvIntersector.force_opacity(forced_opacity::opaque);");
 		statement("if ((spvRayFlags & ", RayFlagsNoOpaqueKHRMask, "u) != 0u)");
@@ -14370,7 +14381,7 @@ string CompilerMSL::func_type_decl(SPIRType &type)
 		entry_type = "[[visible]]";
 		break;
 	case ExecutionModelAnyHitKHR:
-		entry_type = "[[intersection(triangle, triangle_data, instancing)]]";
+		entry_type = "[[intersection(triangle, triangle_data, instancing, world_space_data)]]";
 		return_type = "bool";
 		break;
 	default:
@@ -15046,7 +15057,7 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
 			ep_args += ", ";
 		ep_args += join("visible_function_table<spvRTVisibleFn> spvRTVisibleTable [[buffer(",
 		                msl_options.rt_visible_function_table_index, ")]], ",
-		                "intersection_function_table<triangle_data, instancing> spvRTIntersectionTable [[buffer(",
+		                "intersection_function_table<triangle_data, instancing, world_space_data> spvRTIntersectionTable [[buffer(",
 		                msl_options.rt_intersection_function_table_index, ")]], ",
 		                "constant spvRTSBTParams& spvRTParams [[buffer(",
 		                msl_options.rt_sbt_params_buffer_index, ")]], ",
@@ -15063,7 +15074,7 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
 		                "uint spvGeometryId [[geometry_id]], ",
 		                "uint spvInstanceId [[instance_id]], ",
 		                "uint spvUserInstanceId [[user_instance_id]], ",
-		                "bool spvFrontFacing [[triangle_front_facing]], ",
+		                "bool spvFrontFacing [[front_facing]], ",
 		                "float spvDistance [[distance]], ",
 		                "float3 spvRayOrigin [[origin]], ",
 		                "float3 spvRayDirection [[direction]], ",
@@ -20716,6 +20727,14 @@ void CompilerMSL::emit_mesh_outputs()
 	uint32_t num_invocations = 0;
 	if (mode.workgroup_size.id_x == 0 && mode.workgroup_size.id_y == 0 && mode.workgroup_size.id_z == 0)
 		num_invocations = mode.workgroup_size.x * mode.workgroup_size.y * mode.workgroup_size.z;
+	else if (mode.flags.get(ExecutionModeLocalSizeId))
+	{
+		auto &cx = get<SPIRConstant>(mode.workgroup_size.id_x);
+		auto &cy = get<SPIRConstant>(mode.workgroup_size.id_y);
+		auto &cz = get<SPIRConstant>(mode.workgroup_size.id_z);
+		if (!cx.specialization && !cy.specialization && !cz.specialization)
+			num_invocations = cx.scalar() * cy.scalar() * cz.scalar();
+	}
 
 	statement("threadgroup_barrier(mem_flags::mem_threadgroup);");
 	statement("if (spvMeshSizes.y == 0)");

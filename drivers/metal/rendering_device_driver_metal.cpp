@@ -1399,7 +1399,7 @@ void RenderingDeviceDriverMetal::shader_destroy_modules(ShaderID p_shader) {
 }
 
 // GodotNext: metal_ray_shaders (#172).
-uint32_t RenderingDeviceDriverMetal::shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) {
+uint32_t RenderingDeviceDriverMetal::shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const {
 	const MDRaytracingShader *rt_shader = dynamic_cast<const MDRaytracingShader *>(reinterpret_cast<const MDShader *>(p_shader.id));
 	if (rt_shader == nullptr) {
 		return 0;
@@ -2054,7 +2054,7 @@ void RenderingDeviceDriverMetal::command_render_set_line_width(CommandBufferID p
 
 // ----- PIPELINE -----
 
-RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDeviceDriverMetal::_create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants) {
+RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDeviceDriverMetal::_create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants, NS::String *p_specialized_name) {
 	MTL::Library *library = p_library->get_library();
 	if (!library) {
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to compile Metal library");
@@ -2064,87 +2064,101 @@ RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDevice
 	ERR_FAIL_NULL_V_MSG(function, ERR_CANT_CREATE, "No function named main0");
 
 	NS::Dictionary *constants_dict = function->functionConstantsDictionary();
-	if (constants_dict->count() == 0) {
+	const bool has_constants = constants_dict->count() > 0;
+	if (!has_constants && p_specialized_name == nullptr) {
 		return NS::TransferPtr(function);
 	}
 
-	LocalVector<MTL::FunctionConstant *> constants;
-	NS::Enumerator<NS::String> *keys = constants_dict->keyEnumerator<NS::String>();
-	while (NS::String *key = keys->nextObject()) {
-		constants.push_back(constants_dict->object<MTL::FunctionConstant>(key));
-	}
-
-	// Check if already sorted by index.
-	bool is_sorted = true;
-	for (NS::UInteger i = 1; i < constants.size(); i++) {
-		MTL::FunctionConstant *prev = constants[i - 1];
-		MTL::FunctionConstant *curr = constants[i];
-		if (prev->index() > curr->index()) {
-			is_sorted = false;
-			break;
+	NS::SharedPtr<MTL::FunctionConstantValues> constantValues;
+	if (has_constants) {
+		LocalVector<MTL::FunctionConstant *> constants;
+		NS::Enumerator<NS::String> *keys = constants_dict->keyEnumerator<NS::String>();
+		while (NS::String *key = keys->nextObject()) {
+			constants.push_back(constants_dict->object<MTL::FunctionConstant>(key));
 		}
-	}
 
-	if (!is_sorted) {
-		struct Comparator {
-			bool operator()(const MTL::FunctionConstant *p, const MTL::FunctionConstant *q) const {
-				return p->index() < q->index();
+		// Check if already sorted by index.
+		bool is_sorted = true;
+		for (NS::UInteger i = 1; i < constants.size(); i++) {
+			MTL::FunctionConstant *prev = constants[i - 1];
+			MTL::FunctionConstant *curr = constants[i];
+			if (prev->index() > curr->index()) {
+				is_sorted = false;
+				break;
 			}
-		};
-
-		constants.sort_custom<Comparator>();
-	}
-
-	// Build a sorted list of specialization constants by constant_id.
-	uint32_t *indexes = (uint32_t *)alloca(p_specialization_constants.size() * sizeof(uint32_t));
-	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
-		indexes[i] = i;
-	}
-	std::sort(indexes, &indexes[p_specialization_constants.size()], [&](int a, int b) {
-		return p_specialization_constants[a].constant_id < p_specialization_constants[b].constant_id;
-	});
-
-	NS::SharedPtr<MTL::FunctionConstantValues> constantValues = NS::TransferPtr(MTL::FunctionConstantValues::alloc()->init());
-
-	// Merge the sorted constants from the function with the sorted user constants.
-	NS::UInteger i = 0;
-	uint32_t j = 0;
-	while (i < constants.size() && j < p_specialization_constants.size()) {
-		MTL::FunctionConstant *curr = (MTL::FunctionConstant *)constants[i];
-		const PipelineSpecializationConstant &sc = p_specialization_constants[indexes[j]];
-		if (curr->index() == sc.constant_id) {
-			switch (curr->type()) {
-				case MTL::DataTypeBool:
-				case MTL::DataTypeFloat:
-				case MTL::DataTypeInt:
-				case MTL::DataTypeUInt: {
-					constantValues->setConstantValue(&sc.int_value, curr->type(), sc.constant_id);
-				} break;
-				default:
-					ERR_FAIL_V_MSG(NS::TransferPtr(function), "Invalid specialization constant type");
-			}
-			i++;
-			j++;
-		} else if (curr->index() < sc.constant_id) {
-			i++;
-		} else {
-			j++;
 		}
-	}
 
-	// Handle R32UI_ALIGNMENT_CONSTANT_ID if present.
-	if (i < constants.size()) {
-		MTL::FunctionConstant *curr = constants[i];
-		if (curr->index() == R32UI_ALIGNMENT_CONSTANT_ID) {
-			uint32_t alignment = 16; // TODO(sgc): is this always correct?
-			constantValues->setConstantValue(&alignment, curr->type(), curr->index());
-			i++;
+		if (!is_sorted) {
+			struct Comparator {
+				bool operator()(const MTL::FunctionConstant *p, const MTL::FunctionConstant *q) const {
+					return p->index() < q->index();
+				}
+			};
+
+			constants.sort_custom<Comparator>();
+		}
+
+		// Build a sorted list of specialization constants by constant_id.
+		uint32_t *indexes = (uint32_t *)alloca(p_specialization_constants.size() * sizeof(uint32_t));
+		for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+			indexes[i] = i;
+		}
+		std::sort(indexes, &indexes[p_specialization_constants.size()], [&](int a, int b) {
+			return p_specialization_constants[a].constant_id < p_specialization_constants[b].constant_id;
+		});
+
+		constantValues = NS::TransferPtr(MTL::FunctionConstantValues::alloc()->init());
+
+		// Merge the sorted constants from the function with the sorted user constants.
+		NS::UInteger i = 0;
+		uint32_t j = 0;
+		while (i < constants.size() && j < p_specialization_constants.size()) {
+			MTL::FunctionConstant *curr = (MTL::FunctionConstant *)constants[i];
+			const PipelineSpecializationConstant &sc = p_specialization_constants[indexes[j]];
+			if (curr->index() == sc.constant_id) {
+				switch (curr->type()) {
+					case MTL::DataTypeBool:
+					case MTL::DataTypeFloat:
+					case MTL::DataTypeInt:
+					case MTL::DataTypeUInt: {
+						constantValues->setConstantValue(&sc.int_value, curr->type(), sc.constant_id);
+					} break;
+					default:
+						ERR_FAIL_V_MSG(NS::TransferPtr(function), "Invalid specialization constant type");
+				}
+				i++;
+				j++;
+			} else if (curr->index() < sc.constant_id) {
+				i++;
+			} else {
+				j++;
+			}
+		}
+
+		// Handle R32UI_ALIGNMENT_CONSTANT_ID if present.
+		if (i < constants.size()) {
+			MTL::FunctionConstant *curr = constants[i];
+			if (curr->index() == R32UI_ALIGNMENT_CONSTANT_ID) {
+				uint32_t alignment = 16; // TODO(sgc): is this always correct?
+				constantValues->setConstantValue(&alignment, curr->type(), curr->index());
+				i++;
+			}
 		}
 	}
 
 	NS::Error *err = nullptr;
 	function->release();
-	function = library->newFunction(p_name, constantValues.get(), &err);
+	if (p_specialized_name != nullptr) {
+		NS::SharedPtr<MTL::FunctionDescriptor> fn_desc = NS::TransferPtr(MTL::FunctionDescriptor::alloc()->init());
+		fn_desc->setName(p_name);
+		fn_desc->setSpecializedName(p_specialized_name);
+		if (has_constants) {
+			fn_desc->setConstantValues(constantValues.get());
+		}
+		function = library->newFunction(fn_desc.get(), &err);
+	} else {
+		function = library->newFunction(p_name, constantValues.get(), &err);
+	}
 	ERR_FAIL_NULL_V_MSG(function, ERR_CANT_CREATE, String("specialized function failed: ") + (err ? err->localizedDescription()->utf8String() : "unknown error"));
 
 	return NS::TransferPtr(function);
@@ -2651,6 +2665,14 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 
 	// Collect all visible functions (miss shaders followed by closest-hit shaders) and any-hit functions.
 	LocalVector<MTL::Function *> linked_fn_ptrs;
+	auto add_linked_fn = [&linked_fn_ptrs](MTL::Function *p_fn) {
+		for (MTL::Function *existing : linked_fn_ptrs) {
+			if (existing == p_fn) {
+				return;
+			}
+		}
+		linked_fn_ptrs.push_back(p_fn);
+	};
 	LocalVector<MTL::Function *> visible_fn_ptrs;
 	LocalVector<uint32_t> miss_visible_indices;
 	miss_visible_indices.resize(miss_count);
@@ -2661,7 +2683,7 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 		ERR_FAIL_NULL_V(fn, false);
 		miss_visible_indices[i] = visible_fn_ptrs.size();
 		visible_fn_ptrs.push_back(fn);
-		linked_fn_ptrs.push_back(fn);
+		add_linked_fn(fn);
 	}
 
 	LocalVector<uint32_t> hit_visible_indices;
@@ -2679,14 +2701,14 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 			ERR_FAIL_NULL_V(fn, false);
 			hit_visible_indices[i] = visible_fn_ptrs.size();
 			visible_fn_ptrs.push_back(fn);
-			linked_fn_ptrs.push_back(fn);
+			add_linked_fn(fn);
 		}
 		if (hg.any_hit_shader_index != UINT32_MAX) {
 			ERR_FAIL_UNSIGNED_INDEX_V(hg.any_hit_shader_index, p_pipeline->specialized_stages.size(), false);
 			MTL::Function *fn = p_pipeline->specialized_stages[hg.any_hit_shader_index].function.get();
 			ERR_FAIL_NULL_V(fn, false);
 			hit_anyhit_fns[i] = fn;
-			linked_fn_ptrs.push_back(fn);
+			add_linked_fn(fn);
 		}
 	}
 
@@ -2728,7 +2750,7 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 	const uint32_t vft_count = MAX(visible_fn_ptrs.size(), 1u);
 	const uint32_t ift_count = MAX(hit_count, 1u);
 	const MTL::IntersectionFunctionSignature opaque_sig =
-			static_cast<MTL::IntersectionFunctionSignature>(MTL::IntersectionFunctionSignatureTriangleData | MTL::IntersectionFunctionSignatureInstancing);
+			static_cast<MTL::IntersectionFunctionSignature>(MTL::IntersectionFunctionSignatureTriangleData | MTL::IntersectionFunctionSignatureInstancing | MTL::IntersectionFunctionSignatureWorldSpaceData);
 
 	for (uint32_t r = 0; r < raygen_count; r++) {
 		const uint32_t stage_idx = p_pipeline->raygen_shader_indices[r];
@@ -2803,7 +2825,14 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_create
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Metal raytracing pipeline shader stage is missing.");
 		}
 		VectorView<PipelineSpecializationConstant> spec = ps.specialization_constants;
-		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec);
+		NS::String *spec_name = nullptr;
+		NS::SharedPtr<NS::String> spec_name_holder;
+		if (ps.shader_stage != SHADER_STAGE_RAYGEN) {
+			CharString unique = vformat("spv_rt_%d", _rt_function_id.increment()).utf8();
+			spec_name_holder = NS::TransferPtr(NS::String::alloc()->init(unique.get_data(), NS::UTF8StringEncoding));
+			spec_name = spec_name_holder.get();
+		}
+		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec, spec_name);
 		if (std::holds_alternative<Error>(fn_or_err)) {
 			delete pipeline;
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Failed to create Metal function for raytracing pipeline stage.");
@@ -2812,14 +2841,14 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_create
 		pipeline->specialized_stages[i].function = std::get<NS::SharedPtr<MTL::Function>>(fn_or_err);
 	}
 
-	for (uint32_t idx : p_raygen_shader_indices) {
-		pipeline->raygen_shader_indices.push_back(idx);
+	for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
+		pipeline->raygen_shader_indices.push_back(p_raygen_shader_indices[i]);
 	}
-	for (uint32_t idx : p_miss_shader_indices) {
-		pipeline->miss_shader_indices.push_back(idx);
+	for (uint32_t i = 0; i < p_miss_shader_indices.size(); i++) {
+		pipeline->miss_shader_indices.push_back(p_miss_shader_indices[i]);
 	}
-	for (const HitGroup &hg : p_hit_groups) {
-		pipeline->hit_groups.push_back(hg);
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		pipeline->hit_groups.push_back(p_hit_groups[i]);
 	}
 
 	const char *label = pipeline->layout_shader != nullptr ? pipeline->layout_shader->name.get_data() : "RaytracingPipeline";
@@ -2849,7 +2878,14 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_librar
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Metal raytracing library shader stage is missing.");
 		}
 		VectorView<PipelineSpecializationConstant> spec = ps.specialization_constants;
-		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec);
+		NS::String *spec_name = nullptr;
+		NS::SharedPtr<NS::String> spec_name_holder;
+		if (ps.shader_stage != SHADER_STAGE_RAYGEN) {
+			CharString unique = vformat("spv_rt_%d", _rt_function_id.increment()).utf8();
+			spec_name_holder = NS::TransferPtr(NS::String::alloc()->init(unique.get_data(), NS::UTF8StringEncoding));
+			spec_name = spec_name_holder.get();
+		}
+		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec, spec_name);
 		if (std::holds_alternative<Error>(fn_or_err)) {
 			delete library;
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Failed to create Metal function for raytracing library stage.");
@@ -2858,14 +2894,14 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_librar
 		library->specialized_stages[i].function = std::get<NS::SharedPtr<MTL::Function>>(fn_or_err);
 	}
 
-	for (uint32_t idx : p_raygen_shader_indices) {
-		library->raygen_shader_indices.push_back(idx);
+	for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
+		library->raygen_shader_indices.push_back(p_raygen_shader_indices[i]);
 	}
-	for (uint32_t idx : p_miss_shader_indices) {
-		library->miss_shader_indices.push_back(idx);
+	for (uint32_t i = 0; i < p_miss_shader_indices.size(); i++) {
+		library->miss_shader_indices.push_back(p_miss_shader_indices[i]);
 	}
-	for (const HitGroup &hg : p_hit_groups) {
-		library->hit_groups.push_back(hg);
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		library->hit_groups.push_back(p_hit_groups[i]);
 	}
 
 	return RaytracingPipelineID(library);
@@ -2873,7 +2909,7 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_librar
 
 RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY), RaytracingPipelineID(), "Metal raytracing pipeline libraries are disabled or unsupported on this device.");
-	ERR_FAIL_COND_V(p_libraries.is_empty(), RaytracingPipelineID());
+	ERR_FAIL_COND_V(p_libraries.size() == 0, RaytracingPipelineID());
 
 	MDRaytracingPipeline *linked = new MDRaytracingPipeline();
 	linked->is_library = false;

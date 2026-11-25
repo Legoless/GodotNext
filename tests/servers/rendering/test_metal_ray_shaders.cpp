@@ -371,12 +371,12 @@ void main() {
 		CHECK(msl.contains("using namespace metal::raytracing;"));
 		CHECK(msl.contains("kernel void main0("));
 		CHECK(msl.contains("visible_function_table<spvRTVisibleFn> spvRTVisibleTable [[buffer(16)]]"));
-		CHECK(msl.contains("intersection_function_table<triangle_data, instancing> spvRTIntersectionTable [[buffer(17)]]"));
+		CHECK(msl.contains("intersection_function_table<triangle_data, instancing, world_space_data> spvRTIntersectionTable [[buffer(17)]]"));
 		CHECK(msl.contains("constant spvRTSBTParams& spvRTParams [[buffer(18)]]"));
 		CHECK(msl.contains("uint3 spvLaunchID [[thread_position_in_grid]]"));
 		CHECK(msl.contains("if (any(spvLaunchID >= spvLaunchSize))"));
 		CHECK(msl.contains("uint4 payload = {};"));
-		CHECK(msl.contains("intersector<triangle_data, instancing> spvIntersector;"));
+		CHECK(msl.contains("intersector<triangle_data, instancing, world_space_data> spvIntersector;"));
 		CHECK(msl.contains("spvIntersector.intersect(spvRay,"));
 		CHECK(msl.contains("spvRTIntersectionTable)"));
 		CHECK(msl.contains("spvRTVisibleTable[spvMissHandle->visible_function_index](&payload, spvHitInfo, nullptr, spvRTParams);"));
@@ -396,13 +396,13 @@ void main() {
 	SUBCASE("AnyHitKHR emits triangle intersection function returning false on ignore and true on accept") {
 		const String msl = _compile_glsl_stage_to_msl(RenderingDeviceCommons::SHADER_STAGE_ANY_HIT, any_hit_glsl);
 		REQUIRE_FALSE(msl.is_empty());
-		CHECK(msl.contains("[[intersection(triangle, triangle_data, instancing)]] bool main0("));
+		CHECK(msl.contains("[[intersection(triangle, triangle_data, instancing, world_space_data)]] bool main0("));
 		CHECK(msl.contains("constant spvRTSBTParams& spvRTParams [[buffer(18)]]"));
 		CHECK(msl.contains("float2 spvBary [[barycentric_coord]]"));
 		CHECK(msl.contains("uint spvPrimitiveId [[primitive_id]]"));
 		CHECK(msl.contains("uint spvInstanceId [[instance_id]]"));
 		CHECK(msl.contains("uint spvUserInstanceId [[user_instance_id]]"));
-		CHECK(msl.contains("bool spvFrontFacing [[triangle_front_facing]]"));
+		CHECK(msl.contains("bool spvFrontFacing [[front_facing]]"));
 		CHECK(msl.contains("const device HitRecord& record = *static_cast<const device HitRecord*>(spvRecordPtr);"));
 		CHECK(msl.contains("[[function_constant(0)]]"));
 		CHECK(msl.contains("return false;"));

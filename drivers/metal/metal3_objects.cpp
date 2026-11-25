@@ -1056,6 +1056,25 @@ void MDCommandBuffer::render_clear_attachments(VectorView<RDD::AttachmentClear> 
 		key.enable_layered_rendering();
 	}
 
+	// GodotNext: rd_clear_values (#275). Populate pixel formats for every active attachment in the
+	// subpass so Metal's render pipeline descriptor matches the framebuffer even on attachments that
+	// are loaded rather than cleared (those keep MTL::ColorWriteMaskNone via clear_mask).
+	for (uint32_t c = 0; c < subpass.color_references.size(); c++) {
+		uint32_t att_idx = subpass.color_references[c].attachment;
+		if (att_idx != RDD::AttachmentReference::UNUSED) {
+			key.set_color_format(c, render.pass->attachments[att_idx].format);
+		}
+	}
+	if (subpass.depth_stencil_reference.attachment != RDD::AttachmentReference::UNUSED) {
+		const MDAttachment &ds_att = render.pass->attachments[subpass.depth_stencil_reference.attachment];
+		if (ds_att.type & MDAttachmentType::Depth) {
+			key.set_depth_format(ds_att.format);
+		}
+		if (ds_att.type & MDAttachmentType::Stencil) {
+			key.set_stencil_format(ds_att.format);
+		}
+	}
+
 	float depth_value = 0;
 	uint32_t stencil_value = 0;
 
@@ -1076,6 +1095,7 @@ void MDCommandBuffer::render_clear_attachments(VectorView<RDD::AttachmentClear> 
 		const MDAttachment &mda = render.pass->attachments[attachment_index];
 		if (attClear.aspect.has_flag(RDD::TEXTURE_ASPECT_COLOR_BIT)) {
 			key.set_color_format(attClear.color_attachment, mda.format);
+			key.enable_color_clear(attClear.color_attachment);
 
 			clear_colors[attClear.color_attachment] = simd_make_float4(
 					attClear.value.color.r,
@@ -1086,11 +1106,13 @@ void MDCommandBuffer::render_clear_attachments(VectorView<RDD::AttachmentClear> 
 
 		if (attClear.aspect.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT)) {
 			key.set_depth_format(mda.format);
+			key.enable_depth_clear();
 			depth_value = attClear.value.depth;
 		}
 
 		if (attClear.aspect.has_flag(RDD::TEXTURE_ASPECT_STENCIL_BIT)) {
 			key.set_stencil_format(mda.format);
+			key.enable_stencil_clear();
 			stencil_value = attClear.value.stencil;
 		}
 	}
@@ -1104,7 +1126,7 @@ void MDCommandBuffer::render_clear_attachments(VectorView<RDD::AttachmentClear> 
 	enc->setRenderPipelineState(cache.get_clear_render_pipeline_state(key, nullptr));
 
 	MDRenderPipeline::RasterState clear_state = render.encoder_raster;
-	clear_state.depth_stencil = cache.get_depth_stencil_state(key.is_depth_enabled(), key.is_stencil_enabled());
+	clear_state.depth_stencil = cache.get_depth_stencil_state(key.is_depth_clear_enabled(), key.is_stencil_clear_enabled());
 	clear_state.cull_mode = MTL::CullModeNone;
 	clear_state.fill_mode = MTL::TriangleFillModeFill;
 	clear_state.depth_bias = MDRenderPipeline::RasterState::DepthBias();
@@ -1117,7 +1139,7 @@ void MDCommandBuffer::render_clear_attachments(VectorView<RDD::AttachmentClear> 
 	enc->setScissorRect(MTL::ScissorRect{ 0, 0, (NS::UInteger)size.width, (NS::UInteger)size.height });
 
 	enc->setVertexBytes(clear_colors, sizeof(clear_colors), 0);
-	if (key.has_color_attachment()) {
+	if (key.has_color_clear()) {
 		enc->setFragmentBytes(clear_colors, sizeof(clear_colors), 0);
 	}
 	enc->setVertexBytes(vertices, vertex_count * sizeof(vertices[0]), device_driver->get_metal_buffer_index_for_vertex_attribute_binding(VERT_CONTENT_BUFFER_INDEX));

@@ -10,6 +10,8 @@
 
 set -euo pipefail
 
+export GODOTNEXT_BACKGROUND="${GODOTNEXT_BACKGROUND:-1}"
+
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 testbed_dir=$(cd "$script_dir/../.." && pwd)
 override="$testbed_dir/override.cfg"
@@ -54,6 +56,7 @@ cat >"$override" <<EOF
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt_value
 EOF
 
 "$@"

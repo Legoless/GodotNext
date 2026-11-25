@@ -77,16 +77,25 @@ struct ClearAttKey {
 
 	Flags flags = CLEAR_FLAGS_NONE;
 	uint16_t sample_count = 0;
+	// GodotNext: rd_clear_values (#275). Track which bound attachments are actually cleared separately
+	// from pixel_formats so loaded attachments still match the render pass format with ColorWriteMaskNone.
+	uint16_t clear_mask = 0;
 	uint16_t pixel_formats[ATTACHMENT_COUNT] = { 0 };
+
+	static_assert(ATTACHMENT_COUNT <= 16);
 
 	_FORCE_INLINE_ void set_color_format(uint32_t p_idx, MTL::PixelFormat p_fmt) { pixel_formats[p_idx] = p_fmt; }
 	_FORCE_INLINE_ void set_depth_format(MTL::PixelFormat p_fmt) { pixel_formats[DEPTH_INDEX] = p_fmt; }
 	_FORCE_INLINE_ void set_stencil_format(MTL::PixelFormat p_fmt) { pixel_formats[STENCIL_INDEX] = p_fmt; }
+	_FORCE_INLINE_ void enable_color_clear(uint32_t p_idx) { clear_mask |= uint16_t(1u << p_idx); }
+	_FORCE_INLINE_ void enable_depth_clear() { clear_mask |= uint16_t(1u << DEPTH_INDEX); }
+	_FORCE_INLINE_ void enable_stencil_clear() { clear_mask |= uint16_t(1u << STENCIL_INDEX); }
 	_FORCE_INLINE_ MTL::PixelFormat depth_format() const { return (MTL::PixelFormat)pixel_formats[DEPTH_INDEX]; }
 	_FORCE_INLINE_ MTL::PixelFormat stencil_format() const { return (MTL::PixelFormat)pixel_formats[STENCIL_INDEX]; }
 	_FORCE_INLINE_ void enable_layered_rendering() { flags::set(flags, CLEAR_FLAGS_LAYERED); }
 
 	_FORCE_INLINE_ bool is_enabled(uint32_t p_idx) const { return pixel_formats[p_idx] != 0; }
+	_FORCE_INLINE_ bool is_color_clear_enabled(uint32_t p_idx) const { return is_enabled(p_idx) && (clear_mask & (1u << p_idx)) != 0; }
 
 	_FORCE_INLINE_ bool has_color_attachment() const {
 		for (uint32_t i = 0; i < COLOR_COUNT; i++) {
@@ -96,8 +105,18 @@ struct ClearAttKey {
 		}
 		return false;
 	}
+	_FORCE_INLINE_ bool has_color_clear() const {
+		for (uint32_t i = 0; i < COLOR_COUNT; i++) {
+			if (is_color_clear_enabled(i)) {
+				return true;
+			}
+		}
+		return false;
+	}
 	_FORCE_INLINE_ bool is_depth_enabled() const { return pixel_formats[DEPTH_INDEX] != 0; }
 	_FORCE_INLINE_ bool is_stencil_enabled() const { return pixel_formats[STENCIL_INDEX] != 0; }
+	_FORCE_INLINE_ bool is_depth_clear_enabled() const { return is_depth_enabled() && (clear_mask & (1u << DEPTH_INDEX)) != 0; }
+	_FORCE_INLINE_ bool is_stencil_clear_enabled() const { return is_stencil_enabled() && (clear_mask & (1u << STENCIL_INDEX)) != 0; }
 	_FORCE_INLINE_ bool is_layered_rendering_enabled() const { return flags::any(flags, CLEAR_FLAGS_LAYERED); }
 
 	_FORCE_INLINE_ bool operator==(const ClearAttKey &p_rhs) const {
@@ -107,6 +126,7 @@ struct ClearAttKey {
 	uint32_t hash() const {
 		uint32_t h = hash_murmur3_one_32(flags);
 		h = hash_murmur3_one_32(sample_count, h);
+		h = hash_murmur3_one_32(clear_mask, h);
 		h = hash_murmur3_buffer(pixel_formats, ATTACHMENT_COUNT * sizeof(pixel_formats[0]), h);
 		return hash_fmix32(h);
 	}
