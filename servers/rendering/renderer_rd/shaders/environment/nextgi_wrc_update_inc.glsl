@@ -267,19 +267,28 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		return found;
 	}
 	float best_align = -2.0;
+	float fallback_align = -2.0;
 	vec3 best = vec3(0.0);
+	vec3 fallback = vec3(0.0);
 	bool found = false;
+	bool found_fallback = false;
 	for (uint i = 0u; i < card_set.card_count; i++) {
 		NextGICard card = cards.data[card_set.first_card + i];
 		vec3 rel = object_pos - card.origin.xyz;
 		float u = dot(rel, card.axis_u.xyz);
 		float v = dot(rel, card.axis_v.xyz);
-		if (abs(u) > card.axis_u.w || abs(v) > card.axis_v.w) {
+		if (abs(u) > card.axis_u.w + 1e-4 || abs(v) > card.axis_v.w + 1e-4) {
 			continue;
 		}
+		float depth = -dot(rel, card.axis_n.xyz);
 		float align = dot(face_normal, card.axis_n.xyz);
 		vec2 card_size = max(vec2(card.atlas_rect.zw), vec2(1.0));
 		vec2 texel = vec2((u / card.axis_u.w) * 0.5 + 0.5, (v / card.axis_v.w) * 0.5 + 0.5) * card_size;
+		ivec2 material = ivec2(card.atlas_rect.xy) + ivec2(clamp(texel, vec2(0.0), card_size - 1.0));
+		float card_depth = texelFetch(material_depth_tex, material, 0).r;
+		if (!(card_depth > 0.0)) {
+			continue;
+		}
 		uint page_index = rec.page_table + i;
 		if (page_index >= params.page_rect_count) {
 			continue;
@@ -289,27 +298,39 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		uvec2 page_size = max(uvec2(page.y & 0xFFFFu, page.y >> 16u), uvec2(1u));
 		ivec2 radiance_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - 1.0));
 		vec3 sample_radiance = texelFetch(src_radiance_tex, radiance_coord, 0).rgb;
-		if (align > best_align) {
+		float depth_tol = 2.0 * max(card_set.texel_size, max(2.0 * card.axis_u.w / card_size.x, 2.0 * card.axis_v.w / card_size.y));
+		if (abs(card_depth - depth) <= depth_tol && align > best_align) {
 			best_align = align;
 			best = sample_radiance;
 			found = true;
+		} else if (align > fallback_align) {
+			fallback_align = align;
+			fallback = sample_radiance;
+			found_fallback = true;
 		}
 	}
-	radiance = best;
-	return found;
+	if (found) {
+		radiance = best;
+		return true;
+	}
+	if (found_fallback) {
+		radiance = fallback;
+		return true;
+	}
+	return false;
 }
 #endif // !NEXTGI_TRACE_SDF
 
 // GodotNext: ps_lumen_lite (#183). The gather's miss term (nextgi_miss_radiance), octahedral sky.
 vec3 nextgi_wrc_miss_radiance(vec3 direction) {
-	if (params.sky.w < 0.5) {
+	if (params.sky.w <= 0.0) {
 		return params.sky.rgb;
 	}
 	vec3 n = direction / max(abs(direction.x) + abs(direction.y) + abs(direction.z), 1e-6);
 	if (n.z < 0.0) {
 		n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
 	}
-	return textureLod(sky_radiance_tex, n.xy * 0.5 + 0.5, 0.0).rgb;
+	return textureLod(sky_radiance_tex, n.xy * 0.5 + 0.5, 0.0).rgb * params.sky.w;
 }
 
 vec3 nextgi_wrc_oct_dir(ivec2 texel) {
@@ -457,7 +478,13 @@ void nextgi_wrc_trace() {
 		}
 #endif
 		sample_radiance = looked_up;
+#ifdef NEXTGI_TRACE_SDF
 		back_face = !hit.front_face && hit.t < 0.5 * spacing;
+#else
+		// Godot front faces wind clockwise, so Vulkan rayQueryGetIntersectionFrontFaceEXT
+		// (hit.front_face) is false on front faces and true on back faces.
+		back_face = hit.front_face && hit.t < 0.5 * spacing;
+#endif
 	} else {
 #ifdef MODE_TRANSLUCENCY_TRACE
 		atomicAdd(counters.translucent_sky_misses, 1u);

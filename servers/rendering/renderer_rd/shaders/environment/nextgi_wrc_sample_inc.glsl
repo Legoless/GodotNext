@@ -93,24 +93,24 @@ vec3 nextgi_wrc_sample(vec3 p, vec3 dir) {
 		if (dist_to_p > 1e-4) {
 #ifdef NEXTGI_TLAS
 			// Exact wall-visibility test from p toward the grid probe (reuses D5 nextgi_trace_opaque).
-			// Prevents probes across thin dividing walls or outside rooms/courtyards from leaking.
+			// Prevents probes across thin dividing walls or outside rooms/courtyards from leaking
+			// without coarse 8x8 octahedral Chebyshev false-occlusion on unobstructed rooms.
 			NextGIHit probe_vis_hit;
 			if (dist_to_p > 0.02 && nextgi_trace(p, -to_p / dist_to_p, dist_to_p - 0.01, probe_vis_hit)) {
 				chebyshev = 0.0;
 			}
-#endif
-			if (chebyshev > 0.0) {
-				vec2 vis_oct = nextgi_wrc_oct_uv(to_p / dist_to_p);
-				ivec2 vis_local = clamp(ivec2(vis_oct * 8.0), ivec2(0), ivec2(7));
-				vec2 moments = texelFetch(nextgi_wrc_visibility, ivec2(tile) * 8 + vis_local, 0).rg;
-				float depth_bias = 0.05 * spacing;
-				if (moments.r > 0.0 && dist_to_p > moments.r + depth_bias) {
-					float delta = dist_to_p - (moments.r + depth_bias);
-					float variance = max(moments.g - moments.r * moments.r, 1e-4);
-					float p_vis = variance / (variance + delta * delta);
-					chebyshev = p_vis * p_vis;
-				}
+#else
+			vec2 vis_oct = nextgi_wrc_oct_uv(to_p / dist_to_p);
+			ivec2 vis_local = clamp(ivec2(vis_oct * 8.0), ivec2(0), ivec2(7));
+			vec2 moments = texelFetch(nextgi_wrc_visibility, ivec2(tile) * 8 + vis_local, 0).rg;
+			float depth_bias = 0.05 * spacing;
+			if (moments.r > 0.0 && dist_to_p > moments.r + depth_bias) {
+				float delta = dist_to_p - (moments.r + depth_bias);
+				float variance = max(moments.g - moments.r * moments.r, 1e-4);
+				float p_vis = variance / (variance + delta * delta);
+				chebyshev = p_vis * p_vis;
 			}
+#endif
 		}
 		if (chebyshev <= 0.0) {
 			continue;

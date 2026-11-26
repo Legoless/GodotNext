@@ -168,8 +168,19 @@ struct StagedPagePriorityComparator {
 	}
 };
 
-static constexpr uint32_t MAX_ACTIVE_IO_BATCHES = 2;
-static constexpr uint32_t MAX_ITEMS_PER_IO_BATCH = 8;
+static constexpr uint32_t MAX_ACTIVE_IO_BATCHES = 8;
+static constexpr uint32_t MAX_ITEMS_PER_IO_BATCH = 32;
+static constexpr uint32_t MAX_DAG_SCAN_PAGES_PER_BATCH = 256;
+
+struct IODagScanPageCountComparator {
+	template <typename T>
+	_FORCE_INLINE_ bool operator()(const T &p_a, const T &p_b) const {
+		if (p_a.total_page_count != p_b.total_page_count) {
+			return p_a.total_page_count < p_b.total_page_count;
+		}
+		return p_a.mesh < p_b.mesh;
+	}
+};
 
 } // namespace
 
@@ -3187,6 +3198,7 @@ void RendererVirtualMeshStorage::_io_worker_entry(void *p_userdata) {
 	}
 
 	// 2. Read requested page payloads (with deterministic wall-time debug IO delay per request).
+	HashMap<String, Ref<NGMFile>> open_ngms;
 	for (uint32_t i = 0; i < batch->items.size(); i++) {
 		if (batch->owner->shutting_down.is_set()) {
 			break;
@@ -3218,8 +3230,17 @@ void RendererVirtualMeshStorage::_io_worker_entry(void *p_userdata) {
 			out.raw = item.in_memory_raw;
 		} else if (!item.ngm_path.is_empty()) {
 			Ref<NGMFile> ngm;
-			ngm.instantiate();
-			if (ngm->open(item.ngm_path) == OK) {
+			if (Ref<NGMFile> *cached = open_ngms.getptr(item.ngm_path)) {
+				ngm = *cached;
+			} else {
+				ngm.instantiate();
+				if (ngm->open(item.ngm_path) == OK) {
+					open_ngms.insert(item.ngm_path, ngm);
+				} else {
+					ngm.unref();
+				}
+			}
+			if (ngm.is_valid()) {
 				ngm->read_page(item.page_id, out.raw);
 			}
 		}
@@ -3369,59 +3390,86 @@ void RendererVirtualMeshStorage::_dispatch_worker_batches() {
 	SortArray<PrioritizedPageRequest, StagedPagePriorityComparator> sorter;
 	sorter.sort(ready_requests.ptr(), ready_requests.size());
 
+	// Scan smallest .ngm meshes first and split huge scans across independent batches so a
+	// multi-thousand-page mesh never blocks smaller meshes or ready page reads.
+	SortArray<IODagScanItem, IODagScanPageCountComparator> scan_sorter;
+	scan_sorter.sort(dag_scans.ptr(), dag_scans.size());
+
 	Vector2 delay_ms;
 	if (ProjectSettings::get_singleton() != nullptr && ProjectSettings::get_singleton()->has_setting("rendering/nextgeo/streaming/debug_io_delay_ms")) {
 		delay_ms = parse_debug_io_delay_setting(ProjectSettings::get_singleton()->get_setting("rendering/nextgeo/streaming/debug_io_delay_ms"));
 	}
+	const bool serialized_delay = delay_ms.x > 0.0f || delay_ms.y > 0.0f;
+	uint32_t active_read_batches = 0;
+	for (uint32_t i = 0; i < active_batches.size(); i++) {
+		if (!active_batches[i]->items.is_empty()) {
+			active_read_batches++;
+		}
+	}
 
-	while ((active_batches.size() < MAX_ACTIVE_IO_BATCHES) && (!dag_scans.is_empty() || !ready_requests.is_empty())) {
+	uint32_t scan_cursor = 0;
+	uint32_t req_cursor = 0;
+	while ((active_batches.size() < MAX_ACTIVE_IO_BATCHES) && (scan_cursor < dag_scans.size() || req_cursor < ready_requests.size())) {
+		const bool can_read_pages = req_cursor < ready_requests.size() && (!serialized_delay || active_read_batches == 0);
+		if (scan_cursor >= dag_scans.size() && !can_read_pages) {
+			break;
+		}
 		IOWorkerBatch *batch = memnew(IOWorkerBatch);
 		batch->owner = this;
-		if (!dag_scans.is_empty()) {
-			batch->dag_scans = dag_scans;
-			dag_scans.clear();
-		}
 
-		uint32_t cursor = 0;
-		while (cursor < ready_requests.size() && batch->items.size() < MAX_ITEMS_PER_IO_BATCH) {
-			const PrioritizedPageRequest &req = ready_requests[cursor++];
-			const QueuedPageKey key = { req.mesh, req.page_id };
-			pending_requests.erase(key);
-			MeshInfo *info = meshes.getptr(req.mesh);
-			if (info == nullptr || info->page_to_slot[req.page_id] != INVALID_PAGE_SLOT || in_flight_pages.has(key)) {
-				continue;
-			}
+		// Prefer dispatching ready page reads in dedicated batches (when available) alongside
+		// independent DAG scan batches so streaming never stalls behind a large .ngm header scan.
+		if (can_read_pages && (scan_cursor >= dag_scans.size() || active_batches.size() + 1 < MAX_ACTIVE_IO_BATCHES || active_read_batches == 0)) {
+			while (req_cursor < ready_requests.size() && batch->items.size() < MAX_ITEMS_PER_IO_BATCH) {
+				const PrioritizedPageRequest &req = ready_requests[req_cursor++];
+				const QueuedPageKey key = { req.mesh, req.page_id };
+				pending_requests.erase(key);
+				MeshInfo *info = meshes.getptr(req.mesh);
+				if (info == nullptr || info->page_to_slot[req.page_id] != INVALID_PAGE_SLOT || in_flight_pages.has(key)) {
+					continue;
+				}
 
-			IOBatchItem item;
-			item.mesh = req.mesh;
-			item.generation = req.generation;
-			item.ngm_path = info->desc.ngm_path;
-			item.page_id = req.page_id;
-			item.topo_depth = req.topo_depth;
-			item.visible = req.visible;
-			item.distance = req.distance;
-			item.px_error = req.px_error;
-			item.request_index = next_io_request_index++;
-			item.delay_seed = io_delay_seed;
-			item.delay_ms = delay_ms;
-			const Vector<Vector<uint8_t>> *mem_pages = in_memory_mesh_pages.getptr(req.mesh);
-			if (mem_pages != nullptr && int(req.page_id) < mem_pages->size()) {
-				item.in_memory_raw = (*mem_pages)[int(req.page_id)];
-				item.has_in_memory = true;
+				IOBatchItem item;
+				item.mesh = req.mesh;
+				item.generation = req.generation;
+				item.ngm_path = info->desc.ngm_path;
+				item.page_id = req.page_id;
+				item.topo_depth = req.topo_depth;
+				item.visible = req.visible;
+				item.distance = req.distance;
+				item.px_error = req.px_error;
+				item.request_index = next_io_request_index++;
+				item.delay_seed = io_delay_seed;
+				item.delay_ms = delay_ms;
+				const Vector<Vector<uint8_t>> *mem_pages = in_memory_mesh_pages.getptr(req.mesh);
+				if (mem_pages != nullptr && int(req.page_id) < mem_pages->size()) {
+					item.in_memory_raw = (*mem_pages)[int(req.page_id)];
+					item.has_in_memory = true;
+				}
+				in_flight_pages.insert(key);
+				batch->items.push_back(item);
 			}
-			in_flight_pages.insert(key);
-			batch->items.push_back(item);
-		}
-		if (cursor > 0) {
-			for (uint32_t r = cursor; r < ready_requests.size(); r++) {
-				ready_requests[r - cursor] = ready_requests[r];
+			if (!batch->items.is_empty()) {
+				active_read_batches++;
 			}
-			ready_requests.resize(ready_requests.size() - cursor);
+		} else if (scan_cursor < dag_scans.size()) {
+			uint32_t scan_pages = 0;
+			while (scan_cursor < dag_scans.size()) {
+				const uint32_t next_pages = dag_scans[scan_cursor].total_page_count;
+				if (!batch->dag_scans.is_empty() && scan_pages + next_pages > MAX_DAG_SCAN_PAGES_PER_BATCH) {
+					break;
+				}
+				batch->dag_scans.push_back(dag_scans[scan_cursor++]);
+				scan_pages += next_pages;
+				if (scan_pages >= MAX_DAG_SCAN_PAGES_PER_BATCH) {
+					break;
+				}
+			}
 		}
 
 		if (batch->dag_scans.is_empty() && batch->items.is_empty()) {
 			memdelete(batch);
-			break;
+			continue;
 		}
 
 		active_batches.push_back(batch);
@@ -3430,6 +3478,15 @@ void RendererVirtualMeshStorage::_dispatch_worker_batches() {
 		} else {
 			_io_worker_entry(batch);
 		}
+	}
+
+	// Any DAG scans that couldn't be dispatched yet due to batch cap must clear page_dag_scanning
+	// so they will be picked up on the next frame.
+	while (scan_cursor < dag_scans.size()) {
+		if (MeshInfo *info = meshes.getptr(dag_scans[scan_cursor].mesh)) {
+			info->page_dag_scanning = false;
+		}
+		scan_cursor++;
 	}
 }
 

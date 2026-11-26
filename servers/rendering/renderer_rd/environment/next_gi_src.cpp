@@ -491,6 +491,32 @@ void nextgi_src_axis_cards(const AABB &p_bounds, NextGICardClusterResult &r_resu
 	}
 }
 
+void nextgi_src_scale_cards_to_budget(LocalVector<NextGICardDesc> &r_cards, uint64_t p_max_texels, float p_min_texel_meters) {
+	if (r_cards.is_empty()) {
+		return;
+	}
+	uint64_t total_texels = 0;
+	for (uint32_t i = 0; i < r_cards.size(); i++) {
+		NextGICardDesc &card = r_cards[i];
+		if (p_min_texel_meters > 0.0f) {
+			const uint32_t max_u = _nextgi_src_card_texels(card.half_u * 2.0f, p_min_texel_meters);
+			const uint32_t max_v = _nextgi_src_card_texels(card.half_v * 2.0f, p_min_texel_meters);
+			card.texels_u = MIN(card.texels_u, max_u);
+			card.texels_v = MIN(card.texels_v, max_v);
+		}
+		card.texels_u = CLAMP(card.texels_u, uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+		card.texels_v = CLAMP(card.texels_v, uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+		total_texels += uint64_t(card.texels_u) * uint64_t(card.texels_v);
+	}
+	if (p_max_texels > 0 && total_texels > p_max_texels) {
+		const float scale = Math::sqrt(float(p_max_texels) / float(total_texels));
+		for (uint32_t i = 0; i < r_cards.size(); i++) {
+			r_cards[i].texels_u = CLAMP(uint32_t(Math::round(float(r_cards[i].texels_u) * scale)), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+			r_cards[i].texels_v = CLAMP(uint32_t(Math::round(float(r_cards[i].texels_v) * scale)), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+		}
+	}
+}
+
 void NextGI::cluster_cards(const float *p_positions, uint32_t p_vertex_count, const uint32_t *p_indices, uint32_t p_index_count, NextGICardClusterResult &r_result) {
 	nextgi_src_cluster_cards(p_positions, p_vertex_count, p_indices, p_index_count, r_result);
 }
@@ -1155,24 +1181,35 @@ bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key) {
 		return false;
 	}
 
-	// Keep any single mesh's Stage-2 card set within 1/64th of the 2048^2 material atlas
-	// so large multi-mesh scenes retain full SRC coverage without starving later meshes.
-	constexpr uint64_t STAGE2_MAX_TEXELS_PER_MESH = 65536u;
-	uint64_t stage2_texels = 0;
-	for (uint32_t i = 0; i < sizes.size(); i++) {
-		stage2_texels += uint64_t(sizes[i].x) * uint64_t(sizes[i].y);
-	}
-	if (stage2_texels > STAGE2_MAX_TEXELS_PER_MESH) {
-		const float scale = Math::sqrt(float(STAGE2_MAX_TEXELS_PER_MESH) / float(stage2_texels));
-		for (uint32_t i = 0; i < built_descs.size(); i++) {
-			built_descs[i].texels_u = CLAMP(uint32_t(Math::round(float(built_descs[i].texels_u) * scale)), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
-			built_descs[i].texels_v = CLAMP(uint32_t(Math::round(float(built_descs[i].texels_v) * scale)), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
-			sizes[i] = Vector2i(int(built_descs[i].texels_u), int(built_descs[i].texels_v));
-		}
+	// Keep any single mesh's Stage-2 card set within 1/256th of the material atlas (min 4096 texels)
+	// and cap tiny sub-centimeter props at the 1 cm authored card-texel floor so large multi-mesh
+	// scenes retain full SRC coverage without starving later meshes.
+	const uint64_t stage2_max_texels_per_mesh = MAX(uint64_t(atlas_width) * uint64_t(atlas_height) / 256u, uint64_t(4096u));
+	nextgi_src_scale_cards_to_budget(built_descs, stage2_max_texels_per_mesh, NEXTGI_SRC_EMISSIVE_MIN_TEXEL_METERS);
+	for (uint32_t i = 0; i < built_descs.size(); i++) {
+		sizes[i] = Vector2i(int(built_descs[i].texels_u), int(built_descs[i].texels_v));
 	}
 
 	LocalVector<Rect2i> rects;
-	if (!packer.allocate_all(sizes, rects)) {
+	bool allocated = packer.allocate_all(sizes, rects);
+	for (int attempt = 0; !allocated && attempt < 4; attempt++) {
+		bool shrank = false;
+		for (uint32_t i = 0; i < built_descs.size(); i++) {
+			const uint32_t nu = MAX(built_descs[i].texels_u / 2u, uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS));
+			const uint32_t nv = MAX(built_descs[i].texels_v / 2u, uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS));
+			if (nu < built_descs[i].texels_u || nv < built_descs[i].texels_v) {
+				built_descs[i].texels_u = nu;
+				built_descs[i].texels_v = nv;
+				sizes[i] = Vector2i(int(nu), int(nv));
+				shrank = true;
+			}
+		}
+		if (!shrank) {
+			break;
+		}
+		allocated = packer.allocate_all(sizes, rects);
+	}
+	if (!allocated) {
 		// Let _build_card_set try compact Stage-1 clustered cards before giving up on this mesh.
 		return false;
 	}
@@ -1351,6 +1388,9 @@ bool NextGISRC::_ensure_stage2_proxy_instances(CardSetState &r_state) {
 		Vector3 pb;
 		Vector3 pc;
 		Vector3 fn;
+		Vector2 uva;
+		Vector2 uvb;
+		Vector2 uvc;
 	};
 	struct CardSurfaceBucket {
 		LocalVector<CardTri> tris;
@@ -1362,6 +1402,9 @@ bool NextGISRC::_ensure_stage2_proxy_instances(CardSetState &r_state) {
 	const uint32_t vgd_surface_count = part_count > 0 ? uint32_t(desc->rt_proxy_surface_ranges.size() / (part_count * 2)) : 0u;
 	const float *pos_ptr = desc->rt_proxy_positions.ptr();
 	const uint32_t total_verts = uint32_t(desc->rt_proxy_positions.size() / 3);
+	const float *uv_ptr = desc->rt_proxy_uvs.ptr();
+	const uint32_t total_uv_verts = uint32_t(desc->rt_proxy_uvs.size() / 2);
+	const bool has_proxy_uvs = uv_ptr != nullptr && total_uv_verts >= total_verts;
 	const uint8_t *idx_bytes = desc->rt_proxy_indices.ptr();
 	const uint32_t total_indices = uint32_t(desc->rt_proxy_indices.size() / 4);
 	const uint8_t *grp_bytes = desc->rt_proxy_triangle_groups.ptr();
@@ -1413,6 +1456,11 @@ bool NextGISRC::_ensure_stage2_proxy_instances(CardSetState &r_state) {
 				ct.pb = pb;
 				ct.pc = pc;
 				ct.fn = fn;
+				if (has_proxy_uvs) {
+					ct.uva = Vector2(uv_ptr[uint64_t(ia) * 2u + 0], uv_ptr[uint64_t(ia) * 2u + 1]);
+					ct.uvb = Vector2(uv_ptr[uint64_t(ib) * 2u + 0], uv_ptr[uint64_t(ib) * 2u + 1]);
+					ct.uvc = Vector2(uv_ptr[uint64_t(ic) * 2u + 0], uv_ptr[uint64_t(ic) * 2u + 1]);
+				}
 				card_buckets[uint64_t(*card_slot) * uint32_t(surface_count) + uint32_t(s)].tris.push_back(ct);
 			}
 		}
@@ -1454,9 +1502,9 @@ bool NextGISRC::_ensure_stage2_proxy_instances(CardSetState &r_state) {
 				nrm_w[base + 0] = ct.fn;
 				nrm_w[base + 1] = ct.fn;
 				nrm_w[base + 2] = ct.fn;
-				uv_w[base + 0] = Vector2();
-				uv_w[base + 1] = Vector2();
-				uv_w[base + 2] = Vector2();
+				uv_w[base + 0] = ct.uva;
+				uv_w[base + 1] = ct.uvb;
+				uv_w[base + 2] = ct.uvc;
 				idx_w[base + 0] = int32_t(base + 0);
 				idx_w[base + 1] = int32_t(base + 1);
 				idx_w[base + 2] = int32_t(base + 2);
@@ -1674,6 +1722,11 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 		stats.failed_mesh_count++;
 		return false;
 	}
+
+	// Apply the same per-mesh atlas budget and 1 cm texel floor to Stage-1 card sets so meshes
+	// falling back from Stage-2 do not exhaust the material atlas before later meshes get cards.
+	const uint64_t stage1_max_texels_per_mesh = MAX(uint64_t(atlas_width) * uint64_t(atlas_height) / 256u, uint64_t(4096u));
+	nextgi_src_scale_cards_to_budget(result.cards, stage1_max_texels_per_mesh, NEXTGI_SRC_EMISSIVE_MIN_TEXEL_METERS);
 
 	LocalVector<Vector2i> sizes;
 	for (const NextGICardDesc &card : result.cards) {

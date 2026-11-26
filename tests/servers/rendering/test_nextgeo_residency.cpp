@@ -897,4 +897,64 @@ TEST_CASE("[NextGeo][Residency][Shadow] Residency epoch, instance lookup, and su
 	CHECK_EQ(storage.get_residency_changed_records().size(), 0u);
 }
 
+TEST_CASE("[NextGeo][Residency] High-throughput page streaming uploads full frame budget without 8-item choke") {
+	using namespace TestNextGeoResidency;
+
+	constexpr uint32_t PAGE_COUNT = 40u;
+	LocalVector<uint32_t> groups;
+	for (uint32_t g = 0; g < PAGE_COUNT; g++) {
+		groups.push_back(g);
+	}
+	Vector<Vector<uint8_t>> pages;
+	pages.resize(int(PAGE_COUNT));
+	pages.write[0] = make_synthetic_raw_page(1);
+	for (uint32_t p = 1; p < PAGE_COUNT; p++) {
+		pages.write[int(p)] = make_synthetic_raw_page(-1, 0.0f);
+	}
+	LocalVector<LocalVector<uint32_t>> parents;
+	parents.resize(PAGE_COUNT);
+	for (uint32_t p = 1; p < PAGE_COUNT; p++) {
+		parents[p].push_back(0u);
+	}
+
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	desc.dag_header = make_synthetic_dag_header(groups);
+	desc.root_pages.push_back(pages[0]);
+	desc.eligible_surface_mask = 1u;
+	desc.vertex_layout = 1u;
+	desc.page_size = 256u;
+	desc.page_count = PAGE_COUNT;
+
+	MockVirtualMeshStorage storage;
+	storage.set_page_arena_bytes_override(64u * 256u);
+	storage.set_page_upload_bytes_per_frame_override(64u * 256u);
+
+	const RID mesh = make_test_rid(8301);
+	storage.mesh_set_in_memory_pages(mesh, pages);
+	storage.mesh_set_virtual_geometry(mesh, desc);
+	storage.mesh_set_page_parents(mesh, parents);
+
+	LocalVector<RendererVirtualMeshStorage::PageRequest> reqs;
+	for (uint32_t p = 1; p < PAGE_COUNT; p++) {
+		reqs.push_back({ 0u, p, true, float(p), 32.0f });
+	}
+	storage.submit_page_requests(reqs.ptr(), reqs.size(), true);
+
+	// Frame 1 kicks parallel worker batches; waiting completes all 39 reads in one wave.
+	storage.begin_frame();
+	storage.flush();
+	storage.wait_for_streaming_tasks();
+
+	// Frame 2 uploads all 39 streamed pages at once (previously choked to <= 16 across 2x8 batches).
+	storage.begin_frame();
+	storage.flush();
+	uint32_t resident = 0u;
+	for (uint32_t p = 1; p < PAGE_COUNT; p++) {
+		if (storage.mesh_is_page_resident(mesh, p)) {
+			resident++;
+		}
+	}
+	CHECK_EQ(resident, PAGE_COUNT - 1u);
+}
+
 #endif // _3D_DISABLED

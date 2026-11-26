@@ -669,7 +669,7 @@ void main() {
 	if (gl_GlobalInvocationID.x != 0u) {
 		return;
 	}
-	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX = 128u;
+	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX = 4096u;
 	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN = 1u;
 
 	// Adapt per-chain dirty-page slice from the previous frame before clearing per-frame counters
@@ -916,10 +916,9 @@ void main() {
 
 	bool prog_enabled = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS) != 0u;
 	bool pure_fixed = !prog_enabled || (record.surface_mask == record.pad0);
-	if (pure_fixed && !is_skinned) {
-		float disp_bound = max(record.prev_world_aabb_max.w, 0.0);
-		vec3 g_min = vec3(vsm_dag_float(base + 36u), vsm_dag_float(base + 40u), vsm_dag_float(base + 44u)) - vec3(disp_bound);
-		vec3 g_max = vec3(vsm_dag_float(base + 48u), vsm_dag_float(base + 52u), vsm_dag_float(base + 56u)) + vec3(disp_bound);
+	if (!is_skinned) {
+		vec3 g_min = vec3(vsm_dag_float(base + 36u), vsm_dag_float(base + 40u), vsm_dag_float(base + 44u));
+		vec3 g_max = vec3(vsm_dag_float(base + 48u), vsm_dag_float(base + 52u), vsm_dag_float(base + 56u));
 		vec2 px_min;
 		vec2 px_max;
 		float min_depth;
@@ -927,7 +926,7 @@ void main() {
 		if (!vsm_local_aabb_page_bounds(record, g_min, g_max, md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
 			return;
 		}
-		if (vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+		if (pure_fixed && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
 			vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_nodes, 1u));
 			return;
 		}
@@ -1278,10 +1277,9 @@ void main() {
 
 	bool prog_enabled = (vsm_params.cull_flags & NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS) != 0u;
 	bool pure_fixed = !prog_enabled || (record.surface_mask == record.pad0);
-	if (pure_fixed && !is_skinned) {
-		float disp_bound = max(record.prev_world_aabb_max.w, 0.0);
-		vec3 n_min = vec3(vsm_dag_float(base + 20u), vsm_dag_float(base + 24u), vsm_dag_float(base + 28u)) - vec3(disp_bound);
-		vec3 n_max = vec3(vsm_dag_float(base + 32u), vsm_dag_float(base + 36u), vsm_dag_float(base + 40u)) + vec3(disp_bound);
+	if (!is_skinned) {
+		vec3 n_min = vec3(vsm_dag_float(base + 20u), vsm_dag_float(base + 24u), vsm_dag_float(base + 28u));
+		vec3 n_max = vec3(vsm_dag_float(base + 32u), vsm_dag_float(base + 36u), vsm_dag_float(base + 40u));
 		vec2 px_min;
 		vec2 px_max;
 		float min_depth;
@@ -1289,7 +1287,7 @@ void main() {
 		if (!vsm_local_aabb_page_bounds(record, n_min, n_max, md, mip, slot, px_min, px_max, min_depth, straddles_near)) {
 			return;
 		}
-		if (vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
+		if (pure_fixed && vsm_hiz_occluded(rec, map, mip, slot, px_min, px_max, min_depth, straddles_near)) {
 			vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_nodes, 1u));
 			return;
 		}
@@ -1297,18 +1295,65 @@ void main() {
 
 	uint child_count = min(vsm_dag_uint(base + 44u), 8u);
 	uint next_level = min(level + 1u, 7u);
+	uint mesh_group_count = (mesh.bvh_node_offset > mesh.group_offset) ? ((mesh.bvh_node_offset - mesh.group_offset) / 60u) : 0u;
 	for (uint child = 0u; child < child_count; child++) {
 		uint value = vsm_dag_uint(base + 48u + child * 4u);
 		if ((value & NEXTGEO_BVH_LEAF_BIT) != 0u) {
+			uint group_idx = value & ~NEXTGEO_BVH_LEAF_BIT;
+			if (group_idx >= mesh_group_count || !vsm_mesh_group_refine_ok(record.virtual_mesh, group_idx)) {
+				continue;
+			}
+			uint gbase = mesh.group_offset + group_idx * 60u;
+			vec4 parent_lod = vec4(vsm_dag_float(gbase + 16u), vsm_dag_float(gbase + 20u), vsm_dag_float(gbase + 24u), vsm_dag_float(gbase + 28u));
+			float parent_error = vsm_dag_float(gbase + 32u);
+			if (vsm_projected_error_skinned(record, parent_lod, parent_error, inst_bone_scale, is_skinned, md, mip) <= vsm_params.max_texel_error) {
+				continue;
+			}
+			if (!is_skinned) {
+				vec3 g_min = vec3(vsm_dag_float(gbase + 36u), vsm_dag_float(gbase + 40u), vsm_dag_float(gbase + 44u));
+				vec3 g_max = vec3(vsm_dag_float(gbase + 48u), vsm_dag_float(gbase + 52u), vsm_dag_float(gbase + 56u));
+				vec2 c_px_min;
+				vec2 c_px_max;
+				float c_min_depth;
+				bool c_straddles_near;
+				if (!vsm_local_aabb_page_bounds(record, g_min, g_max, md, mip, slot, c_px_min, c_px_max, c_min_depth, c_straddles_near)) {
+					continue;
+				}
+				if (pure_fixed && vsm_hiz_occluded(rec, map, mip, slot, c_px_min, c_px_max, c_min_depth, c_straddles_near)) {
+					vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_nodes, 1u));
+					continue;
+				}
+			}
 			uint gslot = atomicAdd(vsm_counters.group_count, 1u);
 			if (gslot >= vsm_params.group_capacity) {
 				vsm_ng_mark_overflow(rec);
 				continue;
 			}
-			vsm_groups_out.data[gslot] = uvec4(record_idx, value & ~NEXTGEO_BVH_LEAF_BIT, dirty_idx, 0u);
+			vsm_groups_out.data[gslot] = uvec4(record_idx, group_idx, dirty_idx, 0u);
 			uint groups = (gslot + 64u) / 64u;
 			vsm_ng_sink(atomicMax(vsm_group_args_out.data[0].x, groups));
 		} else if (level + 1u < 8u) {
+			uint cbase = mesh.bvh_node_offset + value * 80u;
+			vec4 child_lod = vec4(vsm_dag_float(cbase), vsm_dag_float(cbase + 4u), vsm_dag_float(cbase + 8u), vsm_dag_float(cbase + 12u));
+			float child_err = vsm_dag_float(cbase + 16u);
+			if (vsm_projected_error_skinned(record, child_lod, child_err, inst_bone_scale, is_skinned, md, mip) <= vsm_params.max_texel_error) {
+				continue;
+			}
+			if (!is_skinned) {
+				vec3 c_min = vec3(vsm_dag_float(cbase + 20u), vsm_dag_float(cbase + 24u), vsm_dag_float(cbase + 28u));
+				vec3 c_max = vec3(vsm_dag_float(cbase + 32u), vsm_dag_float(cbase + 36u), vsm_dag_float(cbase + 40u));
+				vec2 c_px_min;
+				vec2 c_px_max;
+				float c_min_depth;
+				bool c_straddles_near;
+				if (!vsm_local_aabb_page_bounds(record, c_min, c_max, md, mip, slot, c_px_min, c_px_max, c_min_depth, c_straddles_near)) {
+					continue;
+				}
+				if (pure_fixed && vsm_hiz_occluded(rec, map, mip, slot, c_px_min, c_px_max, c_min_depth, c_straddles_near)) {
+					vsm_ng_sink(atomicAdd(vsm_counters.hiz_culled_nodes, 1u));
+					continue;
+				}
+			}
 			uint nslot = atomicAdd(vsm_counters.bvh_level_counts[next_level], 1u);
 			if (nslot >= vsm_params.node_capacity) {
 				vsm_ng_mark_overflow(rec);

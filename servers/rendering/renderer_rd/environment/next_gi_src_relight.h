@@ -193,6 +193,16 @@ _FORCE_INLINE_ Vector3 nextgi_card_positional_light_rank_point(const AABB &p_bou
 			CLAMP(p_light_pos.z, card_min.z, card_max.z));
 }
 
+// Effective directional-light alignment for card light selection. Stage-2 cards use the 6 axis
+// normals and Stage-1 cards cluster curved geometry, so individual card texels can tilt up to
+// ~60 degrees away from the card normal (cos(150 deg) = -0.866). Keep the directional light in
+// the card's candidate list whenever any texel on the card can face it; the relight shader applies
+// exact per-texel max(dot(texel_normal, to_light), 0).
+_FORCE_INLINE_ float nextgi_card_directional_ndotl(const Vector3 &p_card_normal, const Vector3 &p_light_travel) {
+	const float ndotl = p_card_normal.dot(-p_light_travel);
+	return ndotl > -0.87f ? MAX(ndotl, 0.05f) : 0.0f;
+}
+
 // Godot's omni falloff: nd^4 window times inverse-distance decay.
 _FORCE_INLINE_ float nextgi_omni_attenuation(float p_distance, float p_inv_range, float p_decay) {
 	float nd = p_distance * p_inv_range;

@@ -205,7 +205,8 @@ void main() {
 
 	NextGICard card = cards.data[page.card_index];
 	vec2 card_size = max(vec2(card.atlas_rect.zw), vec2(1.0));
-	ivec2 material = ivec2(card.atlas_rect.xy) + ivec2(clamp(((vec2(texel) + 0.5) / vec2(size)) * card_size, vec2(0.0), card_size - 1.0));
+	ivec2 material_local = ivec2(clamp(((vec2(texel) + 0.5) / vec2(size)) * card_size, vec2(0.0), card_size - 1.0));
+	ivec2 material = ivec2(card.atlas_rect.xy) + material_local;
 	float depth = texelFetch(depth_tex, material, 0).r;
 	if (depth <= 0.0) {
 		imageStore(radiance_image, radiance_coord, vec4(0.0));
@@ -214,12 +215,21 @@ void main() {
 
 	NextGIInstanceRecord rec = records.data[page.record_index];
 	NextGICardSet card_set = card_sets.data[rec.card_set];
-	float xu = ((float(texel.x) + 0.5) / float(size.x) * 2.0 - 1.0) * card.axis_u.w;
-	float yv = ((float(texel.y) + 0.5) / float(size.y) * 2.0 - 1.0) * card.axis_v.w;
+	// Reconstruct (xu, yv) at the exact material-atlas texel center where depth was captured so
+	// scaled/upsampled radiance pages never drift laterally behind sloped or curved triangles.
+	float xu = ((float(material_local.x) + 0.5) / card_size.x * 2.0 - 1.0) * card.axis_u.w;
+	float yv = ((float(material_local.y) + 0.5) / card_size.y * 2.0 - 1.0) * card.axis_v.w;
 	vec3 object_p = card.origin.xyz + card.axis_u.xyz * xu + card.axis_v.xyz * yv + card.axis_n.xyz * (-depth * card_set.capture_scale);
 	vec3 world = nextgi_xform(rec, object_p);
 
 	vec3 nview = normalize(texelFetch(normal_tex, material, 0).rgb * 2.0 - 1.0);
+	// Cards capture surfaces visible from the +axis_n hemisphere. Double-sided (cull_disabled)
+	// materials evaluate DO_SIDE_CHECK against unflipped gl_FrontFacing during card capture, which
+	// can invert nview.z < 0; flip it back into the outward card hemisphere so direct shading and
+	// shadow-ray origin offsets never point into the surface.
+	if (nview.z < 0.0) {
+		nview = -nview;
+	}
 	vec3 nobj = normalize(card.axis_u.xyz * nview.x + card.axis_v.xyz * nview.y + card.axis_n.xyz * nview.z);
 	vec3 normal = normalize(nextgi_xform_n(rec, nobj));
 

@@ -73,11 +73,12 @@ static constexpr uint32_t NEXTGEO_VSM_GROUP_CAPACITY = 1u << 20; // 1,048,576 (r
 static constexpr uint32_t NEXTGEO_VSM_CLUSTER_CAPACITY = 1u << 20; // 1,048,576 (cluster, page) pairs (< 2^21 for #155 bin packing).
 static_assert(NEXTGEO_VSM_CLUSTER_CAPACITY <= (1u << 21), "VSM cluster capacity must fit in 21-bit raster-bin entry index.");
 
-// Adaptive per-chain dirty-page slice bounds for Nanite VSM culling. Starts at MAX (128 pages/frame),
-// halves from the active page count whenever any VSM queue overflows, holds while draining a dense
-// burst cleanly, and ramps back up to MAX once the burst finishes. Prevents overflow livelock and
-// unshadowed 128x128 tile holes on dense multi-million-triangle scenes with zero extra VRAM.
-static constexpr uint32_t NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX = 128u;
+// Adaptive per-chain dirty-page slice bounds for Nanite VSM culling. Starts at MAX (4096 pages/frame)
+// so non-overflowing frames rasterize every cleared dirty page immediately without leaving unshadowed
+// tiles, halves from the active page count whenever any VSM queue overflows, holds while draining a
+// dense burst cleanly, and ramps back up to MAX once the burst finishes. Prevents both post-clear
+// unshadowed tile flashes and overflow livelock with zero extra VRAM.
+static constexpr uint32_t NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX = 4096u;
 static constexpr uint32_t NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN = 1u;
 
 enum NextGeoVSMChain : uint32_t {

@@ -207,7 +207,8 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 			fallback = sample_radiance;
 			found_fallback = true;
 		}
-		if (card_depth > 0.0 && abs(card_depth - depth) <= 2.0 * card_set.texel_size && align > best_align) {
+		float depth_tol = 2.0 * max(card_set.texel_size, max(2.0 * card.axis_u.w / card_size.x, 2.0 * card.axis_v.w / card_size.y));
+		if (card_depth > 0.0 && abs(card_depth - depth) <= depth_tol && align > best_align) {
 			best_align = align;
 			best = sample_radiance;
 			found = true;
@@ -240,17 +241,36 @@ vec3 nextgi_unproject(vec2 pixel, float depth) {
 
 vec3 nextgi_geometric_normal(ivec2 pixel, float depth, vec3 world) {
 	ivec2 size = ivec2(params.screen_jitter.xy);
-	ivec2 px = pixel + ivec2(1, 0);
-	ivec2 py = pixel + ivec2(0, 1);
-	float dx = texelFetch(depth_tex, clamp(px, ivec2(0), size - 1), 0).r;
-	float dy = texelFetch(depth_tex, clamp(py, ivec2(0), size - 1), 0).r;
-	vec3 wx = nextgi_unproject(vec2(px), dx);
-	vec3 wy = nextgi_unproject(vec2(py), dy);
-	vec3 normal = normalize(cross(wx - world, wy - world));
-	if (dot(normal, params.camera_pos.xyz - world) < 0.0) {
+	ivec2 px_p = clamp(pixel + ivec2(1, 0), ivec2(0), size - 1);
+	ivec2 px_m = clamp(pixel - ivec2(1, 0), ivec2(0), size - 1);
+	ivec2 py_p = clamp(pixel + ivec2(0, 1), ivec2(0), size - 1);
+	ivec2 py_m = clamp(pixel - ivec2(0, 1), ivec2(0), size - 1);
+	float dx_p = texelFetch(depth_tex, px_p, 0).r;
+	float dx_m = texelFetch(depth_tex, px_m, 0).r;
+	float dy_p = texelFetch(depth_tex, py_p, 0).r;
+	float dy_m = texelFetch(depth_tex, py_m, 0).r;
+	bool use_xm = (dx_m > 0.0) && (dx_p <= 0.0 || abs(dx_m - depth) < abs(dx_p - depth));
+	bool use_ym = (dy_m > 0.0) && (dy_p <= 0.0 || abs(dy_m - depth) < abs(dy_p - depth));
+	vec3 tx = use_xm ? (world - nextgi_unproject(vec2(px_m), dx_m)) : (nextgi_unproject(vec2(px_p), dx_p) - world);
+	vec3 ty = use_ym ? (world - nextgi_unproject(vec2(py_m), dy_m)) : (nextgi_unproject(vec2(py_p), dy_p) - world);
+	vec3 cross_n = cross(tx, ty);
+	vec3 to_cam = params.camera_pos.xyz - world;
+	vec3 normal = dot(cross_n, cross_n) > 1e-12 ? normalize(cross_n) : (dot(to_cam, to_cam) > 1e-12 ? normalize(to_cam) : vec3(0.0, 1.0, 0.0));
+	if (dot(normal, to_cam) < 0.0) {
 		normal = -normal;
 	}
 	return normal;
+}
+
+vec3 nextgi_surface_normal(ivec2 pixel, float depth, vec3 world) {
+	if (textureSize(normal_roughness_tex, 0) == ivec2(params.screen_jitter.xy)) {
+		vec3 encoded = texelFetch(normal_roughness_tex, pixel, 0).xyz;
+		vec3 n = nextgi_view_world_normal(mat3(params.view_to_world[0].xyz, params.view_to_world[1].xyz, params.view_to_world[2].xyz), encoded);
+		if (dot(n, n) > 1e-6) {
+			return n;
+		}
+	}
+	return nextgi_geometric_normal(pixel, depth, world);
 }
 
 vec3 nextgi_orient(vec3 normal, vec3 local_dir) {
@@ -262,7 +282,7 @@ vec3 nextgi_orient(vec3 normal, vec3 local_dir) {
 
 vec3 nextgi_miss_radiance(vec3 direction) {
 	if (params.sky_enabled != 0u) {
-		return textureLod(sky_tex, vec3_to_oct(direction), 0.0).rgb;
+		return textureLod(sky_tex, vec3_to_oct(direction), 0.0).rgb * params.ambient_color.a;
 	}
 	return params.ambient_color.rgb;
 }
@@ -327,7 +347,8 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 		uncovered_count++;
 		return cached;
 	}
-	return nextgi_miss_radiance(ray_dir);
+	// A ray that hit solid geometry must never leak open-sky radiance through the hit surface.
+	return vec3(0.0);
 }
 #else
 vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, out float confidence) {
@@ -375,7 +396,7 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 			return cached;
 		}
 	}
-	return nextgi_miss_radiance(ray_dir);
+	return vec3(0.0);
 #else
 	vec3 radiance;
 	bool uncovered = false;
@@ -395,7 +416,8 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 				return cached;
 			}
 		}
-		return nextgi_miss_radiance(ray_dir);
+		// A ray that hit solid geometry must never fall back to open-sky radiance.
+		return vec3(0.0);
 	}
 	confidence = 1.0;
 	if (uncovered) {
@@ -446,8 +468,7 @@ void nextgi_anchor_main() {
 		return;
 	}
 	uint probe_idx = probe.y * params.probes_x + probe.x;
-	vec2 pixel = vec2(probe) * 16.0 + params.screen_jitter.zw * 16.0;
-	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
+	ivec2 ipixel = clamp(ivec2(probe) * 16 + ivec2(8), ivec2(0), ivec2(params.screen_jitter.xy) - ivec2(1));
 	float depth = texelFetch(depth_tex, ipixel, 0).r;
 	if (depth <= 0.0) {
 		confidence_data.data[probe_idx] = -1.0;
@@ -476,8 +497,7 @@ void nextgi_clamp_main() {
 		return;
 	}
 	uint probe_idx = probe.y * params.probes_x + probe.x;
-	vec2 pixel = vec2(probe) * 16.0 + params.screen_jitter.zw * 16.0;
-	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
+	ivec2 ipixel = clamp(ivec2(probe) * 16 + ivec2(8), ivec2(0), ivec2(params.screen_jitter.xy) - ivec2(1));
 	float depth = texelFetch(depth_tex, ipixel, 0).r;
 	if (depth <= 0.0) {
 		confidence_data.data[probe_idx] = 0.0;
@@ -562,14 +582,13 @@ void nextgi_gather_main() {
 		return;
 	}
 #endif
-	vec2 pixel = vec2(probe) * 16.0 + params.screen_jitter.zw * 16.0;
-	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
+	ivec2 ipixel = clamp(ivec2(probe) * 16 + ivec2(8), ivec2(0), ivec2(params.screen_jitter.xy) - ivec2(1));
 	float depth = texelFetch(depth_tex, ipixel, 0).r;
 	if (depth <= 0.0) {
 		return;
 	}
 	vec3 world = nextgi_unproject(vec2(ipixel), depth);
-	vec3 normal = nextgi_geometric_normal(ipixel, depth, world);
+	vec3 normal = nextgi_surface_normal(ipixel, depth, world);
 #ifdef NEXTGI_TRACE_SDF
 	// GodotNext: ps_swrt_trace (#186 step 6). 1.5 voxels of the level that holds the surface.
 	vec3 origin = swrt_offset_origin(world, normal);
@@ -714,13 +733,18 @@ void nextgi_integrate_main() {
 		return;
 	}
 	vec3 world = nextgi_unproject(full, depth);
-	vec3 normal = nextgi_geometric_normal(ipixel, depth, world);
-	vec2 probe_f = full / 16.0 - 0.5;
+	vec3 normal = nextgi_surface_normal(ipixel, depth, world);
+	float view_dist = max(length(world - params.camera_pos.xyz), 0.05);
+	ivec2 screen_i = ivec2(screen);
+	vec2 probe_f = (full - 8.0) / 16.0;
 	ivec2 base = ivec2(floor(probe_f));
 	vec2 fract_p = probe_f - vec2(base);
 	vec3 accum = vec3(0.0);
 	float weight = 0.0;
 	float conf_accum = 0.0;
+	vec3 fallback_accum = vec3(0.0);
+	float fallback_weight = 0.0;
+	float fallback_conf = 0.0;
 	for (int oy = 0; oy <= 1; oy++) {
 		for (int ox = 0; ox <= 1; ox++) {
 			ivec2 id = base + ivec2(ox, oy);
@@ -729,21 +753,37 @@ void nextgi_integrate_main() {
 			}
 			float bilinear = (ox == 0 ? 1.0 - fract_p.x : fract_p.x) * (oy == 0 ? 1.0 - fract_p.y : fract_p.y);
 			vec4 probe = imageLoad(probe_image, id * int(params.ray_stride));
-			float depth_weight = probe.a <= 0.0 ? 0.0 : 1.0 / (1.0 + abs(length(world - params.camera_pos.xyz) - probe.a) * 4.0);
+			if (probe.a <= 0.0) {
+				continue;
+			}
+			ivec2 p_anchor = clamp(id * 16 + ivec2(8), ivec2(0), screen_i - ivec2(1));
+			float p_depth = texelFetch(depth_tex, p_anchor, 0).r;
+			if (p_depth <= 0.0) {
+				continue;
+			}
+			vec3 p_world = nextgi_unproject(vec2(p_anchor), p_depth);
+			vec3 p_normal = nextgi_surface_normal(p_anchor, p_depth, p_world);
+			float plane_dist = abs(dot(p_world - world, normal));
+			float depth_weight = 1.0 / (1.0 + (plane_dist / (0.05 * view_dist)) + abs(view_dist - probe.a) * 0.5);
+			float normal_weight = pow(max(dot(normal, p_normal), 0.0), 4.0);
 			vec3 irradiance = vec3(0.0);
 			for (uint i = 0u; i < params.ray_stride * params.ray_stride; i++) {
 				irradiance += imageLoad(probe_image, id * int(params.ray_stride) + ivec2(i % params.ray_stride, i / params.ray_stride)).rgb;
 			}
 			irradiance /= float(params.ray_stride * params.ray_stride);
-			float w = bilinear * depth_weight * max(dot(normal, normal), 0.0);
 			float probe_confidence = confidence_data.data[uint(id.y) * params.probes_x + uint(id.x)];
+			float w = bilinear * depth_weight * normal_weight;
 			accum += irradiance * w;
 			conf_accum += probe_confidence * w;
 			weight += w;
+			float fw = bilinear * depth_weight;
+			fallback_accum += irradiance * fw;
+			fallback_conf += probe_confidence * fw;
+			fallback_weight += fw;
 		}
 	}
-	vec3 out_irr = weight > 0.0 ? accum / weight : vec3(0.0);
-	float out_confidence = weight > 0.0 ? conf_accum / weight : 0.0;
+	vec3 out_irr = weight > 1e-5 ? (accum / weight) : (fallback_weight > 0.0 ? (fallback_accum / fallback_weight) : vec3(0.0));
+	float out_confidence = weight > 1e-5 ? (conf_accum / weight) : (fallback_weight > 0.0 ? (fallback_conf / fallback_weight) : 0.0);
 	// Cosine-weighted ray mean is already E / PI, matching scene_forward_clustered.glsl (ambient_light *= albedo.rgb)
 	// and nextgi_irradiance_field.glsl (Lumen Lite).
 	imageStore(ambient_image, pixel, vec4(out_irr, out_confidence));
@@ -845,7 +885,7 @@ void nextgi_coverage_main() {
 		return;
 	}
 	vec3 world = nextgi_unproject(vec2(full), depth);
-	vec3 normal = nextgi_geometric_normal(full, depth, world);
+	vec3 normal = nextgi_surface_normal(full, depth, world);
 	vec3 dir = normal;
 	NextGIHit hit;
 #ifdef NEXTGI_TRACE_SDF

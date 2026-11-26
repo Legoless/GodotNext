@@ -130,6 +130,9 @@ struct NextGICardClusterResult {
 // Degenerate triangles are ignored.
 void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count, const uint32_t *p_indices, uint32_t p_index_count, NextGICardClusterResult &r_result);
 void nextgi_src_axis_cards(const AABB &p_bounds, NextGICardClusterResult &r_result);
+// Clamps card texels against a minimum world-space texel floor (when > 0) and proportionally
+// scales the card set so its total texels fit within p_max_texels (respecting MIN/MAX texels).
+void nextgi_src_scale_cards_to_budget(LocalVector<NextGICardDesc> &r_cards, uint64_t p_max_texels, float p_min_texel_meters = 0.0f);
 
 // The material atlas: albedo, normal and orm RGBA8, emission RGBA16F, depth R32F, plus the
 // framebuffer depth (D16 when supported, else X8_D24).

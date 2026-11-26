@@ -1756,7 +1756,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			float atten = 1.0f;
 			float ndotl = 0.0f;
 			if (cpu.directional) {
-				ndotl = normal.dot(-travel);
+				ndotl = nextgi_card_directional_ndotl(normal, travel);
 			} else {
 				// Rank positional lights using the closest point on the card's world AABB so large
 				// cards (e.g. 40 m floors/ceilings) still receive lights whose range or hemisphere
@@ -1881,6 +1881,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		}
 		probe_capacity = MAX(page_table_count, 1u);
 		probe_buffer = rd->storage_buffer_create(probe_capacity * sizeof(float) * 4);
+		rd->buffer_clear(probe_buffer, 0, probe_capacity * sizeof(float) * 4);
 		_reset_uniform_set();
 	}
 	// GodotNext: nextgi_src_page_levels (#247). Reused page-table runs start without the last owner's probes.

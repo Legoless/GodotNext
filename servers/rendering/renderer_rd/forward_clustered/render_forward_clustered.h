@@ -375,6 +375,7 @@ private:
 		// GodotNext: megalights_inputs (#136). Shadow and front-layer passes leave this false.
 		bool megalights_inputs = false;
 		bool nextgi_translucency_mark = false;
+		bool nextgi_card_capture = false;
 		bool use_nextgeo_proxy = false;
 		bool use_nextgeo_rt_proxy = false;
 		bool is_uv2_bake = false;

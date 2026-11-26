@@ -5554,3 +5554,91 @@ TEST_CASE("[NextGI] P6f vendor-optional CLAS, PTLAS and OMM capability mocks and
 	CHECK_EQ(omm.usages[0].count, 1u);
 	CHECK_EQ(omm.usages[0].format, 1u);
 }
+
+TEST_CASE("[NextGI] Gather and WRC shader contracts: probe normal weights, solid-hit non-sky fallback, and HWRT backface polarity") {
+	const String gather_src = RendererRD::NextGIGather::build_shader_source(0);
+	const String integrate_src = RendererRD::NextGIGather::build_shader_source(1);
+	REQUIRE_FALSE(gather_src.is_empty());
+	REQUIRE_FALSE(integrate_src.is_empty());
+	// Gather and Integrate share surface normal decoding (normal_roughness_tex) and tile-center anchor.
+	CHECK(gather_src.contains("nextgi_surface_normal"));
+	CHECK(integrate_src.contains("nextgi_surface_normal"));
+	// Integrate must weight neighbor probes by pixel-vs-probe normal dot product, never max(dot(normal, normal), 0.0).
+	CHECK(integrate_src.contains("dot(normal, p_normal)"));
+	CHECK_FALSE(integrate_src.contains("max(dot(normal, normal)"));
+	// Miss radiance scales sampled sky by 1 / baked_exposure stored in params.ambient_color.a.
+	CHECK(gather_src.contains("params.ambient_color.a"));
+	// Stage-1 SRC lookup must scale depth tolerance by actual card texel extent, matching Stage-2.
+	CHECK(gather_src.contains("float depth_tol = 2.0 * max(card_set.texel_size, max(2.0 * card.axis_u.w / card_size.x, 2.0 * card.axis_v.w / card_size.y));"));
+	// WRC HWRT update must treat hit.front_face (Vulkan CCW) as backface for Godot's clockwise front faces.
+	NextgiWrcUpdateShaderRD wrc_shader;
+	Vector<String> wrc_defines;
+	wrc_defines.push_back("");
+	wrc_shader.initialize(wrc_defines);
+	const RID wrc_ver = wrc_shader.version_create(false);
+	REQUIRE(wrc_ver.is_valid());
+	const Vector<String> wrc_sources = wrc_shader.version_build_variant_stage_sources(wrc_ver, 0);
+	wrc_shader.version_free(wrc_ver);
+	REQUIRE_GT(wrc_sources.size(), int(RenderingDevice::SHADER_STAGE_COMPUTE));
+	const String wrc_src = wrc_sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+	CHECK(wrc_src.contains("back_face = hit.front_face && hit.t < 0.5 * spacing;"));
+	CHECK(wrc_src.contains("* params.sky.w;"));
+
+	// SRC relight must flip negative-Z view normals back into the card's outward capture hemisphere.
+	NextgiSrcRelightShaderRD relight_shader;
+	Vector<String> relight_defines;
+	relight_defines.push_back("");
+	relight_shader.initialize(relight_defines);
+	const RID relight_ver = relight_shader.version_create(false);
+	REQUIRE(relight_ver.is_valid());
+	const Vector<String> relight_sources = relight_shader.version_build_variant_stage_sources(relight_ver, 0);
+	relight_shader.version_free(relight_ver);
+	REQUIRE_GT(relight_sources.size(), int(RenderingDevice::SHADER_STAGE_COMPUTE));
+	CHECK(relight_sources[RenderingDevice::SHADER_STAGE_COMPUTE].contains("if (nview.z < 0.0)"));
+	CHECK(relight_sources[RenderingDevice::SHADER_STAGE_COMPUTE].contains("float(material_local.x) + 0.5) / card_size.x"));
+	CHECK(wrc_src.contains("if (!(card_depth > 0.0))"));
+}
+
+TEST_CASE("[NextGI] SRC card atlas budgeting and directional-light alignment on tilted cards") {
+	// Directional lights stay in the card candidate list for tilted geometry up to ~145 degrees
+	// off the card axis, while strictly back-facing cards are still culled.
+	const Vector3 travel = Vector3(0.383f, -0.906f, -0.178f).normalized();
+	CHECK(RendererRD::nextgi_card_directional_ndotl(Vector3(0, 1, 0), travel) == doctest::Approx(0.906f).epsilon(0.01f));
+	CHECK_GT(RendererRD::nextgi_card_directional_ndotl(Vector3(1, 0, 0), travel), 0.0f);
+	CHECK_EQ(RendererRD::nextgi_card_directional_ndotl(Vector3(0, -1, 0), travel), 0.0f);
+
+	// Sub-centimeter props are capped by the 1 cm floor instead of wasting 128x128 atlas space.
+	LocalVector<RendererRD::NextGICardDesc> tiny_cards;
+	for (int i = 0; i < 6; i++) {
+		RendererRD::NextGICardDesc c;
+		c.half_u = 0.02f;
+		c.half_v = 0.02f;
+		c.texels_u = 128;
+		c.texels_v = 128;
+		tiny_cards.push_back(c);
+	}
+	RendererRD::nextgi_src_scale_cards_to_budget(tiny_cards, 16384u, 0.01f);
+	for (uint32_t i = 0; i < tiny_cards.size(); i++) {
+		CHECK_EQ(tiny_cards[i].texels_u, 4u);
+		CHECK_EQ(tiny_cards[i].texels_v, 4u);
+	}
+
+	// Large 12-card meshes scale proportionally to fit within the per-mesh atlas budget.
+	LocalVector<RendererRD::NextGICardDesc> big_cards;
+	for (int i = 0; i < 12; i++) {
+		RendererRD::NextGICardDesc c;
+		c.half_u = 5.0f;
+		c.half_v = 5.0f;
+		c.texels_u = 128;
+		c.texels_v = 128;
+		big_cards.push_back(c);
+	}
+	RendererRD::nextgi_src_scale_cards_to_budget(big_cards, 16384u, 0.01f);
+	uint64_t total = 0;
+	for (uint32_t i = 0; i < big_cards.size(); i++) {
+		CHECK_GE(big_cards[i].texels_u, uint32_t(RendererRD::NEXTGI_SRC_CARD_MIN_TEXELS));
+		CHECK_LE(big_cards[i].texels_u, uint32_t(RendererRD::NEXTGI_SRC_CARD_MAX_TEXELS));
+		total += uint64_t(big_cards[i].texels_u) * uint64_t(big_cards[i].texels_v);
+	}
+	CHECK_LE(total, 17500u);
+}

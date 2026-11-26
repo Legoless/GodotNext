@@ -748,7 +748,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		// Determine the cull variant.
 		SceneShaderForwardClustered::ShaderData::CullVariant cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_MAX;
 		// GodotNext: avboit (#295). The AVBOIT pre-passes cull as the composite does.
-		if ((p_pass_mode == PASS_MODE_DEPTH_MATERIAL && !p_params->nextgeo_fallback_mark && p_params->avboit_pass == RendererRD::AVBOIT::PASS_NONE) || p_pass_mode == PASS_MODE_SDF) {
+		// NextGI SRC card capture also keeps per-material culling so back faces never overwrite
+		// front faces in the card's orthographic depth and normal targets.
+		if ((p_pass_mode == PASS_MODE_DEPTH_MATERIAL && !p_params->nextgeo_fallback_mark && !p_params->nextgi_card_capture && p_params->avboit_pass == RendererRD::AVBOIT::PASS_NONE) || p_pass_mode == PASS_MODE_SDF) {
 			cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
 		} else {
 			if constexpr (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
@@ -9185,6 +9187,7 @@ uint32_t RenderForwardClustered::_render_nextgi_card_batch(const NextGICardCaptu
 		uint32_t uniform_buffer_index = 0;
 		Rect2i rect;
 		RID rp_uniform_set;
+		bool reverse_cull = true;
 	};
 	LocalVector<CardPass> passes;
 	const Size2i screen_size = rd->framebuffer_get_size(p_framebuffer);
@@ -9220,6 +9223,10 @@ uint32_t RenderForwardClustered::_render_nextgi_card_batch(const NextGICardCaptu
 		render_list[RENDER_LIST_SECONDARY].sort_by_key_range(pass.element_from, pass.element_count);
 		_fill_instance_data(RENDER_LIST_SECONDARY, nullptr, pass.element_from, pass.element_count, false);
 		pass.rect = p_cards[i].rect;
+		// Card capture uses flip_y = false so ty = 0 matches v = -half_v. Without the Y flip,
+		// Godot's clockwise front faces stay clockwise in clip space, so reverse_cull keeps front
+		// faces (and cancels when cam_transform itself carries a negative-determinant mirror).
+		pass.reverse_cull = p_cards[i].cam_transform.basis.determinant() >= 0.0;
 		passes.push_back(pass);
 	}
 	if (scene_state.instance_buffer[RENDER_LIST_SECONDARY].get_size(0u) > 0u) {
@@ -9238,9 +9245,10 @@ uint32_t RenderForwardClustered::_render_nextgi_card_batch(const NextGICardCaptu
 		}
 		rd->draw_list_set_viewport(draw_list, pass.rect);
 		rd->draw_list_enable_scissor(draw_list, Rect2(Point2(), pass.rect.size));
-		RenderListParameters params(render_list[RENDER_LIST_SECONDARY].elements.ptr() + pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + pass.element_from, pass.element_count, true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, pass.rp_uniform_set, false, Vector2(), 0.0f, 0.0f, 1, pass.element_from);
+		RenderListParameters params(render_list[RENDER_LIST_SECONDARY].elements.ptr() + pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + pass.element_from, pass.element_count, pass.reverse_cull, PASS_MODE_DEPTH_MATERIAL, 0, true, false, pass.rp_uniform_set, false, Vector2(), 0.0f, 0.0f, 1, pass.element_from);
 		params.framebuffer_format = fb_format;
 		params.use_nextgeo_proxy = true;
+		params.nextgi_card_capture = true;
 		_render_list(draw_list, fb_format, &params, 0, pass.element_count);
 	}
 	rd->draw_list_end();

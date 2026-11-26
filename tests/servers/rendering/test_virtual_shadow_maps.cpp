@@ -3507,7 +3507,7 @@ TEST_CASE("[VSM][NextGeo] Layout, capacities, provisional settings and shared RA
 	CHECK_EQ(NEXTGEO_VSM_COUNTER_SINK, 21u);
 	CHECK_EQ(NEXTGEO_VSM_COUNTER_HIZ_PAGES_BUILT, 22u);
 	CHECK_EQ(offsetof(NextGeoVSMCounters, dirty_page_slice), size_t(31u * sizeof(uint32_t)));
-	CHECK_EQ(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX, 128u);
+	CHECK_EQ(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX, 4096u);
 	CHECK_EQ(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN, 1u);
 
 	// Provisional SW/HW switch threshold clamping.
@@ -3546,12 +3546,14 @@ TEST_CASE("[VSM][NextGeo] Layout, capacities, provisional settings and shared RA
 TEST_CASE("[VSM][NextGeo] Adaptive dirty-page slice backs off on overflow and holds while draining (#223)") {
 	using namespace RendererRD;
 
-	// Initial cold state (0) starts at MAX (128) and stays at MAX on clean frames.
-	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(0u, 0u, 0u), 128u);
-	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 128u, 0u), 128u);
-	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 400u, 0u), 128u);
+	// Initial cold state (0) starts at MAX (4096) and stays at MAX on clean frames so cleared dirty
+	// pages are never truncated into unshadowed holes when queues do not overflow.
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(0u, 0u, 0u), NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX, 1396u, 0u), NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX, 4096u, 0u), NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
 
-	// Dense overflow halves from the active page count (min(prev_slice, prev_dirty)).
+	// Dense overflow halves from the active page count (min(prev_slice, prev_dirty)) in one step.
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX, 400u, 1u), 200u);
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 400u, 1u), 64u);
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(64u, 400u, 12u), 32u);
 	// Sub-slice overflow (e.g. 50 very dense pages with slice=128) halves from 50 -> 25 rather than 64.
@@ -3566,15 +3568,16 @@ TEST_CASE("[VSM][NextGeo] Adaptive dirty-page slice backs off on overflow and ho
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(32u, 32u, 0u), 64u);
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(64u, 0u, 0u), 128u);
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(25u, 10u, 0u), 50u);
-	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(100u, 0u, 0u), 128u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(2048u, 0u, 0u), NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(3000u, 0u, 0u), NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
 
 	// Floor at 1 page/frame; clamping defends against corrupt/oversized input.
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(2u, 2u, 1u), 1u);
 	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(1u, 1u, 99u), 1u);
-	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(999u, 0u, 0u), 128u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(99999u, 0u, 0u), NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
 
 	// End-to-end dense burst simulation: 300 dirty pages where >20 pages/frame overflows cluster capacity.
-	// Must back off automatically, drain all 300 pages cleanly with zero livelock, and recover to 128.
+	// Must back off automatically, drain all 300 pages cleanly with zero livelock, and recover to MAX.
 	uint32_t remaining = 300u;
 	uint32_t slice = 0u;
 	uint32_t prev_dirty = 0u;
@@ -3594,15 +3597,15 @@ TEST_CASE("[VSM][NextGeo] Adaptive dirty-page slice backs off on overflow and ho
 		frames++;
 	}
 	CHECK_EQ(remaining, 0u);
-	CHECK_EQ(slice, 16u);
+	CHECK_EQ(slice, 18u);
 	CHECK(frames < 32u);
 	// Recovery after burst drains to zero.
-	slice = nextgeo_vsm_next_dirty_page_slice(slice, prev_dirty, prev_overflow);
-	CHECK_EQ(slice, 32u);
-	slice = nextgeo_vsm_next_dirty_page_slice(slice, 0u, 0u);
-	CHECK_EQ(slice, 64u);
-	slice = nextgeo_vsm_next_dirty_page_slice(slice, 0u, 0u);
-	CHECK_EQ(slice, 128u);
+	for (int i = 0; i < 10; i++) {
+		slice = nextgeo_vsm_next_dirty_page_slice(slice, prev_dirty, prev_overflow);
+		prev_dirty = 0u;
+		prev_overflow = 0u;
+	}
+	CHECK_EQ(slice, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
 }
 
 TEST_CASE("[VSM][NextGeo] Page-mip projected error matches P5 at mip 0 and scales by 2^mip (#217)") {

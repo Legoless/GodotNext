@@ -918,7 +918,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	previous_origin = origin;
 	has_previous_origin = true;
 	params.frame = frame;
-	params.record_count = swrt ? 0u : next_gi->get_rt_scene()->get_stats().instance_count;
+	params.record_count = swrt ? 0u : next_gi->get_rt_scene()->get_total_record_count();
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	params.page_rect_count = relight != nullptr ? relight->get_page_rect_count() : 0;
 	// GodotNext: nextgi_view_math. The froxels and the history use the depth texture's clip space.
@@ -938,21 +938,26 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	// GodotNext: ps_lumen_lite (#183). A miss reads the sky radiance, as the gather's misses do;
 	// the background color is only the fallback without a sky. Lite gets all of its GI from here.
 	RID sky_radiance;
+	float sky_rad_scale = 1.0f;
 	if (scene != nullptr && p_render_data->environment.is_valid()) {
 		const Color bg = scene->environment_get_bg_color(p_render_data->environment);
-		const float energy = scene->environment_get_bg_energy_multiplier(p_render_data->environment);
-		params.sky[0] = bg.r * energy;
-		params.sky[1] = bg.g * energy;
-		params.sky[2] = bg.b * energy;
+		const float bg_energy = scene->environment_get_bg_energy_multiplier(p_render_data->environment);
+		params.sky[0] = bg.r * bg_energy;
+		params.sky[1] = bg.g * bg_energy;
+		params.sky[2] = bg.b * bg_energy;
 		const RID sky = scene->environment_get_sky(p_render_data->environment);
 		if (sky.is_valid() && scene->get_sky() != nullptr) {
 			sky_radiance = scene->get_sky()->sky_get_radiance_texture_2d(sky);
+			if (sky_radiance.is_valid()) {
+				// sky_get_radiance_texture_2d already bakes bg_energy_multiplier * baked_exposure.
+				sky_rad_scale = 1.0f / MAX(scene->get_sky()->sky_get_baked_exposure(sky), 1e-4f);
+			}
 		}
 	}
 	const bool sky_read = scene != nullptr && p_render_data->environment.is_valid() && scene->environment_get_nextgi_read_sky_light(p_render_data->environment);
 	// Environment.nextgi_read_sky_light off keeps the sky out of the cache: misses read the
 	// background color, as they did before the sky term.
-	params.sky[3] = sky_radiance.is_valid() && sky_read ? 1.0f : 0.0f;
+	params.sky[3] = sky_radiance.is_valid() && sky_read ? sky_rad_scale : 0.0f;
 	const Vector3 forward = -p_render_data->scene_data->cam_transform.basis.get_column(2).normalized();
 	if (!has_previous_camera || camera.distance_to(previous_camera_position) > 16.0f || forward.dot(previous_camera_forward) < 0.5f || previous_sky_read != sky_read) {
 		volume_history_valid = false;

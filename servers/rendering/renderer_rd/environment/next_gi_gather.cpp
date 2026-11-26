@@ -732,6 +732,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	}
 	RID sky_tex = dummy_color;
 	uint32_t sky_enabled = 0;
+	float sky_energy = 1.0f;
 	Color ambient(0, 0, 0, 1);
 	if (p_render_data->environment.is_valid()) {
 		ambient = scene->environment_get_ambient_light(p_render_data->environment);
@@ -743,6 +744,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 			if (radiance.is_valid()) {
 				sky_tex = radiance;
 				sky_enabled = 1;
+				// sky_get_radiance_texture_2d already bakes bg_energy_multiplier * baked_exposure.
+				sky_energy = 1.0f / MAX(sky_rd->sky_get_baked_exposure(sky), 1e-4f);
 			}
 		}
 	}
@@ -767,7 +770,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.ambient_color[0] = ambient.r;
 	params.ambient_color[1] = ambient.g;
 	params.ambient_color[2] = ambient.b;
-	params.ambient_color[3] = 1.0f;
+	params.ambient_color[3] = sky_energy;
 	params.screen_jitter[0] = float(MAX(screen.x, 1));
 	params.screen_jitter[1] = float(MAX(screen.y, 1));
 	params.screen_jitter[2] = float(frame % 256) / 256.0f;
@@ -844,17 +847,24 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	RID normal_roughness = front_layer ? front_normal_roughness : dummy_color;
 	RID velocity = dummy_color;
 	last_normal_roughness = front_layer ? front_normal_roughness : RID();
-	if (!front_layer && rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
-		normal_roughness = rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness"));
-		velocity = rb->get_velocity_buffer(false);
-		params.velocity_enabled = velocity.is_valid() && normal_roughness.is_valid() ? 1u : 0u;
-		last_normal_roughness = normal_roughness;
-	} else {
-		params.velocity_enabled = 0;
+	if (!front_layer && rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness"))) {
+		const RID nr = rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness"));
+		if (nr.is_valid()) {
+			normal_roughness = nr;
+			last_normal_roughness = nr;
+		}
 	}
+	if (!front_layer && rb->has_velocity_buffer(false)) {
+		const RID vel = rb->get_velocity_buffer(false);
+		if (vel.is_valid()) {
+			velocity = vel;
+		}
+	}
+	const bool have_velocity = !front_layer && velocity != dummy_color;
+	params.velocity_enabled = (have_velocity && last_normal_roughness.is_valid()) ? 1u : 0u;
 	last_depth = depth;
 	last_inv_projection = view.inv_projection; // GodotNext: nextgi_view_math
-	last_velocity = front_layer ? RID() : (velocity.is_valid() ? velocity : RID());
+	last_velocity = have_velocity ? velocity : RID();
 	params.front_layer = front_layer ? 1u : 0u;
 	params.fog_pad[0] = 0u;
 	params.fog_pad[1] = 0u;
