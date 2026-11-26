@@ -341,6 +341,20 @@ int32_t RenderingDeviceGraph::_add_to_write_list(int32_t p_command_index, Rect2i
 	return next_index;
 }
 
+int32_t RenderingDeviceGraph::_add_to_async_slice_list(int32_t p_command_index, Rect2i p_subresources, int32_t p_list_index) {
+	DEV_ASSERT(p_command_index < int32_t(command_count));
+	DEV_ASSERT(p_list_index < int32_t(async_slice_list_nodes.size()));
+
+	int32_t next_index = int32_t(async_slice_list_nodes.size());
+	async_slice_list_nodes.resize(next_index + 1);
+
+	RecordedSliceListNode &new_node = async_slice_list_nodes[next_index];
+	new_node.command_index = p_command_index;
+	new_node.next_list_index = p_list_index;
+	new_node.subresources = p_subresources;
+	return next_index;
+}
+
 // Ensures all commands are 8-byte aligned.
 #define GRAPH_ALIGN(x) (((x) + 7u) & 0xFFFFFFF8u)
 
@@ -952,20 +966,26 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 			search_tracker->read_full_command_list_index = _add_to_command_list(p_command_index, search_tracker->read_full_command_list_index);
 		}
 
-		// GodotNext: async_compute (#174). A texture barrier the async queue cannot run moves before the
-		// fork (BARRIER_SELECTION_ASYNC_FORK). That keeps the order only while its source access is on
-		// the main queue, which holds the first time an async command of the frame uses the resource
-		// (or any slice of it). A later one, such as a slice normalized back to its parent's layout
-		// after an earlier async list used the slice, makes the frame run on the main queue.
+		// GodotNext: async_compute (#174) & px_rd_async_multiview (#300). A texture barrier the async
+		// queue cannot run moves before the fork (BARRIER_SELECTION_ASYNC_FORK). That keeps the order
+		// while its source access on the barrier's subresources is still on the main queue. A barrier
+		// on one view's slice does not conflict when an earlier async command of the frame only used a
+		// disjoint slice of the same parent texture; a barrier whose subresources intersect an earlier
+		// async command's subresources (or a whole-resource async use) still falls back to main queue.
 		if (r_command->queue == QUEUE_ASYNC_COMPUTE && driver_textures_require_layout_transitions) {
-			const bool used_by_earlier_async_command = search_tracker->async_command_frame == tracking_frame && search_tracker->async_command_index != p_command_index;
-			// GodotNext: rd_readonly_depth (#301). A shared read-only depth transition moves to the
-			// fork just like any other unsupported async texture barrier.
-			if (used_by_earlier_async_command && (added_shared_read_transition || _async_fork_texture_barriers_added(r_command, async_normalization_start, async_transition_start))) {
+			const Rect2i parent_rect(search_tracker->texture_subresources.base_mipmap, search_tracker->texture_subresources.base_layer,
+					search_tracker->texture_subresources.mipmap_count, search_tracker->texture_subresources.layer_count);
+			// GodotNext: rd_readonly_depth (#301). A shared read-only depth transition covers the
+			// parent's subresources and moves to the fork like any unsupported async texture barrier.
+			const bool shared_read_conflict = added_shared_read_transition && _async_subresources_used_by_earlier_command(search_tracker, p_command_index, parent_rect);
+			if (shared_read_conflict || _async_fork_texture_barriers_conflict(search_tracker, p_command_index, r_command, async_normalization_start, async_transition_start)) {
 				async_fork_barrier_conflict = true;
 			}
-			search_tracker->async_command_frame = tracking_frame;
-			search_tracker->async_command_index = p_command_index;
+			if (resource_has_parent) {
+				search_tracker->async_slice_command_list_index = _add_to_async_slice_list(p_command_index, search_tracker_rect, search_tracker->async_slice_command_list_index);
+			} else {
+				search_tracker->async_full_command_index = p_command_index;
+			}
 		}
 	}
 }
@@ -1723,15 +1743,38 @@ static bool _async_queue_supports_texture_barrier(const RDD::TextureBarrier &p_b
 	return RenderingDeviceGraph::async_queue_supports_texture_layout(p_barrier.prev_layout) && RenderingDeviceGraph::async_queue_supports_texture_layout(p_barrier.next_layout);
 }
 
-bool RenderingDeviceGraph::_async_fork_texture_barriers_added(const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const {
-	for (int32_t j = p_normalization_start; j < p_command->normalization_barrier_count; j++) {
-		if (!_async_queue_supports_texture_barrier(command_normalization_barriers[p_command->normalization_barrier_index + j])) {
+bool RenderingDeviceGraph::_async_subresources_used_by_earlier_command(const ResourceTracker *p_search_tracker, int32_t p_command_index, const Rect2i &p_subresources) const {
+	if (p_search_tracker->async_full_command_index >= 0 && p_search_tracker->async_full_command_index != p_command_index) {
+		return true;
+	}
+	int32_t list_index = p_search_tracker->async_slice_command_list_index;
+	while (list_index >= 0) {
+		const RecordedSliceListNode &node = async_slice_list_nodes[list_index];
+		if (node.command_index != p_command_index && node.subresources.intersects(p_subresources)) {
 			return true;
+		}
+		list_index = node.next_list_index;
+	}
+	return false;
+}
+
+bool RenderingDeviceGraph::_async_fork_texture_barriers_conflict(const ResourceTracker *p_search_tracker, int32_t p_command_index, const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const {
+	for (int32_t j = p_normalization_start; j < p_command->normalization_barrier_count; j++) {
+		const RDD::TextureBarrier &barrier = command_normalization_barriers[p_command->normalization_barrier_index + j];
+		if (!_async_queue_supports_texture_barrier(barrier)) {
+			const Rect2i barrier_rect(barrier.subresources.base_mipmap, barrier.subresources.base_layer, barrier.subresources.mipmap_count, barrier.subresources.layer_count);
+			if (_async_subresources_used_by_earlier_command(p_search_tracker, p_command_index, barrier_rect)) {
+				return true;
+			}
 		}
 	}
 	for (int32_t j = p_transition_start; j < p_command->transition_barrier_count; j++) {
-		if (!_async_queue_supports_texture_barrier(command_transition_barriers[p_command->transition_barrier_index + j])) {
-			return true;
+		const RDD::TextureBarrier &barrier = command_transition_barriers[p_command->transition_barrier_index + j];
+		if (!_async_queue_supports_texture_barrier(barrier)) {
+			const Rect2i barrier_rect(barrier.subresources.base_mipmap, barrier.subresources.base_layer, barrier.subresources.mipmap_count, barrier.subresources.layer_count);
+			if (_async_subresources_used_by_earlier_command(p_search_tracker, p_command_index, barrier_rect)) {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -2269,6 +2312,8 @@ void RenderingDeviceGraph::begin() {
 	command_list_nodes.clear();
 	read_slice_list_nodes.clear();
 	write_slice_list_nodes.clear();
+	// GodotNext: px_rd_async_multiview (#300).
+	async_slice_list_nodes.clear();
 	command_count = 0;
 	// GodotNext: async_compute (#174).
 	async_command_count = 0;

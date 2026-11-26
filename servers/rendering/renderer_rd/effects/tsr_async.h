@@ -123,9 +123,10 @@ struct TSRAsyncSchedule {
 static_assert(TSR_PASS_MAX == 10, "TSRAsyncSchedule::point lists one record point per pass.");
 
 // p_level is rendering/anti_aliasing/tsr/async_compute. p_async_available is
-// nextgi_tsr_async_available(): false without an active async queue, for a multiview (XR) viewport
-// and for every TSR viewport of an RD frame after the first one that used the queue; every level
-// then records exactly as level 0: every pass on the main queue, at the upscaler's place.
+// nextgi_tsr_async_available(): false without an active async queue and for every TSR viewport of
+// an RD frame after the first one that used the queue; every level then records exactly as level 0:
+// every pass on the main queue, at the upscaler's place. Multiview (XR) viewports follow the level
+// setting like single-view ones (#300, slice-aware fork barriers in RenderingDeviceGraph).
 // p_split_allowed is true when nothing between the motion-vector pass and the upscaler can change
 // the depth or velocity TSR reads (RenderForwardClustered: no MSAA resolve, no transparent surface
 // that writes depth, no compositor effect in between, no VoxelGI or SDFGI debug draw). Without it,
@@ -166,13 +167,11 @@ inline constexpr TSRAsyncSchedule nextgi_tsr_async_schedule(int64_t p_level, boo
 // - when one async part's consumer comes before another's producer, as when a second TSR viewport
 //   samples the first one's output or follows it through a shared shadow atlas. So only the first
 //   TSR viewport of each frame that uses the queue gets it: p_claimed_frame is the RD frame
-//   (get_frames_drawn()) of the last viewport that did;
-// - when an async list needs a layout transition before the fork on a texture whose other slice an
-//   earlier async list of the frame used (#174), as the second view of a multiview (XR) viewport
-//   does on the layered depth, velocity, color and TSR textures. So a viewport with more than one
-//   view (p_view_count) records as level 0.
+//   (get_frames_drawn()) of the last viewport that did.
+// GodotNext: px_rd_async_multiview (#300). With slice-aware fork barriers in RenderingDeviceGraph,
+// multiview (XR) viewports (p_view_count >= 1) use the async queue like single-view viewports.
 inline constexpr bool nextgi_tsr_async_available(bool p_async_active, uint32_t p_view_count, uint64_t p_rd_frame, uint64_t p_claimed_frame) {
-	return p_async_active && p_view_count == 1 && p_rd_frame != p_claimed_frame;
+	return p_async_active && p_view_count > 0 && p_rd_frame != p_claimed_frame;
 }
 
 inline constexpr uint32_t nextgi_tsr_pass_bit(TSRPass p_pass) {

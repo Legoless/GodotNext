@@ -7953,16 +7953,17 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		alpha_depth_scan.add_surface(writes_depth, writes_stencil);
 	}
 
-	// GodotNext: pt_tsr_async_compute (#193) & rd_readonly_depth (#301). TSR's async schedule for
-	// this frame, from rendering/anti_aliasing/tsr/async_compute (UE's r.TSR.AsyncCompute levels).
-	// Without async compute (RD::is_async_compute_active()), in a multiview (XR) viewport, and in
+	// GodotNext: pt_tsr_async_compute (#193), rd_readonly_depth (#301) & px_rd_async_multiview (#300).
+	// TSR's async schedule for this frame, from rendering/anti_aliasing/tsr/async_compute (UE's
+	// r.TSR.AsyncCompute levels). Without async compute (RD::is_async_compute_active()), and in
 	// every TSR viewport of an RD frame after the first one that used it
-	// (nextgi_tsr_async_available()), every level records as level 0. At level 2, velocity dilation
-	// and parallax disocclusion record here on the async queue, as soon as the depth and velocity
-	// buffers are final, and the passes that read the scene color record at the upscaler's place
-	// below. The split needs the depth and velocity to stay as they are until then: no MSAA
-	// resolve, no transparent surface that writes depth, no compositor effect and no VoxelGI or
-	// SDFGI debug draw in between. Otherwise level 2 records as level 0. With read-only depth
+	// (nextgi_tsr_async_available()), every level records as level 0. Multiview (XR) viewports follow
+	// the level setting like single-view ones (#300, slice-aware fork barriers in RDG). At level 2,
+	// velocity dilation and parallax disocclusion record here on the async queue, as soon as the
+	// depth and velocity buffers are final, and the passes that read the scene color record at the
+	// upscaler's place below. The split needs the depth and velocity to stay as they are until then:
+	// no MSAA resolve, no transparent surface that writes depth, no compositor effect and no VoxelGI
+	// or SDFGI debug draw in between. Otherwise level 2 records as level 0. With read-only depth
 	// attachments (#301), the sky pass, SSS, specular merge, depth copy, and transparent pass (when
 	// no depth_draw_always or stencil-writing surface draws) share the depth buffer's read-only
 	// layout with the async passes, so the fork-join window spans them and closes at TSR's shading
@@ -8027,8 +8028,16 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		params.camera_transform = cur_transform;
 		// Wall-clock, not time_step: the flicker clock must advance while Engine.time_scale is 0.
 		params.delta_time = float(RSG::frame_step_unscaled);
-		// Thin-geometry detection is opt-in and read live.
-		params.thin_geometry = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/tsr/thin_geometry_detection");
+		// GodotNext: pt_tsr_stability (#198, LQ11, plan v3.9.23). Thin-geometry detection defaults
+		// off, is read live, and turns on automatically when Nanite foliage is active (matching UE 5.9).
+		const bool thin_setting = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/tsr/thin_geometry_detection");
+		const bool nanite_foliage_active = nextgi_tsr_nanite_foliage_active(
+				using_nextgeo,
+				GLOBAL_GET_CACHED(bool, "rendering/nextgeo/experimental/voxels"),
+				RendererVirtualMeshStorage::are_assemblies_enabled(),
+				RendererVirtualMeshStorage::is_foliage_wind_enabled(),
+				RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->is_dynamic_wind_active());
+		params.thin_geometry = nextgi_tsr_thin_geometry_enabled(thin_setting, nanite_foliage_active);
 		// The pass visualizer draws while the viewport's debug draw is DEBUG_DRAW_TSR; the setting picks the pass.
 		params.debug_view = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_TSR ? int32_t(nextgi_tsr_debug_view_from_setting(GLOBAL_GET_CACHED(int64_t, "rendering/anti_aliasing/tsr/debug_view"))) : -1;
 		params.async_schedule = tsr_async_schedule;

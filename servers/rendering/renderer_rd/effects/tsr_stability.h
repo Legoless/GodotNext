@@ -45,9 +45,24 @@ enum TSRFeature : uint32_t {
 	TSR_FEATURE_ALL = 0xFu,
 };
 
+// GodotNext: pt_tsr_stability (#198, LQ11, plan v3.9.21/v3.9.23). Whether Nanite foliage is active
+// in the current scene: NextGeo is active and at least one Nanite foliage feature (voxels,
+// assemblies, foliage wind, or dynamic wind) is enabled.
+inline constexpr bool nextgi_tsr_nanite_foliage_active(bool p_using_nextgeo, bool p_voxels_enabled, bool p_assemblies_enabled, bool p_foliage_wind_enabled, bool p_dynamic_wind_active) {
+	return p_using_nextgeo && (p_voxels_enabled || p_assemblies_enabled || p_foliage_wind_enabled || p_dynamic_wind_active);
+}
+
+// GodotNext: pt_tsr_stability (#198, LQ11, plan v3.9.23). Thin-geometry detection is off by
+// default (rendering/anti_aliasing/tsr/thin_geometry_detection) and turns on automatically when
+// Nanite foliage is active, matching UE 5.9.
+inline constexpr bool nextgi_tsr_thin_geometry_enabled(bool p_setting_enabled, bool p_nanite_foliage_active) {
+	return p_setting_enabled || p_nanite_foliage_active;
+}
+
 // The stability features in effect: resurrection, reprojection field and flicker
 // analysis follow TSR_PRESETS[q]; thin geometry follows its project setting
-// (rendering/anti_aliasing/tsr/thin_geometry_detection) at every preset.
+// (rendering/anti_aliasing/tsr/thin_geometry_detection) or auto-enables when
+// Nanite foliage is active (LQ11, plan v3.9.23) at every preset.
 inline constexpr uint32_t nextgi_tsr_feature_mask(RSE::ViewportTSRQuality p_quality, bool p_thin_geometry) {
 	const TSRPreset &preset = TSR_PRESETS[CLAMP(int(p_quality), 0, int(RSE::VIEWPORT_TSR_QUALITY_MAX) - 1)];
 	uint32_t features = 0;

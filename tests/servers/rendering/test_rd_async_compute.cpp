@@ -2219,4 +2219,117 @@ TEST_CASE("[RD][Graph] cross-frame switch between read-only depth attachment and
 	}
 }
 
+// GodotNext: px_rd_async_multiview (#300). Slice-aware fork barriers let disjoint slices of the
+// same parent texture (such as the two views of an XR multiview viewport) each emit their own
+// pre-fork layout transitions without triggering async_fork_barrier_conflict, while any barrier
+// whose subresources overlap an earlier async command still falls back to the main queue.
+TEST_CASE("[RD][AsyncCompute][Graph] slice-aware fork barriers keep disjoint slices async and fall back on overlap") {
+	auto layer_slice_tracker = [](RDG::ResourceTracker *p_parent, uint64_t p_id, uint32_t p_layer) {
+		RDG::ResourceTracker *slice = texture_tracker(p_id, 1);
+		slice->parent = p_parent;
+		slice->texture_subresources.aspect = p_parent->texture_subresources.aspect;
+		slice->texture_subresources.base_layer = p_layer;
+		slice->texture_subresources.layer_count = 1;
+		slice->texture_slice_or_dirty_rect = Rect2i(0, p_layer, 1, 1);
+		return slice;
+	};
+
+	// Case 1: Two async lists read two disjoint layers (view 0 and view 1) of a 2-layer color
+	// attachment produced on the main queue. Both slice transitions COLOR_ATTACHMENT -> SHADER_READ
+	// move before the fork cleanly with zero conflict, keeping the frame on the async queue.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *color = texture_tracker(10, 1);
+		color->texture_subresources.layer_count = 2;
+		color->texture_slice_or_dirty_rect = Rect2i(0, 0, 1, 2);
+		RDG::ResourceTracker *layer0 = layer_slice_tracker(color, 11, 0);
+		RDG::ResourceTracker *layer1 = layer_slice_tracker(color, 12, 1);
+		RDG::ResourceTracker *out0 = texture_tracker(13, 1);
+		RDG::ResourceTracker *out1 = texture_tracker(14, 1);
+		RDG::ResourceTracker *trackers[] = { layer0, layer1, color, out0, out1 };
+
+		add_color_pass(graph, color);
+		add_texture_compute(graph, layer0, out0, RDG::QUEUE_ASYNC_COMPUTE);
+		add_texture_compute(graph, layer1, out1, RDG::QUEUE_ASYNC_COMPUTE);
+
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK(plan.active);
+		CHECK_EQ(plan.async_count, 2u);
+		CHECK_EQ(plan.fork_level, 1u);
+
+		RDG::AsyncBarriers fork;
+		graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan, fork);
+		CHECK_EQ(count_texture_barriers(fork.texture_barriers, 11, RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+		CHECK_EQ(count_texture_barriers(fork.texture_barriers, 12, RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+
+		free_trackers(trackers, 5);
+	}
+
+	// Case 2: Disjoint slices on the async queue, followed by a third async list reading the WHOLE
+	// texture (which normalizes the async-used slices back to parent's COLOR_ATTACHMENT layout).
+	// The normalization barrier intersects the slices already used on the async queue, so the frame
+	// MUST fall back to the main queue.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *color = texture_tracker(20, 1);
+		color->texture_subresources.layer_count = 2;
+		color->texture_slice_or_dirty_rect = Rect2i(0, 0, 1, 2);
+		RDG::ResourceTracker *layer0 = layer_slice_tracker(color, 21, 0);
+		RDG::ResourceTracker *layer1 = layer_slice_tracker(color, 22, 1);
+		RDG::ResourceTracker *out0 = texture_tracker(23, 1);
+		RDG::ResourceTracker *out1 = texture_tracker(24, 1);
+		RDG::ResourceTracker *out2 = texture_tracker(25, 1);
+		RDG::ResourceTracker *trackers[] = { layer0, layer1, color, out0, out1, out2 };
+
+		add_color_pass(graph, color);
+		add_texture_compute(graph, layer0, out0, RDG::QUEUE_ASYNC_COMPUTE);
+		add_texture_compute(graph, layer1, out1, RDG::QUEUE_ASYNC_COMPUTE);
+		add_texture_compute(graph, color, out2, RDG::QUEUE_ASYNC_COMPUTE);
+
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK_EQ(plan.async_count, 3u);
+		CHECK_FALSE(plan.active);
+
+		free_trackers(trackers, 6);
+	}
+
+	// Case 3: Overlapping mip/layer slice on the same resource — async list 1 uses layer 0, async
+	// list 2 uses a slice covering layers 0..1 (reverts dirty layer 0 back to parent layout).
+	// That normalization intersects layer 0's earlier async use, so the frame MUST fall back.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *color = texture_tracker(30, 1);
+		color->texture_subresources.layer_count = 2;
+		color->texture_slice_or_dirty_rect = Rect2i(0, 0, 1, 2);
+		RDG::ResourceTracker *layer0 = layer_slice_tracker(color, 31, 0);
+		RDG::ResourceTracker *both = texture_tracker(32, 1);
+		both->parent = color;
+		both->texture_subresources.base_layer = 0;
+		both->texture_subresources.layer_count = 2;
+		both->texture_slice_or_dirty_rect = Rect2i(0, 0, 1, 2);
+		RDG::ResourceTracker *out0 = texture_tracker(33, 1);
+		RDG::ResourceTracker *out1 = texture_tracker(34, 1);
+		RDG::ResourceTracker *trackers[] = { layer0, both, color, out0, out1 };
+
+		add_color_pass(graph, color);
+		add_texture_compute(graph, layer0, out0, RDG::QUEUE_ASYNC_COMPUTE);
+		add_texture_compute(graph, both, out1, RDG::QUEUE_ASYNC_COMPUTE);
+
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK_EQ(plan.async_count, 2u);
+		CHECK_FALSE(plan.active);
+
+		free_trackers(trackers, 5);
+	}
+}
+
 #endif // RD_ENABLED

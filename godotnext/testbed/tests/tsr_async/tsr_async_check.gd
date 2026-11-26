@@ -30,10 +30,9 @@ extends Node3D
 ##   an RD frame uses the async queue, so the frame still forks once and never falls back.
 ## - --xr: Upscaler Torture renders in a TSR SubViewport with use_xr through the MobileVR interface
 ##   (two views, multiview); the main viewport renders no 3D. The image check reads that viewport.
-##   A multiview viewport records every level as level 0 (the render graph would put the whole frame
-##   back on the main queue for the second view's texture slices, #174), so no level submits an async
-##   frame or falls back. Needs xr/shaders/enabled=true in override.cfg (the multiview shader
-##   variants), as any XR project.
+##   With slice-aware fork barriers (#300), multiview viewports follow the level setting like
+##   single-view ones, so levels 2 and 3 fork one async frame per rendered frame with 0 fallbacks.
+##   Needs xr/shaders/enabled=true in override.cfg (the multiview shader variants), as any XR project.
 ##
 ## Run it as a validation job, e.g. on the Linux L4 machine:
 ##   godot --path . --rendering-driver vulkan --gpu-validation --gpu-abort --resolution 1280x720 \
@@ -195,8 +194,8 @@ func _run(preset_name: String, levels: PackedInt32Array) -> void:
 		_finish(preset_name, levels, false, {}, ["no RenderingDevice"])
 		return
 	var active := bool(ProjectSettings.get_setting(RD_SETTING, false)) and rd.has_feature(RenderingDevice.SUPPORTS_ASYNC_COMPUTE)
-	# TSR uses the async queue only in single-view viewports.
-	var tsr_async := active and not _xr
+	# GodotNext: px_rd_async_multiview (#300). Multiview (XR) viewports now use the async queue like single-view ones.
+	var tsr_async := active
 	ProjectSettings.set_setting(LEVEL_SETTING, levels[0])
 	for i in WARMUP_FRAMES:
 		await RenderingServer.frame_post_draw

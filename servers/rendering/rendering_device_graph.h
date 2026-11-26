@@ -249,10 +249,11 @@ public:
 		Size2i texture_size;
 		uint32_t texture_usage = 0;
 		int32_t texture_slice_command_index = -1;
-		// GodotNext: async_compute (#174). The frame and command of the last async compute list that
-		// used the resource. A slice records it on its parent.
-		int64_t async_command_frame = -1;
-		int32_t async_command_index = -1;
+		// GodotNext: async_compute (#174) & px_rd_async_multiview (#300). Async compute lists of the
+		// current tracking frame that used this resource (whole resource or per-slice rects). A slice
+		// records on its parent; both reset each frame in reset_if_outdated().
+		int32_t async_full_command_index = -1;
+		int32_t async_slice_command_list_index = -1;
 		// GodotNext: rd_readonly_depth (#301). Active entry in shared_read_transitions for this frame,
 		// or -1 when the resource has not entered the shared read-only depth layout since its last write.
 		int32_t shared_read_transition_index = -1;
@@ -282,6 +283,9 @@ public:
 				raytracing_list_index = -1;
 				texture_slice_command_index = -1;
 				write_command_list_enabled = false;
+				// GodotNext: px_rd_async_multiview (#300).
+				async_full_command_index = -1;
+				async_slice_command_list_index = -1;
 				// GodotNext: rd_readonly_depth (#301).
 				shared_read_transition_index = -1;
 			}
@@ -1175,6 +1179,8 @@ private:
 	LocalVector<RecordedCommandListNode> command_list_nodes;
 	LocalVector<RecordedSliceListNode> read_slice_list_nodes;
 	LocalVector<RecordedSliceListNode> write_slice_list_nodes;
+	// GodotNext: px_rd_async_multiview (#300). Per-frame async slice uses for slice-aware fork barriers.
+	LocalVector<RecordedSliceListNode> async_slice_list_nodes;
 	int32_t command_timestamp_index = -1;
 	int32_t command_synchronization_index = -1;
 	bool command_synchronization_pending = false;
@@ -1209,6 +1215,7 @@ private:
 	void _add_adjacent_command(int32_t p_previous_command_index, int32_t p_command_index, RecordedCommand *r_command);
 	int32_t _add_to_slice_read_list(int32_t p_command_index, Rect2i p_subresources, int32_t p_list_index);
 	int32_t _add_to_write_list(int32_t p_command_index, Rect2i p_subresources, int32_t p_list_index, bool p_partial_coverage);
+	int32_t _add_to_async_slice_list(int32_t p_command_index, Rect2i p_subresources, int32_t p_list_index);
 	RecordedCommand *_allocate_command(uint32_t p_command_size, int32_t &r_command_index);
 	DrawListInstruction *_allocate_draw_list_instruction(uint32_t p_instruction_size);
 	ComputeListInstruction *_allocate_compute_list_instruction(uint32_t p_instruction_size);
@@ -1244,7 +1251,8 @@ private:
 	// _gather_barriers_for_render_commands() fills barrier_group and returns false when it is empty.
 	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection = BARRIER_SELECTION_ALL);
 	bool _gather_barriers_for_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection);
-	bool _async_fork_texture_barriers_added(const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const;
+	bool _async_subresources_used_by_earlier_command(const ResourceTracker *p_search_tracker, int32_t p_command_index, const Rect2i &p_subresources) const;
+	bool _async_fork_texture_barriers_conflict(const ResourceTracker *p_search_tracker, int32_t p_command_index, const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const;
 	// GodotNext: rd_readonly_depth (#301). Places each shared read-only depth transition at the
 	// fork (main queue, before fork_level) or at the earliest main-queue reader's level.
 	void _resolve_shared_read_transitions(const LocalVector<RecordedCommandSort> &p_commands_sorted, const AsyncPlan &p_plan);

@@ -846,6 +846,23 @@ TEST_CASE("[Upscalers][TSR] Stability feature mask follows TSR_PRESETS and the t
 	const bool thin_setting = bool(ps->get_setting("rendering/anti_aliasing/tsr/thin_geometry_detection"));
 	CHECK_FALSE(thin_setting);
 	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_LOW, thin_setting), 0u);
+
+	// LQ11 (plan v3.9.23): thin-geometry detection stays off by default when Nanite foliage is
+	// inactive, and turns on automatically when NextGeo + any Nanite foliage feature is active.
+	CHECK_FALSE(nextgi_tsr_nanite_foliage_active(false, false, false, false, false));
+	CHECK_FALSE(nextgi_tsr_nanite_foliage_active(false, true, true, true, true));
+	CHECK_FALSE(nextgi_tsr_nanite_foliage_active(true, false, false, false, false));
+	CHECK(nextgi_tsr_nanite_foliage_active(true, true, false, false, false));
+	CHECK(nextgi_tsr_nanite_foliage_active(true, false, true, false, false));
+	CHECK(nextgi_tsr_nanite_foliage_active(true, false, false, true, false));
+	CHECK(nextgi_tsr_nanite_foliage_active(true, false, false, false, true));
+
+	CHECK_FALSE(nextgi_tsr_thin_geometry_enabled(false, false));
+	CHECK(nextgi_tsr_thin_geometry_enabled(true, false));
+	CHECK(nextgi_tsr_thin_geometry_enabled(false, true));
+	CHECK(nextgi_tsr_thin_geometry_enabled(true, true));
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_LOW, nextgi_tsr_thin_geometry_enabled(false, nextgi_tsr_nanite_foliage_active(true, true, false, false, false))), uint32_t(TSR_FEATURE_THIN_GEOMETRY));
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_HIGH, nextgi_tsr_thin_geometry_enabled(false, nextgi_tsr_nanite_foliage_active(true, false, false, true, false))), uint32_t(TSR_FEATURE_ALL));
 }
 
 TEST_CASE("[Upscalers][TSR] Stability pass plan leaves the core passes alone with no feature") {
@@ -1666,13 +1683,17 @@ TEST_CASE("[Upscalers][TSR] Async compute setting and the passes each level move
 	CHECK_EQ(nextgi_tsr_async_schedule(9, true, true).level, uint32_t(TSR_ASYNC_ALL));
 	CHECK(nextgi_tsr_point_passes(nextgi_tsr_async_schedule(9, true, true), TSR_RECORD_UPSCALE, ALL_PASSES).runs_async(TSR_PASS_RESOLVE));
 
-	// Only the first single-view TSR viewport of an RD frame that uses the async queue gets it.
+	// Only the first TSR viewport of an RD frame that uses the async queue gets it; with #300's
+	// slice-aware fork barriers, multiview (XR) viewports (view_count >= 1) follow the same rule.
 	CHECK(nextgi_tsr_async_available(true, 1, 7, UINT64_MAX));
 	CHECK(nextgi_tsr_async_available(true, 1, 7, 6));
 	CHECK_FALSE(nextgi_tsr_async_available(true, 1, 7, 7));
 	CHECK_FALSE(nextgi_tsr_async_available(false, 1, 7, 6));
-	CHECK_FALSE(nextgi_tsr_async_available(true, 2, 7, 6));
-	CHECK_FALSE(nextgi_tsr_async_available(true, 2, 7, UINT64_MAX));
+	CHECK(nextgi_tsr_async_available(true, 2, 7, 6));
+	CHECK(nextgi_tsr_async_available(true, 2, 7, UINT64_MAX));
+	CHECK_FALSE(nextgi_tsr_async_available(true, 2, 7, 7));
+	CHECK_FALSE(nextgi_tsr_async_available(false, 2, 7, UINT64_MAX));
+	CHECK_FALSE(nextgi_tsr_async_available(true, 0, 7, UINT64_MAX));
 }
 
 TEST_CASE("[Upscalers][DynRes] 16-bucket table, project settings defaults, and scale_range intersection") {
