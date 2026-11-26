@@ -80,6 +80,7 @@ cat >"$override" <<EOF
 
 global_illumination/nextgi/enabled=$enabled_value
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt_value
 EOF
 
 # pipefail makes the pipeline's status Godot's when Godot fails.

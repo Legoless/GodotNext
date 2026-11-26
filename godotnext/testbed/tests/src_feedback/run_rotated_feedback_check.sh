@@ -65,6 +65,7 @@ cat >"$override" <<CFG
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt
 global_illumination/nextgi/debug/deny_ray_query=$deny
 global_illumination/nextgi/quality=2
 CFG

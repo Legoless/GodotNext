@@ -64,6 +64,7 @@ shaders/enabled=true
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt
 CFG
 
 set +e

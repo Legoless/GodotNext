@@ -2292,6 +2292,48 @@ TEST_CASE("[NextGI] SRC cards: an occluded hollow room splits interior depth lay
 	CHECK(has_floor);
 }
 
+TEST_CASE("[NextGI] SRC cards: stepped colonnade roof stays on outer +Y card so inner +Y card captures the floor (#29)") {
+	// Concave courtyard geometry: 16x16 floor at y = 0, outer walls, building ring roof at y = 6.3,
+	// and an unoccluded 2 m colonnade terrace at y = 2.3 (below the 2-means midpoint ~3.1 and
+	// ~20% of the lower +Y area). The visibility-based depth split must keep the unoccluded y = 2.3
+	// colonnade roof on the outer +Y card so the inner +Y card places its camera below y = 1.0 to
+	// capture the occluded floor underneath it.
+	SRCTestMesh mesh;
+	mesh.add_box(Vector3(0.0f, -0.15f, 0.0f), Vector3(8.0f, 0.15f, 8.0f));
+	// Four outer perimeter walls so +/-X and +/-Z clusters remain above merge_area.
+	mesh.add_box(Vector3(0.0f, 3.0f, -7.85f), Vector3(8.0f, 3.0f, 0.15f));
+	mesh.add_box(Vector3(0.0f, 3.0f, 7.85f), Vector3(8.0f, 3.0f, 0.15f));
+	mesh.add_box(Vector3(-7.85f, 3.0f, 0.0f), Vector3(0.15f, 3.0f, 7.7f));
+	mesh.add_box(Vector3(7.85f, 3.0f, 0.0f), Vector3(0.15f, 3.0f, 7.7f));
+	// Building ring roof at y = 6.0..6.3.
+	mesh.add_box(Vector3(0.0f, 6.15f, -6.0f), Vector3(8.0f, 0.15f, 2.0f));
+	mesh.add_box(Vector3(0.0f, 6.15f, 6.0f), Vector3(8.0f, 0.15f, 2.0f));
+	mesh.add_box(Vector3(-6.0f, 6.15f, 0.0f), Vector3(2.0f, 0.15f, 4.0f));
+	mesh.add_box(Vector3(6.0f, 6.15f, 0.0f), Vector3(2.0f, 0.15f, 4.0f));
+	// Unoccluded colonnade terrace ring at y = 2.0..2.3.
+	mesh.add_box(Vector3(0.0f, 2.15f, -3.0f), Vector3(4.0f, 0.15f, 1.0f));
+	mesh.add_box(Vector3(0.0f, 2.15f, 3.0f), Vector3(4.0f, 0.15f, 1.0f));
+	mesh.add_box(Vector3(-3.0f, 2.15f, 0.0f), Vector3(1.0f, 0.15f, 4.0f));
+	mesh.add_box(Vector3(3.0f, 2.15f, 0.0f), Vector3(1.0f, 0.15f, 4.0f));
+
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	bool has_outer_roof = false;
+	bool has_inner_floor_below_colonnade = false;
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		if (src_vectors_equal(card.axis_n, Vector3(0, 1, 0))) {
+			if (card.origin.y > 6.0f) {
+				has_outer_roof = true;
+			} else if (card.origin.y > 0.0f && card.origin.y < 1.0f) {
+				has_inner_floor_below_colonnade = true;
+			}
+		}
+	}
+	CHECK(has_outer_roof);
+	CHECK(has_inner_floor_below_colonnade);
+}
+
 TEST_CASE("[NextGI] SRC cards: a curved single-layer dome does not false-split its +Y card") {
 	// Shallow smooth parabolic dome on top of a box (normals stay near +Y, heightfield single-valued):
 	// the 32x32 exact depth rasterizer must see zero front-layer occlusion and keep <= 6 cards.

@@ -70,6 +70,7 @@ cat >"$override" <<EOF
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt_value
 global_illumination/nextgi/debug/read_page_radiance=$probes
 global_illumination/nextgi/debug/read_shadow_mask=$shadow_mask
 global_illumination/nextgi/debug/deny_ray_query=$deny

@@ -24,8 +24,9 @@ _METRICS_DIR = Path(__file__).resolve().parents[1]
 
 # Unmasked outputs of the frozen metrics on the captures below, recorded with the metrics as #14
 # and #95 left them (before the mask option), on x86-64 Linux. The keys and every non-float value
-# must match exactly; floats within 1e-6, since FLIP's last digits can differ on another CPU. The
-# byte-for-byte check compares each command's output with the frozen function run in-process.
+# must match exactly; floats within rel=1e-5 / abs=1e-6, since float32 FLIP's last digits can differ
+# across CPUs (for example x86-64 SSE vs ARM64 NEON FMA). The byte-for-byte check compares each
+# command's output with the frozen function run in-process.
 _GOLDEN_Q8_CLI = (
     '{"details": {"frame_count_ok": true}, "metric": "Q8", "pass": false, "threshold": 0.015, '
     '"value": 0.016272419341223185, "values": {"frames": 64, "max_relative_sigma": 0.024068991468624592, '
@@ -108,7 +109,7 @@ def _run(*args: str) -> tuple[int, str]:
 
 def _close(actual: object, expected: object) -> None:
     if isinstance(expected, float):
-        assert isinstance(actual, float) and actual == pytest.approx(expected, rel=1e-6)
+        assert isinstance(actual, float) and actual == pytest.approx(expected, rel=1e-5, abs=1e-6)
     elif isinstance(expected, dict):
         assert isinstance(actual, dict) and set(actual) == set(expected)
         for key, value in expected.items():
@@ -187,7 +188,7 @@ def test_mask_scores_match_the_frozen_per_mask_values(tmp_path: Path) -> None:
     code, text = _run("-m", "godotnext_metrics", "q19", "--in", str(test_dir), "--ref", str(ref_dir), "--json")
     payload = json.loads(text)
     assert code == 0
-    assert payload["values"]["per_mask"] == {"thin": pytest.approx(_GOLDEN_Q19_CLI_CMASK_THIN, rel=1e-6)}
+    assert payload["values"]["per_mask"] == {"thin": pytest.approx(_GOLDEN_Q19_CLI_CMASK_THIN, rel=1e-5, abs=1e-6)}
     assert payload["details"]["mask_pixels"] == {"thin": {"frames": 64, "mean": 48.0, "min": 48}}
     script = str(_METRICS_DIR / "q19_upscaler_flip.py")
     code, text = _run(
@@ -197,8 +198,8 @@ def test_mask_scores_match_the_frozen_per_mask_values(tmp_path: Path) -> None:
     )
     payload = json.loads(text)
     assert code == 0
-    assert payload["values"]["per_mask"] == {"thin": pytest.approx(_GOLDEN_Q19_SCRIPT_MASK_THIN, rel=1e-6)}
-    assert payload["values"]["mean"] == pytest.approx(json.loads(_GOLDEN_Q19_SCRIPT_MOVING)["values"]["mean"], rel=1e-6)
+    assert payload["values"]["per_mask"] == {"thin": pytest.approx(_GOLDEN_Q19_SCRIPT_MASK_THIN, rel=1e-5, abs=1e-6)}
+    assert payload["values"]["mean"] == pytest.approx(json.loads(_GOLDEN_Q19_SCRIPT_MOVING)["values"]["mean"], rel=1e-5, abs=1e-6)
 
 
 def _flip_frames(count: int) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:

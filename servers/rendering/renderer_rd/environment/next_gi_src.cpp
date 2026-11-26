@@ -256,9 +256,9 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 	struct DepthSplitCandidate {
 		uint32_t cluster = UINT32_MAX;
 		uint32_t depth = UINT32_MAX;
-		real_t split_pn = 0.0;
-		real_t outer_n_min = 0.0;
+		real_t outer_n_min = Math::INF;
 		float occluded_area = 0.0f;
+		LocalVector<uint32_t> inner_tris;
 	};
 	auto cluster_basis = [](const Vector3 &p_n, Vector3 &r_u, Vector3 &r_v) {
 		int reference_axis = 0;
@@ -355,51 +355,74 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 				c_outer = sum_out / area_out;
 			}
 			const real_t split_pn = (c_inner + c_outer) * 0.5;
-			float inner_area = 0.0f;
-			float outer_area = 0.0f;
-			real_t inner_n_max = -Math::INF;
-			real_t outer_n_max = -Math::INF;
-			real_t outer_n_min = Math::INF;
-			// 32x32 exact 2D triangle depth buffer of the outer layer so curved/convex meshes
-			// (such as spheres or displaced rocks) never false-positive from coarse AABB overlap,
-			// while genuinely occluded interior architectural walls split cleanly.
+			// 32x32 exact 2D front-depth buffer over the entire cluster so:
+			// (1) curved/convex single-layer meshes never false-positive from coarse AABB overlap, and
+			// (2) unoccluded stepped foreground tiers (such as a colonnade roof inside a courtyard
+			//     ring whose outer roof is higher) stay on the outer card rather than falling into the
+			//     inner card and occluding the floor beneath them.
 			constexpr int OCC_RES = 32;
-			real_t outer_depth[OCC_RES * OCC_RES];
+			real_t front_depth[OCC_RES * OCC_RES];
 			for (int oi = 0; oi < OCC_RES * OCC_RES; oi++) {
-				outer_depth[oi] = -Math::INF;
+				front_depth[oi] = -Math::INF;
 			}
+			auto project_tri_2d = [&](uint32_t p_t, real_t &r_x0, real_t &r_y0, real_t &r_x1, real_t &r_y1, real_t &r_x2, real_t &r_y2, real_t &r_d0, real_t &r_d1, real_t &r_d2) {
+				const Vector3 p0 = position(triangles[p_t].index[0]);
+				const Vector3 p1 = position(triangles[p_t].index[1]);
+				const Vector3 p2 = position(triangles[p_t].index[2]);
+				r_d0 = p0.dot(n);
+				r_d1 = p1.dot(n);
+				r_d2 = p2.dot(n);
+				r_x0 = ((p0.dot(u) - u_min) / u_span) * real_t(OCC_RES);
+				r_y0 = ((p0.dot(v) - v_min) / v_span) * real_t(OCC_RES);
+				r_x1 = ((p1.dot(u) - u_min) / u_span) * real_t(OCC_RES);
+				r_y1 = ((p1.dot(v) - v_min) / v_span) * real_t(OCC_RES);
+				r_x2 = ((p2.dot(u) - u_min) / u_span) * real_t(OCC_RES);
+				r_y2 = ((p2.dot(v) - v_min) / v_span) * real_t(OCC_RES);
+			};
 			for (uint32_t t = 0; t < triangles.size(); t++) {
 				if (assignment[t] != c) {
 					continue;
 				}
-				const Vector3 p0 = position(triangles[t].index[0]);
-				const Vector3 p1 = position(triangles[t].index[1]);
-				const Vector3 p2 = position(triangles[t].index[2]);
-				const real_t pn = ((p0 + p1 + p2) * (real_t(1.0) / real_t(3.0))).dot(n);
-				const real_t d0 = p0.dot(n);
-				const real_t d1 = p1.dot(n);
-				const real_t d2 = p2.dot(n);
-				const real_t tri_n_max = MAX(d0, MAX(d1, d2));
-				const real_t tri_n_min = MIN(d0, MIN(d1, d2));
-				if (pn > split_pn) {
-					outer_area += triangles[t].area;
-					outer_n_max = MAX(outer_n_max, tri_n_max);
-					outer_n_min = MIN(outer_n_min, tri_n_min);
-					const real_t x0 = ((p0.dot(u) - u_min) / u_span) * real_t(OCC_RES);
-					const real_t y0 = ((p0.dot(v) - v_min) / v_span) * real_t(OCC_RES);
-					const real_t x1 = ((p1.dot(u) - u_min) / u_span) * real_t(OCC_RES);
-					const real_t y1 = ((p1.dot(v) - v_min) / v_span) * real_t(OCC_RES);
-					const real_t x2 = ((p2.dot(u) - u_min) / u_span) * real_t(OCC_RES);
-					const real_t y2 = ((p2.dot(v) - v_min) / v_span) * real_t(OCC_RES);
-					const real_t area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
-					if (Math::abs(area2) <= real_t(1e-8)) {
-						continue;
+				real_t x0, y0, x1, y1, x2, y2, d0, d1, d2;
+				project_tri_2d(t, x0, y0, x1, y1, x2, y2, d0, d1, d2);
+				const real_t area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+				if (Math::abs(area2) <= real_t(1e-8)) {
+					continue;
+				}
+				const real_t inv_area2 = real_t(1.0) / area2;
+				const int gx0 = CLAMP(int(Math::floor(MIN(x0, MIN(x1, x2)))), 0, OCC_RES - 1);
+				const int gx1 = CLAMP(int(Math::floor(MAX(x0, MAX(x1, x2)))), 0, OCC_RES - 1);
+				const int gy0 = CLAMP(int(Math::floor(MIN(y0, MIN(y1, y2)))), 0, OCC_RES - 1);
+				const int gy1 = CLAMP(int(Math::floor(MAX(y0, MAX(y1, y2)))), 0, OCC_RES - 1);
+				for (int gy = gy0; gy <= gy1; gy++) {
+					const real_t py = real_t(gy) + real_t(0.5);
+					for (int gx = gx0; gx <= gx1; gx++) {
+						const real_t px = real_t(gx) + real_t(0.5);
+						const real_t w0 = ((x1 - px) * (y2 - py) - (y1 - py) * (x2 - px)) * inv_area2;
+						const real_t w1 = ((x2 - px) * (y0 - py) - (y2 - py) * (x0 - px)) * inv_area2;
+						const real_t w2 = real_t(1.0) - w0 - w1;
+						if (w0 >= real_t(-1e-4) && w1 >= real_t(-1e-4) && w2 >= real_t(-1e-4)) {
+							const real_t depth = w0 * d0 + w1 * d1 + w2 * d2;
+							real_t &slot = front_depth[gy * OCC_RES + gx];
+							if (depth > slot) {
+								slot = depth;
+							}
+						}
 					}
+				}
+			}
+			auto is_tri_occluded = [&](uint32_t p_t) -> bool {
+				real_t x0, y0, x1, y1, x2, y2, d0, d1, d2;
+				project_tri_2d(p_t, x0, y0, x1, y1, x2, y2, d0, d1, d2);
+				const real_t area2 = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+				if (Math::abs(area2) > real_t(1e-8)) {
 					const real_t inv_area2 = real_t(1.0) / area2;
 					const int gx0 = CLAMP(int(Math::floor(MIN(x0, MIN(x1, x2)))), 0, OCC_RES - 1);
 					const int gx1 = CLAMP(int(Math::floor(MAX(x0, MAX(x1, x2)))), 0, OCC_RES - 1);
 					const int gy0 = CLAMP(int(Math::floor(MIN(y0, MIN(y1, y2)))), 0, OCC_RES - 1);
 					const int gy1 = CLAMP(int(Math::floor(MAX(y0, MAX(y1, y2)))), 0, OCC_RES - 1);
+					uint32_t total_cells = 0;
+					uint32_t occ_cells = 0;
 					for (int gy = gy0; gy <= gy1; gy++) {
 						const real_t py = real_t(gy) + real_t(0.5);
 						for (int gx = gx0; gx <= gx1; gx++) {
@@ -408,23 +431,33 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 							const real_t w1 = ((x2 - px) * (y0 - py) - (y2 - py) * (x0 - px)) * inv_area2;
 							const real_t w2 = real_t(1.0) - w0 - w1;
 							if (w0 >= real_t(-1e-4) && w1 >= real_t(-1e-4) && w2 >= real_t(-1e-4)) {
+								total_cells++;
 								const real_t depth = w0 * d0 + w1 * d1 + w2 * d2;
-								real_t &slot = outer_depth[gy * OCC_RES + gx];
-								if (depth > slot) {
-									slot = depth;
+								const real_t front_pn = front_depth[gy * OCC_RES + gx];
+								if (front_pn > -Math::INF && (front_pn - depth) >= min_depth_gap) {
+									occ_cells++;
 								}
 							}
 						}
 					}
-				} else {
-					inner_area += triangles[t].area;
-					inner_n_max = MAX(inner_n_max, tri_n_max);
+					if (total_cells > 0) {
+						return occ_cells * 4 >= total_cells;
+					}
 				}
-			}
-			if (inner_area < merge_area || outer_area < merge_area || (outer_n_max - inner_n_max) < min_depth_gap) {
-				continue;
-			}
-			float occluded_area = 0.0f;
+				const real_t cx = (x0 + x1 + x2) * (real_t(1.0) / real_t(3.0));
+				const real_t cy = (y0 + y1 + y2) * (real_t(1.0) / real_t(3.0));
+				const real_t cd = (d0 + d1 + d2) * (real_t(1.0) / real_t(3.0));
+				const int gx = CLAMP(int(Math::floor(cx)), 0, OCC_RES - 1);
+				const int gy = CLAMP(int(Math::floor(cy)), 0, OCC_RES - 1);
+				const real_t front_pn = front_depth[gy * OCC_RES + gx];
+				return front_pn > -Math::INF && (front_pn - cd) >= min_depth_gap;
+			};
+			float inner_area = 0.0f;
+			float outer_area = 0.0f;
+			real_t inner_n_max = -Math::INF;
+			real_t outer_n_max = -Math::INF;
+			LocalVector<uint32_t> inner_tris;
+			LocalVector<real_t> outer_tri_n_mins;
 			for (uint32_t t = 0; t < triangles.size(); t++) {
 				if (assignment[t] != c) {
 					continue;
@@ -432,25 +465,38 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 				const Vector3 p0 = position(triangles[t].index[0]);
 				const Vector3 p1 = position(triangles[t].index[1]);
 				const Vector3 p2 = position(triangles[t].index[2]);
-				const Vector3 centroid = (p0 + p1 + p2) * (real_t(1.0) / real_t(3.0));
-				const real_t c_pn = centroid.dot(n);
-				if (c_pn > split_pn) {
-					continue;
-				}
-				const int gx = CLAMP(int(Math::floor(((centroid.dot(u) - u_min) / u_span) * real_t(OCC_RES))), 0, OCC_RES - 1);
-				const int gy = CLAMP(int(Math::floor(((centroid.dot(v) - v_min) / v_span) * real_t(OCC_RES))), 0, OCC_RES - 1);
-				const real_t front_pn = outer_depth[gy * OCC_RES + gx];
-				if (front_pn > -Math::INF && (front_pn - c_pn) >= min_depth_gap) {
-					occluded_area += triangles[t].area;
+				const real_t d0 = p0.dot(n);
+				const real_t d1 = p1.dot(n);
+				const real_t d2 = p2.dot(n);
+				const real_t pn = (d0 + d1 + d2) * (real_t(1.0) / real_t(3.0));
+				const real_t tri_n_max = MAX(d0, MAX(d1, d2));
+				const real_t tri_n_min = MIN(d0, MIN(d1, d2));
+				if (pn <= split_pn && is_tri_occluded(t)) {
+					inner_area += triangles[t].area;
+					inner_n_max = MAX(inner_n_max, tri_n_max);
+					inner_tris.push_back(t);
+				} else {
+					outer_area += triangles[t].area;
+					outer_n_max = MAX(outer_n_max, tri_n_max);
+					outer_tri_n_mins.push_back(tri_n_min);
 				}
 			}
-			const bool better = best_split.cluster == UINT32_MAX || split_depth[c] < best_split.depth || (split_depth[c] == best_split.depth && occluded_area > best_split.occluded_area);
-			if (occluded_area >= inner_area * 0.25f && occluded_area >= merge_area && better) {
+			if (inner_area < merge_area || outer_area < merge_area || (outer_n_max - inner_n_max) < min_depth_gap) {
+				continue;
+			}
+			real_t outer_n_min = Math::INF;
+			for (real_t tn_min : outer_tri_n_mins) {
+				if (tn_min > inner_n_max) {
+					outer_n_min = MIN(outer_n_min, tn_min);
+				}
+			}
+			const bool better = best_split.cluster == UINT32_MAX || split_depth[c] < best_split.depth || (split_depth[c] == best_split.depth && inner_area > best_split.occluded_area);
+			if (better) {
 				best_split.cluster = c;
 				best_split.depth = split_depth[c];
-				best_split.split_pn = split_pn;
 				best_split.outer_n_min = outer_n_min;
-				best_split.occluded_area = occluded_area;
+				best_split.occluded_area = inner_area;
+				best_split.inner_tris = std::move(inner_tris);
 			}
 		}
 		if (best_split.cluster == UINT32_MAX) {
@@ -466,17 +512,8 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 		is_inner_split.push_back(true);
 		split_outer_n_min.push_back(best_split.outer_n_min);
 		split_depth.push_back(next_depth);
-		for (uint32_t t = 0; t < triangles.size(); t++) {
-			if (assignment[t] != src_c) {
-				continue;
-			}
-			const Vector3 p0 = position(triangles[t].index[0]);
-			const Vector3 p1 = position(triangles[t].index[1]);
-			const Vector3 p2 = position(triangles[t].index[2]);
-			const real_t pn = ((p0 + p1 + p2) * (real_t(1.0) / real_t(3.0))).dot(n);
-			if (pn <= best_split.split_pn) {
-				assignment[t] = dst_c;
-			}
+		for (uint32_t t : best_split.inner_tris) {
+			assignment[t] = dst_c;
 		}
 		alive_count++;
 	}

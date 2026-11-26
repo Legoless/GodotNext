@@ -61,6 +61,7 @@ run_pass() {
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt
 global_illumination/nextgi/quality=2
 global_illumination/nextgi/debug/deny_ray_query=$deny
 global_illumination/nextgi/debug/swrt_trace_readback=true
