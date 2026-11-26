@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_voxel_lighting.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_world_cache.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
@@ -897,6 +898,21 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	} else if (fresh_frames[0] == 0u && settle_sweeps_remaining > 0u) {
 		settle_sweeps_remaining--;
 		nextgi_wrc_mark_fresh(0xFu, fresh_frames);
+	}
+	// On SWRT, keep each clipmap level fresh while its initial voxel-lighting bricks are still
+	// filling so probes capture the shaded voxels before steady-state temporal blending (blend=0.1)
+	// resumes on that level.
+	if (swrt && next_gi->get_voxel_lighting() != nullptr) {
+		const NextGIVoxelLighting *vl = next_gi->get_voxel_lighting();
+		uint32_t swrt_fill_mask = 0u;
+		for (uint32_t level = 0; level < NEXTGI_WRC_LEVELS; level++) {
+			if (vl->pending_bricks_at_level(level) > 0u) {
+				swrt_fill_mask |= 1u << level;
+			}
+		}
+		if (swrt_fill_mask != 0u) {
+			nextgi_wrc_mark_fresh(swrt_fill_mask, fresh_frames);
+		}
 	}
 	params.fresh_levels = nextgi_wrc_fresh_mask(fresh_frames);
 	previous_origin = origin;

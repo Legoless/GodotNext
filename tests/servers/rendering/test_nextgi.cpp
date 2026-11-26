@@ -541,6 +541,8 @@ TEST_CASE("[NextGI] Dummy status agrees with the tier info, and counters stay ze
 		"rt_instance_cap",
 		"rt_dynamic_excluded",
 		"rt_blas_pending",
+		"blas_builds",
+		"compaction_copies",
 		"blas_bytes_compacted",
 		"blas_bytes_uncompacted",
 		"rt_arena_bytes",
@@ -570,7 +572,7 @@ TEST_CASE("[NextGI] Dummy status agrees with the tier info, and counters stay ze
 		"swrt_shadow_rays",
 		"swrt_mode",
 	};
-	CHECK_EQ(counters.size(), 36);
+	CHECK_EQ(counters.size(), 38);
 	for (const char *key : keys) {
 		CHECK(counters.has(key));
 		CHECK_EQ(int64_t(counters[key]), int64_t(0));

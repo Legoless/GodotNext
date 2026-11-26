@@ -5,7 +5,8 @@ Schema stays 1. These fields are extra keys. Q11 still reads ``columns`` and
 still drops line 1b by column name. This mapper instead tags whole frames.
 
 A frame is a line-1b frame when its counters report a BLAS build or a
-compaction copy, or when the summed line-1b timestamps are above zero.
+compaction copy; when those counters are absent from the row, it falls back
+to checking whether the summed line-1b timestamps are above zero.
 Steady-state percentiles use the other frames. Line 1b itself is summarized
 on the tagged frames. The p99 of those frames is the full GPU pass sum
 (not ``wall_ms``), compared with High total + line 1b when the device is
@@ -119,11 +120,20 @@ def _row_counters(row: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _has_counter_value(counters: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
+    for key in keys:
+        if key in counters and _as_float(counters[key]) is not None:
+            return True
+    return False
+
+
 def _is_line_1b(columns: Mapping[str, float], counters: Mapping[str, Any]) -> bool:
-    if _counter_value(counters, _BLAS_KEYS) > 0.0:
-        return True
-    if _counter_value(counters, _COPY_KEYS) > 0.0:
-        return True
+    if _has_counter_value(counters, _BLAS_KEYS) or _has_counter_value(counters, _COPY_KEYS):
+        if _counter_value(counters, _BLAS_KEYS) > 0.0:
+            return True
+        if _counter_value(counters, _COPY_KEYS) > 0.0:
+            return True
+        return False
     return _line_sums(columns)["1b"] > 0.0
 
 

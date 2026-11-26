@@ -69,6 +69,31 @@ def test_counter_only_tag_and_alias_columns() -> None:
     assert fields["lines"]["1b"]["p95"] == 0.0
 
 
+def test_explicit_zero_as_build_counters_keep_empty_timestamp_steady() -> None:
+    # Metal records ~0.0025 ms on an empty NextGI: AS builds timestamp span; when the row reports
+    # explicit blas_builds/compaction_copies counters of 0, the frame stays steady.
+    rows = [
+        _row(
+            [("nextgi_as_updates_ms", 0.2), ("nextgi_as_builds_ms", 0.0025)],
+            {"blas_builds": 0, "compaction_copies": 0},
+        ),
+        _row(
+            [("nextgi_as_updates_ms", 0.3), ("nextgi_as_builds_ms", 1.2)],
+            {"blas_builds": 1, "compaction_copies": 0},
+        ),
+        _row(
+            [("nextgi_as_updates_ms", 0.4), ("nextgi_as_builds_ms", 0.0021)],
+            {"blas_builds": 0, "compaction_copies": 0},
+        ),
+    ]
+    fields = timing_fields(rows, host="Apple M5 Max", adapter="Apple M5 Max")
+    assert fields["line_1b_frames"]["frames"] == [1]
+    assert fields["line_1b_frames"]["count"] == 1
+    assert fields["lines"]["1a"]["n"] == 2
+    assert fields["lines"]["1b"]["n"] == 1
+    assert fields["diffuse_path"]["n"] == 2
+
+
 def test_frame_block_slot_columns_map_to_lines_3_and_7() -> None:
     # The NextGI frame block (#26) names its slots "NextGI: WRC update" and "NextGI: Integration".
     rows = [_row([("nextgi_wrc_update_ms", 0.5), ("nextgi_integration_ms", 0.25)])]

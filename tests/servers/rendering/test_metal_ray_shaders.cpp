@@ -184,6 +184,39 @@ TEST_CASE("[MetalRayShaders] SBT handle, params struct layout, raygen index, and
 	CHECK_EQ(RDRTPipeline::get_hit_group_stride(RDD::METAL_RT_SHADER_GROUP_HANDLE_SIZE, RDD::METAL_RT_SHADER_GROUP_HANDLE_ALIGNMENT, 0), 16u);
 	CHECK_EQ(RDRTPipeline::get_hit_group_stride(RDD::METAL_RT_SHADER_GROUP_HANDLE_SIZE, RDD::METAL_RT_SHADER_GROUP_HANDLE_ALIGNMENT, 8), 32u);
 	CHECK_EQ(RDRTPipeline::get_hit_group_stride(RDD::METAL_RT_SHADER_GROUP_HANDLE_SIZE, RDD::METAL_RT_SHADER_GROUP_HANDLE_ALIGNMENT, 32), 48u);
+
+	// SBT-slot-indexed intersection function resolution (#134: 256+ materials > 18 hit groups).
+	constexpr uint32_t HIT_GROUPS = 18;
+	constexpr uint32_t SBT_SLOTS = 268;
+	constexpr uint32_t STRIDE = 32; // 16-byte handle + 16-byte shader record.
+	Vector<uint8_t> sbt;
+	sbt.resize_initialized(SBT_SLOTS * STRIDE);
+	for (uint32_t s = 0; s < SBT_SLOTS; s++) {
+		RDD::MetalRTShaderGroupHandle h;
+		h.group_type = RDD::MetalRTShaderGroupHandle::TYPE_HIT;
+		h.visible_function_index = s % HIT_GROUPS;
+		// Slots 200..255 use any-hit group 5; slot 260 uses opaque (INVALID_FUNCTION_INDEX).
+		h.intersection_function_index = (s >= 200 && s < 256) ? 5u : RDD::MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+		memcpy(sbt.ptrw() + s * STRIDE, &h, sizeof(h));
+	}
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, 0, HIT_GROUPS), RDD::MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX);
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, 200, HIT_GROUPS), 5u);
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, 255, HIT_GROUPS), 5u);
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, 260, HIT_GROUPS), RDD::MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX);
+	// Out-of-bounds slot and non-zero offset checks.
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, SBT_SLOTS, HIT_GROUPS), RDD::MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX);
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 200 * STRIDE, STRIDE, 0, HIT_GROUPS), 5u);
+	// Non-hit handle type and out-of-range hit-group index resolve to invalid (opaque fallback).
+	RDD::MetalRTShaderGroupHandle bad_type;
+	bad_type.group_type = RDD::MetalRTShaderGroupHandle::TYPE_MISS;
+	bad_type.intersection_function_index = 2u;
+	memcpy(sbt.ptrw() + 10 * STRIDE, &bad_type, sizeof(bad_type));
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, 10, HIT_GROUPS), RDD::MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX);
+	RDD::MetalRTShaderGroupHandle bad_idx;
+	bad_idx.group_type = RDD::MetalRTShaderGroupHandle::TYPE_HIT;
+	bad_idx.intersection_function_index = HIT_GROUPS;
+	memcpy(sbt.ptrw() + 11 * STRIDE, &bad_idx, sizeof(bad_idx));
+	CHECK_EQ(RDD::metal_rt_hit_sbt_intersection_function_index(sbt.ptr(), sbt.size(), 0, STRIDE, 11, HIT_GROUPS), RDD::MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX);
 }
 
 #ifdef MODULE_GLSLANG_ENABLED

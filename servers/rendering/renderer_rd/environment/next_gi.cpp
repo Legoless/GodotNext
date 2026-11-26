@@ -1102,6 +1102,8 @@ Dictionary NextGI::get_counters() const {
 		counters["rt_instance_cap"] = int64_t(coverage.instance_cap);
 		counters["rt_dynamic_excluded"] = int64_t(coverage.dynamic_excluded);
 		counters["rt_blas_pending"] = int64_t(coverage.blas_pending);
+		counters["blas_builds"] = int64_t(rt_scene->get_stats().blas_build_count);
+		counters["compaction_copies"] = int64_t(rt_scene->get_stats().compaction_copies);
 		// GodotNext: nextgi_shadow_policy (#145)
 		const NextGIShadowMaskAllocator::Allocation &allocation = rt_scene->get_shadow_allocation();
 		PackedInt64Array allocated;

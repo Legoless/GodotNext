@@ -257,6 +257,26 @@ uint32_t RenderingDeviceDriver::metal_rt_raygen_index_from_sbt(uint64_t p_offset
 	return p_stride > 0 ? uint32_t(p_offset / p_stride) : 0;
 }
 
+uint32_t RenderingDeviceDriver::metal_rt_hit_sbt_intersection_function_index(const uint8_t *p_sbt_data, uint64_t p_sbt_size, uint64_t p_offset, uint32_t p_stride, uint32_t p_slot, uint32_t p_hit_group_count) {
+	if (p_sbt_data == nullptr || p_stride < METAL_RT_SHADER_GROUP_HANDLE_SIZE || p_hit_group_count == 0) {
+		return MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+	}
+	const uint64_t slot_bytes = uint64_t(p_slot) * uint64_t(p_stride);
+	if (p_offset > p_sbt_size || slot_bytes > p_sbt_size - p_offset) {
+		return MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+	}
+	const uint64_t entry_offset = p_offset + slot_bytes;
+	if (METAL_RT_SHADER_GROUP_HANDLE_SIZE > p_sbt_size - entry_offset) {
+		return MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+	}
+	MetalRTShaderGroupHandle handle;
+	memcpy(&handle, p_sbt_data + entry_offset, sizeof(handle));
+	if (handle.group_type != MetalRTShaderGroupHandle::TYPE_HIT || handle.intersection_function_index >= p_hit_group_count) {
+		return MetalRTShaderGroupHandle::INVALID_FUNCTION_INDEX;
+	}
+	return handle.intersection_function_index;
+}
+
 void RenderingDeviceDriver::metal_rt_compute_threadgroups(uint32_t p_width, uint32_t p_height, uint32_t p_depth, uint32_t p_tg_x, uint32_t p_tg_y, uint32_t p_tg_z, uint32_t &r_groups_x, uint32_t &r_groups_y, uint32_t &r_groups_z) {
 	const uint32_t tx = MAX(p_tg_x, 1u);
 	const uint32_t ty = MAX(p_tg_y, 1u);

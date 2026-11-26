@@ -110,7 +110,7 @@ protected:
 	void _destroy_dummy_blas();
 	void _update_ray_query_caps();
 	void _update_raytracing_pipeline_caps();
-	bool _raytracing_pipeline_build_executable(MDRaytracingPipeline *p_pipeline, const char *p_label);
+	bool _raytracing_pipeline_build_executable(MDRaytracingPipeline *p_pipeline, const char *p_label, const MDRaytracingPipeline *p_base_executable = nullptr, uint32_t p_base_stage_count = 0);
 	MetalDeviceProfile device_profile;
 	RenderingShaderContainerFormatMetal *shader_container_format = nullptr;
 	PixelFormats *pixel_formats = nullptr;
@@ -206,12 +206,27 @@ protected:
 	// recorded (MDBindlessTable::clear_slot()); begin_segment() drops the residency those slots kept.
 	HashSet<MDBindlessTable *> bindless_tables_with_releases;
 
+	// GodotNext: metal_ray_shaders (#172). CPU shadow of BUFFER_USAGE_SHADER_BINDING_TABLE_BIT
+	// buffers so Metal can build an SBT-slot-indexed MTL::IntersectionFunctionTable matching
+	// TLAS instance intersectionFunctionTableOffset values when SBT slots outnumber hit groups.
+	struct SBTShadow {
+		LocalVector<uint8_t> data;
+		uint64_t version = 0;
+	};
+	Mutex sbt_shadows_mutex;
+	HashMap<const void *, SBTShadow> sbt_shadows;
+	uint64_t next_sbt_shadow_version = 1;
+	SafeNumeric<uint32_t> sbt_shadow_count;
+
 public:
 	// GodotNext: rd_mesh_shaders (#178). p_stages: the object and mesh stages for an encoder that binds a mesh pipeline.
 	void encode_imported_resources(MTL::RenderCommandEncoder *p_enc, MTL::RenderStages p_stages = MTL::RenderStageVertex | MTL::RenderStageFragment);
 	void encode_imported_resources(MTL::ComputeCommandEncoder *p_enc);
 	void defer_release(CFTypeRef p_resource);
 	void flush_deferred_releases();
+	void sbt_shadow_copy(const void *p_src_buf, const void *p_dst_buf, VectorView<RDD::BufferCopyRegion> p_regions);
+	bool sbt_shadow_get_version(const void *p_buf, uint64_t &r_version);
+	bool sbt_shadow_copy_out(const void *p_buf, LocalVector<uint8_t> &r_data, uint64_t &r_version);
 
 protected:
 	virtual Error _create_device();
@@ -480,7 +495,7 @@ public:
 #pragma mark Pipeline
 
 private:
-	Result<NS::SharedPtr<MTL::Function>> _create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants, NS::String *p_specialized_name = nullptr);
+	Result<NS::SharedPtr<MTL::Function>> _create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants, NS::String *p_specialized_name = nullptr, bool p_compile_to_binary = false, bool p_is_intersection = false, bool *r_is_binary = nullptr);
 	SafeNumeric<uint64_t> _rt_function_id;
 
 public:

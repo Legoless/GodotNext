@@ -30,6 +30,8 @@
 
 #include "rendering_shader_container_metal.h"
 
+#include "drivers/metal/metal_shader_validation.h"
+
 #include "core/io/file_access.h"
 #include "core/io/marshalls.h"
 #include "core/os/os.h"
@@ -176,7 +178,10 @@ Error RenderingShaderContainerMetal::compile_metal_source(const char *p_source, 
 		if (p_stage_data.is_position_invariant) {
 			args.push_back("-fpreserve-invariance");
 		}
-		args.push_back("-fmetal-math-mode=fast");
+		args.push_back(p_stage_data.supports_fast_math ? "-fmetal-math-mode=fast" : "-fmetal-math-mode=safe");
+		if (!p_stage_data.supports_fast_math) {
+			args.push_back("-fmetal-math-floating-point-functions=precise");
+		}
 		args.push_back(source_file->get_path_absolute());
 		args.push_back("-o");
 		args.push_back(result_file->get_path_absolute());
@@ -926,14 +931,20 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 		}
 
 		stage_data.is_position_invariant = compiler.is_position_invariant();
-		stage_data.supports_fast_math = !entry_point.flags.get(spv::ExecutionModeSignedZeroInfNanPreserve);
+		stage_data.supports_fast_math = !entry_point.flags.get(spv::ExecutionModeSignedZeroInfNanPreserve) && !spirv_uses_no_contraction(spirv.ptr(), spirv.size());
 		// GodotNext: metal_ray_shaders (#172). Record per-stage ray payload size for library validation.
 		if (stage == RDC::SHADER_STAGE_RAYGEN || stage == RDC::SHADER_STAGE_ANY_HIT ||
 				stage == RDC::SHADER_STAGE_CLOSEST_HIT || stage == RDC::SHADER_STAGE_MISS ||
 				stage == RDC::SHADER_STAGE_INTERSECTION) {
 			stage_data.rt_payload_size = RDRTPipeline::get_spirv_payload_size(reinterpret_cast<const uint8_t *>(spirv.ptr()), spirv.size() * sizeof(uint32_t));
 		}
-		stage_data.hash = SHA256Digest(source.c_str(), source.length());
+		if (stage_data.supports_fast_math) {
+			stage_data.hash = SHA256Digest(source.c_str(), source.length());
+		} else {
+			std::string tagged = source;
+			tagged.append("\n// math-mode=safe");
+			stage_data.hash = SHA256Digest(tagged.c_str(), tagged.length());
+		}
 		stage_data.source_size = source.length();
 		::Vector<uint8_t> binary_data;
 		binary_data.resize(stage_data.source_size);
@@ -1054,6 +1065,15 @@ uint32_t RenderingShaderContainerMetal::_format() const {
 
 uint32_t RenderingShaderContainerMetal::_format_version() const {
 	return FORMAT_VERSION;
+}
+
+bool RenderingShaderContainerMetal::spirv_uses_no_contraction(const uint32_t *p_words, size_t p_word_count) {
+	static_assert(spv::MagicNumber == 0x07230203u);
+	static_assert(spv::OpFunction == 54u);
+	static_assert(spv::OpDecorate == 71u);
+	static_assert(spv::OpMemberDecorate == 72u);
+	static_assert(spv::DecorationNoContraction == 42u);
+	return metal_spirv_uses_no_contraction(p_words, p_word_count);
 }
 
 Ref<RenderingShaderContainer> RenderingShaderContainerFormatMetal::create_container() const {

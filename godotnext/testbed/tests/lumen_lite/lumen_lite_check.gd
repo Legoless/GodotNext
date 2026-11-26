@@ -44,8 +44,11 @@ var _environment: Environment
 var _sky_background := Environment.BG_SKY
 var _sky: Sky
 var _card_only_luma := 0.0
+var _card_only_total_luma := 0.0
 var _card_only_lit := 0.0
 var _sky_luma := 0.0
+var _sky_total_luma := 0.0
+var _sky_lit := 0.0
 var _summary := {}
 var _done := false
 
@@ -143,6 +146,7 @@ func _field_stats() -> Dictionary:
 	return {
 		"lit_fraction": float(lit) / float(maxi(total, 1)),
 		"mean_luma": luma_sum / float(maxi(lit, 1)),
+		"total_luma": luma_sum / float(maxi(total, 1)),
 		"spread_fraction": float(differing) / float(maxi(total, 1)),
 	}
 
@@ -169,11 +173,12 @@ func _process(_delta: float) -> void:
 				return
 			var stats := _field_stats()
 			_summary["card_only"] = stats
-			print("LITE_FIELD card_only lit=%.3f luma=%.4f spread=%.3f" % [stats["lit_fraction"], stats["mean_luma"], stats["spread_fraction"]])
+			print("LITE_FIELD card_only lit=%.3f luma=%.4f total=%.4f spread=%.3f" % [stats["lit_fraction"], stats["mean_luma"], stats["total_luma"], stats["spread_fraction"]])
 			if float(stats["lit_fraction"]) < MIN_CARD_LIT_FRACTION or float(stats["spread_fraction"]) < 0.05:
 				_fail("the Lite field is empty without the sky: no surface-cache radiance reaches the probes")
 				return
 			_card_only_luma = float(stats["mean_luma"])
+			_card_only_total_luma = float(stats["total_luma"])
 			_card_only_lit = float(stats["lit_fraction"])
 			_environment.sky = _sky
 			_environment.background_mode = _sky_background
@@ -184,13 +189,17 @@ func _process(_delta: float) -> void:
 				return
 			var stats := _field_stats()
 			_summary["sky"] = stats
-			print("LITE_FIELD sky lit=%.3f luma=%.4f spread=%.3f" % [stats["lit_fraction"], stats["mean_luma"], stats["spread_fraction"]])
-			# Sky-lit surfaces the sun misses join the field, and the field brightens well past the
-			# card-only level (about 2.7x on the corridor; WRC history alone reaches about 1.2x).
-			if float(stats["lit_fraction"]) < MIN_SKY_LIT_FRACTION or float(stats["lit_fraction"]) < _card_only_lit + 0.1 or float(stats["mean_luma"]) < _card_only_luma * 1.6:
+			print("LITE_FIELD sky lit=%.3f luma=%.4f total=%.4f spread=%.3f" % [stats["lit_fraction"], stats["mean_luma"], stats["total_luma"], stats["spread_fraction"]])
+			# Sky-lit surfaces the sun misses join the field, and total irradiance across the fixed
+			# sampling grid rises clearly past card-only (measuring over the full grid avoids
+			# Simpson's paradox where newly-lit shadowed pixels dilute the lit-only conditional mean).
+			var sky_total := float(stats["total_luma"])
+			if float(stats["lit_fraction"]) < MIN_SKY_LIT_FRACTION or float(stats["lit_fraction"]) < _card_only_lit + 0.1 or sky_total < _card_only_total_luma * 1.15 or sky_total - _card_only_total_luma < 0.02:
 				_fail("the sky does not reach the Lite field (WRC misses)")
 				return
 			_sky_luma = float(stats["mean_luma"])
+			_sky_total_luma = sky_total
+			_sky_lit = float(stats["lit_fraction"])
 			_environment.nextgi_read_sky_light = false
 			_next_phase(3)
 		3:
@@ -199,8 +208,11 @@ func _process(_delta: float) -> void:
 				return
 			var stats := _field_stats()
 			_summary["sky_light_off"] = stats
-			print("LITE_FIELD sky_light_off lit=%.3f luma=%.4f spread=%.3f" % [stats["lit_fraction"], stats["mean_luma"], stats["spread_fraction"]])
-			if float(stats["mean_luma"]) > _sky_luma * 0.8:
+			print("LITE_FIELD sky_light_off lit=%.3f luma=%.4f total=%.4f spread=%.3f" % [stats["lit_fraction"], stats["mean_luma"], stats["total_luma"], stats["spread_fraction"]])
+			# At least half of the added sky term must decay over SKY_OFF_FRAMES (theory: ~70% gone),
+			# and shadowed surfaces that only saw the sky must fall back out of the lit set.
+			var sky_gain := _sky_total_luma - _card_only_total_luma
+			if float(stats["lit_fraction"]) > _sky_lit - 0.05 or float(stats["total_luma"]) > _card_only_total_luma + sky_gain * 0.5:
 				_fail("Environment.nextgi_read_sky_light off still lets the sky into the Lite field")
 				return
 			_environment.nextgi_read_sky_light = true

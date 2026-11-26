@@ -392,6 +392,17 @@ func _test_timing_fields() -> void:
 	_check(blackwell["line_1b_frames"]["limit_ms"] == null, "5090 has no ms limit")
 	_check(blackwell["line_1b_frames"]["within_limit"] == null, "5090 within_limit is null")
 
+	# Explicit zero BLAS/compaction counters override tiny empty Metal timestamp spans.
+	var metal_rows: Array = [
+		{"wall_ms": 1.0, "passes": [{"column": "nextgi_as_updates_ms", "ms": 0.2}, {"column": "nextgi_as_builds_ms", "ms": 0.0025}], "counters": {"blas_builds": 0, "compaction_copies": 0}},
+		{"wall_ms": 1.0, "passes": [{"column": "nextgi_as_updates_ms", "ms": 0.3}, {"column": "nextgi_as_builds_ms", "ms": 1.2}], "counters": {"blas_builds": 1, "compaction_copies": 0}},
+		{"wall_ms": 1.0, "passes": [{"column": "nextgi_as_updates_ms", "ms": 0.4}, {"column": "nextgi_as_builds_ms", "ms": 0.0021}], "counters": {"blas_builds": 0, "compaction_copies": 0}},
+	]
+	var metal_fields: Dictionary = ManifestScript.timing_fields(metal_rows, "Apple M5 Max", "Apple M5 Max", true)
+	_check(metal_fields["line_1b_frames"]["frames"] == [1], "explicit zero counters keep empty Metal 1b span steady")
+	_check(int(metal_fields["lines"]["1a"]["n"]) == 2, "steady 1a count with explicit zero counters")
+	_check(int(metal_fields["diffuse_path"]["n"]) == 2, "diffuse path n with explicit zero counters")
+
 
 func _test_animation_frame() -> void:
 	var node = load("res://harness/harness.gd").new()

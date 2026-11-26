@@ -270,6 +270,7 @@ public:
 
 	void set_export_mode(bool p_export_mode) { export_mode = p_export_mode; }
 	void set_device_profile(const MetalDeviceProfile *p_device_profile) { device_profile = p_device_profile; }
+	static bool spirv_uses_no_contraction(const uint32_t *p_words, size_t p_word_count);
 
 	struct MetalShaderReflection {
 		Vector<Vector<UniformData>> uniform_sets;

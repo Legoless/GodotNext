@@ -125,6 +125,8 @@ public:
 			"rt_instance_cap",
 			"rt_dynamic_excluded",
 			"rt_blas_pending",
+			"blas_builds",
+			"compaction_copies",
 			"blas_bytes_compacted",
 			"blas_bytes_uncompacted",
 			"rt_arena_bytes",

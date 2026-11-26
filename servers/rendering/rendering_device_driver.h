@@ -1473,6 +1473,7 @@ public:
 	static const char *metal_raytracing_pipeline_reason_name(MetalRaytracingPipelineReason p_reason);
 	static String metal_raytracing_pipeline_log_line(const MetalRaytracingPipelineCaps &p_caps);
 	static uint32_t metal_rt_raygen_index_from_sbt(uint64_t p_offset, uint64_t p_stride);
+	static uint32_t metal_rt_hit_sbt_intersection_function_index(const uint8_t *p_sbt_data, uint64_t p_sbt_size, uint64_t p_offset, uint32_t p_stride, uint32_t p_slot, uint32_t p_hit_group_count);
 	static void metal_rt_compute_threadgroups(uint32_t p_width, uint32_t p_height, uint32_t p_depth, uint32_t p_tg_x, uint32_t p_tg_y, uint32_t p_tg_z, uint32_t &r_groups_x, uint32_t &r_groups_y, uint32_t &r_groups_z);
 
 	virtual bool has_feature(Features p_feature) = 0;

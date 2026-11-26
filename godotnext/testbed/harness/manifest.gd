@@ -268,11 +268,22 @@ static func _timing_counter_number(counters: Dictionary, keys: Array) -> float:
 	return 0.0
 
 
+static func _timing_has_counter_number(counters: Dictionary, keys: Array) -> bool:
+	for key in keys:
+		if counters.has(key) and _is_number(counters[key]):
+			return true
+	return false
+
+
 static func _timing_is_line_1b(columns: Dictionary, counters: Dictionary) -> bool:
-	if _timing_counter_number(counters, ["blas_builds", "blas_build_count"]) > 0.0:
-		return true
-	if _timing_counter_number(counters, ["compaction_copies", "compaction_copy_count"]) > 0.0:
-		return true
+	var has_blas := _timing_has_counter_number(counters, ["blas_builds", "blas_build_count"])
+	var has_copies := _timing_has_counter_number(counters, ["compaction_copies", "compaction_copy_count"])
+	if has_blas or has_copies:
+		if _timing_counter_number(counters, ["blas_builds", "blas_build_count"]) > 0.0:
+			return true
+		if _timing_counter_number(counters, ["compaction_copies", "compaction_copy_count"]) > 0.0:
+			return true
+		return false
 	return float(_timing_line_sums(columns)["1b"]) > 0.0
 
 

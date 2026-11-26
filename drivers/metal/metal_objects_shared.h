@@ -1282,14 +1282,26 @@ public:
 		NS::SharedPtr<MTL::ComputePipelineState> state;
 		NS::SharedPtr<MTL::VisibleFunctionTable> visible_table;
 		NS::SharedPtr<MTL::IntersectionFunctionTable> intersection_table;
+		// Per-hit-group any-hit function handles (empty entry = opaque triangle intersection).
+		LocalVector<NS::SharedPtr<MTL::FunctionHandle>> hit_anyhit_handles;
+		MTL::IntersectionFunctionSignature opaque_sig = static_cast<MTL::IntersectionFunctionSignature>(0);
+		// Cached SBT-slot-indexed intersection function table built from the active hit SBT.
+		NS::SharedPtr<MTL::IntersectionFunctionTable> sbt_intersection_table;
+		const void *sbt_ift_buffer = nullptr;
+		uint64_t sbt_ift_offset = 0;
+		uint32_t sbt_ift_stride = 0;
+		uint32_t sbt_ift_count = 0;
+		uint64_t sbt_ift_version = 0;
 	};
 
 	struct SpecializedStage {
 		RDD::ShaderStage stage = RDD::SHADER_STAGE_MAX;
 		NS::SharedPtr<MTL::Function> function;
+		bool is_binary = false;
 	};
 
 	bool is_library = false;
+	bool supports_adding_binary_functions = false;
 	MDShader *layout_shader = nullptr;
 	uint32_t max_trace_recursion_depth = 1;
 	uint32_t max_payload_size = 0;

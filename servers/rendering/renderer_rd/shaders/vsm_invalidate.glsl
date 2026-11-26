@@ -114,6 +114,14 @@ void vsm_invalidate_entry(uint index, uint dirty_flags, bool dynamic_if_used) {
 
 #ifdef MODE_BOXES
 
+// Exact operation order matching RendererVirtualShadowMapStorage::row_dot() without FMA contraction.
+float vsm_invalidate_row(vec4 r, vec3 p) {
+	precise float sum = r.x * p.x;
+	sum = sum + r.y * p.y;
+	sum = sum + r.z * p.z;
+	return sum + r.w;
+}
+
 void main() {
 	uint box_idx = gl_WorkGroupID.x;
 	if (box_idx >= params.count) {
@@ -146,7 +154,7 @@ void main() {
 						(c & 1u) != 0u ? bmax.x : bmin.x,
 						(c & 2u) != 0u ? bmax.y : bmin.y,
 						(c & 4u) != 0u ? bmax.z : bmin.z);
-				vec2 t = floor(vec2(vsm_row(md.row0, corner), vsm_row(md.row1, corner)));
+				vec2 t = floor(vec2(vsm_invalidate_row(md.row0, corner), vsm_invalidate_row(md.row1, corner)));
 				t = clamp(t, vec2(-1073741824.0), vec2(1073741824.0));
 				ivec2 texel = ivec2(t);
 				level_min = min(level_min, texel);
@@ -187,9 +195,9 @@ void main() {
 					(c & 1u) != 0u ? bmax.x : bmin.x,
 					(c & 2u) != 0u ? bmax.y : bmin.y,
 					(c & 4u) != 0u ? bmax.z : bmin.z);
-			float x = vsm_row(md.row0, corner);
-			float y = vsm_row(md.row1, corner);
-			float w = vsm_row(md.row3, corner);
+			precise float x = vsm_invalidate_row(md.row0, corner);
+			precise float y = vsm_invalidate_row(md.row1, corner);
+			precise float w = vsm_invalidate_row(md.row3, corner);
 			outside[0] += (w - x < 0.0) ? 1u : 0u;
 			outside[1] += (w + x < 0.0) ? 1u : 0u;
 			outside[2] += (w - y < 0.0) ? 1u : 0u;
@@ -200,7 +208,9 @@ void main() {
 				cut = true;
 				continue;
 			}
-			vec2 uv = vec2(x / w * 0.5 + 0.5, y / w * 0.5 + 0.5);
+			precise float u = (x / w) * 0.5 + 0.5;
+			precise float v = (y / w) * 0.5 + 0.5;
+			vec2 uv = vec2(u, v);
 			uv_min = min(uv_min, uv);
 			uv_max = max(uv_max, uv);
 		}

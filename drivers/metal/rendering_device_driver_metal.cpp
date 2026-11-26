@@ -151,6 +151,15 @@ RDD::BufferID RenderingDeviceDriverMetal::buffer_create(uint64_t p_size, BitFiel
 	}
 	*static_cast<MetalBuffer *>(buf_info) = buffer;
 
+	if (p_usage.has_flag(BUFFER_USAGE_SHADER_BINDING_TABLE_BIT)) {
+		MutexLock lock(sbt_shadows_mutex);
+		SBTShadow shadow;
+		shadow.data.resize_initialized(p_size);
+		shadow.version = next_sbt_shadow_version++;
+		sbt_shadows.insert(buf_info, std::move(shadow));
+		sbt_shadow_count.set(sbt_shadows.size());
+	}
+
 	return BufferID(buf_info);
 }
 
@@ -161,6 +170,13 @@ bool RenderingDeviceDriverMetal::buffer_set_texel_format(BufferID p_buffer, Data
 
 void RenderingDeviceDriverMetal::buffer_free(BufferID p_buffer) {
 	BufferInfo *buf_info = (BufferInfo *)p_buffer.id;
+
+	if (sbt_shadow_count.get() > 0) {
+		MutexLock lock(sbt_shadows_mutex);
+		if (sbt_shadows.erase(buf_info)) {
+			sbt_shadow_count.set(sbt_shadows.size());
+		}
+	}
 
 	allocator->free_buffer(*buf_info);
 
@@ -1272,9 +1288,10 @@ RDD::ShaderID RenderingDeviceDriverMetal::shader_create_from_container(const Ref
 		} else {
 			options->setPreserveInvariance(shader_data.is_position_invariant);
 #if __MAC_OS_X_VERSION_MIN_REQUIRED >= 150000 || __IPHONE_OS_VERSION_MIN_REQUIRED >= 180000 || __TV_OS_VERSION_MIN_REQUIRED >= 180000 || defined(VISIONOS_ENABLED)
-			options->setMathMode(MTL::MathModeFast);
+			options->setMathMode(shader_data.supports_fast_math ? MTL::MathModeFast : MTL::MathModeSafe);
+			options->setMathFloatingPointFunctions(shader_data.supports_fast_math ? MTL::MathFloatingPointFunctionsFast : MTL::MathFloatingPointFunctionsPrecise);
 #else
-			options->setFastMathEnabled(true);
+			options->setFastMathEnabled(shader_data.supports_fast_math != 0);
 #endif
 			library = MDLibrary::create(cd, device, source.get(), options.get(), _shader_load_strategy);
 		}
@@ -2054,7 +2071,10 @@ void RenderingDeviceDriverMetal::command_render_set_line_width(CommandBufferID p
 
 // ----- PIPELINE -----
 
-RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDeviceDriverMetal::_create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants, NS::String *p_specialized_name) {
+RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDeviceDriverMetal::_create_function(MDLibrary *p_library, NS::String *p_name, VectorView<PipelineSpecializationConstant> &p_specialization_constants, NS::String *p_specialized_name, bool p_compile_to_binary, bool p_is_intersection, bool *r_is_binary) {
+	if (r_is_binary != nullptr) {
+		*r_is_binary = false;
+	}
 	MTL::Library *library = p_library->get_library();
 	if (!library) {
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to compile Metal library");
@@ -2065,7 +2085,7 @@ RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDevice
 
 	NS::Dictionary *constants_dict = function->functionConstantsDictionary();
 	const bool has_constants = constants_dict->count() > 0;
-	if (!has_constants && p_specialized_name == nullptr) {
+	if (!has_constants && p_specialized_name == nullptr && !p_compile_to_binary) {
 		return NS::TransferPtr(function);
 	}
 
@@ -2148,14 +2168,48 @@ RenderingDeviceDriverMetal::Result<NS::SharedPtr<MTL::Function>> RenderingDevice
 
 	NS::Error *err = nullptr;
 	function->release();
-	if (p_specialized_name != nullptr) {
-		NS::SharedPtr<MTL::FunctionDescriptor> fn_desc = NS::TransferPtr(MTL::FunctionDescriptor::alloc()->init());
-		fn_desc->setName(p_name);
-		fn_desc->setSpecializedName(p_specialized_name);
-		if (has_constants) {
-			fn_desc->setConstantValues(constantValues.get());
+	if (p_specialized_name != nullptr || p_compile_to_binary) {
+		auto build_with_options = [&](MTL::FunctionOptions p_options) -> MTL::Function * {
+			err = nullptr;
+			if (p_is_intersection) {
+				NS::SharedPtr<MTL::IntersectionFunctionDescriptor> ifn_desc = NS::TransferPtr(MTL::IntersectionFunctionDescriptor::alloc()->init());
+				ifn_desc->setName(p_name);
+				if (p_specialized_name != nullptr) {
+					ifn_desc->setSpecializedName(p_specialized_name);
+				}
+				if (has_constants) {
+					ifn_desc->setConstantValues(constantValues.get());
+				}
+				if (p_options != MTL::FunctionOptionNone) {
+					ifn_desc->setOptions(p_options);
+				}
+				return library->newIntersectionFunction(ifn_desc.get(), &err);
+			}
+			NS::SharedPtr<MTL::FunctionDescriptor> fn_desc = NS::TransferPtr(MTL::FunctionDescriptor::alloc()->init());
+			fn_desc->setName(p_name);
+			if (p_specialized_name != nullptr) {
+				fn_desc->setSpecializedName(p_specialized_name);
+			}
+			if (has_constants) {
+				fn_desc->setConstantValues(constantValues.get());
+			}
+			if (p_options != MTL::FunctionOptionNone) {
+				fn_desc->setOptions(p_options);
+			}
+			return library->newFunction(fn_desc.get(), &err);
+		};
+		if (p_compile_to_binary) {
+			function = build_with_options(MTL::FunctionOptionCompileToBinary);
+			if (function != nullptr) {
+				if (r_is_binary != nullptr) {
+					*r_is_binary = true;
+				}
+			} else {
+				function = build_with_options(MTL::FunctionOptionNone);
+			}
+		} else {
+			function = build_with_options(MTL::FunctionOptionNone);
 		}
-		function = library->newFunction(fn_desc.get(), &err);
 	} else {
 		function = library->newFunction(p_name, constantValues.get(), &err);
 	}
@@ -2654,7 +2708,7 @@ RDD::PipelineID RenderingDeviceDriverMetal::compute_pipeline_create(ShaderID p_s
 // GodotNext: metal_ray_shaders (#172). Builds one compute pipeline state per raygen shader with
 // MTL::LinkedFunctions, MTL::VisibleFunctionTable (miss + closest-hit), and MTL::IntersectionFunctionTable
 // (any-hit or opaque triangle per hit group), plus shader group handles for raygen/miss/hit SBTs.
-bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytracingPipeline *p_pipeline, const char *p_label) {
+bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytracingPipeline *p_pipeline, const char *p_label, const MDRaytracingPipeline *p_base_executable, uint32_t p_base_stage_count) {
 	NS::AutoreleasePool *pool = NS::AutoreleasePool::alloc()->init();
 	DEFER([pool]() { pool->release(); });
 
@@ -2663,15 +2717,47 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 	const uint32_t hit_count = p_pipeline->hit_groups.size();
 	ERR_FAIL_COND_V_MSG(raygen_count == 0, false, "Metal raytracing pipeline requires at least one ray generation shader.");
 
-	// Collect all visible functions (miss shaders followed by closest-hit shaders) and any-hit functions.
-	LocalVector<MTL::Function *> linked_fn_ptrs;
-	auto add_linked_fn = [&linked_fn_ptrs](MTL::Function *p_fn) {
-		for (MTL::Function *existing : linked_fn_ptrs) {
-			if (existing == p_fn) {
-				return;
+	HashSet<MTL::Function *> base_linked_fns;
+	if (p_base_executable != nullptr) {
+		for (uint32_t stage_idx : p_base_executable->miss_shader_indices) {
+			if (stage_idx < p_base_executable->specialized_stages.size() && p_base_executable->specialized_stages[stage_idx].function) {
+				base_linked_fns.insert(p_base_executable->specialized_stages[stage_idx].function.get());
 			}
 		}
-		linked_fn_ptrs.push_back(p_fn);
+		for (const HitGroup &hg : p_base_executable->hit_groups) {
+			if (hg.closest_hit_shader_index < p_base_executable->specialized_stages.size() && p_base_executable->specialized_stages[hg.closest_hit_shader_index].function) {
+				base_linked_fns.insert(p_base_executable->specialized_stages[hg.closest_hit_shader_index].function.get());
+			}
+			if (hg.any_hit_shader_index < p_base_executable->specialized_stages.size() && p_base_executable->specialized_stages[hg.any_hit_shader_index].function) {
+				base_linked_fns.insert(p_base_executable->specialized_stages[hg.any_hit_shader_index].function.get());
+			}
+		}
+	}
+
+	// Collect all visible functions (miss shaders followed by closest-hit shaders) and any-hit functions.
+	HashSet<MTL::Function *> seen_linked_fns;
+	LocalVector<MTL::Function *> linked_air_fn_ptrs;
+	LocalVector<MTL::Function *> linked_binary_fn_ptrs;
+	LocalVector<MTL::Function *> added_air_fn_ptrs;
+	LocalVector<MTL::Function *> added_binary_fn_ptrs;
+	auto add_linked_stage = [&](uint32_t p_stage_idx) {
+		const MDRaytracingPipeline::SpecializedStage &stage = p_pipeline->specialized_stages[p_stage_idx];
+		MTL::Function *fn = stage.function.get();
+		if (seen_linked_fns.has(fn)) {
+			return;
+		}
+		seen_linked_fns.insert(fn);
+		if (stage.is_binary) {
+			linked_binary_fn_ptrs.push_back(fn);
+			if (p_base_executable != nullptr && !base_linked_fns.has(fn)) {
+				added_binary_fn_ptrs.push_back(fn);
+			}
+		} else {
+			linked_air_fn_ptrs.push_back(fn);
+			if (p_base_executable != nullptr && !base_linked_fns.has(fn)) {
+				added_air_fn_ptrs.push_back(fn);
+			}
+		}
 	};
 	LocalVector<MTL::Function *> visible_fn_ptrs;
 	LocalVector<uint32_t> miss_visible_indices;
@@ -2683,7 +2769,7 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 		ERR_FAIL_NULL_V(fn, false);
 		miss_visible_indices[i] = visible_fn_ptrs.size();
 		visible_fn_ptrs.push_back(fn);
-		add_linked_fn(fn);
+		add_linked_stage(stage_idx);
 	}
 
 	LocalVector<uint32_t> hit_visible_indices;
@@ -2701,14 +2787,14 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 			ERR_FAIL_NULL_V(fn, false);
 			hit_visible_indices[i] = visible_fn_ptrs.size();
 			visible_fn_ptrs.push_back(fn);
-			add_linked_fn(fn);
+			add_linked_stage(hg.closest_hit_shader_index);
 		}
 		if (hg.any_hit_shader_index != UINT32_MAX) {
 			ERR_FAIL_UNSIGNED_INDEX_V(hg.any_hit_shader_index, p_pipeline->specialized_stages.size(), false);
 			MTL::Function *fn = p_pipeline->specialized_stages[hg.any_hit_shader_index].function.get();
 			ERR_FAIL_NULL_V(fn, false);
 			hit_anyhit_fns[i] = fn;
-			add_linked_fn(fn);
+			add_linked_stage(hg.any_hit_shader_index);
 		}
 	}
 
@@ -2740,10 +2826,40 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 		p_pipeline->group_handles.push_back(h);
 	}
 
-	NS::SharedPtr<MTL::LinkedFunctions> linked_functions = NS::TransferPtr(MTL::LinkedFunctions::alloc()->init());
-	if (!linked_fn_ptrs.is_empty()) {
-		NS::Array *fn_array = NS::Array::array(reinterpret_cast<NS::Object *const *>(linked_fn_ptrs.ptr()), linked_fn_ptrs.size());
-		linked_functions->setFunctions(fn_array);
+	bool can_incremental_link = p_base_executable != nullptr &&
+			!p_base_executable->is_library &&
+			p_base_executable->supports_adding_binary_functions &&
+			p_base_executable->max_trace_recursion_depth == p_pipeline->max_trace_recursion_depth &&
+			p_base_executable->raygen_entries.size() == raygen_count &&
+			p_base_executable->raygen_shader_indices.size() == raygen_count &&
+			added_air_fn_ptrs.is_empty();
+	if (can_incremental_link) {
+		for (uint32_t r = 0; r < raygen_count; r++) {
+			if (p_pipeline->raygen_shader_indices[r] >= p_base_stage_count ||
+					p_pipeline->raygen_shader_indices[r] != p_base_executable->raygen_shader_indices[r] ||
+					!p_base_executable->raygen_entries[r].state) {
+				can_incremental_link = false;
+				break;
+			}
+		}
+	}
+
+	NS::SharedPtr<MTL::LinkedFunctions> linked_functions;
+	NS::Array *added_binary_array = nullptr;
+	if (can_incremental_link) {
+		if (!added_binary_fn_ptrs.is_empty()) {
+			added_binary_array = NS::Array::array(reinterpret_cast<NS::Object *const *>(added_binary_fn_ptrs.ptr()), added_binary_fn_ptrs.size());
+		}
+	} else {
+		linked_functions = NS::TransferPtr(MTL::LinkedFunctions::alloc()->init());
+		if (!linked_air_fn_ptrs.is_empty()) {
+			NS::Array *fn_array = NS::Array::array(reinterpret_cast<NS::Object *const *>(linked_air_fn_ptrs.ptr()), linked_air_fn_ptrs.size());
+			linked_functions->setFunctions(fn_array);
+		}
+		if (!linked_binary_fn_ptrs.is_empty()) {
+			NS::Array *bin_array = NS::Array::array(reinterpret_cast<NS::Object *const *>(linked_binary_fn_ptrs.ptr()), linked_binary_fn_ptrs.size());
+			linked_functions->setBinaryFunctions(bin_array);
+		}
 	}
 
 	p_pipeline->raygen_entries.resize(raygen_count);
@@ -2758,16 +2874,25 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 		MTL::Function *raygen_fn = p_pipeline->specialized_stages[stage_idx].function.get();
 		ERR_FAIL_NULL_V(raygen_fn, false);
 
-		NS::SharedPtr<MTL::ComputePipelineDescriptor> desc = NS::TransferPtr(MTL::ComputePipelineDescriptor::alloc()->init());
-		desc->setComputeFunction(raygen_fn);
-		desc->setLinkedFunctions(linked_functions.get());
-		desc->setMaxCallStackDepth(MAX(p_pipeline->max_trace_recursion_depth, 1u) + 1u);
-		if (p_label != nullptr) {
-			desc->setLabel(NS::String::string(p_label, NS::UTF8StringEncoding));
-		}
-
 		NS::Error *error = nullptr;
-		NS::SharedPtr<MTL::ComputePipelineState> state = NS::TransferPtr(device->newComputePipelineState(desc.get(), MTL::PipelineOptionNone, nullptr, &error));
+		NS::SharedPtr<MTL::ComputePipelineState> state;
+		if (can_incremental_link) {
+			if (added_binary_array != nullptr) {
+				state = NS::TransferPtr(p_base_executable->raygen_entries[r].state->newComputePipelineState(added_binary_array, &error));
+			} else {
+				state = p_base_executable->raygen_entries[r].state;
+			}
+		} else {
+			NS::SharedPtr<MTL::ComputePipelineDescriptor> desc = NS::TransferPtr(MTL::ComputePipelineDescriptor::alloc()->init());
+			desc->setComputeFunction(raygen_fn);
+			desc->setLinkedFunctions(linked_functions.get());
+			desc->setSupportAddingBinaryFunctions(true);
+			desc->setMaxCallStackDepth(MAX(p_pipeline->max_trace_recursion_depth, 1u) + 1u);
+			if (p_label != nullptr) {
+				desc->setLabel(NS::String::string(p_label, NS::UTF8StringEncoding));
+			}
+			state = NS::TransferPtr(device->newComputePipelineState(desc.get(), MTL::PipelineOptionNone, nullptr, &error));
+		}
 		ERR_FAIL_COND_V_MSG(error != nullptr, false, String("Error creating Metal raytracing pipeline state: ") + error->localizedDescription()->utf8String());
 		ERR_FAIL_COND_V_MSG(!state, false, "Failed to create Metal raytracing compute pipeline state.");
 
@@ -2785,6 +2910,8 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 		ift_desc->setFunctionCount(ift_count);
 		NS::SharedPtr<MTL::IntersectionFunctionTable> ift = NS::TransferPtr(state->newIntersectionFunctionTable(ift_desc.get()));
 		ERR_FAIL_COND_V_MSG(!ift, false, "Failed to create Metal intersection function table.");
+		LocalVector<NS::SharedPtr<MTL::FunctionHandle>> hit_anyhit_handles;
+		hit_anyhit_handles.resize(hit_count);
 		if (hit_count == 0) {
 			ift->setOpaqueTriangleIntersectionFunction(opaque_sig, 0);
 		} else {
@@ -2793,6 +2920,7 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 					MTL::FunctionHandle *handle = state->functionHandle(hit_anyhit_fns[i]);
 					ERR_FAIL_NULL_V_MSG(handle, false, "Failed to retrieve Metal intersection function handle.");
 					ift->setFunction(handle, i);
+					hit_anyhit_handles[i] = NS::RetainPtr(handle);
 				} else {
 					ift->setOpaqueTriangleIntersectionFunction(opaque_sig, i);
 				}
@@ -2803,8 +2931,11 @@ bool RenderingDeviceDriverMetal::_raytracing_pipeline_build_executable(MDRaytrac
 		entry.state = std::move(state);
 		entry.visible_table = std::move(vft);
 		entry.intersection_table = std::move(ift);
+		entry.hit_anyhit_handles = std::move(hit_anyhit_handles);
+		entry.opaque_sig = opaque_sig;
 	}
 
+	p_pipeline->supports_adding_binary_functions = true;
 	return true;
 }
 
@@ -2827,18 +2958,22 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_create
 		VectorView<PipelineSpecializationConstant> spec = ps.specialization_constants;
 		NS::String *spec_name = nullptr;
 		NS::SharedPtr<NS::String> spec_name_holder;
-		if (ps.shader_stage != SHADER_STAGE_RAYGEN) {
+		const bool compile_to_binary = ps.shader_stage != SHADER_STAGE_RAYGEN;
+		const bool is_intersection = ps.shader_stage == SHADER_STAGE_ANY_HIT || ps.shader_stage == SHADER_STAGE_INTERSECTION;
+		if (compile_to_binary) {
 			CharString unique = vformat("spv_rt_%d", _rt_function_id.increment()).utf8();
 			spec_name_holder = NS::TransferPtr(NS::String::alloc()->init(unique.get_data(), NS::UTF8StringEncoding));
 			spec_name = spec_name_holder.get();
 		}
-		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec, spec_name);
+		bool is_binary = false;
+		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec, spec_name, compile_to_binary, is_intersection, &is_binary);
 		if (std::holds_alternative<Error>(fn_or_err)) {
 			delete pipeline;
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Failed to create Metal function for raytracing pipeline stage.");
 		}
 		pipeline->specialized_stages[i].stage = ps.shader_stage;
 		pipeline->specialized_stages[i].function = std::get<NS::SharedPtr<MTL::Function>>(fn_or_err);
+		pipeline->specialized_stages[i].is_binary = is_binary;
 	}
 
 	for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
@@ -2880,18 +3015,22 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_librar
 		VectorView<PipelineSpecializationConstant> spec = ps.specialization_constants;
 		NS::String *spec_name = nullptr;
 		NS::SharedPtr<NS::String> spec_name_holder;
-		if (ps.shader_stage != SHADER_STAGE_RAYGEN) {
+		const bool compile_to_binary = ps.shader_stage != SHADER_STAGE_RAYGEN;
+		const bool is_intersection = ps.shader_stage == SHADER_STAGE_ANY_HIT || ps.shader_stage == SHADER_STAGE_INTERSECTION;
+		if (compile_to_binary) {
 			CharString unique = vformat("spv_rt_%d", _rt_function_id.increment()).utf8();
 			spec_name_holder = NS::TransferPtr(NS::String::alloc()->init(unique.get_data(), NS::UTF8StringEncoding));
 			spec_name = spec_name_holder.get();
 		}
-		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec, spec_name);
+		bool is_binary = false;
+		Result<NS::SharedPtr<MTL::Function>> fn_or_err = _create_function(rt_shader->stages[ps.shader_stage].get(), MTLSTR("main0"), spec, spec_name, compile_to_binary, is_intersection, &is_binary);
 		if (std::holds_alternative<Error>(fn_or_err)) {
 			delete library;
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Failed to create Metal function for raytracing library stage.");
 		}
 		library->specialized_stages[i].stage = ps.shader_stage;
 		library->specialized_stages[i].function = std::get<NS::SharedPtr<MTL::Function>>(fn_or_err);
+		library->specialized_stages[i].is_binary = is_binary;
 	}
 
 	for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
@@ -2917,11 +3056,17 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_link(V
 	linked->max_trace_recursion_depth = p_max_trace_recursion_depth;
 	linked->max_payload_size = p_max_payload_size;
 
+	const MDRaytracingPipeline *base_executable = nullptr;
+	uint32_t base_stage_count = 0;
 	for (uint32_t l = 0; l < p_libraries.size(); l++) {
 		const MDRaytracingPipeline *lib = reinterpret_cast<const MDRaytracingPipeline *>(p_libraries[l].id);
 		if (lib == nullptr) {
 			delete linked;
 			ERR_FAIL_V_MSG(RaytracingPipelineID(), "Null raytracing pipeline library passed to raytracing_pipeline_link.");
+		}
+		if (l == 0 && !lib->is_library) {
+			base_executable = lib;
+			base_stage_count = lib->specialized_stages.size();
 		}
 		const uint32_t stage_base = linked->specialized_stages.size();
 		for (const MDRaytracingPipeline::SpecializedStage &s : lib->specialized_stages) {
@@ -2943,7 +3088,7 @@ RDD::RaytracingPipelineID RenderingDeviceDriverMetal::raytracing_pipeline_link(V
 	}
 
 	const char *label = linked->layout_shader != nullptr ? linked->layout_shader->name.get_data() : "LinkedRaytracingPipeline";
-	if (!_raytracing_pipeline_build_executable(linked, label)) {
+	if (!_raytracing_pipeline_build_executable(linked, label, base_executable, base_stage_count)) {
 		delete linked;
 		return RaytracingPipelineID();
 	}
@@ -3117,6 +3262,69 @@ void RenderingDeviceDriverMetal::flush_deferred_releases() {
 			CFRelease(entry.resource);
 		}
 	}
+}
+
+void RenderingDeviceDriverMetal::sbt_shadow_copy(const void *p_src_buf, const void *p_dst_buf, VectorView<RDD::BufferCopyRegion> p_regions) {
+	if (sbt_shadow_count.get() == 0 || p_src_buf == nullptr || p_dst_buf == nullptr) {
+		return;
+	}
+	const BufferInfo *src = static_cast<const BufferInfo *>(p_src_buf);
+	if (src->buffer.get() == nullptr || src->buffer->storageMode() != MTL::StorageModeShared) {
+		return;
+	}
+	const uint8_t *src_bytes = static_cast<const uint8_t *>(src->buffer->contents());
+	if (src_bytes == nullptr) {
+		return;
+	}
+	const uint64_t src_len = src->buffer->length();
+	MutexLock lock(sbt_shadows_mutex);
+	SBTShadow *dst_shadow = sbt_shadows.getptr(p_dst_buf);
+	if (dst_shadow == nullptr) {
+		return;
+	}
+	bool modified = false;
+	const uint64_t dst_len = dst_shadow->data.size();
+	for (uint32_t i = 0; i < p_regions.size(); i++) {
+		const RDD::BufferCopyRegion &region = p_regions[i];
+		if (region.size == 0 || region.src_offset > src_len || region.dst_offset > dst_len) {
+			continue;
+		}
+		const uint64_t copy_size = MIN(region.size, MIN(src_len - region.src_offset, dst_len - region.dst_offset));
+		if (copy_size > 0) {
+			memcpy(dst_shadow->data.ptr() + region.dst_offset, src_bytes + region.src_offset, copy_size);
+			modified = true;
+		}
+	}
+	if (modified) {
+		dst_shadow->version = next_sbt_shadow_version++;
+	}
+}
+
+bool RenderingDeviceDriverMetal::sbt_shadow_get_version(const void *p_buf, uint64_t &r_version) {
+	if (sbt_shadow_count.get() == 0 || p_buf == nullptr) {
+		return false;
+	}
+	MutexLock lock(sbt_shadows_mutex);
+	const SBTShadow *shadow = sbt_shadows.getptr(p_buf);
+	if (shadow == nullptr) {
+		return false;
+	}
+	r_version = shadow->version;
+	return true;
+}
+
+bool RenderingDeviceDriverMetal::sbt_shadow_copy_out(const void *p_buf, LocalVector<uint8_t> &r_data, uint64_t &r_version) {
+	if (sbt_shadow_count.get() == 0 || p_buf == nullptr) {
+		return false;
+	}
+	MutexLock lock(sbt_shadows_mutex);
+	const SBTShadow *shadow = sbt_shadows.getptr(p_buf);
+	if (shadow == nullptr) {
+		return false;
+	}
+	r_data = shadow->data;
+	r_version = shadow->version;
+	return true;
 }
 
 void RenderingDeviceDriverMetal::end_segment() {

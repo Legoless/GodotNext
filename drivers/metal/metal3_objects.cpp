@@ -810,6 +810,8 @@ void MDCommandBuffer::copy_buffer(RDD::BufferID p_src_buffer, RDD::BufferID p_ds
 	const RDM::BufferInfo *src = (const RDM::BufferInfo *)p_src_buffer.id;
 	const RDM::BufferInfo *dst = (const RDM::BufferInfo *)p_dst_buffer.id;
 
+	device_driver->sbt_shadow_copy(src, dst, p_regions);
+
 	MTL::BlitCommandEncoder *enc = _ensure_blit_encoder();
 
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
@@ -2178,6 +2180,7 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 		}
 	}
 
+	MTL::IntersectionFunctionTable *active_ift = entry.intersection_table.get();
 	if (p_hit_sbt.buffer.id != 0) {
 		const RDM::BufferInfo *hit_info = reinterpret_cast<const RDM::BufferInfo *>(p_hit_sbt.buffer.id);
 		if (hit_info != nullptr && hit_info->buffer.get() != nullptr) {
@@ -2185,6 +2188,65 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 			params.hit_sbt_stride = p_hit_sbt.stride;
 			params.hit_sbt_count = p_hit_sbt.stride > 0 ? p_hit_sbt.size / p_hit_sbt.stride : 0;
 			enc->useResource(hit_info->buffer.get(), MTL::ResourceUsageRead);
+
+			// Build or reuse an SBT-slot-indexed MTL::IntersectionFunctionTable so TLAS instances
+			// with intersectionFunctionTableOffset == hit_sbt_offset invoke the right any-hit
+			// function even when SBT slots outnumber pipeline hit groups (e.g. 256 materials).
+			if (params.hit_sbt_count > 0 && params.hit_sbt_stride >= RDD::METAL_RT_SHADER_GROUP_HANDLE_SIZE) {
+				uint64_t sbt_version = 0;
+				const bool has_shadow = device_driver->sbt_shadow_get_version(hit_info, sbt_version);
+				const bool is_shared = !has_shadow && hit_info->buffer->storageMode() == MTL::StorageModeShared && hit_info->buffer->contents() != nullptr;
+				if (has_shadow || is_shared) {
+					const bool cache_hit = has_shadow &&
+							entry.sbt_intersection_table &&
+							entry.sbt_ift_buffer == hit_info &&
+							entry.sbt_ift_offset == p_hit_sbt.offset &&
+							entry.sbt_ift_stride == params.hit_sbt_stride &&
+							entry.sbt_ift_count == params.hit_sbt_count &&
+							entry.sbt_ift_version == sbt_version;
+					if (!cache_hit) {
+						LocalVector<uint8_t> shadow_bytes;
+						const uint8_t *sbt_ptr = nullptr;
+						uint64_t sbt_size = 0;
+						if (has_shadow && device_driver->sbt_shadow_copy_out(hit_info, shadow_bytes, sbt_version)) {
+							sbt_ptr = shadow_bytes.ptr();
+							sbt_size = shadow_bytes.size();
+						} else if (is_shared) {
+							sbt_ptr = reinterpret_cast<const uint8_t *>(hit_info->buffer->contents());
+							sbt_size = hit_info->buffer->length();
+						}
+						if (sbt_ptr != nullptr) {
+							NS::SharedPtr<MTL::IntersectionFunctionTableDescriptor> ift_desc = NS::TransferPtr(MTL::IntersectionFunctionTableDescriptor::alloc()->init());
+							ift_desc->setFunctionCount(params.hit_sbt_count);
+							NS::SharedPtr<MTL::IntersectionFunctionTable> sbt_ift = NS::TransferPtr(entry.state->newIntersectionFunctionTable(ift_desc.get()));
+							if (sbt_ift) {
+								const uint32_t hit_group_count = entry.hit_anyhit_handles.size();
+								for (uint32_t slot = 0; slot < params.hit_sbt_count; slot++) {
+									const uint32_t ift_idx = RDD::metal_rt_hit_sbt_intersection_function_index(sbt_ptr, sbt_size, p_hit_sbt.offset, params.hit_sbt_stride, slot, hit_group_count);
+									if (ift_idx < hit_group_count && entry.hit_anyhit_handles[ift_idx]) {
+										sbt_ift->setFunction(entry.hit_anyhit_handles[ift_idx].get(), slot);
+									} else {
+										sbt_ift->setOpaqueTriangleIntersectionFunction(entry.opaque_sig, slot);
+									}
+								}
+								if (entry.sbt_intersection_table) {
+									entry.sbt_intersection_table->retain();
+									device_driver->defer_release(reinterpret_cast<CFTypeRef>(entry.sbt_intersection_table.get()));
+								}
+								entry.sbt_intersection_table = std::move(sbt_ift);
+								entry.sbt_ift_buffer = has_shadow ? hit_info : nullptr;
+								entry.sbt_ift_offset = p_hit_sbt.offset;
+								entry.sbt_ift_stride = params.hit_sbt_stride;
+								entry.sbt_ift_count = params.hit_sbt_count;
+								entry.sbt_ift_version = sbt_version;
+							}
+						}
+					}
+					if (entry.sbt_intersection_table) {
+						active_ift = entry.sbt_intersection_table.get();
+					}
+				}
+			}
 		}
 	}
 
@@ -2257,7 +2319,7 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 			params.const_sets[set_index] = gpu_addr;
 			params.device_sets[set_index] = gpu_addr;
 			enc->setBuffer(arg_buf, 0, set_index);
-			entry.intersection_table->setBuffer(arg_buf, 0, set_index);
+			active_ift->setBuffer(arg_buf, 0, set_index);
 			enc->useResource(arg_buf, MTL::ResourceUsageRead);
 		}
 	}
@@ -2271,7 +2333,7 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 		if (push_constant_binding.is_valid()) {
 			const uint32_t pc_slot = push_constant_binding.get_binding();
 			enc->setBuffer(pc_alloc.buffer, pc_alloc.offset, pc_slot);
-			entry.intersection_table->setBuffer(pc_alloc.buffer, pc_alloc.offset, pc_slot);
+			active_ift->setBuffer(pc_alloc.buffer, pc_alloc.offset, pc_slot);
 		}
 	}
 
@@ -2279,7 +2341,7 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 	memcpy(params_alloc.ptr, &params, sizeof(RDD::MetalRTSBTParams));
 	enc->useResource(params_alloc.buffer, MTL::ResourceUsageRead);
 
-	entry.intersection_table->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
+	active_ift->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
 
 	raytracing.resource_tracker.encode(enc);
 
@@ -2312,10 +2374,10 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 		}
 		enc->setComputePipelineState(entry.state.get());
 		enc->setVisibleFunctionTable(entry.visible_table.get(), RDD::METAL_RT_VISIBLE_FUNCTION_TABLE_BUFFER_INDEX);
-		enc->setIntersectionFunctionTable(entry.intersection_table.get(), RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX);
+		enc->setIntersectionFunctionTable(active_ift, RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX);
 		enc->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
 		enc->useResource(entry.visible_table.get(), MTL::ResourceUsageRead);
-		enc->useResource(entry.intersection_table.get(), MTL::ResourceUsageRead);
+		enc->useResource(active_ift, MTL::ResourceUsageRead);
 		enc->dispatchThreadgroups(tg_alloc.buffer, tg_alloc.offset, threads_per_tg);
 	} else {
 		uint32_t gx = 0;
@@ -2324,10 +2386,10 @@ void MDCommandBuffer::_raytracing_encode_trace(const RDD::ShaderBindingTable &p_
 		RDD::metal_rt_compute_threadgroups(p_width, p_height, p_depth, RDD::METAL_RT_THREADGROUP_WIDTH, RDD::METAL_RT_THREADGROUP_HEIGHT, 1, gx, gy, gz);
 		enc->setComputePipelineState(entry.state.get());
 		enc->setVisibleFunctionTable(entry.visible_table.get(), RDD::METAL_RT_VISIBLE_FUNCTION_TABLE_BUFFER_INDEX);
-		enc->setIntersectionFunctionTable(entry.intersection_table.get(), RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX);
+		enc->setIntersectionFunctionTable(active_ift, RDD::METAL_RT_INTERSECTION_FUNCTION_TABLE_BUFFER_INDEX);
 		enc->setBuffer(params_alloc.buffer, params_alloc.offset, RDD::METAL_RT_SBT_PARAMS_BUFFER_INDEX);
 		enc->useResource(entry.visible_table.get(), MTL::ResourceUsageRead);
-		enc->useResource(entry.intersection_table.get(), MTL::ResourceUsageRead);
+		enc->useResource(active_ift, MTL::ResourceUsageRead);
 		enc->dispatchThreadgroups(MTL::Size(gx, gy, gz), threads_per_tg);
 	}
 

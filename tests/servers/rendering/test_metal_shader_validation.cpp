@@ -39,3 +39,72 @@ TEST_CASE("[Metal][ShaderValidation] Argument-buffer stores are declared read-wr
 	CHECK_EQ(metal_shader_validation_usage(METAL_RESOURCE_USAGE_WRITE), METAL_RESOURCE_USAGE_READ | METAL_RESOURCE_USAGE_WRITE);
 	CHECK_EQ(metal_shader_validation_usage(METAL_RESOURCE_USAGE_READ | METAL_RESOURCE_USAGE_WRITE), METAL_RESOURCE_USAGE_READ | METAL_RESOURCE_USAGE_WRITE);
 }
+
+TEST_CASE("[Metal][ShaderValidation] SPIR-V NoContraction scanner toggles safe math mode") {
+	constexpr uint32_t MAGIC = 0x07230203u;
+	constexpr uint32_t OP_FUNCTION = 54u;
+	constexpr uint32_t OP_DECORATE = 71u;
+	constexpr uint32_t OP_MEMBER_DECORATE = 72u;
+	constexpr uint32_t DECORATION_NO_CONTRACTION = 42u;
+	constexpr uint32_t DECORATION_INVARIANT = 11u;
+
+	// Null / short / bad magic.
+	CHECK_FALSE(metal_spirv_uses_no_contraction(nullptr, 0));
+	const uint32_t bad_magic[] = { 0x12345678u, 0x00010600u, 0, 10, 0 };
+	CHECK_FALSE(metal_spirv_uses_no_contraction(bad_magic, 5));
+
+	// Shader without NoContraction keeps fast math.
+	const uint32_t plain[] = {
+		MAGIC,
+		0x00010600u,
+		0,
+		10,
+		0,
+		(3u << 16) | OP_DECORATE,
+		5u,
+		DECORATION_INVARIANT,
+		(5u << 16) | OP_FUNCTION,
+		1u,
+		2u,
+		0u,
+		3u,
+	};
+	CHECK_FALSE(metal_spirv_uses_no_contraction(plain, sizeof(plain) / sizeof(plain[0])));
+
+	// OpDecorate NoContraction (GLSL `precise`) disables fast math.
+	const uint32_t precise_var[] = {
+		MAGIC,
+		0x00010600u,
+		0,
+		10,
+		0,
+		(3u << 16) | OP_DECORATE,
+		7u,
+		DECORATION_NO_CONTRACTION,
+		(5u << 16) | OP_FUNCTION,
+		1u,
+		2u,
+		0u,
+		3u,
+	};
+	CHECK(metal_spirv_uses_no_contraction(precise_var, sizeof(precise_var) / sizeof(precise_var[0])));
+
+	// OpMemberDecorate NoContraction also disables fast math.
+	const uint32_t precise_member[] = {
+		MAGIC,
+		0x00010600u,
+		0,
+		10,
+		0,
+		(4u << 16) | OP_MEMBER_DECORATE,
+		4u,
+		2u,
+		DECORATION_NO_CONTRACTION,
+		(5u << 16) | OP_FUNCTION,
+		1u,
+		2u,
+		0u,
+		3u,
+	};
+	CHECK(metal_spirv_uses_no_contraction(precise_member, sizeof(precise_member) / sizeof(precise_member[0])));
+}

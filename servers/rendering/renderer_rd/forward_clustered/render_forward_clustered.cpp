@@ -7045,7 +7045,6 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			nextgeo_last_tessellation_enabled = tess_enabled_now;
 			nextgeo_last_voxels_enabled = voxels_enabled_now;
 			nextgeo_last_sw_raster_available = sw_raster_now;
-			bool marked_any = false;
 			auto inst_needs_rebin = [sw_raster_changed](const GeometryInstanceForwardClustered *p_inst) -> bool {
 				if (p_inst == nullptr) {
 					return false;
@@ -7063,22 +7062,27 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 				return false;
 			};
+			LocalVector<GeometryInstanceForwardClustered *> to_mark;
 			if (p_render_data->instances != nullptr) {
 				for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
 					GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
 					if (inst_needs_rebin(inst)) {
-						inst->_mark_dirty();
-						marked_any = true;
+						to_mark.push_back(inst);
 					}
 				}
 			}
+			// Collect owners before calling _mark_dirty(): _mark_dirty() frees and unlinks the
+			// owner's surface caches from geometry_surface_compilation_all_list, which would
+			// invalidate a live range-for iterator and cut the scan short after the first match.
 			for (GeometryInstanceSurfaceDataCache &surf : geometry_surface_compilation_all_list) {
 				if (surf.owner != nullptr && inst_needs_rebin(surf.owner)) {
-					surf.owner->_mark_dirty();
-					marked_any = true;
+					to_mark.push_back(surf.owner);
 				}
 			}
-			if (marked_any) {
+			if (!to_mark.is_empty()) {
+				for (GeometryInstanceForwardClustered *inst : to_mark) {
+					inst->_mark_dirty();
+				}
 				_update_dirty_geometry_instances();
 			}
 		}
