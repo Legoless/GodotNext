@@ -66,6 +66,7 @@ config/custom_user_dir_name="$user_name"
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt_value
 EOF
 }
 

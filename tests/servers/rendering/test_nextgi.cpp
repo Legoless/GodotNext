@@ -5680,6 +5680,9 @@ TEST_CASE("[NextGI] Gather and WRC shader contracts: probe normal weights, solid
 	CHECK(relight_sources[RenderingDevice::SHADER_STAGE_COMPUTE].contains("if (nview.z < 0.0)"));
 	CHECK(relight_sources[RenderingDevice::SHADER_STAGE_COMPUTE].contains("float(material_local.x) + 0.5) / card_size.x"));
 	CHECK(wrc_src.contains("if (!(card_depth > 0.0))"));
+	// Coarse SRC cards (> 8 cm world texel extent) must guard against wall-straddling radiance leaks in both Gather and WRC.
+	CHECK(gather_src.contains("nextgi_src_resolve_coarse_radiance"));
+	CHECK(wrc_src.contains("nextgi_wrc_resolve_coarse_radiance"));
 }
 
 TEST_CASE("[NextGI] SRC card atlas budgeting and directional-light alignment on tilted cards") {

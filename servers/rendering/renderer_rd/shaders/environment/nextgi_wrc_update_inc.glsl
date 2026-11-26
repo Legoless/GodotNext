@@ -185,6 +185,90 @@ bool nextgi_wrc_hit_pos_normal(NextGIHit hit, out vec3 object_pos, out vec3 face
 	return true;
 }
 
+vec3 nextgi_wrc_point_to_world(NextGIInstanceRecord rec, vec3 p) {
+	return vec3(
+			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), p) + rec.object_to_world[3],
+			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), p) + rec.object_to_world[7],
+			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), p) + rec.object_to_world[11]);
+}
+
+bool nextgi_wrc_src_vis_blocked(vec3 p0, vec3 p1) {
+	vec3 delta = p1 - p0;
+	float dist = length(delta);
+	if (dist <= 0.01) {
+		return false;
+	}
+	float tmax = dist - 0.005;
+	if (tmax <= 0.005) {
+		return false;
+	}
+	NextGIHit vis_hit;
+	return nextgi_trace(p0, delta / dist, tmax, vis_hit);
+}
+
+// Mirror nextgi_src_resolve_coarse_radiance in nextgi_gather_body_inc.glsl so WRC probes never
+// pull lit-room radiance across thin partition walls on coarse Stage-1/Stage-2 cards.
+vec3 nextgi_wrc_resolve_coarse_radiance(NextGIInstanceRecord rec, NextGICardSet card_set, NextGICard card, uvec2 page_origin, uvec2 page_size, vec3 object_pos, vec3 face_normal, vec2 card_size, vec2 texel, float hit_depth, float card_depth, float depth_tol, vec3 sample_radiance, bool is_skinned) {
+	if (is_skinned) {
+		return sample_radiance;
+	}
+	float world_scale = max(
+			length(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2])),
+			max(length(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6])),
+					length(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]))));
+	float rad_texel_extent = max(2.0 * card.axis_u.w / float(page_size.x), 2.0 * card.axis_v.w / float(page_size.y));
+	if (rad_texel_extent * world_scale <= 0.08) {
+		return sample_radiance;
+	}
+	vec2 rad_texel = texel / card_size * vec2(page_size);
+	ivec2 rad_local = ivec2(clamp(rad_texel, vec2(0.0), vec2(page_size) - 1.0));
+	ivec2 src_mat_local = ivec2(clamp(((vec2(rad_local) + 0.5) / vec2(page_size)) * card_size, vec2(0.0), card_size - 1.0));
+	float src_depth = texelFetch(material_depth_tex, ivec2(card.atlas_rect.xy) + src_mat_local, 0).r;
+	if (src_depth <= 0.0) {
+		src_depth = card_depth;
+	}
+	float xu = ((float(src_mat_local.x) + 0.5) / card_size.x * 2.0 - 1.0) * card.axis_u.w;
+	float yv = ((float(src_mat_local.y) + 0.5) / card_size.y * 2.0 - 1.0) * card.axis_v.w;
+	vec3 texel_obj = card.origin.xyz + card.axis_u.xyz * xu + card.axis_v.xyz * yv + card.axis_n.xyz * (-src_depth * card_set.capture_scale);
+	vec3 hit_world = nextgi_wrc_point_to_world(rec, object_pos);
+	vec3 texel_world = nextgi_wrc_point_to_world(rec, texel_obj);
+	vec3 wn_raw = nextgi_record_normal_to_world(rec, face_normal);
+	float wn_len = length(wn_raw);
+	if (wn_len <= 1e-6) {
+		return sample_radiance;
+	}
+	vec3 world_normal = wn_raw / wn_len;
+	float vis_off = max(rec.origin_offset, 0.02);
+	vec3 p0 = hit_world + world_normal * vis_off;
+	vec3 p1 = texel_world + world_normal * (vis_off + max(0.0, -dot(world_normal, texel_world - hit_world)));
+	if (!nextgi_wrc_src_vis_blocked(p0, p1)) {
+		return sample_radiance;
+	}
+	vec2 frac = rad_texel - (vec2(rad_local) + 0.5);
+	ivec2 step_a = abs(frac.x) >= abs(frac.y) ? ivec2(frac.x >= 0.0 ? 1 : -1, 0) : ivec2(0, frac.y >= 0.0 ? 1 : -1);
+	ivec2 step_b = abs(frac.x) >= abs(frac.y) ? ivec2(0, frac.y >= 0.0 ? 1 : -1) : ivec2(frac.x >= 0.0 ? 1 : -1, 0);
+	for (int attempt = 0; attempt < 2; attempt++) {
+		ivec2 alt_rad_local = rad_local + (attempt == 0 ? step_a : step_b);
+		if (alt_rad_local.x < 0 || alt_rad_local.y < 0 || alt_rad_local.x >= int(page_size.x) || alt_rad_local.y >= int(page_size.y)) {
+			continue;
+		}
+		ivec2 alt_mat_local = ivec2(clamp(((vec2(alt_rad_local) + 0.5) / vec2(page_size)) * card_size, vec2(0.0), card_size - 1.0));
+		float alt_depth = texelFetch(material_depth_tex, ivec2(card.atlas_rect.xy) + alt_mat_local, 0).r;
+		if (!(alt_depth > 0.0 && abs(alt_depth - hit_depth) <= depth_tol)) {
+			continue;
+		}
+		float axu = ((float(alt_mat_local.x) + 0.5) / card_size.x * 2.0 - 1.0) * card.axis_u.w;
+		float ayv = ((float(alt_mat_local.y) + 0.5) / card_size.y * 2.0 - 1.0) * card.axis_v.w;
+		vec3 alt_obj = card.origin.xyz + card.axis_u.xyz * axu + card.axis_v.xyz * ayv + card.axis_n.xyz * (-alt_depth * card_set.capture_scale);
+		vec3 alt_world = nextgi_wrc_point_to_world(rec, alt_obj);
+		vec3 p_alt = alt_world + world_normal * (vis_off + max(0.0, -dot(world_normal, alt_world - hit_world)));
+		if (!nextgi_wrc_src_vis_blocked(p0, p_alt)) {
+			return texelFetch(src_radiance_tex, ivec2(page_origin) + alt_rad_local, 0).rgb;
+		}
+	}
+	return vec3(0.0);
+}
+
 // D6 card lookup. A failure falls through to the previous WRC sample (black when the texel's
 // ray saw something else last time: nextgi_wrc_texel_keeps_history).
 bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
@@ -205,6 +289,7 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		// GodotNext: nextgi_nextgeo (#77). Outside-mask surface on a Stage-2 mesh falls back to WRC.
 		return false;
 	}
+	bool is_skinned = (surface.flags & 1u) != 0u;
 	NextGICardSet card_set = card_sets.data[rec.card_set];
 	if ((surface.flags & 2u) != 0u) {
 		// GodotNext: nextgi_nextgeo (#77). Stage-2 cards keyed by proxy-cut cluster group + dominant axis.
@@ -225,6 +310,14 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		}
 		float best_align = 0.0;
 		vec3 best = vec3(0.0);
+		uint best_card_index = 0u;
+		uvec2 best_page_origin = uvec2(0u);
+		uvec2 best_page_size = uvec2(1u);
+		vec2 best_card_size = vec2(1.0);
+		vec2 best_texel = vec2(0.0);
+		float best_hit_depth = 0.0;
+		float best_card_depth = 0.0;
+		float best_depth_tol = 0.0;
 		bool found = false;
 		for (uint k = 0u; k < 6u && (lo + k) < card_set.card_count; k++) {
 			uint i = lo + k;
@@ -261,14 +354,31 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 			ivec2 radiance_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - 1.0));
 			best_align = align;
 			best = texelFetch(src_radiance_tex, radiance_coord, 0).rgb;
+			best_card_index = card_set.first_card + i;
+			best_page_origin = page_origin;
+			best_page_size = page_size;
+			best_card_size = card_size;
+			best_texel = texel;
+			best_hit_depth = depth;
+			best_card_depth = card_depth;
+			best_depth_tol = depth_tol;
 			found = true;
 		}
-		radiance = best;
+		if (found) {
+			radiance = nextgi_wrc_resolve_coarse_radiance(rec, card_set, cards.data[best_card_index], best_page_origin, best_page_size, object_pos, face_normal, best_card_size, best_texel, best_hit_depth, best_card_depth, best_depth_tol, best, is_skinned);
+		}
 		return found;
 	}
 	float best_align = 0.0;
 	float best_depth = 1.0e20;
 	vec3 best = vec3(0.0);
+	uint best_card_index = 0u;
+	uvec2 best_page_origin = uvec2(0u);
+	uvec2 best_page_size = uvec2(1u);
+	vec2 best_card_size = vec2(1.0);
+	vec2 best_texel = vec2(0.0);
+	float best_card_depth = 0.0;
+	float best_depth_tol = 0.0;
 	bool found = false;
 	for (uint i = 0u; i < card_set.card_count; i++) {
 		NextGICard card = cards.data[card_set.first_card + i];
@@ -310,10 +420,19 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 			best_align = align;
 			best_depth = depth;
 			best = sample_radiance;
+			best_card_index = card_set.first_card + i;
+			best_page_origin = page_origin;
+			best_page_size = page_size;
+			best_card_size = card_size;
+			best_texel = texel;
+			best_card_depth = card_depth;
+			best_depth_tol = depth_tol;
 			found = true;
 		}
 	}
-	radiance = best;
+	if (found) {
+		radiance = nextgi_wrc_resolve_coarse_radiance(rec, card_set, cards.data[best_card_index], best_page_origin, best_page_size, object_pos, face_normal, best_card_size, best_texel, best_depth, best_card_depth, best_depth_tol, best, is_skinned);
+	}
 	return found;
 }
 #endif // !NEXTGI_TRACE_SDF
