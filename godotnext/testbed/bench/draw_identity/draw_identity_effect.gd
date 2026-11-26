@@ -436,8 +436,8 @@ void main() {
 		// Path (c): single indirect instanced draw (vertexCount = 384, instanceCount = visible clusters).
 		atomicAdd(indirect[0].y, 1u);
 	} else if (mode == 1u) {
-		// Path (a): one VkDrawIndirectCommand per visible cluster + count buffer.
-		indirect[idx] = uvec4(tri_cnt * 3u, 1u, 0u, 0u);
+		// Path (a): one VkDrawIndirectCommand per visible cluster + count buffer (firstInstance = idx for Metal).
+		indirect[idx] = uvec4(tri_cnt * 3u, 1u, 0u, idx);
 	} else {
 		// Path (b): per-triangle compacted list, single draw with vertexCount = 3N.
 		uint base_vert = atomicAdd(indirect[0].x, tri_cnt * 3u);
@@ -485,7 +485,34 @@ void main() {
 }
 """
 	elif path_mode == "a":
-		glsl_vert = """#version 460
+		var is_metal := RenderingServer.get_current_rendering_driver_name().to_lower() == "metal"
+		if is_metal:
+			# Metal/MSL has no DrawIndex (gl_DrawID); Stage 3 writes firstInstance = idx, read via gl_InstanceIndex.
+			glsl_vert = """#version 460
+struct Instance { mat4 model; vec4 world_bounds; uvec4 meta; };
+struct Cluster { vec4 bounds; vec4 cone; uvec4 counts; };
+layout(set = 0, binding = 0, std430) readonly buffer Instances { Instance insts[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Clusters { Cluster clusters[]; };
+layout(set = 0, binding = 2, std430) readonly buffer Verts { vec4 verts[]; };
+layout(set = 0, binding = 3, std430) readonly buffer Tris { uint tris[]; };
+layout(set = 0, binding = 4, std430) readonly buffer VisClusters { uvec2 vis_clusters[]; };
+layout(push_constant) uniform PC { mat4 vp; } pc;
+layout(location = 0) flat out uint v_vis_id;
+void main() {
+	uint vis_idx = uint(gl_InstanceIndex);
+	uint tri = uint(gl_VertexIndex) / 3u;
+	uint corner = uint(gl_VertexIndex) % 3u;
+	uvec2 pair = vis_clusters[vis_idx];
+	Cluster cl = clusters[pair.y];
+	uint packed = tris[cl.counts.y + tri];
+	uint local_v = (packed >> (corner * 8u)) & 0xffu;
+	vec3 pos = verts[cl.counts.x + local_v].xyz;
+	gl_Position = pc.vp * (insts[pair.x].model * vec4(pos, 1.0));
+	v_vis_id = (vis_idx << 7u) | tri;
+}
+"""
+		else:
+			glsl_vert = """#version 460
 #extension GL_ARB_shader_draw_parameters : require
 struct Instance { mat4 model; vec4 world_bounds; uvec4 meta; };
 struct Cluster { vec4 bounds; vec4 cone; uvec4 counts; };
