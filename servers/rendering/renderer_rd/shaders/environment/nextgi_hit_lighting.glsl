@@ -93,48 +93,60 @@ vec3 hl_wrc_sample(vec3 p_world, vec3 p_dir, out bool r_hit_cache) {
 	if (hit_light_params.wrc_camera.w < 0.5) {
 		return vec3(0.0);
 	}
-	float dist = length(p_world - hit_light_params.wrc_camera.xyz);
-	float spacing = 1.0;
-	uint level = 0u;
-	if (dist > 8.0) {
-		spacing = 2.0;
-		level = 1u;
+	uint level = 3u;
+	float spacing = 8.0;
+	vec3 level_origin = floor(hit_light_params.wrc_origin_spacing.xyz / 8.0) * 8.0;
+	vec3 local = (p_world - level_origin) / 8.0 + vec3(7.5);
+	for (uint l = 0u; l < 4u; l++) {
+		float s = float(1u << l);
+		vec3 lo = floor(hit_light_params.wrc_origin_spacing.xyz / s) * s;
+		vec3 lc = (p_world - lo) / s + vec3(7.5);
+		if (all(greaterThanEqual(lc, vec3(0.0))) && all(lessThanEqual(lc, vec3(15.0)))) {
+			level = l;
+			spacing = s;
+			level_origin = lo;
+			local = lc;
+			break;
+		}
 	}
-	if (dist > 16.0) {
-		spacing = 4.0;
-		level = 2u;
-	}
-	if (dist > 32.0) {
-		spacing = 8.0;
-		level = 3u;
-	}
-	vec3 level_origin = floor(hit_light_params.wrc_origin_spacing.xyz / spacing) * spacing;
-	vec3 local = (p_world - level_origin) / spacing + vec3(7.5);
 	vec3 base = floor(local);
 	vec3 frac = local - base;
 	vec2 oct = hl_wrc_oct_uv(p_dir);
 	vec3 accum = vec3(0.0);
 	float weight_sum = 0.0;
+	bool any_probe_in_bounds = false;
 	for (uint i = 0u; i < 8u; i++) {
 		ivec3 offset = ivec3(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
 		ivec3 cell = ivec3(base) + offset;
 		if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, ivec3(16)))) {
 			continue;
 		}
+		any_probe_in_bounds = true;
 		uint probe = uint(cell.x) + uint(cell.y) * 16u + uint(cell.z) * 256u + level * 4096u;
 		uvec2 tile = uvec2(probe % 128u, probe / 128u);
-		vec2 uv = (vec2(tile) * 10.0 + vec2(1.0) + oct * 8.0 + vec2(0.5)) / vec2(1280.0);
-		vec2 vis_uv = (vec2(tile) * 8.0 + oct * 7.0 + vec2(0.5)) / vec2(1024.0);
+		vec3 probe_pos = level_origin + (vec3(cell) - vec3(7.5)) * spacing;
+		vec3 to_p = p_world - probe_pos;
+		float dist_to_p = length(to_p);
+		if (dist_to_p > 0.02) {
+			rayQueryEXT vis_rq;
+			rayQueryInitializeEXT(vis_rq, hit_tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, NEXTGI_HL_MASK_GI, p_world, 0.0, -to_p / dist_to_p, dist_to_p - 0.01);
+			rayQueryProceedEXT(vis_rq);
+			if (rayQueryGetIntersectionTypeEXT(vis_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+				continue;
+			}
+		}
+		vec2 uv = (vec2(tile) * 10.0 + vec2(1.0) + oct * 8.0) / vec2(1280.0);
 		vec3 rad = textureLod(sampler2D(hit_light_wrc_radiance, SAMPLER_LINEAR_CLAMP), uv, 0.0).rgb;
-		vec2 moments = textureLod(sampler2D(hit_light_wrc_visibility, SAMPLER_LINEAR_CLAMP), vis_uv, 0.0).rg;
-		float variance = max(moments.g - moments.r * moments.r, 0.0);
-		float chebyshev = variance / (variance + 0.05);
 		vec3 trilinear = mix(vec3(1.0) - frac, frac, vec3(offset));
-		float weight = trilinear.x * trilinear.y * trilinear.z * max(chebyshev, 0.05);
+		float weight = trilinear.x * trilinear.y * trilinear.z;
 		accum += rad * weight;
 		weight_sum += weight;
 	}
+	if (!any_probe_in_bounds) {
+		return vec3(0.0);
+	}
 	if (weight_sum <= 0.0) {
+		r_hit_cache = true;
 		return vec3(0.0);
 	}
 	r_hit_cache = true;
@@ -147,8 +159,8 @@ vec3 hl_miss_radiance(vec3 p_end_pos, vec3 p_dir) {
 	if (wrc_ok) {
 		return wrc;
 	}
-	if (hit_light_params.ambient_color_sky.a > 0.5) {
-		return textureLod(sampler2D(hit_light_sky, SAMPLER_LINEAR_CLAMP), vec3_to_oct(p_dir), 0.0).rgb;
+	if (hit_light_params.ambient_color_sky.a > 0.0) {
+		return textureLod(sampler2D(hit_light_sky, SAMPLER_LINEAR_CLAMP), vec3_to_oct(p_dir), 0.0).rgb * hit_light_params.ambient_color_sky.a;
 	}
 	return hit_light_params.ambient_color_sky.rgb;
 }
@@ -329,10 +341,12 @@ vec3 hl_shade_surface(
 					continue;
 				}
 				to_light = delta / dist;
+				float min_eval_dist = p_diffuse_gi ? 0.15 : 0.05;
+				float eval_dist = max(dist, max(light.spot_atten_radius.w, min_eval_dist));
 				if (ltype == 2u) {
-					atten = nextgi_hl_spot_attenuation(dist, light.position_inv_range.w, light.spot_atten_radius.x, dot(-to_light, light.direction_type.xyz), light.spot_atten_radius.y, light.spot_atten_radius.z);
+					atten = nextgi_hl_spot_attenuation(eval_dist, light.position_inv_range.w, light.spot_atten_radius.x, dot(-to_light, light.direction_type.xyz), light.spot_atten_radius.y, light.spot_atten_radius.z);
 				} else {
-					atten = nextgi_hl_omni_attenuation(dist, light.position_inv_range.w, light.spot_atten_radius.x);
+					atten = nextgi_hl_omni_attenuation(eval_dist, light.position_inv_range.w, light.spot_atten_radius.x);
 				}
 			}
 			float n_dot_l = dot(p_normal, to_light);
@@ -444,7 +458,6 @@ void main() {
 
 	vec3 cur_origin = rec.origin_t.xyz;
 	float mark_t = rec.origin_t.w;
-	uint inst_idx = rec.id_pixel.x & 0xFFFFFFu;
 	uint material_key = rec.id_pixel.y >> 16u;
 	bool first_translucent = (rec.id_pixel.x & NEXTGI_HL_RECORD_FLAG_TRANSLUCENT) != 0u;
 	vec3 ray_dir = nextgi_hl_oct_decode(unpackSnorm2x16(rec.packed_geom.y));
@@ -454,13 +467,10 @@ void main() {
 	uint max_bounces = clamp(hit_light_params.counts0.z, 1u, 4u);
 	float world_tmax = hit_light_params.camera_pos_radius.w;
 
-	float mark_eps = inst_idx < hit_params.record_count ? hit_records.data[inst_idx].origin_offset : 0.005;
-	float primary_tmax = mark_t + max(2.0 * mark_eps, 0.01);
-
 	// GodotNext: nextgi_hit_lighting_gi (#128). Diffuse GI hits share the raygen and world light grid
 	// with 1 shadowed light per hit, replacing SRC radiance in probe_image (bound at slot 52) before filtering.
 	if (is_gi_pass) {
-		hl_trace_primary(cur_origin, ray_dir, primary_tmax, NEXTGI_HL_MASK_GI, material_key, cone);
+		hl_trace_primary(cur_origin, ray_dir, world_tmax, NEXTGI_HL_MASK_GI, material_key, cone);
 		uint pflags = payload.shading.z >> 24u;
 		vec3 gi_radiance;
 		if ((pflags & NEXTGI_HIT_PAYLOAD_HIT) == 0u) {
@@ -502,9 +512,10 @@ void main() {
 		if (any(isnan(gi_radiance)) || any(isinf(gi_radiance))) {
 			gi_radiance = vec3(0.0);
 		}
-		gi_radiance = max(gi_radiance, vec3(0.0));
-		// resume_dist carries probe_depth for diffuse GI records so probe_image.a is preserved without read-modify-write.
-		imageStore(hit_light_reflection_out, pixel, vec4(gi_radiance, resume_dist));
+		gi_radiance = clamp(gi_radiance, vec3(0.0), vec3(16.0));
+		// Store full confidence (1.0) in .a so MODE_CLAMP (run after GI hit lighting) applies the
+		// 3-sigma firefly clamp over all probe rays before replacing .a with probe_dist.
+		imageStore(hit_light_reflection_out, pixel, vec4(gi_radiance, 1.0));
 		uint gi_prev = atomicAdd(hit_light_counters.data.gi_shaded_hits, 1u);
 		if (gi_prev == 0xFFFFFFFFu) {
 			hit_light_counters.data.sink = gi_prev;
@@ -530,7 +541,7 @@ void main() {
 
 		for (uint seg = 0u; seg <= NEXTGI_HL_MAX_TRANSLUCENT_SKIPS; seg++) {
 			if (bounce == 0u && seg == 0u) {
-				hl_trace_primary(cur_origin, ray_dir, primary_tmax, primary_mask, material_key, cone);
+				hl_trace_primary(cur_origin, ray_dir, seg_remaining, primary_mask, material_key, cone);
 			} else {
 				uint mask = (has_translucent && translucent_skips < NEXTGI_HL_MAX_TRANSLUCENT_SKIPS)
 						? (NEXTGI_HL_MASK_GI | NEXTGI_HL_MASK_TRANSLUCENT)
@@ -644,6 +655,10 @@ void main() {
 			hit_light_params.fog_params0,
 			hit_light_params.fog_params1,
 			hit_light_params.fog_light_color);
+	if (any(isnan(final_radiance)) || any(isinf(final_radiance))) {
+		final_radiance = vec3(0.0);
+	}
+	final_radiance = clamp(final_radiance, vec3(0.0), vec3(64.0));
 	float confidence = got_any_hit ? 1.0 : 0.0;
 	imageStore(hit_light_reflection_out, pixel, vec4(final_radiance, confidence));
 	imageStore(hit_light_hit_distance_out, pixel, vec4(first_hit_distance));

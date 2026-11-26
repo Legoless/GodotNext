@@ -836,7 +836,7 @@ bool NextGIHitLighting::_dispatch_mark(const ExecuteParams &p_params, uint32_t p
 	mp.ambient_color_sky[0] = p_params.ambient_color.r;
 	mp.ambient_color_sky[1] = p_params.ambient_color.g;
 	mp.ambient_color_sky[2] = p_params.ambient_color.b;
-	mp.ambient_color_sky[3] = p_params.sky_enabled ? 1.0f : 0.0f;
+	mp.ambient_color_sky[3] = p_params.sky_enabled ? MAX(p_params.sky_energy, 1e-4f) : 0.0f;
 	mp.fog_params0[0] = p_params.fog_enabled ? 1.0f : 0.0f;
 	mp.fog_params0[1] = p_params.fog_depth_mode ? 1.0f : 0.0f;
 	mp.fog_params0[2] = p_params.fog_density;
@@ -1055,7 +1055,7 @@ void NextGIHitLighting::_upload_hl_params(const ExecuteParams &p_params, uint32_
 	hp.ambient_color_sky[0] = p_params.ambient_color.r;
 	hp.ambient_color_sky[1] = p_params.ambient_color.g;
 	hp.ambient_color_sky[2] = p_params.ambient_color.b;
-	hp.ambient_color_sky[3] = p_params.sky_enabled ? 1.0f : 0.0f;
+	hp.ambient_color_sky[3] = p_params.sky_enabled ? MAX(p_params.sky_energy, 1e-4f) : 0.0f;
 	hp.fog_params0[0] = p_params.fog_enabled ? 1.0f : 0.0f;
 	hp.fog_params0[1] = p_params.fog_depth_mode ? 1.0f : 0.0f;
 	hp.fog_params0[2] = p_params.fog_density;
@@ -1352,6 +1352,19 @@ void NextGIHitLighting::fill_counters(Dictionary &r_counters, bool p_gi_active) 
 	r_counters["hit_lighting_lights"] = int64_t(counters.last_light_count);
 	r_counters["hit_lighting_max_bounces"] = int64_t(counters.last_max_bounces);
 	r_counters["hit_lighting_indirect_dispatch"] = counters.indirect_dispatch;
+}
+
+String NextGIHitLighting::build_mark_shader_source() {
+	NextgiReflectShaderRD mark_shader;
+	mark_shader.initialize(Vector<String>({ "" }));
+	const RID version = mark_shader.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = mark_shader.version_build_variant_stage_sources(version, 0);
+	mark_shader.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
 }
 
 } // namespace RendererRD

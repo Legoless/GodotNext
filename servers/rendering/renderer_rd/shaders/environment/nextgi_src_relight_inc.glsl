@@ -486,7 +486,9 @@ void main() {
 			vec3 delta = light.position_inv_range.xyz - world;
 			float dist = length(delta);
 			to_light = dist > 0.0 ? delta / dist : vec3(0.0, 1.0, 0.0);
-			atten = nextgi_omni_attenuation(dist, light.position_inv_range.w, light.attenuation);
+			// Regularize near-singular point/spot distances so a light placed inside a lamp globe or sconce
+			// cannot bake 1e4-1e8 radiance spikes into SRC cards that later explode into diffuse GI blotches.
+			atten = nextgi_omni_attenuation(max(dist, 0.15), light.position_inv_range.w, light.attenuation);
 			if (light_type == 2u) {
 				float facing = dot(-to_light, light.direction_type.xyz);
 				float scos = max(facing, light.cos_spot);
@@ -533,6 +535,10 @@ void main() {
 	}
 #endif
 	vec3 radiance = emission + (albedo / PI) * (direct + indirect);
+	if (any(isnan(radiance)) || any(isinf(radiance))) {
+		radiance = vec3(0.0);
+	}
+	radiance = clamp(radiance, vec3(0.0), vec3(64.0));
 	imageStore(radiance_image, radiance_coord, vec4(radiance, 1.0));
 
 	uvec2 center = (size / 2u) & ~1u;

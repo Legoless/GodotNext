@@ -643,6 +643,10 @@ void nextgi_clamp_main() {
 
 	float lum_sum = 0.0;
 	float confidence_sum = 0.0;
+	float max_lum1 = -1.0;
+	float max_lum2 = -1.0;
+	uint max_idx1 = 0xFFFFFFFFu;
+	uint max_idx2 = 0xFFFFFFFFu;
 	uint non_hl_count = 0u;
 	for (uint i = 0u; i < rcount; i++) {
 		ivec2 texel = base_texel + ivec2(int(i % rstride), int(i / rstride));
@@ -650,21 +654,47 @@ void nextgi_clamp_main() {
 		bool is_hl = sample_val.a < -0.5;
 		confidence_sum += is_hl ? 1.0 : max(sample_val.a, 0.0);
 		if (!is_hl) {
-			lum_sum += dot(sample_val.rgb, luminance_weights);
+			float lum = dot(max(sample_val.rgb, vec3(0.0)), luminance_weights);
+			lum_sum += lum;
 			non_hl_count++;
+			if (lum > max_lum1) {
+				max_lum2 = max_lum1;
+				max_idx2 = max_idx1;
+				max_lum1 = lum;
+				max_idx1 = i;
+			} else if (lum > max_lum2) {
+				max_lum2 = lum;
+				max_idx2 = i;
+			}
 		}
 	}
-	const float mean_lum = non_hl_count > 0u ? (lum_sum / float(non_hl_count)) : 0.0;
+	// Trim top 1-2 brightest rays when estimating the probe's baseline mean and sigma so a single
+	// blazing lamp or emissive bulb hit cannot drag mean + 3*sigma up with itself and leak through
+	// as a blurred wall blotch after probe denoising.
+	uint trim_k = non_hl_count >= 16u ? 2u : (non_hl_count >= 4u ? 1u : 0u);
+	float trimmed_sum = lum_sum;
+	if (trim_k >= 1u && max_idx1 != 0xFFFFFFFFu) {
+		trimmed_sum -= max_lum1;
+	}
+	if (trim_k >= 2u && max_idx2 != 0xFFFFFFFFu) {
+		trimmed_sum -= max_lum2;
+	}
+	uint stat_count = non_hl_count - trim_k;
+	const float mean_lum = stat_count > 0u ? max(trimmed_sum / float(stat_count), 0.0) : 0.0;
 	float variance = 0.0;
 	for (uint i = 0u; i < rcount; i++) {
+		if ((trim_k >= 1u && i == max_idx1) || (trim_k >= 2u && i == max_idx2)) {
+			continue;
+		}
 		ivec2 texel = base_texel + ivec2(int(i % rstride), int(i / rstride));
 		vec4 sample_val = imageLoad(probe_image, texel);
 		if (!(sample_val.a < -0.5)) {
-			const float delta = dot(sample_val.rgb, luminance_weights) - mean_lum;
+			const float delta = dot(max(sample_val.rgb, vec3(0.0)), luminance_weights) - mean_lum;
 			variance += delta * delta;
 		}
 	}
-	const float clamp_limit = non_hl_count > 0u ? (mean_lum + 3.0 * sqrt(variance / float(non_hl_count))) : 1e9;
+	const float sigma = stat_count > 0u ? sqrt(variance / float(stat_count)) : 0.0;
+	const float clamp_limit = stat_count > 0u ? min(max(mean_lum + 3.0 * sigma, mean_lum * 2.5 + 0.5), 16.0) : 16.0;
 
 	float removed = 0.0;
 	for (uint i = 0u; i < rcount; i++) {
@@ -773,7 +803,12 @@ void nextgi_gather_main() {
 		resume = nextgi_screen_resume_tier(origin, dir, traveled, tmax, trace_origin, trace_tmax);
 	}
 	if (screen_hit) {
-		radiance = screen_color;
+		if (any(isnan(screen_color)) || any(isinf(screen_color))) {
+			screen_color = vec3(0.0);
+		}
+		// Cap diffuse GI screen-trace bounce intensity so near-singular HDR lamp fixtures in last_frame_tex
+		// cannot inject 1000-nit fireflies into nearby screen probes.
+		radiance = clamp(screen_color, vec3(0.0), vec3(16.0));
 		ray_confidence = 1.0;
 		atomicAdd(counters.screen_hits, 1u);
 #ifdef NEXTGI_TRACE_SDF

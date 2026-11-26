@@ -45,7 +45,6 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "../oct_inc.glsl"
 #include "nextgi_hit_lighting_common_inc.glsl"
-#include "nextgi_records_inc.glsl"
 #include "nextgi_reflect_inc.glsl"
 #include "nextgi_view_inc.glsl"
 
@@ -73,6 +72,24 @@ layout(set = 0, binding = 6) uniform sampler2D blue_noise_tex;
 layout(set = 0, binding = 7) uniform sampler2D nextgi_wrc_radiance;
 layout(set = 0, binding = 8) uniform sampler2D nextgi_wrc_visibility;
 
+layout(set = 0, binding = 12, std430) restrict readonly buffer MarkWRCParams {
+	vec4 camera;
+	vec4 sky;
+	vec4 origin_spacing;
+	uvec4 dispatch;
+	uint page_rect_count;
+	uint fresh_levels;
+	uint pad1;
+	uint pad2;
+}
+nextgi_wrc;
+
+// Define NEXTGI_TLAS before nextgi_rt_inc.glsl so nextgi_wrc_sample performs exact HWRT
+// wall-visibility ray tests (matching nextgi_gather.glsl) instead of unfiltered 8x8 visibility texels.
+#define NEXTGI_TLAS tlas
+#define NEXTGI_WRC
+#include "nextgi_rt_inc.glsl"
+
 layout(set = 0, binding = 9, std430) restrict readonly buffer MarkRecords {
 	NextGIInstanceRecord data[];
 }
@@ -88,24 +105,12 @@ layout(set = 0, binding = 11, std430) restrict readonly buffer MarkHitMaterials 
 }
 hit_materials;
 
-layout(set = 0, binding = 12, std430) restrict readonly buffer MarkWRCParams {
-	vec4 camera;
-	vec4 sky;
-	vec4 origin_spacing;
-	uvec4 dispatch;
-	uint page_rect_count;
-	uint fresh_levels;
-	uint pad1;
-	uint pad2;
-}
-nextgi_wrc;
-
 layout(set = 0, binding = 13, std430) restrict readonly buffer MarkParams {
 	mat4 inv_view_proj;
 	mat4 view_proj;
 	vec4 camera_pos_radius; // xyz camera pos, w rt_scene_radius
 	vec4 screen_size_origin; // xy full screen size, z max_origin_offset, w max_trace_roughness
-	vec4 ambient_color_sky; // rgb ambient color, a sky_enabled (0/1)
+	vec4 ambient_color_sky; // rgb ambient color, a sky_energy (>0 when sky enabled)
 	vec4 fog_params0; // x enabled, y depth_mode, z density, w height
 	vec4 fog_params1; // x height_density, y depth_begin, z depth_end, w depth_curve
 	vec4 fog_light_color; // rgb color, a energy
@@ -141,9 +146,6 @@ layout(rgba16f, set = 0, binding = 19) restrict uniform image2D specular_debug_i
 #define NEXTGI_SCREEN_LAST_FRAME_TEX last_frame_tex
 #include "nextgi_screen_trace_inc.glsl"
 
-#define NEXTGI_WRC
-#include "nextgi_wrc_sample_inc.glsl"
-
 vec2 mark_blue_noise(ivec2 p_pixel, uint p_frame) {
 	vec2 offset = fract(vec2(p_frame) * vec2(0.7548776662, 0.5698402910)) * 64.0;
 	ivec2 coord = (p_pixel + ivec2(offset)) & ivec2(63);
@@ -151,8 +153,8 @@ vec2 mark_blue_noise(ivec2 p_pixel, uint p_frame) {
 }
 
 vec3 mark_miss_radiance(vec3 p_direction) {
-	if (mark_params.ambient_color_sky.a > 0.5) {
-		return textureLod(sky_tex, vec3_to_oct(p_direction), 0.0).rgb;
+	if (mark_params.ambient_color_sky.a > 0.0) {
+		return textureLod(sky_tex, vec3_to_oct(p_direction), 0.0).rgb * mark_params.ambient_color_sky.a;
 	}
 	return mark_params.ambient_color_sky.rgb;
 }

@@ -181,6 +181,7 @@ class NextGIGather {
 	float last_max_origin_offset = 0.01f;
 	float last_max_trace_roughness = 0.4f;
 	bool last_sky_enabled = false;
+	float last_sky_energy = 1.0f;
 	bool last_reflect_enabled = true;
 	bool last_reflect_debug = false;
 	Color last_ambient_color;

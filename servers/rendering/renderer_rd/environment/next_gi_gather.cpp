@@ -883,6 +883,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	last_max_origin_offset = params.max_origin_offset;
 	last_max_trace_roughness = params.max_trace_roughness;
 	last_sky_enabled = params.sky_enabled != 0u;
+	last_sky_energy = sky_energy;
 	last_reflect_enabled = params.reflect_enabled != 0u;
 	last_reflect_debug = params.reflect_debug != 0u;
 	last_ambient_color = ambient;
@@ -1315,6 +1316,7 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		ep.blue_noise_mode = rr_sampling_mode == 0u;
 		ep.front_layer = front_layer;
 		ep.sky_enabled = last_sky_enabled;
+		ep.sky_energy = last_sky_energy;
 		ep.ambient_color = last_ambient_color;
 		ep.fog_enabled = last_fog_enabled;
 		ep.fog_depth_mode = last_fog_depth_mode;
@@ -1386,11 +1388,13 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		}
 		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, ray_groups_x, ray_groups_y, 1);
-		rd->compute_list_add_barrier(list);
-		rd->compute_list_bind_compute_pipeline(list, _pipeline(10));
-		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
-		_bind_trace_set(list);
-		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
+		if (!ran_gi_hit_lighting) {
+			rd->compute_list_add_barrier(list);
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(10));
+			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+			_bind_trace_set(list);
+			rd->compute_list_dispatch(list, groups_x, groups_y, 1);
+		}
 		rd->compute_list_end();
 		diffuse_dispatches++;
 		// GodotNext: ps_lumen_lite (#183). The per-frame count Lite's dispatch check reads.
@@ -1416,11 +1420,20 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		rd->compute_list_end();
 	}
 	// GodotNext: nextgi_hit_lighting_gi (#128). When GI hit lighting is active, mark reflections into
-	// the same hit-record buffer, run the single 16-bit counting sort (disjoint key ranges), and shade
-	// diffuse GI hits back into probe_image BEFORE probe spatial/temporal filtering.
+	// the same hit-record buffer, run the single 16-bit counting sort (disjoint key ranges), shade
+	// diffuse GI hits back into probe_image, and THEN run MODE_CLAMP (3-sigma firefly clamp +
+	// probe_dist / confidence reduction) over all probe rays before spatial/temporal filtering.
 	bool gi_hl_shaded = false;
 	if (ran_gi_hit_lighting && hl != nullptr) {
 		gi_hl_shaded = hl->mark_sort_and_shade_gi(ep, probe_image);
+		if (p_diffuse) {
+			const RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(10));
+			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+			_bind_trace_set(list);
+			rd->compute_list_dispatch(list, groups_x, groups_y, 1);
+			rd->compute_list_end();
+		}
 	}
 	// GodotNext: nextgi_denoise
 	// Spatial denoise of the fresh probe texels, between the gather (and GI hit lighting) and the ambient integration.

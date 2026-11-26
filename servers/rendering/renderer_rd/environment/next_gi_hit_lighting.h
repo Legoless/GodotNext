@@ -284,6 +284,7 @@ public:
 		bool blue_noise_mode = true;
 		bool front_layer = false;
 		bool sky_enabled = false;
+		float sky_energy = 1.0f;
 		Color ambient_color;
 
 		bool fog_enabled = false;
@@ -375,6 +376,7 @@ public:
 
 	const Counters &get_counters() const { return counters; }
 	void fill_counters(Dictionary &r_counters, bool p_gi_active = true) const;
+	static String build_mark_shader_source();
 
 	NextGIHitLighting() = default;
 	~NextGIHitLighting();

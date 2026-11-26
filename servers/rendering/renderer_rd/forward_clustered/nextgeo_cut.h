@@ -228,8 +228,8 @@ struct NextGeoRasterInputs {
 // per phase per view.
 class NextGeoCut {
 public:
-	static constexpr uint32_t NODE_CAPACITY = 1u << 17;
-	static constexpr uint32_t GROUP_CAPACITY = 1u << 17;
+	static constexpr uint32_t NODE_CAPACITY = 1u << 20;
+	static constexpr uint32_t GROUP_CAPACITY = 1u << 20;
 	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 21;
 	static constexpr uint32_t PHASE2_CLUSTER_BASE = CLUSTER_CAPACITY / 2;
 	static constexpr uint32_t HIZ_MAX_MIPS = 16;

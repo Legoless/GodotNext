@@ -53,23 +53,24 @@ vec3 nextgi_wrc_sample(vec3 p, vec3 dir) {
 	if (nextgi_wrc.camera.w < 0.5) {
 		return vec3(0.0);
 	}
-	float dist = length(p - nextgi_wrc.camera.xyz);
-	float spacing = 1.0;
-	uint level = 0u;
-	if (dist > 8.0) {
-		spacing = 2.0;
-		level = 1u;
+	// Select the finest clipmap level whose snapped [0..15] probe grid encloses p, avoiding
+	// spherical-distance vs snapped-box dead zones where all 8 probes fall out of bounds.
+	uint level = 3u;
+	float spacing = 8.0;
+	vec3 level_origin = floor(nextgi_wrc.origin_spacing.xyz / 8.0) * 8.0;
+	vec3 local = (p - level_origin) / 8.0 + vec3(7.5);
+	for (uint l = 0u; l < 4u; l++) {
+		float s = float(1u << l);
+		vec3 lo = floor(nextgi_wrc.origin_spacing.xyz / s) * s;
+		vec3 lc = (p - lo) / s + vec3(7.5);
+		if (all(greaterThanEqual(lc, vec3(0.0))) && all(lessThanEqual(lc, vec3(15.0)))) {
+			level = l;
+			spacing = s;
+			level_origin = lo;
+			local = lc;
+			break;
+		}
 	}
-	if (dist > 16.0) {
-		spacing = 4.0;
-		level = 2u;
-	}
-	if (dist > 32.0) {
-		spacing = 8.0;
-		level = 3u;
-	}
-	vec3 level_origin = floor(nextgi_wrc.origin_spacing.xyz / spacing) * spacing;
-	vec3 local = (p - level_origin) / spacing + vec3(7.5);
 	vec3 base = floor(local);
 	vec3 frac = local - base;
 	vec2 oct = nextgi_wrc_oct_uv(dir);
@@ -109,6 +110,9 @@ vec3 nextgi_wrc_sample(vec3 p, vec3 dir) {
 				float variance = max(moments.g - moments.r * moments.r, 1e-4);
 				float p_vis = variance / (variance + delta * delta);
 				chebyshev = p_vis * p_vis;
+				if (chebyshev < 0.05) {
+					chebyshev = 0.0;
+				}
 			}
 #endif
 		}
@@ -134,7 +138,7 @@ vec3 nextgi_wrc_sample(vec3 p, vec3 dir) {
 		return vec3(0.0);
 	}
 	nextgi_wrc_hit_cache = true;
-	nextgi_wrc_confidence = min(max_vis, 0.99);
+	nextgi_wrc_confidence = 0.99;
 	return accum / weight_sum;
 }
 #endif // NEXTGI_WRC

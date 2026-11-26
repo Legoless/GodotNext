@@ -573,4 +573,52 @@ TEST_CASE("[NextGI][HitLighting][GI] Gather MODE_HIT_LIGHTING_GI variant follows
 #endif
 }
 
+TEST_CASE("[NextGI][HitLighting] Reflection mark shader uses HWRT wall visibility for WRC and compiles") {
+	const String source = RendererRD::NextGIHitLighting::build_mark_shader_source();
+	REQUIRE_FALSE(source.is_empty());
+	CHECK(source.contains("#define NEXTGI_TLAS tlas"));
+	CHECK(source.contains("nextgi_trace(p, -to_p / dist_to_p, dist_to_p - 0.01, probe_vis_hit)"));
+	CHECK(source.contains("all(lessThanEqual(lc, vec3(15.0)))"));
+	CHECK(source.contains("mark_params.ambient_color_sky.a"));
+	CHECK_FALSE(source.contains("while"));
+	CHECK_FALSE(source.contains("rayQueryGetIntersectionTriangleVertexPositionsEXT"));
+	CHECK_FALSE(source.contains("GL_EXT_buffer_reference"));
+#ifdef MODULE_GLSLANG_ENABLED
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(
+			RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+			source,
+			RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+			RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3,
+			&error);
+	if (spirv.is_empty()) {
+		FAIL_CHECK(("glslang failed to compile NextGI hit-lighting mark shader (nextgi_reflect.glsl):\n" + error).utf8().get_data());
+	}
+	REQUIRE_GE(spirv.size(), 20);
+#endif
+}
+
+TEST_CASE("[NextGI][HitLighting][GI] Gather MODE_CLAMP trims outliers and compiles") {
+	const String source = RendererRD::NextGIGather::build_shader_source(10);
+	REQUIRE_FALSE(source.is_empty());
+	CHECK(source.contains("#define MODE_CLAMP"));
+	CHECK(source.contains("max_lum1"));
+	CHECK(source.contains("max_lum2"));
+	CHECK(source.contains("clamp(screen_color, vec3(0.0), vec3(16.0))"));
+	CHECK_FALSE(source.contains("while"));
+#ifdef MODULE_GLSLANG_ENABLED
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(
+			RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+			source,
+			RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+			RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3,
+			&error);
+	if (spirv.is_empty()) {
+		FAIL_CHECK(("glslang failed to compile NextGI gather MODE_CLAMP:\n" + error).utf8().get_data());
+	}
+	REQUIRE_GE(spirv.size(), 20);
+#endif
+}
+
 } // namespace TestNextGIHitLighting
