@@ -73,6 +73,13 @@ static constexpr uint32_t NEXTGEO_VSM_GROUP_CAPACITY = 1u << 20; // 1,048,576 (r
 static constexpr uint32_t NEXTGEO_VSM_CLUSTER_CAPACITY = 1u << 20; // 1,048,576 (cluster, page) pairs (< 2^21 for #155 bin packing).
 static_assert(NEXTGEO_VSM_CLUSTER_CAPACITY <= (1u << 21), "VSM cluster capacity must fit in 21-bit raster-bin entry index.");
 
+// Adaptive per-chain dirty-page slice bounds for Nanite VSM culling. Starts at MAX (128 pages/frame),
+// halves from the active page count whenever any VSM queue overflows, holds while draining a dense
+// burst cleanly, and ramps back up to MAX once the burst finishes. Prevents overflow livelock and
+// unshadowed 128x128 tile holes on dense multi-million-triangle scenes with zero extra VRAM.
+static constexpr uint32_t NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX = 128u;
+static constexpr uint32_t NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN = 1u;
+
 enum NextGeoVSMChain : uint32_t {
 	NEXTGEO_VSM_CHAIN_DIRECTIONAL = 0u,
 	NEXTGEO_VSM_CHAIN_LOCAL = 1u,
@@ -156,7 +163,8 @@ struct NextGeoVSMCounters {
 	// GodotNext: nextgeo_voxels (#165). Voxel brick-page pairs emitted and SW texels written.
 	uint32_t voxel_bricks = 0u; // 29
 	uint32_t voxel_writes = 0u; // 30
-	uint32_t pad1 = 0u; // 31
+	// Persistent adaptive dirty-page slice for this chain (updated in VSM_SETUP across frames).
+	uint32_t dirty_page_slice = 0u; // 31
 };
 static_assert(sizeof(NextGeoVSMCounters) == 128, "NextGeoVSMCounters must match GLSL layout (128 bytes).");
 static_assert(offsetof(NextGeoVSMCounters, cluster_count) == 11 * sizeof(uint32_t), "cluster_count word index must stay 11.");
@@ -168,6 +176,7 @@ static_assert(offsetof(NextGeoVSMCounters, vertex_offset_distance_fixed) == 27 *
 static_assert(offsetof(NextGeoVSMCounters, vertex_offset_clamped) == 28 * sizeof(uint32_t), "vertex_offset_clamped word index must stay 28.");
 static_assert(offsetof(NextGeoVSMCounters, voxel_bricks) == 29 * sizeof(uint32_t), "voxel_bricks word index must stay 29.");
 static_assert(offsetof(NextGeoVSMCounters, voxel_writes) == 30 * sizeof(uint32_t), "voxel_writes word index must stay 30.");
+static_assert(offsetof(NextGeoVSMCounters, dirty_page_slice) == 31 * sizeof(uint32_t), "dirty_page_slice word index must stay 31.");
 
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_CLUSTER_COUNT = 11u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_SW_CLUSTERS = 12u;
@@ -176,6 +185,21 @@ static constexpr uint32_t NEXTGEO_VSM_COUNTER_SINK = 21u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_HIZ_PAGES_BUILT = 22u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_VOXEL_BRICKS = 29u;
 static constexpr uint32_t NEXTGEO_VSM_COUNTER_VOXEL_WRITES = 30u;
+
+// Matches cluster_cull.glsl VSM_SETUP adaptive dirty-page slice state machine.
+inline uint32_t nextgeo_vsm_next_dirty_page_slice(uint32_t p_prev_slice, uint32_t p_prev_dirty_pages, uint32_t p_prev_overflow) {
+	const uint32_t prev_slice = (p_prev_slice == 0u)
+			? NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX
+			: CLAMP(p_prev_slice, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+	if (p_prev_overflow > 0u) {
+		const uint32_t active_prev = MIN(prev_slice, MAX(p_prev_dirty_pages, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN));
+		return MAX(active_prev >> 1u, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN);
+	}
+	if (p_prev_dirty_pages > prev_slice) {
+		return prev_slice;
+	}
+	return MIN(prev_slice << 1u, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+}
 
 // Clamps the provisional SW/HW edge threshold to the software setup's full-precision extent.
 inline float nextgeo_vsm_sw_switch_texels(float p_setting_texels) {

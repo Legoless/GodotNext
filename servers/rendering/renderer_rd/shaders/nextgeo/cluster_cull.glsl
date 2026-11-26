@@ -186,7 +186,7 @@ layout(set = 0, binding = 5, std430) buffer restrict VSMCounters {
 	uint vertex_offset_clamped; // #164: vertices clamped to Material.vertex_offset_max
 	uint voxel_bricks; // #165: visible VSM (voxel brick, page) pairs
 	uint voxel_writes; // #165: VSM voxel SW texel writes
-	uint pad1;
+	uint dirty_page_slice; // Persistent adaptive per-chain dirty-page slice (1..128) updated in VSM_SETUP.
 }
 vsm_counters;
 
@@ -669,12 +669,59 @@ void main() {
 	if (gl_GlobalInvocationID.x != 0u) {
 		return;
 	}
+	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX = 128u;
+	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN = 1u;
+
+	// Adapt per-chain dirty-page slice from the previous frame before clearing per-frame counters
+	// (matches nextgeo_vsm_next_dirty_page_slice() in nextgeo_vsm.h).
+	uint prev_slice = vsm_counters.dirty_page_slice;
+	prev_slice = (prev_slice == 0u) ? NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX : clamp(prev_slice, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+	uint prev_dirty = vsm_counters.dirty_pages;
+	uint prev_overflow = vsm_counters.overflow;
+	uint next_slice;
+	if (prev_overflow > 0u) {
+		uint active_prev = min(prev_slice, max(prev_dirty, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN));
+		next_slice = max(active_prev >> 1u, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN);
+	} else if (prev_dirty > prev_slice) {
+		next_slice = prev_slice;
+	} else {
+		next_slice = min(prev_slice << 1u, NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX);
+	}
+
 	uint total_dirty = min(vsm_alloc_state.data[VSM_STATE_DIRTY], vsm_params.pool_pages);
 	uint dir_dirty = min(vsm_alloc_state.data[VSM_STATE_DIRTY_DIRECTIONAL], total_dirty);
 	uint d_begin = (vsm_params.chain_index == 0u) ? 0u : dir_dirty;
 	uint d_end = (vsm_params.chain_index == 0u) ? dir_dirty : total_dirty;
 	uint d_count = d_end > d_begin ? (d_end - d_begin) : 0u;
+
 	vsm_counters.dirty_pages = d_count;
+	vsm_counters.seeded_pairs = 0u;
+	for (uint lvl = 0u; lvl < 8u; lvl++) {
+		vsm_counters.bvh_level_counts[lvl] = 0u;
+	}
+	vsm_counters.group_count = 0u;
+	vsm_counters.cluster_count = 0u;
+	vsm_counters.sw_clusters = 0u;
+	vsm_counters.hw_clusters = 0u;
+	vsm_counters.prog_sw_clusters = 0u;
+	vsm_counters.prog_hw_clusters = 0u;
+	vsm_counters.hiz_culled_nodes = 0u;
+	vsm_counters.hiz_culled_clusters = 0u;
+	vsm_counters.overflow = 0u;
+	vsm_counters.redraw_marks = 0u;
+	vsm_counters.sw_writes = 0u;
+	vsm_counters.sink = 0u;
+	vsm_counters.hiz_pages_built = 0u;
+	vsm_counters.static_clusters = 0u;
+	vsm_counters.dynamic_clusters = 0u;
+	vsm_counters.always_layer0_clusters = 0u;
+	vsm_counters.distance_fixed_clusters = 0u;
+	vsm_counters.vertex_offset_distance_fixed = 0u;
+	vsm_counters.vertex_offset_clamped = 0u;
+	vsm_counters.voxel_bricks = 0u;
+	vsm_counters.voxel_writes = 0u;
+	vsm_counters.dirty_page_slice = next_slice;
+
 	uint inst_groups = (vsm_params.record_count + 63u) / 64u;
 	vsm_args_out.data[0] = uvec4((d_count > 0u && vsm_params.record_count > 0u) ? inst_groups : 0u, d_count, 1u, 0u);
 }
@@ -691,11 +738,11 @@ void main() {
 		return;
 	}
 
-	// Cap Nanite VSM dirty pages per chain per frame so cold starts or huge camera snaps on
-	// multi-million-triangle scenes drain cleanly across frames instead of overflowing and
-	// re-dirtying every page in an infinite loop.
-	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE = 128u;
-	if (dirty_idx >= d_begin + NEXTGEO_VSM_DIRTY_PAGE_SLICE) {
+	// Cap Nanite VSM dirty pages per chain per frame using the adaptive slice computed by
+	// VSM_SETUP so dense multi-million-triangle scenes halve on queue overflow and drain cleanly
+	// across frames instead of livelocking and leaving unshadowed 128x128 tile holes.
+	uint dirty_page_slice = max(vsm_counters.dirty_page_slice, 1u);
+	if (dirty_idx >= d_begin + dirty_page_slice) {
 		if (record_idx == 0u) {
 			uvec4 deferred_rec = vsm_dirty.data[dirty_idx];
 			uint d_map = deferred_rec.x;

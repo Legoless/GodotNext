@@ -3735,6 +3735,10 @@ bool NextGeoCut::_ensure_vsm() {
 		vsm_failed = true;
 		return false;
 	}
+	// Initialize VSM counters once so VSM_SETUP's persistent adaptive dirty_page_slice starts cleanly at 0.
+	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
+		rd->buffer_clear(vsm_counters[chain], 0, sizeof(RendererRD::NextGeoVSMCounters));
+	}
 	// GodotNext: nextgeo_mesh_raster (#154, plan §21.4 contract N9). Build VSM HW task/mesh variant
 	// only on mesh-capable devices; non-mesh devices keep the VS VSM HW path without errors.
 	vsm_hw_mesh_ready = false;
@@ -4699,7 +4703,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			vp.bin_features[66] = RendererRD::NEXTGEO_VSM_VOXEL_BRICK_CAPACITY;
 		}
 		rd->buffer_update(vsm_params_buffer, 0, sizeof(vp), &vp);
-		rd->buffer_clear(vsm_counters[chain], 0, sizeof(RendererRD::NextGeoVSMCounters));
+		// VSM_SETUP reads previous-frame overflow/dirty_pages/dirty_page_slice to adapt the slice,
+		// then zeros all per-frame counter words (0..30) in place.
 		if (vsm_tess_ready && vsm_tess_state[chain].is_valid()) {
 			rd->buffer_clear(vsm_tess_state[chain], 0, sizeof(RendererRD::NextGeoTessState));
 		}
@@ -5005,6 +5010,8 @@ bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextG
 			const RendererRD::NextGeoVSMCounters &lc = vsm_last_gpu_counters[1];
 			stats["directional_dirty_pages"] = int64_t(dc.dirty_pages);
 			stats["local_dirty_pages"] = int64_t(lc.dirty_pages);
+			stats["directional_dirty_page_slice"] = int64_t(dc.dirty_page_slice);
+			stats["local_dirty_page_slice"] = int64_t(lc.dirty_page_slice);
 			stats["directional_clusters"] = int64_t(dc.cluster_count);
 			stats["local_clusters"] = int64_t(lc.cluster_count);
 			stats["sw_clusters"] = int64_t(dc.sw_clusters + lc.sw_clusters);

@@ -310,7 +310,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		ml_query.rim = gen_code.defines.has("#define LIGHT_RIM_USED\n");
 		ml_query.backlight = gen_code.defines.has("#define LIGHT_BACKLIGHT_USED\n");
 		ml_query.anisotropy = gen_code.defines.has("#define LIGHT_ANISOTROPY_USED\n");
-		ml_query.diffuse_lambert = RendererRD::MegaLightsInputs::is_diffuse_lambert(unshaded, gen_code.defines.has("#define DIFFUSE_LAMBERT\n"), gen_code.defines.has("#define DIFFUSE_BURLEY\n"), ml_query.diffuse_toon, ml_query.diffuse_lambert_wrap);
+		const bool ml_diffuse_lambert = RendererRD::MegaLightsInputs::is_diffuse_lambert(unshaded, gen_code.defines.has("#define DIFFUSE_LAMBERT\n"), gen_code.defines.has("#define DIFFUSE_BURLEY\n"), ml_query.diffuse_toon, ml_query.diffuse_lambert_wrap);
 		// uses_alpha_pass() reads uses_blend_alpha, which upstream assigns after version_set_code
 		// below. Assign the same value here; the later assignment leaves it unchanged.
 		uses_blend_alpha = blend_mode_uses_blend_alpha(alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF ? BLEND_MODE_ALPHA_TO_COVERAGE : BlendMode(blend_mode));
@@ -320,8 +320,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 			if (!megalights_fallback_warned && RendererRD::MegaLightsInputs::is_requested() && Engine::get_singleton() && Engine::get_singleton()->is_editor_hint()) {
 				megalights_fallback_warned = true;
 				const String ml_name = path.is_empty() ? vformat("<built-in>:%d", code.hash()) : path;
-				WARN_PRINT_ED(vformat("MegaLights fallback material \"%s\": custom light(), unshaded, Lambert, toon, wrap, rim, backlight, anisotropy, disabled specular, or an alpha-pass surface with a depth prepass keeps clustered shading.", ml_name));
+				WARN_PRINT_ED(vformat("MegaLights fallback material \"%s\": custom light(), unshaded, toon, wrap, rim, backlight, anisotropy, disabled specular, or an alpha-pass surface with a depth prepass keeps clustered shading.", ml_name));
 			}
+		} else if (ml_diffuse_lambert) {
+			gen_code.defines.push_back("#define MEGALIGHTS_DIFFUSE_LAMBERT\n");
 		}
 	}
 	// GodotNext: nextgeo_raster_bins (#155). The raster target's fragment code stays out of the scene shader.

@@ -50,6 +50,7 @@
 #define ML_MODEL_FALLBACK 3u
 #define ML_MODEL_SSS 1u
 #define ML_FLAG_TRANSMISSION (1u << 3u)
+#define ML_FLAG_DIFFUSE_LAMBERT (1u << 5u)
 
 #define ML_HIT_DIST_MISS 65504.0
 #define ML_DEMOD_ALBEDO_FLOOR 0.01
@@ -386,11 +387,16 @@ void ml_eval_brdf(MLSurface p_s, vec3 p_L, float p_size_A, vec3 p_light_color, f
 	vec3 H = H_len2 > 1e-12 ? H_sum * inversesqrt(H_len2) : p_s.normal;
 	float cLdotH = clamp(p_size_A + dot(p_L, H), 0.0, 1.0);
 
-	// Burley diffuse (ml_albedo.rgb already carries ALBEDO * (1 - METALLIC)).
-	float FD90_minus_1 = 2.0 * cLdotH * cLdotH * p_s.roughness - 0.5;
-	float FdV = 1.0 + FD90_minus_1 * ml_schlick_fresnel(cNdotV);
-	float FdL = 1.0 + FD90_minus_1 * ml_schlick_fresnel(cNdotL);
-	float diffuse_brdf_NL = (1.0 / M_PI) * FdV * FdL * cNdotL;
+	// Diffuse BRDF matching scene_forward_lights_inc.glsl (ml_albedo.rgb already carries ALBEDO * (1 - METALLIC)).
+	float diffuse_brdf_NL;
+	if ((p_s.model_flags & ML_FLAG_DIFFUSE_LAMBERT) != 0u) {
+		diffuse_brdf_NL = cNdotL * (1.0 / M_PI);
+	} else {
+		float FD90_minus_1 = 2.0 * cLdotH * cLdotH * p_s.roughness - 0.5;
+		float FdV = 1.0 + FD90_minus_1 * ml_schlick_fresnel(cNdotV);
+		float FdL = 1.0 + FD90_minus_1 * ml_schlick_fresnel(cNdotL);
+		diffuse_brdf_NL = (1.0 / M_PI) * FdV * FdL * cNdotL;
+	}
 	r_diffuse = p_s.diffuse_albedo * p_light_color * (diffuse_brdf_NL * p_attenuation * p_s.direct_ao);
 
 	// Schlick-GGX specular with DFG multiscatter energy compensation.

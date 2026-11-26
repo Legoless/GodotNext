@@ -3506,6 +3506,9 @@ TEST_CASE("[VSM][NextGeo] Layout, capacities, provisional settings and shared RA
 	CHECK_EQ(NEXTGEO_VSM_COUNTER_SW_WRITES, 20u);
 	CHECK_EQ(NEXTGEO_VSM_COUNTER_SINK, 21u);
 	CHECK_EQ(NEXTGEO_VSM_COUNTER_HIZ_PAGES_BUILT, 22u);
+	CHECK_EQ(offsetof(NextGeoVSMCounters, dirty_page_slice), size_t(31u * sizeof(uint32_t)));
+	CHECK_EQ(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MAX, 128u);
+	CHECK_EQ(NEXTGEO_VSM_DIRTY_PAGE_SLICE_MIN, 1u);
 
 	// Provisional SW/HW switch threshold clamping.
 	CHECK_EQ(nextgeo_vsm_sw_switch_texels(0.0f), 0.0f);
@@ -3538,6 +3541,68 @@ TEST_CASE("[VSM][NextGeo] Layout, capacities, provisional settings and shared RA
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_VERTEX_OFFSET, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_VERTEX_OFFSET, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+}
+
+TEST_CASE("[VSM][NextGeo] Adaptive dirty-page slice backs off on overflow and holds while draining (#223)") {
+	using namespace RendererRD;
+
+	// Initial cold state (0) starts at MAX (128) and stays at MAX on clean frames.
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(0u, 0u, 0u), 128u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 128u, 0u), 128u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 400u, 0u), 128u);
+
+	// Dense overflow halves from the active page count (min(prev_slice, prev_dirty)).
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 400u, 1u), 64u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(64u, 400u, 12u), 32u);
+	// Sub-slice overflow (e.g. 50 very dense pages with slice=128) halves from 50 -> 25 rather than 64.
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(128u, 50u, 1u), 25u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(25u, 50u, 1u), 12u);
+
+	// Clean frame while still draining deferred pages holds the working slice (no sawtooth re-overflow).
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(32u, 200u, 0u), 32u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(25u, 40u, 0u), 25u);
+
+	// Once all remaining dirty pages fit inside the slice cleanly, recover smoothly back to MAX.
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(32u, 32u, 0u), 64u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(64u, 0u, 0u), 128u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(25u, 10u, 0u), 50u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(100u, 0u, 0u), 128u);
+
+	// Floor at 1 page/frame; clamping defends against corrupt/oversized input.
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(2u, 2u, 1u), 1u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(1u, 1u, 99u), 1u);
+	CHECK_EQ(nextgeo_vsm_next_dirty_page_slice(999u, 0u, 0u), 128u);
+
+	// End-to-end dense burst simulation: 300 dirty pages where >20 pages/frame overflows cluster capacity.
+	// Must back off automatically, drain all 300 pages cleanly with zero livelock, and recover to 128.
+	uint32_t remaining = 300u;
+	uint32_t slice = 0u;
+	uint32_t prev_dirty = 0u;
+	uint32_t prev_overflow = 0u;
+	uint32_t frames = 0u;
+	while (remaining > 0u && frames < 64u) {
+		slice = nextgeo_vsm_next_dirty_page_slice(slice, prev_dirty, prev_overflow);
+		const uint32_t active = MIN(remaining, slice);
+		prev_dirty = remaining;
+		if (active > 20u) {
+			// Overflowing frame re-dirties all active pages (worst-case livelock scenario).
+			prev_overflow = active;
+		} else {
+			prev_overflow = 0u;
+			remaining -= active;
+		}
+		frames++;
+	}
+	CHECK_EQ(remaining, 0u);
+	CHECK_EQ(slice, 16u);
+	CHECK(frames < 32u);
+	// Recovery after burst drains to zero.
+	slice = nextgeo_vsm_next_dirty_page_slice(slice, prev_dirty, prev_overflow);
+	CHECK_EQ(slice, 32u);
+	slice = nextgeo_vsm_next_dirty_page_slice(slice, 0u, 0u);
+	CHECK_EQ(slice, 64u);
+	slice = nextgeo_vsm_next_dirty_page_slice(slice, 0u, 0u);
+	CHECK_EQ(slice, 128u);
 }
 
 TEST_CASE("[VSM][NextGeo] Page-mip projected error matches P5 at mip 0 and scales by 2^mip (#217)") {

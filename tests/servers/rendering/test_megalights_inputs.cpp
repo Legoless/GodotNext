@@ -101,12 +101,15 @@ TEST_CASE("[Renderer][MegaLights] F0 pack and shading model (#136)") {
 	CHECK_EQ(tint, 0x5E);
 
 	CHECK_EQ(ML::pack_shading_model(false, false, false, false), ML::MODEL_STANDARD);
+	CHECK_EQ(ML::pack_shading_model(false, false, false, false, true), uint8_t(ML::MODEL_STANDARD | ML::FLAG_DIFFUSE_LAMBERT));
 	CHECK_EQ(ML::pack_shading_model(false, true, false, false), uint8_t(ML::MODEL_SSS | ML::FLAG_SSS));
+	CHECK_EQ(ML::pack_shading_model(false, true, false, false, true), uint8_t(ML::MODEL_SSS | ML::FLAG_SSS | ML::FLAG_DIFFUSE_LAMBERT));
 	CHECK_EQ(ML::pack_shading_model(false, true, true, false), uint8_t(ML::MODEL_SSS | ML::FLAG_SSS | ML::FLAG_TRANSMISSION));
 	// Transmission without SSS is not LIGHT_TRANSMITTANCE_USED, so it stays standard plus clearcoat.
 	CHECK_EQ(ML::pack_shading_model(false, false, true, true), uint8_t(ML::MODEL_CLEARCOAT | ML::FLAG_CLEARCOAT));
 	CHECK_EQ(ML::pack_shading_model(false, false, false, true), uint8_t(ML::MODEL_CLEARCOAT | ML::FLAG_CLEARCOAT));
-	CHECK_EQ(ML::pack_shading_model(true, true, true, true), ML::MODEL_FALLBACK);
+	CHECK_EQ(ML::pack_shading_model(false, false, false, true, true), uint8_t(ML::MODEL_CLEARCOAT | ML::FLAG_CLEARCOAT | ML::FLAG_DIFFUSE_LAMBERT));
+	CHECK_EQ(ML::pack_shading_model(true, true, true, true, true), ML::MODEL_FALLBACK);
 }
 
 TEST_CASE("[Renderer][MegaLights] Shared F0 pack rule (#136)") {
@@ -130,6 +133,7 @@ TEST_CASE("[Renderer][MegaLights] Shared F0 pack rule (#136)") {
 	CHECK(prelude.contains(vformat("#define ML_FLAG_CLEARCOAT %d\n", int(ML::FLAG_CLEARCOAT))));
 	CHECK(prelude.contains(vformat("#define ML_FLAG_TRANSMISSION %d\n", int(ML::FLAG_TRANSMISSION))));
 	CHECK(prelude.contains(vformat("#define ML_FLAG_SSS %d\n", int(ML::FLAG_SSS))));
+	CHECK(prelude.contains(vformat("#define ML_FLAG_DIFFUSE_LAMBERT %d\n", int(ML::FLAG_DIFFUSE_LAMBERT))));
 	CHECK(prelude.contains(vformat("#define ML_MODEL_FALLBACK %d\n", int(ML::MODEL_FALLBACK))));
 	CHECK(prelude.contains("#define ML_QUANTIZE_CHROMA(c) clamp(round((c) * float(ML_CHROMA_LEVELS)) + float(ML_CHROMA_BIAS), 0.0, float(ML_CHROMA_LEVELS))\n"));
 }
@@ -165,9 +169,6 @@ TEST_CASE("[Renderer][MegaLights] Fallback classification (#136)") {
 	query.anisotropy = true;
 	CHECK(ML::is_fallback(query));
 	query = ML::FallbackQuery();
-	query.diffuse_lambert = true;
-	CHECK(ML::is_fallback(query));
-	query = ML::FallbackQuery();
 	query.alpha_pass = true;
 	CHECK(ML::is_fallback(query));
 	CHECK_EQ(ML::fallback_bits(query), ML::FALLBACK_ALPHA_PASS);
@@ -176,6 +177,7 @@ TEST_CASE("[Renderer][MegaLights] Fallback classification (#136)") {
 	query.diffuse_lambert_wrap = true;
 	CHECK_EQ(ML::fallback_bits(query), ML::FALLBACK_CUSTOM_LIGHT | ML::FALLBACK_DIFFUSE_LAMBERT_WRAP);
 
+	// Lambert diffuse is shaded natively via FLAG_DIFFUSE_LAMBERT rather than falling back.
 	CHECK_FALSE(ML::is_diffuse_lambert(false, false, true, false, false));
 	CHECK(ML::is_diffuse_lambert(false, true, false, false, false));
 	CHECK(ML::is_diffuse_lambert(false, false, false, false, false));

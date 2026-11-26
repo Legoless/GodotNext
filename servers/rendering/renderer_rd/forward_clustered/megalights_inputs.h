@@ -66,6 +66,7 @@ public:
 	static constexpr uint8_t FLAG_CLEARCOAT = 1u << 2;
 	static constexpr uint8_t FLAG_TRANSMISSION = 1u << 3;
 	static constexpr uint8_t FLAG_SSS = 1u << 4;
+	static constexpr uint8_t FLAG_DIFFUSE_LAMBERT = 1u << 5;
 	static constexpr uint8_t LAYER_GROUP_OVERFLOW = 255;
 	static constexpr uint32_t LAYER_GROUP_LIMIT = 255;
 
@@ -78,7 +79,6 @@ public:
 	static constexpr uint32_t FALLBACK_RIM = 1u << 6;
 	static constexpr uint32_t FALLBACK_BACKLIGHT = 1u << 7;
 	static constexpr uint32_t FALLBACK_ANISOTROPY = 1u << 8;
-	static constexpr uint32_t FALLBACK_DIFFUSE_LAMBERT = 1u << 9;
 	static constexpr uint32_t FALLBACK_ALPHA_PASS = 1u << 10;
 
 	// Hundredths are the source for both the C++ pack and the GLSL defines.
@@ -205,7 +205,6 @@ public:
 		bool rim = false;
 		bool backlight = false;
 		bool anisotropy = false;
-		bool diffuse_lambert = false;
 		// Drawn by the depth prepass (depth_prepass_alpha or alpha antialiasing) but shaded
 		// by the alpha pass, so the opaque color pass never applies its inputs.
 		bool alpha_pass = false;
@@ -213,6 +212,7 @@ public:
 
 	// Lambert is the lights-inc #else: explicit DIFFUSE_LAMBERT, or a shaded
 	// material with neither Burley, toon, nor wrap. Unshaded is its own flag.
+	// Shaded natively by MegaLights via FLAG_DIFFUSE_LAMBERT (bit 5 of ml_material.B).
 	static bool is_diffuse_lambert(bool p_unshaded, bool p_has_lambert, bool p_has_burley, bool p_has_toon, bool p_has_wrap) {
 		if (p_unshaded) {
 			return false;
@@ -249,9 +249,6 @@ public:
 		if (p_query.anisotropy) {
 			bits |= FALLBACK_ANISOTROPY;
 		}
-		if (p_query.diffuse_lambert) {
-			bits |= FALLBACK_DIFFUSE_LAMBERT;
-		}
 		if (p_query.alpha_pass) {
 			bits |= FALLBACK_ALPHA_PASS;
 		}
@@ -262,10 +259,10 @@ public:
 		return fallback_bits(p_query) != 0;
 	}
 
-	// B: bits 0-1 shading model, bits 2-4 flags. Fallback wins and clears flags.
+	// B: bits 0-1 shading model, bits 2-5 flags. Fallback wins and clears flags.
 	// Model 1 is SSS. Transmission is the color pass's LIGHT_TRANSMITTANCE_USED,
 	// which requires SSS as well. Transmission alone stays model 0.
-	static uint8_t pack_shading_model(bool p_fallback, bool p_sss, bool p_transmission, bool p_clearcoat) {
+	static uint8_t pack_shading_model(bool p_fallback, bool p_sss, bool p_transmission, bool p_clearcoat, bool p_diffuse_lambert = false) {
 		if (p_fallback) {
 			return MODEL_FALLBACK;
 		}
@@ -279,6 +276,9 @@ public:
 		}
 		if (p_sss) {
 			flags |= FLAG_SSS;
+		}
+		if (p_diffuse_lambert) {
+			flags |= FLAG_DIFFUSE_LAMBERT;
 		}
 		uint8_t model = MODEL_STANDARD;
 		if (p_sss) {
@@ -323,6 +323,7 @@ public:
 		prelude += "#define ML_FLAG_CLEARCOAT " + String::num_int64(FLAG_CLEARCOAT) + "\n";
 		prelude += "#define ML_FLAG_TRANSMISSION " + String::num_int64(FLAG_TRANSMISSION) + "\n";
 		prelude += "#define ML_FLAG_SSS " + String::num_int64(FLAG_SSS) + "\n";
+		prelude += "#define ML_FLAG_DIFFUSE_LAMBERT " + String::num_int64(FLAG_DIFFUSE_LAMBERT) + "\n";
 		prelude += "#define ML_QUANTIZE_CHROMA(c) clamp(round((c) * float(ML_CHROMA_LEVELS)) + float(ML_CHROMA_BIAS), 0.0, float(ML_CHROMA_LEVELS))\n";
 		return prelude;
 	}

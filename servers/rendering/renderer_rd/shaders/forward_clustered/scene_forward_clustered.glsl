@@ -4232,6 +4232,9 @@ void fragment_shader(in SceneData scene_data) {
 #elif defined(LIGHT_CLEARCOAT_USED)
 		ml_model = uint(ML_MODEL_CLEARCOAT);
 #endif
+#ifdef MEGALIGHTS_DIFFUSE_LAMBERT
+		ml_flags |= uint(ML_FLAG_DIFFUSE_LAMBERT);
+#endif
 		ml_model |= ml_flags;
 #endif
 		uint ml_layer_group = uint(instances.data[instance_index].compressed_aabb_position_pad.w + 0.5);
