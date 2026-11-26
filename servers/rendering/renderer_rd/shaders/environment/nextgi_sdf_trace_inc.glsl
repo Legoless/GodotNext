@@ -328,9 +328,8 @@ uint swrt_level_at(vec3 p) {
 }
 
 // One stored voxel. False for a voxel outside the level or in an unallocated brick.
-bool swrt_fetch(uint level, ivec3 voxel, out float value, out bool coverage) {
+bool swrt_fetch_dist(uint level, ivec3 voxel, bool has_dynamic, out float value) {
 	value = SWRT_FAR;
-	coverage = false;
 	if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, ivec3(128)))) {
 		return false;
 	}
@@ -342,9 +341,29 @@ bool swrt_fetch(uint level, ivec3 voxel, out float value, out bool coverage) {
 	ivec3 local = voxel & ivec3(7);
 	uint voxel_index = uint(local.x + 8 * (local.y + 8 * local.z));
 	uint pool_index = uint(slot) * 512u + voxel_index;
-	value = min(float(swrt_static_pool.data[pool_index]), float(swrt_dynamic_pool.data[pool_index]));
-	coverage = (swrt_coverage.data[uint(slot) * 16u + voxel_index / 32u] & (1u << (voxel_index & 31u))) != 0u;
+	float s = float(swrt_static_pool.data[pool_index]);
+	value = has_dynamic ? min(s, float(swrt_dynamic_pool.data[pool_index])) : s;
 	return value < 60000.0;
+}
+
+bool swrt_fetch_coverage(uint level, ivec3 voxel) {
+	if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, ivec3(128)))) {
+		return false;
+	}
+	ivec3 brick = voxel >> 3;
+	int slot = swrt_page_slot(level, uint(brick.x + 16 * (brick.y + 16 * brick.z)));
+	if (slot < 0 || uint(slot) >= SWRT_P.counts.w) {
+		return false;
+	}
+	ivec3 local = voxel & ivec3(7);
+	uint voxel_index = uint(local.x + 8 * (local.y + 8 * local.z));
+	return (swrt_coverage.data[uint(slot) * 16u + (voxel_index >> 5u)] & (1u << (voxel_index & 31u))) != 0u;
+}
+
+bool swrt_fetch(uint level, ivec3 voxel, out float value, out bool coverage) {
+	bool has_dynamic = SWRT_P.froxel_depth.w > 0.5;
+	coverage = swrt_fetch_coverage(level, voxel);
+	return swrt_fetch_dist(level, voxel, has_dynamic, value);
 }
 
 // Trilinear distance between the voxel centers. present counts the corners
@@ -355,20 +374,48 @@ float swrt_sample(uint level, vec3 p, out uint present, out bool coverage) {
 	vec3 f = p / voxel_size - vec3(SWRT_P.origins[level].xyz) - vec3(0.5);
 	ivec3 base = ivec3(floor(f));
 	vec3 w = f - vec3(base);
+	bool has_dynamic = SWRT_P.froxel_depth.w > 0.5;
 	float values[8];
 	bool have[8];
 	present = 0u;
 	float largest = -SWRT_FAR;
-	for (uint i = 0u; i < 8u; i++) {
-		bool unused;
-		have[i] = swrt_fetch(level, base + ivec3(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u), values[i], unused);
-		if (have[i]) {
-			present++;
-			largest = max(largest, values[i]);
+	// Fast single-brick interior path: 1 page-table lookup instead of 9, 1 coverage read instead of 9,
+	// and instant empty-brick exit with 1 global load instead of 36.
+	if (all(greaterThanEqual(base, ivec3(0))) && all(lessThan(base, ivec3(127))) && all(lessThan(base & ivec3(7), ivec3(7)))) {
+		ivec3 brick = base >> 3;
+		int slot = swrt_page_slot(level, uint(brick.x + 16 * (brick.y + 16 * brick.z)));
+		if (slot < 0 || uint(slot) >= SWRT_P.counts.w) {
+			coverage = false;
+			return SWRT_FAR;
 		}
+		ivec3 local = base & ivec3(7);
+		uint base_pool = uint(slot) * 512u + uint(local.x + 8 * (local.y + 8 * local.z));
+		const uint offsets[8] = uint[8](0u, 1u, 8u, 9u, 64u, 65u, 72u, 73u);
+		for (uint i = 0u; i < 8u; i++) {
+			uint pi = base_pool + offsets[i];
+			float s = float(swrt_static_pool.data[pi]);
+			float v = has_dynamic ? min(s, float(swrt_dynamic_pool.data[pi])) : s;
+			values[i] = v;
+			bool ok = v < 60000.0;
+			have[i] = ok;
+			if (ok) {
+				present++;
+				largest = max(largest, v);
+			}
+		}
+		ivec3 near_local = local + ivec3(greaterThanEqual(w, vec3(0.5)));
+		uint near_vidx = uint(near_local.x + 8 * (near_local.y + 8 * near_local.z));
+		coverage = (swrt_coverage.data[uint(slot) * 16u + (near_vidx >> 5u)] & (1u << (near_vidx & 31u))) != 0u;
+	} else {
+		for (uint i = 0u; i < 8u; i++) {
+			have[i] = swrt_fetch_dist(level, base + ivec3(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u), has_dynamic, values[i]);
+			if (have[i]) {
+				present++;
+				largest = max(largest, values[i]);
+			}
+		}
+		coverage = swrt_fetch_coverage(level, ivec3(floor(f + vec3(0.5))));
 	}
-	float nearest;
-	swrt_fetch(level, ivec3(floor(f + vec3(0.5))), nearest, coverage);
 	if (present == 0u) {
 		return SWRT_FAR;
 	}
@@ -770,6 +817,43 @@ float swrt_mesh_sample(SWRTMeshInfo mesh, vec3 local) {
 	f = clamp(f, vec3(0.0), vec3(dimensions - ivec3(1)));
 	ivec3 base = ivec3(floor(f));
 	vec3 w = f - vec3(base);
+	if (all(lessThan(base & ivec3(7), ivec3(7))) && all(lessThan(base, dimensions - ivec3(1)))) {
+		ivec3 brick_grid = max(mesh.brick_grid.xyz, ivec3(1));
+		ivec3 brick = base >> 3;
+		int entry = swrt_mesh_pages.data[mesh.offsets.x + uint(brick.x + brick_grid.x * (brick.y + brick_grid.y * brick.z))];
+		float band = uintBitsToFloat(mesh.offsets.w);
+		if (entry == -1) {
+			return band;
+		}
+		if (entry == -2) {
+			return -band;
+		}
+		ivec3 loc = base & ivec3(7);
+		uint brick_base = mesh.offsets.y + uint(entry) * 128u;
+		float scale = (2.0 / 255.0) * band;
+		float bias = -band;
+		uint v000 = uint(loc.x + 8 * (loc.y + 8 * loc.z));
+		uint v100 = v000 + 1u;
+		uint v010 = v000 + 8u;
+		uint v110 = v000 + 9u;
+		uint v001 = v000 + 64u;
+		uint v101 = v000 + 65u;
+		uint v011 = v000 + 72u;
+		uint v111 = v000 + 73u;
+		float c000 = float((swrt_mesh_bricks.data[brick_base + (v000 >> 2u)] >> ((v000 & 3u) * 8u)) & 255u) * scale + bias;
+		float c100 = float((swrt_mesh_bricks.data[brick_base + (v100 >> 2u)] >> ((v100 & 3u) * 8u)) & 255u) * scale + bias;
+		float c010 = float((swrt_mesh_bricks.data[brick_base + (v010 >> 2u)] >> ((v010 & 3u) * 8u)) & 255u) * scale + bias;
+		float c110 = float((swrt_mesh_bricks.data[brick_base + (v110 >> 2u)] >> ((v110 & 3u) * 8u)) & 255u) * scale + bias;
+		float c001 = float((swrt_mesh_bricks.data[brick_base + (v001 >> 2u)] >> ((v001 & 3u) * 8u)) & 255u) * scale + bias;
+		float c101 = float((swrt_mesh_bricks.data[brick_base + (v101 >> 2u)] >> ((v101 & 3u) * 8u)) & 255u) * scale + bias;
+		float c011 = float((swrt_mesh_bricks.data[brick_base + (v011 >> 2u)] >> ((v011 & 3u) * 8u)) & 255u) * scale + bias;
+		float c111 = float((swrt_mesh_bricks.data[brick_base + (v111 >> 2u)] >> ((v111 & 3u) * 8u)) & 255u) * scale + bias;
+		float x00 = mix(c000, c100, w.x);
+		float x10 = mix(c010, c110, w.x);
+		float x01 = mix(c001, c101, w.x);
+		float x11 = mix(c011, c111, w.x);
+		return mix(mix(x00, x10, w.y), mix(x01, x11, w.y), w.z);
+	}
 	float x00 = mix(swrt_mesh_voxel(mesh, base), swrt_mesh_voxel(mesh, base + ivec3(1, 0, 0)), w.x);
 	float x10 = mix(swrt_mesh_voxel(mesh, base + ivec3(0, 1, 0)), swrt_mesh_voxel(mesh, base + ivec3(1, 1, 0)), w.x);
 	float x01 = mix(swrt_mesh_voxel(mesh, base + ivec3(0, 0, 1)), swrt_mesh_voxel(mesh, base + ivec3(1, 0, 1)), w.x);
@@ -870,6 +954,15 @@ SWRTHit swrt_trace_detail(vec3 origin, vec3 direction, float tmax, uint froxel_c
 		uint best_instance = SWRT_NO_INSTANCE;
 		for (uint i = 0u; i < count; i++) {
 			uint index = swrt_froxel.data[froxel_cell * (SWRT_FROXEL_CAP + 1u) + 1u + i];
+			// Cheap world AABB lower-bound reject: mesh surface is inside world_min..world_max,
+			// so if distance to box already >= best (and best > 0), this instance cannot improve best.
+			if (best > 0.0) {
+				SWRTInstance inst_bounds = swrt_instances.data[index];
+				vec3 dbox = max(max(inst_bounds.world_min.xyz - p, p - inst_bounds.world_max.xyz), vec3(0.0));
+				if (dot(dbox, dbox) >= best * best) {
+					continue;
+				}
+			}
 			float voxel_size;
 			float distance = swrt_instance_distance(index, p, voxel_size);
 			if (distance < best) {

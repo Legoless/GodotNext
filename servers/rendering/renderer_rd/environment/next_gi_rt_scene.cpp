@@ -2204,6 +2204,7 @@ bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_insta
 		return false;
 	}
 	record.tlas_index = r_records.size();
+	const bool use_stage2_cards = NextGISRC::is_card_set_stage2(record.card_set);
 	float eps_rt = 0.0f;
 	for (const NextGIRTPartGeometry &geometry : part.geometries) {
 		NextGISurfaceRecord surface;
@@ -2213,7 +2214,7 @@ bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_insta
 			surface.vertex_offset = geometry.vertex_offset;
 			surface.index_offset = geometry.index_offset;
 			surface.triangle_count = geometry.triangle_count;
-			surface.flags = geometry.has_stage2_cards ? (NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | geometry.group_offset) : 0u;
+			surface.flags = (geometry.has_stage2_cards && use_stage2_cards) ? (NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | geometry.group_offset) : 0u;
 		} else {
 			MeshStorage::NextGIRTSurfaceInfo info;
 			if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, geometry.surface, info)) {
@@ -2781,6 +2782,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					record.card_set = NextGISRC::get_mesh_card_set(mesh);
 				}
 
+				const bool use_stage2_cards = NextGISRC::is_card_set_stage2(record.card_set);
 				float eps_rt = 0.0f;
 				uint32_t first_vertex_offset = 0u;
 				bool have_first_vertex_offset = false;
@@ -2790,9 +2792,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					surface_record.vertex_offset = part_geometry.vertex_offset;
 					surface_record.index_offset = part_geometry.index_offset;
 					surface_record.triangle_count = part_geometry.triangle_count;
-					if (part_geometry.has_stage2_cards) {
+					if (part_geometry.has_stage2_cards && use_stage2_cards) {
 						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | part_geometry.group_offset;
-					} else if (has_vgd_cards) {
+					} else if (has_vgd_cards && use_stage2_cards) {
 						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
 					} else {
 						surface_record.flags = 0u;
@@ -3315,6 +3317,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				}
 			}
 
+			const bool use_stage2_cards = NextGISRC::is_card_set_stage2(record.card_set);
 			float eps_rt = 0.0f;
 			uint32_t first_vertex_offset = 0;
 			bool have_first_vertex_offset = false;
@@ -3330,9 +3333,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					surface_record.vertex_offset = part_geometry.vertex_offset;
 					surface_record.index_offset = part_geometry.index_offset;
 					surface_record.triangle_count = part_geometry.triangle_count;
-					if (part_geometry.has_stage2_cards) {
+					if (part_geometry.has_stage2_cards && use_stage2_cards) {
 						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | part_geometry.group_offset;
-					} else if (has_vgd_cards) {
+					} else if (has_vgd_cards && use_stage2_cards) {
 						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
 					} else {
 						surface_record.flags = 0;

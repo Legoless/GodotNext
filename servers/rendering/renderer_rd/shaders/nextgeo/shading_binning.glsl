@@ -180,6 +180,7 @@ uint pixel_bin(ivec2 p_px) {
 }
 
 shared uint tile_bins[64];
+shared uint tile_mixed;
 #endif
 
 #ifdef MODE_SCATTER
@@ -204,17 +205,30 @@ void main() {
 
 #if defined(MODE_COUNT) || defined(MODE_SCATTER)
 	uint tid = gl_LocalInvocationIndex;
+	if (tid == 0u) {
+		tile_mixed = 0u;
+	}
 	ivec2 px = ivec2(gl_GlobalInvocationID.xy);
 	uint my_bin = pixel_bin(px);
 	tile_bins[tid] = my_bin;
 	barrier();
 
-	// This pixel's rank among the tile's pixels of its bin, the tile's count of the bin, and the first
-	// pixel of the bin in the tile (the one that talks to the global state).
+	if (my_bin != tile_bins[0]) {
+		atomicOr(tile_mixed, 1u);
+	}
+	barrier();
+
+	// Fast path for uniform tiles (all 64 pixels share one bin or are empty): skips the O(64) scan.
 	uint rank = 0u;
 	uint total = 0u;
 	uint first = tid;
-	if (my_bin != NEXTGEO_SHADING_BIN_NONE) {
+	if (tile_mixed == 0u) {
+		if (my_bin != NEXTGEO_SHADING_BIN_NONE) {
+			rank = tid;
+			total = 64u;
+			first = 0u;
+		}
+	} else if (my_bin != NEXTGEO_SHADING_BIN_NONE) {
 		for (uint i = 0u; i < 64u; i++) {
 			if (tile_bins[i] == my_bin) {
 				if (i < tid) {

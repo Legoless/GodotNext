@@ -87,11 +87,14 @@ float flood_read(ivec3 cell, bool from_a) {
 	return from_a ? flood_a.data[index] : flood_b.data[index];
 }
 
+shared float s_flood[10][10][10];
+
 void main() {
 	ivec3 cell = ivec3(gl_GlobalInvocationID);
 	uint index = cell_index(cell);
 	float cell_size = 4.0 * params.voxel_size;
 	if (params.mode == MODE_SEED) {
+		ivec3 my_brick = (cell * 4) >> 3;
 		int slot = brick_slot(cell * 4);
 		float seed;
 		float flood;
@@ -110,7 +113,8 @@ void main() {
 						if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, ivec3(128)))) {
 							continue;
 						}
-						int voxel_slot = brick_slot(voxel);
+						ivec3 vbrick = voxel >> 3;
+						int voxel_slot = (vbrick == my_brick) ? slot : brick_slot(voxel);
 						if (voxel_slot < 0) {
 							continue; // The trace reads no value there.
 						}
@@ -133,14 +137,23 @@ void main() {
 	}
 	if (params.mode == MODE_PROPAGATE_A_TO_B || params.mode == MODE_PROPAGATE_B_TO_A) {
 		bool from_a = params.mode == MODE_PROPAGATE_A_TO_B;
-		float value = flood_read(cell, from_a);
+		ivec3 group_origin = ivec3(gl_WorkGroupID) * 8 - ivec3(1);
+		uint tid = gl_LocalInvocationIndex;
+		for (uint flat_idx = tid; flat_idx < 1000u; flat_idx += 512u) {
+			uint lz = flat_idx / 100u;
+			uint rem = flat_idx - lz * 100u;
+			uint ly = rem / 10u;
+			uint lx = rem - ly * 10u;
+			ivec3 g = group_origin + ivec3(int(lx), int(ly), int(lz));
+			s_flood[lz][ly][lx] = (any(lessThan(g, ivec3(0))) || any(greaterThanEqual(g, ivec3(COARSE_SIZE)))) ? 0.0 : flood_read(g, from_a);
+		}
+		barrier();
+		ivec3 lc = ivec3(gl_LocalInvocationID) + ivec3(1);
+		float value = s_flood[lc.z][lc.y][lc.x];
 		for (int z = -1; z <= 1; z++) {
 			for (int y = -1; y <= 1; y++) {
 				for (int x = -1; x <= 1; x++) {
-					ivec3 neighbor = cell + ivec3(x, y, z);
-					// Past the level's edge lies geometry this level does not hold.
-					float other = (any(lessThan(neighbor, ivec3(0))) || any(greaterThanEqual(neighbor, ivec3(COARSE_SIZE)))) ? 0.0 : flood_read(neighbor, from_a);
-					value = min(value, other + cell_size);
+					value = min(value, s_flood[lc.z + z][lc.y + y][lc.x + x] + cell_size);
 				}
 			}
 		}

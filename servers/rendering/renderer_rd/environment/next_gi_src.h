@@ -51,6 +51,7 @@ namespace RendererRD {
 
 enum {
 	NEXTGI_SRC_MAX_CARDS_PER_MESH = 12,
+	NEXTGI_SRC_STAGE2_MAX_CARDS_PER_MESH = 128, // Above this, fall back to Stage-1 clustered cards to protect the material atlas.
 	NEXTGI_SRC_CARD_MAX_TEXELS = 128, // Per axis; also the divisor of the texel size.
 	NEXTGI_SRC_CARD_MIN_TEXELS = 4, // Per axis.
 	NEXTGI_SRC_KMEANS_ITERATIONS = 8,
@@ -390,6 +391,8 @@ public:
 	static uint32_t get_mesh_card_set(RID p_mesh);
 	// The card set for this instance's mesh and materials. UINT32_MAX until that key is captured.
 	static uint32_t get_instance_card_set(RenderGeometryInstance *p_instance);
+	// True when p_card_set holds Stage-2 per-group cards rather than Stage-1 clustered cards.
+	static bool is_card_set_stage2(uint32_t p_card_set);
 
 	static String get_atlas_target_name(AtlasTarget p_target);
 

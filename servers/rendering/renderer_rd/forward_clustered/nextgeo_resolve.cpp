@@ -382,7 +382,8 @@ bool NextGeoResolve::classify(RendererVirtualMeshStorage *p_storage, RID p_visib
 	push.max_tiles = current_max_tiles;
 
 	RID init_set = uniform_set_cache->get_cache_vec(classify_shader.version_get_shader(classify_version, 0), 0, uniforms);
-	if (!init_set.is_valid()) {
+	RID classify_set = uniform_set_cache->get_cache_vec(classify_shader.version_get_shader(classify_version, 1), 0, uniforms);
+	if (!init_set.is_valid() || !classify_set.is_valid()) {
 		return false;
 	}
 	RD::ComputeListID cl = rd->compute_list_begin();
@@ -390,13 +391,7 @@ bool NextGeoResolve::classify(RendererVirtualMeshStorage *p_storage, RID p_visib
 	rd->compute_list_bind_uniform_set(cl, init_set, 0);
 	rd->compute_list_set_push_constant(cl, &push, sizeof(push));
 	rd->compute_list_dispatch(cl, (buckets.size() + 63u) / 64u, 1u, 1u);
-	rd->compute_list_end();
-
-	RID classify_set = uniform_set_cache->get_cache_vec(classify_shader.version_get_shader(classify_version, 1), 0, uniforms);
-	if (!classify_set.is_valid()) {
-		return false;
-	}
-	cl = rd->compute_list_begin();
+	rd->compute_list_add_barrier(cl);
 	rd->compute_list_bind_compute_pipeline(cl, classify_pipeline);
 	rd->compute_list_bind_uniform_set(cl, classify_set, 0);
 	rd->compute_list_set_push_constant(cl, &push, sizeof(push));
@@ -591,20 +586,25 @@ bool NextGeoResolve::bin(RendererVirtualMeshStorage *p_storage, RID p_visibility
 		{ 1u, 1u },
 		{ tiles_x, tiles_y },
 	};
-	// One compute list per pass, so each pass sees the previous pass's writes.
+	RID pass_sets[BINNING_PASS_MAX];
 	for (uint32_t pass = 0; pass < BINNING_PASS_MAX; pass++) {
-		const RID set = uniform_set_cache->get_cache_vec(binning_shader.version_get_shader(binning_version, pass), 0, uniforms);
-		if (!set.is_valid()) {
+		pass_sets[pass] = uniform_set_cache->get_cache_vec(binning_shader.version_get_shader(binning_version, pass), 0, uniforms);
+		if (!pass_sets[pass].is_valid()) {
 			shading_bucket_bins.clear();
 			return false;
 		}
-		RD::ComputeListID cl = rd->compute_list_begin();
+	}
+	RD::ComputeListID cl = rd->compute_list_begin();
+	for (uint32_t pass = 0; pass < BINNING_PASS_MAX; pass++) {
+		if (pass > 0u) {
+			rd->compute_list_add_barrier(cl);
+		}
 		rd->compute_list_bind_compute_pipeline(cl, binning_pipelines[pass]);
-		rd->compute_list_bind_uniform_set(cl, set, 0);
+		rd->compute_list_bind_uniform_set(cl, pass_sets[pass], 0);
 		rd->compute_list_set_push_constant(cl, &push, sizeof(push));
 		rd->compute_list_dispatch(cl, groups[pass][0], groups[pass][1], 1u);
-		rd->compute_list_end();
 	}
+	rd->compute_list_end();
 
 	binned = true;
 	return true;
@@ -823,6 +823,7 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 		rd->draw_list_bind_uniform_set(dl, p_rp_uniform_set, RenderForwardClustered::RENDER_PASS_UNIFORM_SET);
 
 		RID prev_pipeline;
+		RID prev_shader_rid;
 		RID prev_resolve_set;
 		RID prev_material_set;
 
@@ -861,7 +862,7 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 			}
 
 			const RID shader_rid = bucket.shader->get_shader_variant(version, 0, false);
-			const RID resolve_set = _build_resolve_uniform_set(shader_rid, p_storage, p_visibility_tex, p_visible_clusters_buf);
+			const RID resolve_set = (shader_rid == prev_shader_rid && prev_resolve_set.is_valid()) ? prev_resolve_set : _build_resolve_uniform_set(shader_rid, p_storage, p_visibility_tex, p_visible_clusters_buf);
 			if (!resolve_set.is_valid()) {
 				continue;
 			}
@@ -873,6 +874,7 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 			if (resolve_set != prev_resolve_set) {
 				rd->draw_list_bind_uniform_set(dl, resolve_set, RenderForwardClustered::TRANSFORMS_UNIFORM_SET);
 				prev_resolve_set = resolve_set;
+				prev_shader_rid = shader_rid;
 			}
 			if (bucket.material_uniform_set.is_valid() && bucket.material_uniform_set != prev_material_set) {
 				rd->draw_list_bind_uniform_set(dl, bucket.material_uniform_set, RenderForwardClustered::MATERIAL_UNIFORM_SET);
@@ -939,6 +941,7 @@ bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_v
 	rd->draw_list_bind_uniform_set(dl, p_rp_uniform_set, RenderForwardClustered::RENDER_PASS_UNIFORM_SET);
 
 	RID prev_pipeline;
+	RID prev_shader_rid;
 	RID prev_resolve_set;
 	RID prev_material_set;
 
@@ -985,7 +988,7 @@ bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_v
 		}
 
 		const RID shader_rid = bucket.shader->get_shader_variant(version, p_pipeline_color_pass_flags, false);
-		const RID resolve_set = _build_resolve_uniform_set(shader_rid, p_storage, p_visibility_tex, p_visible_clusters_buf);
+		const RID resolve_set = (shader_rid == prev_shader_rid && prev_resolve_set.is_valid()) ? prev_resolve_set : _build_resolve_uniform_set(shader_rid, p_storage, p_visibility_tex, p_visible_clusters_buf);
 		if (!resolve_set.is_valid()) {
 			continue;
 		}
@@ -997,6 +1000,7 @@ bool NextGeoResolve::draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_v
 		if (resolve_set != prev_resolve_set) {
 			rd->draw_list_bind_uniform_set(dl, resolve_set, RenderForwardClustered::TRANSFORMS_UNIFORM_SET);
 			prev_resolve_set = resolve_set;
+			prev_shader_rid = shader_rid;
 		}
 		if (bucket.material_uniform_set.is_valid() && bucket.material_uniform_set != prev_material_set) {
 			rd->draw_list_bind_uniform_set(dl, bucket.material_uniform_set, RenderForwardClustered::MATERIAL_UNIFORM_SET);

@@ -138,6 +138,7 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint front_pad0;
 #endif
 	vec4 view_to_world[3]; // GodotNext: nextgi_view_math. The normal-roughness buffer is in view space.
+	mat4 view_proj; // Precomputed view-projection (avoids per-ray inverse(inv_view_proj) in screen trace).
 }
 params;
 

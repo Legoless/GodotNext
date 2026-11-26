@@ -107,6 +107,41 @@ float sample_mesh(MeshInfo mesh, vec3 position) {
 	f = clamp(f, vec3(0.0), vec3(mesh.dimensions - ivec3(1)));
 	ivec3 base = ivec3(floor(f));
 	vec3 frac = f - vec3(base);
+	if (all(lessThan(base & ivec3(7), ivec3(7))) && all(lessThan(base, mesh.dimensions - ivec3(1)))) {
+		ivec3 brick = base >> 3;
+		int entry = page_tables.data[mesh.page_offset + uint(brick.x + mesh.brick_grid.x * (brick.y + mesh.brick_grid.y * brick.z))];
+		if (entry == -1) {
+			return mesh.band;
+		}
+		if (entry == -2) {
+			return -mesh.band;
+		}
+		ivec3 local = base & ivec3(7);
+		uint brick_base = mesh.brick_offset + uint(entry) * 128u;
+		float scale = (2.0 / 255.0) * mesh.band;
+		float bias = -mesh.band;
+		uint v000 = uint(local.x + 8 * (local.y + 8 * local.z));
+		uint v100 = v000 + 1u;
+		uint v010 = v000 + 8u;
+		uint v110 = v000 + 9u;
+		uint v001 = v000 + 64u;
+		uint v101 = v000 + 65u;
+		uint v011 = v000 + 72u;
+		uint v111 = v000 + 73u;
+		float c000 = float((brick_data.data[brick_base + (v000 >> 2u)] >> ((v000 & 3u) * 8u)) & 255u) * scale + bias;
+		float c100 = float((brick_data.data[brick_base + (v100 >> 2u)] >> ((v100 & 3u) * 8u)) & 255u) * scale + bias;
+		float c010 = float((brick_data.data[brick_base + (v010 >> 2u)] >> ((v010 & 3u) * 8u)) & 255u) * scale + bias;
+		float c110 = float((brick_data.data[brick_base + (v110 >> 2u)] >> ((v110 & 3u) * 8u)) & 255u) * scale + bias;
+		float c001 = float((brick_data.data[brick_base + (v001 >> 2u)] >> ((v001 & 3u) * 8u)) & 255u) * scale + bias;
+		float c101 = float((brick_data.data[brick_base + (v101 >> 2u)] >> ((v101 & 3u) * 8u)) & 255u) * scale + bias;
+		float c011 = float((brick_data.data[brick_base + (v011 >> 2u)] >> ((v011 & 3u) * 8u)) & 255u) * scale + bias;
+		float c111 = float((brick_data.data[brick_base + (v111 >> 2u)] >> ((v111 & 3u) * 8u)) & 255u) * scale + bias;
+		float x00 = mix(c000, c100, frac.x);
+		float x10 = mix(c010, c110, frac.x);
+		float x01 = mix(c001, c101, frac.x);
+		float x11 = mix(c011, c111, frac.x);
+		return mix(mix(x00, x10, frac.y), mix(x01, x11, frac.y), frac.z);
+	}
 	float c000 = voxel_value(mesh, base);
 	float c100 = voxel_value(mesh, base + ivec3(1, 0, 0));
 	float c010 = voxel_value(mesh, base + ivec3(0, 1, 0));
@@ -140,10 +175,16 @@ float sample_instance(Instance instance, MeshInfo mesh, vec3 world) {
 	return nextgi_mesh_sdf_world_distance(local, mesh.bounds_position, bounds_max, surface_min, surface_max, sample_mesh(mesh, local), vec4(instance.axis_scale[0], instance.axis_scale[1], instance.axis_scale[2], instance.world_min.w));
 }
 
+shared uint s_cov[16];
+
 void main() {
 	BrickWork brick_work = work.data[gl_WorkGroupID.x];
 	ivec3 voxel = ivec3(gl_LocalInvocationID);
 	uint voxel_index = voxel.x + voxel.y * 8u + voxel.z * 64u;
+	if (voxel_index < 16u) {
+		s_cov[voxel_index] = 0u;
+	}
+	barrier();
 	float voxel_size = 0.1 * float(1u << params.level);
 	vec3 brick_min = vec3(params.origin.xyz + brick_work.brick.xyz * 8) * voxel_size;
 	vec3 world = brick_min + (vec3(voxel) + 0.5) * voxel_size;
@@ -201,6 +242,10 @@ void main() {
 	if (static_two_sided || dynamic_two_sided) {
 		// GodotNext: ps_swrt_trace (#186). 512 bits in 16 words per slot: word voxel / 32,
 		// bit voxel % 32. Byte-for-byte this is the CPU BrickSplit::coverage layout.
-		atomicOr(coverage.data[brick_work.slot * 16u + voxel_index / 32u], 1u << (voxel_index & 31u));
+		atomicOr(s_cov[voxel_index >> 5u], 1u << (voxel_index & 31u));
+	}
+	barrier();
+	if (voxel_index < 16u) {
+		coverage.data[brick_work.slot * 16u + voxel_index] = s_cov[voxel_index];
 	}
 }

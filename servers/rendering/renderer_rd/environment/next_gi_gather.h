@@ -309,6 +309,7 @@ public:
 	// view-space normals into world space (nextgi_view_world_normal()).
 	struct ViewMatrices {
 		Projection inv_view_proj;
+		Projection view_proj;
 		Projection prev_view_proj;
 		Projection inv_projection;
 		Basis view_to_world;

@@ -65,10 +65,12 @@ static constexpr uint32_t NEXTGEO_VSM_HIZ_BLOCK_SIZE = 1u << NEXTGEO_VSM_HIZ_BLO
 static constexpr uint32_t NEXTGEO_VSM_HIZ_PAGE_SIZE = RendererVirtualShadowMapStorage::PAGE_SIZE >> NEXTGEO_VSM_HIZ_BLOCK_SHIFT; // 8 cells.
 static_assert(NEXTGEO_VSM_HIZ_PAGE_SIZE == 8u, "VSM Hi-Z page grid must stay 8x8 (64 threads per page).");
 
-// Per-chain (directional / local) GPU compaction capacities.
-static constexpr uint32_t NEXTGEO_VSM_NODE_CAPACITY = 1u << 18; // 262,144 (record, node, dirty_idx) entries.
-static constexpr uint32_t NEXTGEO_VSM_GROUP_CAPACITY = 1u << 18; // 262,144 (record, group, dirty_idx) entries.
-static constexpr uint32_t NEXTGEO_VSM_CLUSTER_CAPACITY = 1u << 19; // 524,288 (cluster, page) pairs (< 2^21 for #155 bin packing).
+// Per-chain (directional / local) GPU compaction capacities. Sized so real-world 10M+ triangle scenes
+// (Intel Sponza, Bistro) warm-cache all initial dirty pages in a single frame without BVH node overflow
+// triggering permanent VSM_ENTRY_SCROLLED redraw loops.
+static constexpr uint32_t NEXTGEO_VSM_NODE_CAPACITY = 1u << 21; // 2,097,152 (record, node, dirty_idx) entries.
+static constexpr uint32_t NEXTGEO_VSM_GROUP_CAPACITY = 1u << 20; // 1,048,576 (record, group, dirty_idx) entries.
+static constexpr uint32_t NEXTGEO_VSM_CLUSTER_CAPACITY = 1u << 20; // 1,048,576 (cluster, page) pairs (< 2^21 for #155 bin packing).
 static_assert(NEXTGEO_VSM_CLUSTER_CAPACITY <= (1u << 21), "VSM cluster capacity must fit in 21-bit raster-bin entry index.");
 
 enum NextGeoVSMChain : uint32_t {

@@ -93,9 +93,13 @@ void main() {
 }
 #else
 shared uint tile_buckets[64];
+shared uint tile_mixed;
 
 void main() {
 	uint tid = gl_LocalInvocationIndex;
+	if (tid == 0u) {
+		tile_mixed = 0u;
+	}
 	ivec2 px = ivec2(gl_GlobalInvocationID.xy);
 	uint my_bucket = 0xFFFFFFFFu;
 
@@ -157,6 +161,21 @@ void main() {
 
 	tile_buckets[tid] = my_bucket;
 	barrier();
+
+	if (my_bucket != tile_buckets[0]) {
+		atomicOr(tile_mixed, 1u);
+	}
+	barrier();
+
+	if (tile_mixed == 0u) {
+		if (tid == 0u && my_bucket != 0xFFFFFFFFu) {
+			uint slot = atomicAdd(indirect_args.data[my_bucket].y, 1u);
+			if (slot < push_params.max_tiles) {
+				tile_list.data[my_bucket * push_params.max_tiles + slot] = (gl_WorkGroupID.x & 0xFFFFu) | (gl_WorkGroupID.y << 16u);
+			}
+		}
+		return;
+	}
 
 	if (my_bucket != 0xFFFFFFFFu) {
 		bool first_occurrence = true;

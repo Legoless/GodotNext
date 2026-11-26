@@ -103,6 +103,7 @@ public:
 	uint32_t get_missing_bricks(uint32_t p_level) const { return p_level < NextGIGlobalSDF::MAX_LEVELS ? missing_bricks[p_level] : 0; }
 	// The pool buffers exist (ensure_buffers() succeeded on a device).
 	bool has_buffers() const { return pool_buffer.is_valid() && dynamic_pool_buffer.is_valid() && coverage_buffer.is_valid(); }
+	bool has_dynamic_data() const { return dynamic_written; }
 	uint32_t get_capacity() const { return capacity; }
 	const PackedInt32Array &get_page_table(uint32_t p_level) const { return page_tables[p_level]; }
 	RID get_pool_buffer() const { return pool_buffer; }
@@ -128,6 +129,7 @@ private:
 	uint32_t capacity = 0;
 	uint32_t used = 0;
 	bool last_allocation_failed = false; // GodotNext: ps_swrt_trace (#186)
+	bool dynamic_written = false;
 	uint32_t missing_bricks[NextGIGlobalSDF::MAX_LEVELS] = {}; // GodotNext: ps_swrt_trace (#186)
 	mutable PackedByteArray pool_data;
 	Vector<PackedInt32Array> page_tables;

@@ -96,7 +96,7 @@ TEST_CASE("[NextGeo][MeshRaster] Task workgroup count and payload sizing math") 
 	// Worst-case cluster capacities fit within the portable 65,535 X task-group limit (D3D12 / Vulkan min).
 	CHECK_EQ(nextgeo_mesh_task_groups(NextGeoCut::PHASE2_CLUSTER_BASE), 32768u);
 	CHECK_LE(nextgeo_mesh_task_groups(NextGeoCut::PHASE2_CLUSTER_BASE), 65535u);
-	CHECK_EQ(nextgeo_mesh_task_groups(NEXTGEO_VSM_CLUSTER_CAPACITY), 16384u);
+	CHECK_EQ(nextgeo_mesh_task_groups(NEXTGEO_VSM_CLUSTER_CAPACITY), 32768u);
 	CHECK_LE(nextgeo_mesh_task_groups(NEXTGEO_VSM_CLUSTER_CAPACITY), 65535u);
 
 	// Per-workgroup batch counts sum exactly to the HW cluster count for partial and full waves.

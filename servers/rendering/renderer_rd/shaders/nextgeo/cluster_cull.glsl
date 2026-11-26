@@ -691,6 +691,24 @@ void main() {
 		return;
 	}
 
+	// Cap Nanite VSM dirty pages per chain per frame so cold starts or huge camera snaps on
+	// multi-million-triangle scenes drain cleanly across frames instead of overflowing and
+	// re-dirtying every page in an infinite loop.
+	const uint NEXTGEO_VSM_DIRTY_PAGE_SLICE = 128u;
+	if (dirty_idx >= d_begin + NEXTGEO_VSM_DIRTY_PAGE_SLICE) {
+		if (record_idx == 0u) {
+			uvec4 deferred_rec = vsm_dirty.data[dirty_idx];
+			uint d_map = deferred_rec.x;
+			uint d_mip = deferred_rec.y & 0xFFu;
+			if (d_map < vsm_params.table_maps && d_mip < VSM_MIP_COUNT) {
+				uvec2 d_slot = uvec2((deferred_rec.y >> 8u) & 0xFFu, (deferred_rec.y >> 16u) & 0xFFu);
+				vsm_ng_sink(atomicOr(vsm_page_table.entries[vsm_entry_index(d_map, d_mip, d_slot)], VSM_ENTRY_SCROLLED));
+				vsm_ng_sink(atomicAdd(vsm_counters.redraw_marks, 1u));
+			}
+		}
+		return;
+	}
+
 	uvec4 rec = vsm_dirty.data[dirty_idx];
 	uint map = rec.x;
 	uint mip = rec.y & 0xFFu;

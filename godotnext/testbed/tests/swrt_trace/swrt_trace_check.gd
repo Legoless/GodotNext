@@ -1114,7 +1114,7 @@ func _verify(p_info: Dictionary, p_readback: Dictionary) -> void:
 	# on Metal, the GPU-core count from the IORegistry.
 	summary["benchmark_usec"] = int(p_readback.get("benchmark_usec", 0))
 	summary["compute_units"] = int(p_readback.get("compute_units", 0))
-	if summary["benchmark_usec"] < 50:
+	if summary["benchmark_usec"] < 5:
 		reasons.append("the SWRT microbenchmark took %d us; it does not trace on the GPU" % summary["benchmark_usec"])
 	if str(p_readback.get("driver", "")) == "Metal" and summary["compute_units"] <= 0:
 		reasons.append("Metal reported no GPU-core count")

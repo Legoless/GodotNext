@@ -419,7 +419,7 @@ bool nextgi_screen_trace(vec3 origin, vec3 direction, float tmax, out vec3 color
 	if (params.pad0 == 0u) {
 		return false;
 	}
-	return nextgi_screen_trace_hiz(inverse(params.inv_view_proj), params.inv_view_proj, params.camera_pos.xyz, params.screen_jitter.xy, float(params.pad1), origin, direction, tmax, color, march_end);
+	return nextgi_screen_trace_hiz(params.view_proj, params.inv_view_proj, params.camera_pos.xyz, params.screen_jitter.xy, float(params.pad1), origin, direction, tmax, color, march_end);
 }
 
 // GodotNext: ps_swrt_trace (#186 step 4). A screen miss that left the screen or passed
@@ -435,220 +435,268 @@ float nextgi_screen_resume_tier(vec3 origin, vec3 direction, float marched, floa
 	return nextgi_screen_resume(origin, direction, marched, world_tmax, clearance, trace_origin, trace_tmax);
 }
 
-void nextgi_gather_main() {
+#ifdef MODE_ANCHOR
+// Pre-pass (1 thread per probe, HWRT only): computes the per-probe origin_offset via one anchor ray
+// and stores it in confidence_data (-1.0 for background probes) so the 1-thread-per-ray gather never
+// repeats the anchor ray 16x/64x per probe.
+void nextgi_anchor_main() {
+#ifndef NEXTGI_TRACE_SDF
 	uvec2 probe = gl_GlobalInvocationID.xy;
 	if (probe.x >= params.probes_x || probe.y >= params.probes_y) {
 		return;
 	}
+	uint probe_idx = probe.y * params.probes_x + probe.x;
 	vec2 pixel = vec2(probe) * 16.0 + params.screen_jitter.zw * 16.0;
 	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
 	float depth = texelFetch(depth_tex, ipixel, 0).r;
 	if (depth <= 0.0) {
-		confidence_data.data[probe.y * params.probes_x + probe.x] = 0.0;
+		confidence_data.data[probe_idx] = -1.0;
 		return;
 	}
 	vec3 world = nextgi_unproject(vec2(ipixel), depth);
-	vec3 normal = nextgi_geometric_normal(ipixel, depth, world);
 	vec3 to_camera = normalize(params.camera_pos.xyz - world);
-#ifdef NEXTGI_TRACE_SDF
-	// GodotNext: ps_swrt_trace (#186 step 6). 1.5 voxels of the level that holds the surface.
-	vec3 origin = swrt_offset_origin(world, normal);
-#else
 	float anchor_t = length(params.camera_pos.xyz - world);
 	NextGIHit anchor;
 	float origin_offset = params.max_origin_offset;
 	if (nextgi_trace(params.camera_pos.xyz, -to_camera, anchor_t + 0.05, anchor)) {
 		origin_offset = records.data[anchor.custom_index].origin_offset;
 	}
-	vec3 origin = world + normal * origin_offset;
+	confidence_data.data[probe_idx] = origin_offset;
 #endif
+}
+#endif // MODE_ANCHOR
 
-	vec3 raw_radiance[64];
-#ifdef MODE_HIT_LIGHTING_GI
-	float probe_depth = length(world - params.camera_pos.xyz);
-	uint hit_lit_lo = 0u;
-	uint hit_lit_hi = 0u;
-#endif
-	float angle = float(params.frame) * 2.3999632;
-	if (params.sampling_mode == 0u) {
-		angle = nextgi_blue_noise_sample(ivec2(gl_GlobalInvocationID.xy), params.frame).x * 6.2831853;
+#ifdef MODE_CLAMP
+// Post-pass (1 thread per probe, HWRT and SWRT): performs the exact per-probe 3-sigma firefly clamp
+// (#54) over the raw ray samples stored in probe_image, writes the probe distance to .a and publishes
+// the probe's mean confidence into confidence_data.
+void nextgi_clamp_main() {
+	uvec2 probe = gl_GlobalInvocationID.xy;
+	if (probe.x >= params.probes_x || probe.y >= params.probes_y) {
+		return;
 	}
-	uint uncovered_count = 0u;
-	float confidence_sum = 0.0;
-	for (uint i = 0u; i < params.ray_count; i++) {
-		uint ix = i % params.ray_stride;
-		uint iy = i / params.ray_stride;
-		// Exact stratified polar cosine-weighted hemisphere (Malley's method):
-		// E[r^2] = 0.5 exactly for every ray_stride, so mean(L_i) estimates E / PI directly.
-		float r2 = (float(iy) + 0.5) / float(params.ray_stride);
-		float disk_r = sqrt(r2);
-		float disk_phi = ((float(ix) + 0.5) / float(params.ray_stride)) * (2.0 * PI) + angle;
-		vec3 local_dir = vec3(disk_r * cos(disk_phi), disk_r * sin(disk_phi), sqrt(max(1.0 - r2, 0.0)));
-		vec3 dir = nextgi_orient(normal, local_dir);
-		NextGIHit hit;
-		vec3 radiance;
-		float ray_confidence = 0.0;
-		atomicAdd(counters.rays, 1u);
-		float handoff = nextgi_wrc_handoff(origin);
-#ifdef MODE_HIT_LIGHTING_GI
-		float gi_hl_cutoff = handoff > 0.0 ? min(1.5 * handoff, params.rt_radius) : params.rt_radius;
-		float tmax = gi_hl_cutoff;
-#else
-		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
-#endif
-		vec3 screen_color;
-		vec3 march_end;
-		bool screen_hit = nextgi_screen_trace(origin, dir, tmax, screen_color, march_end);
-		float traveled = length(march_end - origin);
-		vec3 trace_origin = origin;
-		float trace_tmax = tmax;
-		// GodotNext: ps_swrt_trace (#186 step 4). Both tiers resume after the screen march
-		// with the pull-back. A hit keeps the screen color and does not continue.
-		float resume = 0.0;
-		if (!screen_hit) {
-			resume = nextgi_screen_resume_tier(origin, dir, traveled, tmax, trace_origin, trace_tmax);
-		}
-		if (screen_hit) {
-			radiance = screen_color;
-			ray_confidence = 1.0;
-			atomicAdd(counters.screen_hits, 1u);
-#ifdef NEXTGI_TRACE_SDF
-		} else if (nextgi_sdf_trace_noted(trace_origin, dir, trace_tmax, world, false, resume, hit)) {
-#else
-		} else if (nextgi_trace(trace_origin, dir, trace_tmax, hit)) {
-#endif
-#ifdef MODE_HIT_LIGHTING_GI
-			// GodotNext: nextgi_hit_lighting_gi (#128). Hits before 1.5x WRC handoff write compact hit
-			// records into the shared hit-lighting buffer with keys in [0x8000..0xFFFF].
-			bool queued_hl = false;
-			if ((resume + hit.t) < gi_hl_cutoff) {
-				uint slot = atomicAdd(gi_hl_counters.data.marked_hits, 1u);
-				if (slot < params.hit_record_max_rays) {
-					uint material_key = NEXTGI_HL_KEY_GI_FALLBACK;
-					if (hit.custom_index < params.hit_record_count) {
-						NextGIInstanceRecord inst = records.data[hit.custom_index];
-						if (hit.geometry_index < inst.surface_count) {
-							uint surf_idx = inst.surface_base + hit.geometry_index;
-							NextGIHitSurfaceGI hs = gi_hit_surfaces.data[surf_idx];
-							if (hs.material_id < params.hit_material_count) {
-								NextGIHitMaterialGI hm = gi_hit_materials.data[hs.material_id];
-								material_key = nextgi_hit_light_gi_material_key(hm.shader_slot, hs.material_id);
-							}
-						}
-					}
-					ivec2 texel = ivec2(probe) * int(params.ray_stride) + ivec2(int(ix), int(iy));
-					uint flags = (hit.front_face ? NEXTGI_HL_RECORD_FLAG_FRONT_FACE : 0u) | NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI;
-					float cone_width = max(probe_depth * 16.0 / max(params.screen_jitter.y, 1.0), 0.01);
-					float cone_spread = 0.18;
-					NextGIHitLightRecord rec;
-					rec.origin_t = vec4(trace_origin, hit.t);
-					rec.id_pixel = uvec4(
-							(hit.custom_index & 0xFFFFFFu) | flags,
-							(hit.geometry_index & 0xFFFFu) | ((material_key & 0xFFFFu) << 16u),
-							hit.primitive,
-							(uint(texel.x) & 0xFFFFu) | ((uint(texel.y) & 0xFFFFu) << 16u));
-					rec.packed_geom = uvec4(
-							packHalf2x16(hit.bary),
-							packSnorm2x16(nextgi_hl_oct_encode(dir)),
-							packHalf2x16(vec2(cone_width, cone_spread)),
-							floatBitsToUint(probe_depth));
-					gi_hit_records_out.data[slot] = rec;
-					uint gi_prev = atomicAdd(gi_hl_counters.data.gi_marked_hits, 1u);
-					if (gi_prev == 0xFFFFFFFFu) {
-						gi_hl_counters.data.sink = gi_prev;
-					}
-					if (i < 32u) {
-						hit_lit_lo |= 1u << i;
-					} else {
-						hit_lit_hi |= 1u << (i - 32u);
-					}
-					radiance = vec3(0.0);
-					ray_confidence = 1.0;
-					queued_hl = true;
-				} else if (slot == 0xFFFFFFFFu) {
-					gi_hl_counters.data.sink = slot;
-				}
-			}
-			if (!queued_hl) {
-				radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
-			}
-#else
-			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
-#endif
-		} else {
-			radiance = nextgi_wrc_sample(trace_origin + dir * trace_tmax, dir);
-			if (!nextgi_wrc_hit_cache) {
-				radiance = nextgi_miss_radiance(dir);
-				ray_confidence = 1.0;
-				atomicAdd(counters.sky_samples, 1u);
-			} else {
-				ray_confidence = nextgi_wrc_confidence;
-				atomicAdd(counters.wrc_samples, 1u);
-				uncovered_count++;
-			}
-			atomicAdd(counters.misses, 1u);
-			uint lum = uint(clamp(dot(radiance, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0));
-			atomicAdd(counters.miss_radiance_bits, lum);
-		}
-		confidence_sum += ray_confidence;
-		raw_radiance[i] = radiance;
+	uint probe_idx = probe.y * params.probes_x + probe.x;
+	vec2 pixel = vec2(probe) * 16.0 + params.screen_jitter.zw * 16.0;
+	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
+	float depth = texelFetch(depth_tex, ipixel, 0).r;
+	if (depth <= 0.0) {
+		confidence_data.data[probe_idx] = 0.0;
+		return;
 	}
+	vec3 world = nextgi_unproject(vec2(ipixel), depth);
+	float probe_dist = length(world - params.camera_pos.xyz);
 
-	// GodotNext: nextgi_firefly_clamp (#54). Clamp each raw sample's luminance to mean + 3 sigma of
-	// this probe's 16 rays (emissive radiance included), then count the removed energy for Q16.
 	const vec3 luminance_weights = vec3(0.2126, 0.7152, 0.0722);
+	const uint rstride = max(params.ray_stride, 1u);
+	const uint rcount = max(params.ray_count, 1u);
+	const ivec2 base_texel = ivec2(probe) * int(rstride);
+
 	float lum_sum = 0.0;
-#ifdef MODE_HIT_LIGHTING_GI
+	float confidence_sum = 0.0;
 	uint non_hl_count = 0u;
-	for (uint i = 0u; i < params.ray_count; i++) {
-		bool is_hl = i < 32u ? ((hit_lit_lo & (1u << i)) != 0u) : ((hit_lit_hi & (1u << (i - 32u))) != 0u);
+	for (uint i = 0u; i < rcount; i++) {
+		ivec2 texel = base_texel + ivec2(int(i % rstride), int(i / rstride));
+		vec4 sample_val = imageLoad(probe_image, texel);
+		bool is_hl = sample_val.a < -0.5;
+		confidence_sum += is_hl ? 1.0 : max(sample_val.a, 0.0);
 		if (!is_hl) {
-			lum_sum += dot(raw_radiance[i], luminance_weights);
+			lum_sum += dot(sample_val.rgb, luminance_weights);
 			non_hl_count++;
 		}
 	}
 	const float mean_lum = non_hl_count > 0u ? (lum_sum / float(non_hl_count)) : 0.0;
 	float variance = 0.0;
-	for (uint i = 0u; i < params.ray_count; i++) {
-		bool is_hl = i < 32u ? ((hit_lit_lo & (1u << i)) != 0u) : ((hit_lit_hi & (1u << (i - 32u))) != 0u);
-		if (!is_hl) {
-			const float delta = dot(raw_radiance[i], luminance_weights) - mean_lum;
+	for (uint i = 0u; i < rcount; i++) {
+		ivec2 texel = base_texel + ivec2(int(i % rstride), int(i / rstride));
+		vec4 sample_val = imageLoad(probe_image, texel);
+		if (!(sample_val.a < -0.5)) {
+			const float delta = dot(sample_val.rgb, luminance_weights) - mean_lum;
 			variance += delta * delta;
 		}
 	}
 	const float clamp_limit = non_hl_count > 0u ? (mean_lum + 3.0 * sqrt(variance / float(non_hl_count))) : 1e9;
-#else
-	for (uint i = 0u; i < params.ray_count; i++) {
-		lum_sum += dot(raw_radiance[i], luminance_weights);
-	}
-	const float mean_lum = lum_sum / float(params.ray_count);
-	float variance = 0.0;
-	for (uint i = 0u; i < params.ray_count; i++) {
-		const float delta = dot(raw_radiance[i], luminance_weights) - mean_lum;
-		variance += delta * delta;
-	}
-	const float clamp_limit = mean_lum + 3.0 * sqrt(variance / float(params.ray_count));
-#endif
+
 	float removed = 0.0;
-	const uint texels = params.ray_stride * params.ray_stride;
-	for (uint t = 0u; t < texels; t++) {
-		uint ray_idx = t % params.ray_count;
-		vec3 radiance = raw_radiance[ray_idx];
+	for (uint i = 0u; i < rcount; i++) {
+		ivec2 texel = base_texel + ivec2(int(i % rstride), int(i / rstride));
+		vec3 radiance = imageLoad(probe_image, texel).rgb;
 		const float luminance = dot(radiance, luminance_weights);
 		if (luminance > clamp_limit && luminance > 0.0) {
 			radiance *= clamp_limit / luminance;
 			removed += luminance - clamp_limit;
 		}
-		// Raw radiance: the temporal pass in NextGIDenoise is the single accumulator (#53, D8).
-		ivec2 texel = ivec2(probe) * int(params.ray_stride) + ivec2(t % params.ray_stride, t / params.ray_stride);
-		imageStore(probe_image, texel, vec4(radiance, length(world - params.camera_pos.xyz)));
+		imageStore(probe_image, texel, vec4(radiance, probe_dist));
+	}
+	const uint texels = rstride * rstride;
+	for (uint t = rcount; t < texels; t++) {
+		uint ray_idx = t % rcount;
+		ivec2 src_texel = base_texel + ivec2(int(ray_idx % rstride), int(ray_idx / rstride));
+		ivec2 dst_texel = base_texel + ivec2(int(t % rstride), int(t / rstride));
+		imageStore(probe_image, dst_texel, imageLoad(probe_image, src_texel));
 	}
 	atomicAdd(clamp_totals.removed, uint(removed * 4.0));
 	atomicAdd(clamp_totals.total, uint(lum_sum * 4.0));
+	confidence_data.data[probe_idx] = confidence_sum / float(rcount);
+}
+#endif // MODE_CLAMP
+
+void nextgi_gather_main() {
+	// 1 thread per probe ray texel (16x/64x higher GPU occupancy than 1 thread per probe, zero
+	// vec3[64] register spill, zero shared memory). MODE_ANCHOR computes per-probe origin_offset
+	// on HWRT; MODE_CLAMP finishes the 3-sigma firefly clamp and confidence reduction.
+	const uint rstride = max(params.ray_stride, 1u);
+	const uvec2 gid = gl_GlobalInvocationID.xy;
+	const uvec2 probe = gid / rstride;
+	const uvec2 local = gid - probe * rstride;
+	if (probe.x >= params.probes_x || probe.y >= params.probes_y) {
+		return;
+	}
+	const uint i = local.y * rstride + local.x;
+	if (i >= params.ray_count) {
+		return;
+	}
+	const uint probe_idx = probe.y * params.probes_x + probe.x;
+#ifndef NEXTGI_TRACE_SDF
+	float origin_offset = confidence_data.data[probe_idx];
+	if (origin_offset < 0.0) {
+		return;
+	}
+#endif
+	vec2 pixel = vec2(probe) * 16.0 + params.screen_jitter.zw * 16.0;
+	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
+	float depth = texelFetch(depth_tex, ipixel, 0).r;
+	if (depth <= 0.0) {
+		return;
+	}
+	vec3 world = nextgi_unproject(vec2(ipixel), depth);
+	vec3 normal = nextgi_geometric_normal(ipixel, depth, world);
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186 step 6). 1.5 voxels of the level that holds the surface.
+	vec3 origin = swrt_offset_origin(world, normal);
+#else
+	vec3 origin = world + normal * origin_offset;
+#endif
+#ifdef MODE_HIT_LIGHTING_GI
+	float probe_depth = length(world - params.camera_pos.xyz);
+#endif
+	float angle = float(params.frame) * 2.3999632;
+	if (params.sampling_mode == 0u) {
+		angle = nextgi_blue_noise_sample(ivec2(probe), params.frame).x * 6.2831853;
+	}
+	uint uncovered_count = 0u;
+	uint ix = local.x;
+	uint iy = local.y;
+	// Exact stratified polar cosine-weighted hemisphere (Malley's method):
+	// E[r^2] = 0.5 exactly for every ray_stride, so mean(L_i) estimates E / PI directly.
+	float r2 = (float(iy) + 0.5) / float(rstride);
+	float disk_r = sqrt(r2);
+	float disk_phi = ((float(ix) + 0.5) / float(rstride)) * (2.0 * PI) + angle;
+	vec3 local_dir = vec3(disk_r * cos(disk_phi), disk_r * sin(disk_phi), sqrt(max(1.0 - r2, 0.0)));
+	vec3 dir = nextgi_orient(normal, local_dir);
+	NextGIHit hit;
+	vec3 radiance;
+	float ray_confidence = 0.0;
+	bool queued_hl = false;
+	atomicAdd(counters.rays, 1u);
+	float handoff = nextgi_wrc_handoff(origin);
+#ifdef MODE_HIT_LIGHTING_GI
+	float gi_hl_cutoff = handoff > 0.0 ? min(1.5 * handoff, params.rt_radius) : params.rt_radius;
+	float tmax = gi_hl_cutoff;
+#else
+	float tmax = handoff > 0.0 ? handoff : params.rt_radius;
+#endif
+	vec3 screen_color;
+	vec3 march_end;
+	bool screen_hit = nextgi_screen_trace(origin, dir, tmax, screen_color, march_end);
+	float traveled = length(march_end - origin);
+	vec3 trace_origin = origin;
+	float trace_tmax = tmax;
+	// GodotNext: ps_swrt_trace (#186 step 4). Both tiers resume after the screen march
+	// with the pull-back. A hit keeps the screen color and does not continue.
+	float resume = 0.0;
+	if (!screen_hit) {
+		resume = nextgi_screen_resume_tier(origin, dir, traveled, tmax, trace_origin, trace_tmax);
+	}
+	if (screen_hit) {
+		radiance = screen_color;
+		ray_confidence = 1.0;
+		atomicAdd(counters.screen_hits, 1u);
+#ifdef NEXTGI_TRACE_SDF
+	} else if (nextgi_sdf_trace_noted(trace_origin, dir, trace_tmax, world, false, resume, hit)) {
+#else
+	} else if (nextgi_trace(trace_origin, dir, trace_tmax, hit)) {
+#endif
+#ifdef MODE_HIT_LIGHTING_GI
+		// GodotNext: nextgi_hit_lighting_gi (#128). Hits before 1.5x WRC handoff write compact hit
+		// records into the shared hit-lighting buffer with keys in [0x8000..0xFFFF].
+		if ((resume + hit.t) < gi_hl_cutoff) {
+			uint slot = atomicAdd(gi_hl_counters.data.marked_hits, 1u);
+			if (slot < params.hit_record_max_rays) {
+				uint material_key = NEXTGI_HL_KEY_GI_FALLBACK;
+				if (hit.custom_index < params.hit_record_count) {
+					NextGIInstanceRecord inst = records.data[hit.custom_index];
+					if (hit.geometry_index < inst.surface_count) {
+						uint surf_idx = inst.surface_base + hit.geometry_index;
+						NextGIHitSurfaceGI hs = gi_hit_surfaces.data[surf_idx];
+						if (hs.material_id < params.hit_material_count) {
+							NextGIHitMaterialGI hm = gi_hit_materials.data[hs.material_id];
+							material_key = nextgi_hit_light_gi_material_key(hm.shader_slot, hs.material_id);
+						}
+					}
+				}
+				ivec2 texel = ivec2(gid);
+				uint flags = (hit.front_face ? NEXTGI_HL_RECORD_FLAG_FRONT_FACE : 0u) | NEXTGI_HL_RECORD_FLAG_DIFFUSE_GI;
+				float cone_width = max(probe_depth * 16.0 / max(params.screen_jitter.y, 1.0), 0.01);
+				float cone_spread = 0.18;
+				NextGIHitLightRecord rec;
+				rec.origin_t = vec4(trace_origin, hit.t);
+				rec.id_pixel = uvec4(
+						(hit.custom_index & 0xFFFFFFu) | flags,
+						(hit.geometry_index & 0xFFFFu) | ((material_key & 0xFFFFu) << 16u),
+						hit.primitive,
+						(uint(texel.x) & 0xFFFFu) | ((uint(texel.y) & 0xFFFFu) << 16u));
+				rec.packed_geom = uvec4(
+						packHalf2x16(hit.bary),
+						packSnorm2x16(nextgi_hl_oct_encode(dir)),
+						packHalf2x16(vec2(cone_width, cone_spread)),
+						floatBitsToUint(probe_depth));
+				gi_hit_records_out.data[slot] = rec;
+				uint gi_prev = atomicAdd(gi_hl_counters.data.gi_marked_hits, 1u);
+				if (gi_prev == 0xFFFFFFFFu) {
+					gi_hl_counters.data.sink = gi_prev;
+				}
+				radiance = vec3(0.0);
+				ray_confidence = 1.0;
+				queued_hl = true;
+			} else if (slot == 0xFFFFFFFFu) {
+				gi_hl_counters.data.sink = slot;
+			}
+		}
+		if (!queued_hl) {
+			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
+		}
+#else
+		radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
+#endif
+	} else {
+		radiance = nextgi_wrc_sample(trace_origin + dir * trace_tmax, dir);
+		if (!nextgi_wrc_hit_cache) {
+			radiance = nextgi_miss_radiance(dir);
+			ray_confidence = 1.0;
+			atomicAdd(counters.sky_samples, 1u);
+		} else {
+			ray_confidence = nextgi_wrc_confidence;
+			atomicAdd(counters.wrc_samples, 1u);
+			uncovered_count++;
+		}
+		atomicAdd(counters.misses, 1u);
+		uint lum = uint(clamp(dot(radiance, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0));
+		atomicAdd(counters.miss_radiance_bits, lum);
+	}
 	if (uncovered_count > 0u) {
 		atomicAdd(counters.uncovered, uncovered_count);
 	}
-	confidence_data.data[probe.y * params.probes_x + probe.x] = confidence_sum / float(max(params.ray_count, 1u));
+	imageStore(probe_image, ivec2(gid), vec4(radiance, queued_hl ? -1.0 : ray_confidence));
 }
 
 void nextgi_integrate_main() {
@@ -1012,6 +1060,10 @@ void main() {
 	nextgi_coverage_main();
 #elif defined(MODE_REFLECT) || defined(MODE_FAR_FIELD)
 	nextgi_reflect_main();
+#elif defined(MODE_CLAMP)
+	nextgi_clamp_main();
+#elif defined(MODE_ANCHOR)
+	nextgi_anchor_main();
 #else
 	nextgi_gather_main();
 #endif

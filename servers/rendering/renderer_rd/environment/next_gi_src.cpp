@@ -857,6 +857,10 @@ uint32_t NextGISRC::get_instance_card_set(RenderGeometryInstance *p_instance) {
 	return card_set != nullptr ? *card_set : UINT32_MAX;
 }
 
+bool NextGISRC::is_card_set_stage2(uint32_t p_card_set) {
+	return singleton != nullptr && p_card_set < singleton->card_set_states.size() && singleton->card_set_states[p_card_set].is_stage2;
+}
+
 RID NextGISRC::get_atlas_texture(AtlasTarget p_target) const {
 	ERR_FAIL_INDEX_V(p_target, ATLAS_TARGET_MAX, RID());
 	return atlas[p_target];
@@ -1094,6 +1098,10 @@ bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key) {
 
 	const uint8_t *raw = desc->card_descriptors.ptr();
 	const uint32_t descriptor_count = uint32_t(desc->card_descriptors.size() / 32);
+	if (descriptor_count > NEXTGI_SRC_STAGE2_MAX_CARDS_PER_MESH) {
+		// Fall back to Stage-1 clustered cards so a single dense VG mesh cannot exhaust the atlas.
+		return false;
+	}
 	const float texel_size = MAX(2.0f * desc->rt_proxy_eps, 1e-6f);
 
 	LocalVector<NextGICardDesc> built_descs;
@@ -1147,11 +1155,25 @@ bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key) {
 		return false;
 	}
 
+	// Keep any single mesh's Stage-2 card set within 1/64th of the 2048^2 material atlas
+	// so large multi-mesh scenes retain full SRC coverage without starving later meshes.
+	constexpr uint64_t STAGE2_MAX_TEXELS_PER_MESH = 65536u;
+	uint64_t stage2_texels = 0;
+	for (uint32_t i = 0; i < sizes.size(); i++) {
+		stage2_texels += uint64_t(sizes[i].x) * uint64_t(sizes[i].y);
+	}
+	if (stage2_texels > STAGE2_MAX_TEXELS_PER_MESH) {
+		const float scale = Math::sqrt(float(STAGE2_MAX_TEXELS_PER_MESH) / float(stage2_texels));
+		for (uint32_t i = 0; i < built_descs.size(); i++) {
+			built_descs[i].texels_u = CLAMP(uint32_t(Math::round(float(built_descs[i].texels_u) * scale)), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+			built_descs[i].texels_v = CLAMP(uint32_t(Math::round(float(built_descs[i].texels_v) * scale)), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+			sizes[i] = Vector2i(int(built_descs[i].texels_u), int(built_descs[i].texels_v));
+		}
+	}
+
 	LocalVector<Rect2i> rects;
 	if (!packer.allocate_all(sizes, rects)) {
-		WARN_PRINT_ONCE("The NextGI SRC material atlas is full; meshes without space get no cards (the P1b LRU, #41, evicts).");
-		failed_meshes.insert(p_mesh);
-		stats.failed_mesh_count++;
+		// Let _build_card_set try compact Stage-1 clustered cards before giving up on this mesh.
 		return false;
 	}
 
@@ -1505,11 +1527,16 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
 		return false;
 	}
-	if (!p_axis_cards && RSG::virtual_mesh_storage != nullptr) {
-		const RenderingServerTypes::VirtualGeometryDesc *vgd_desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh);
-		if (vgd_desc != nullptr && !vgd_desc->card_descriptors.is_empty()) {
-			return _build_stage2_card_set(p_mesh, p_key);
+	const RenderingServerTypes::VirtualGeometryDesc *vgd_desc = RSG::virtual_mesh_storage != nullptr ? RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh) : nullptr;
+	if (!p_axis_cards && vgd_desc != nullptr && !vgd_desc->card_descriptors.is_empty()) {
+		if (_build_stage2_card_set(p_mesh, p_key)) {
+			return true;
 		}
+		if (failed_meshes.has(p_mesh)) {
+			return false;
+		}
+		// Stage-2 cards were unavailable, exceeded the per-mesh cap, or did not fit the atlas;
+		// fall through to Stage-1 clustered cards (which still wait on RT parts when needed).
 	}
 	// The cards cover exactly the surfaces in the mesh's BLAS parts, so hits always find a card set.
 	// No parts yet means the RT scene has not built them; try again next frame.
@@ -1591,6 +1618,45 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 			indices.push_back(surface_indices[i] + base);
 		}
 	}
+	if (positions.is_empty() && vgd_desc != nullptr && !vgd_desc->rt_proxy_positions.is_empty() && !vgd_desc->rt_proxy_indices.is_empty()) {
+		const uint32_t part_count = uint32_t(vgd_desc->rt_proxy_parts.size() / 4);
+		const uint32_t vgd_surface_count = part_count > 0 ? uint32_t(vgd_desc->rt_proxy_surface_ranges.size() / (part_count * 2)) : 0u;
+		const float *pos_ptr = vgd_desc->rt_proxy_positions.ptr();
+		const uint32_t total_verts = uint32_t(vgd_desc->rt_proxy_positions.size() / 3);
+		const uint8_t *idx_bytes = vgd_desc->rt_proxy_indices.ptr();
+		const uint32_t total_indices = uint32_t(vgd_desc->rt_proxy_indices.size() / 4);
+		positions.resize(total_verts * 3u);
+		memcpy(positions.ptr(), pos_ptr, size_t(total_verts) * 3u * sizeof(float));
+		for (uint32_t s = 0; s < vgd_surface_count; s++) {
+			Vector3 lo(Math::INF, Math::INF, Math::INF);
+			Vector3 hi(-Math::INF, -Math::INF, -Math::INF);
+			for (uint32_t p = 0; p < part_count; p++) {
+				const uint32_t v_off = uint32_t(MAX(vgd_desc->rt_proxy_parts[p * 4 + 0], 0));
+				const uint32_t i_off = uint32_t(MAX(vgd_desc->rt_proxy_parts[p * 4 + 2], 0));
+				const uint32_t first_idx = uint32_t(MAX(vgd_desc->rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 0], 0));
+				const uint32_t idx_cnt = uint32_t(MAX(vgd_desc->rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 1], 0));
+				if (uint64_t(i_off) + first_idx + idx_cnt > total_indices) {
+					continue;
+				}
+				for (uint32_t k = 0; k < idx_cnt; k++) {
+					const uint32_t local_idx = decode_uint32(idx_bytes + (i_off + first_idx + k) * 4u);
+					if (uint64_t(v_off) + local_idx >= total_verts) {
+						continue;
+					}
+					const uint32_t v = v_off + local_idx;
+					indices.push_back(v);
+					const uint64_t base = uint64_t(v) * 3u;
+					const Vector3 vertex(pos_ptr[base + 0], pos_ptr[base + 1], pos_ptr[base + 2]);
+					lo = lo.min(vertex);
+					hi = hi.max(vertex);
+				}
+			}
+			if (lo.x <= hi.x) {
+				const Vector3 extent = hi - lo;
+				surface_extents.insert(s, MAX(extent.x, MAX(extent.y, extent.z)));
+			}
+		}
+	}
 
 	NextGICardClusterResult result;
 	if (p_axis_cards) {
@@ -1614,7 +1680,25 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 		sizes.push_back(Vector2i(int(card.texels_u), int(card.texels_v)));
 	}
 	LocalVector<Rect2i> rects;
-	if (!packer.allocate_all(sizes, rects)) {
+	bool allocated = packer.allocate_all(sizes, rects);
+	for (int attempt = 0; !allocated && attempt < 4; attempt++) {
+		bool shrank = false;
+		for (uint32_t i = 0; i < result.cards.size(); i++) {
+			const uint32_t nu = MAX(result.cards[i].texels_u / 2u, uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS));
+			const uint32_t nv = MAX(result.cards[i].texels_v / 2u, uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS));
+			if (nu < result.cards[i].texels_u || nv < result.cards[i].texels_v) {
+				result.cards[i].texels_u = nu;
+				result.cards[i].texels_v = nv;
+				sizes[i] = Vector2i(int(nu), int(nv));
+				shrank = true;
+			}
+		}
+		if (!shrank) {
+			break;
+		}
+		allocated = packer.allocate_all(sizes, rects);
+	}
+	if (!allocated) {
 		WARN_PRINT_ONCE("The NextGI SRC material atlas is full; meshes without space get no cards (the P1b LRU, #41, evicts).");
 		failed_meshes.insert(p_mesh);
 		stats.failed_mesh_count++;

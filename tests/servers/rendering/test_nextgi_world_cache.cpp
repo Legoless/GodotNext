@@ -474,10 +474,12 @@ TEST_CASE("[NextGI][WorldCache] Debug visualization enum parity and HWRT World C
 	CHECK_EQ(view.label, String("world cache"));
 
 	const Vector<String> gather_defines = NextGIGather::get_shader_variant_defines();
-	REQUIRE(gather_defines.size() == 10);
+	REQUIRE(gather_defines.size() == 12);
 	CHECK(gather_defines[8].contains("MODE_WORLD_CACHE"));
 	CHECK(gather_defines[9].contains("MODE_REFLECT"));
 	CHECK(gather_defines[9].contains("MODE_WORLD_CACHE"));
+	CHECK(gather_defines[10].contains("MODE_CLAMP"));
+	CHECK(gather_defines[11].contains("MODE_ANCHOR"));
 	const String gather_wc_src = NextGIGather::build_shader_source(8);
 	CHECK(gather_wc_src.contains("nextgi_wc_lookup"));
 

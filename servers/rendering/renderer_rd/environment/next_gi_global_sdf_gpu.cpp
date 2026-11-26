@@ -483,8 +483,6 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 			work_indices.push_back(uint32_t(remap[source]));
 		}
 		work.push_back(item);
-		uint32_t coverage_zero[16] = {};
-		rd->buffer_update(coverage_buffer, slot * COVERAGE_BYTES, COVERAGE_BYTES, coverage_zero);
 	}
 	last_allocation_failed = allocation_failed;
 	if (work.is_empty()) {
@@ -543,6 +541,9 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		}
 		gpu.world_min[3] = axis_scale.w;
 		gpu.flags = (instance.dynamic ? 1u : 0u) | (instance.two_sided ? 2u : 0u);
+		if (instance.dynamic) {
+			dynamic_written = true;
+		}
 		gpu_instances.push_back(gpu);
 	}
 
@@ -956,6 +957,7 @@ void NextGIGlobalSDFGPU::free_all() {
 	for (uint32_t level = 0; level < NextGIGlobalSDF::MAX_LEVELS; level++) {
 		release_level(level);
 	}
+	dynamic_written = false;
 }
 
 int32_t NextGIGlobalSDFGPU::get_slot(uint32_t p_level, const Vector3i &p_brick) const {

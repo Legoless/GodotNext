@@ -190,6 +190,7 @@ void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps 
 	r_params.counts[0] = uint32_t(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 	r_params.counts[3] = p_capacity;
 	r_params.froxel_depth[2] = float(p_instances);
+	r_params.froxel_depth[3] = (p_field == nullptr || p_field->has_dynamic_data()) ? 1.0f : 0.0f;
 	// GodotNext: global_sdf_coarse_bound (#257). Bit L: the trace may step by level L's coarse bound;
 	// bit 8 + L: it may climb through level L's empty bricks. Level L updates on every 2^L-th frame;
 	// while it still has dirty volumes pending, its page table and bound are older than the finer

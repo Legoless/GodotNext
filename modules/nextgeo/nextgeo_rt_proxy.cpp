@@ -562,9 +562,14 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 	}
 
 	const float card_texel_size = 2.0f * eps;
-	const float gap_tol = 2.0f * card_texel_size;
-	const float overlap_depth_tol = 1.5f * card_texel_size;
+	// Floor layer-separation tolerance to 5 cm and cap per-DAG-slot depth layers at 8 so small
+	// high-detail props (e.g. 14 cm ornaments) never explode into thousands of Stage-2 cards while
+	// meter-scale parallel slabs (walls/floors/ceilings) still split cleanly into non-occluding layers.
+	const float layer_texel = MAX(card_texel_size, 0.05f);
+	const float gap_tol = 2.0f * layer_texel;
+	const float overlap_depth_tol = 1.5f * layer_texel;
 	const float uv_eps = MAX(1e-4f, 1e-3f * card_texel_size);
+	constexpr uint32_t NEXTGEO_STAGE2_MAX_LAYERS_PER_SLOT = 8u;
 
 	LocalVector<LocalVector<DepthLayer>> slot_axis_layers;
 	slot_axis_layers.resize(active_slot_count * 6);
@@ -574,7 +579,7 @@ Error nextgeo_build_rt_proxy(const NextGeoBuildOutput &p_dag, const AABB &p_mesh
 	bool any_multilayer_slot = false;
 
 	for (uint32_t slot = 0; slot < active_slot_count; slot++) {
-		const uint32_t max_allowed_layers = 1u + extra_group_budget;
+		const uint32_t max_allowed_layers = MIN(1u + extra_group_budget, NEXTGEO_STAGE2_MAX_LAYERS_PER_SLOT);
 		uint32_t max_axis_layers = 1u;
 		for (uint32_t axis = 0; axis < 6; axis++) {
 			LocalVector<AxisTri> &tris = slot_axis_tris[slot * 6 + axis];

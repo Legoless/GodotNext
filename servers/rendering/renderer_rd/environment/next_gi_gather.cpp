@@ -125,10 +125,12 @@ struct GatherParamsGPU {
 	uint32_t front_pad;
 	// GodotNext: nextgi_view_math. The camera basis: the normal-roughness buffer is in view space.
 	float view_to_world[12];
+	float view_proj[16];
 };
-static_assert(sizeof(GatherParamsGPU) == 400, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 464, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, fog_light_color) == 320, "std430 aligns fog_light_color to 16 bytes.");
 static_assert(offsetof(GatherParamsGPU, view_to_world) == 352, "view_to_world must follow front_pad.");
+static_assert(offsetof(GatherParamsGPU, view_proj) == 400, "view_proj must follow view_to_world.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -187,10 +189,12 @@ static Mutex nextgi_gather_counter_mutex;
 static HashMap<uint64_t, NextGIGather *> nextgi_gather_counter_registry;
 static uint64_t nextgi_gather_counter_next_token = 1;
 
+static constexpr int NEXTGI_GATHER_VARIANT_COUNT = 12;
+
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
-	RID pipelines[10];
+	RID pipelines[NEXTGI_GATHER_VARIANT_COUNT];
 };
 
 // GodotNext: ps_swrt_trace (#186). Same variants and pipeline indices as the hardware gather;
@@ -198,7 +202,7 @@ struct NextGIGather::ShaderState {
 struct NextGIGather::SWRTShaderState {
 	NextgiGatherSwrtShaderRD shader;
 	RID version;
-	RID pipelines[10];
+	RID pipelines[NEXTGI_GATHER_VARIANT_COUNT];
 };
 
 static Vector<String> _nextgi_gather_variant_defines() {
@@ -214,6 +218,9 @@ static Vector<String> _nextgi_gather_variant_defines() {
 	// GodotNext: nextgi_world_cache (#294). HWRT-only variants sampling the sparse World Cache instead of SRC.
 	defines.push_back("#define MODE_WORLD_CACHE\n");
 	defines.push_back("#define MODE_REFLECT\n#define MODE_WORLD_CACHE\n");
+	// Per-ray diffuse gather post-clamp (10) and HWRT per-probe anchor pre-pass (11).
+	defines.push_back("#define MODE_CLAMP\n");
+	defines.push_back("#define MODE_ANCHOR\n");
 	return defines;
 }
 
@@ -301,7 +308,7 @@ void NextGIGather::free_resources() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 10; i++) {
+			for (int i = 0; i < NEXTGI_GATHER_VARIANT_COUNT; i++) {
 				if (shader->pipelines[i].is_valid()) {
 					rd->free_rid(shader->pipelines[i]);
 				}
@@ -316,7 +323,7 @@ void NextGIGather::free_resources() {
 	// GodotNext: ps_swrt_trace (#186)
 	if (swrt_shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 10; i++) {
+			for (int i = 0; i < NEXTGI_GATHER_VARIANT_COUNT; i++) {
 				if (swrt_shader->pipelines[i].is_valid()) {
 					rd->free_rid(swrt_shader->pipelines[i]);
 				}
@@ -409,7 +416,7 @@ bool NextGIGather::_ensure_shader() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	for (int i = 0; i < 10; i++) {
+	for (int i = 0; i < NEXTGI_GATHER_VARIANT_COUNT; i++) {
 		shader->pipelines[i] = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, i));
 		if (!shader->pipelines[i].is_valid()) {
 			for (int j = 0; j < i; j++) {
@@ -442,7 +449,7 @@ bool NextGIGather::_ensure_swrt_shader() {
 		swrt_shader = nullptr;
 		ERR_FAIL_V_MSG(false, "The NextGI software gather shader failed to compile.");
 	}
-	for (int i = 0; i < 10; i++) {
+	for (int i = 0; i < NEXTGI_GATHER_VARIANT_COUNT; i++) {
 		if (!swrt_shader->shader.is_variant_enabled(i)) {
 			continue;
 		}
@@ -853,6 +860,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.fog_pad[1] = 0u;
 	params.front_pad = 0u;
 	NextGIViewMath::store_basis(view.view_to_world, params.view_to_world); // GodotNext: nextgi_view_math
+	_store_projection(view.view_proj, params.view_proj);
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	// GodotNext: nextgi_hit_lighting (#129). Snapshot view parameters for hit lighting if active this frame.
@@ -1347,7 +1355,15 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	}
 
 	if (p_diffuse) {
+		const uint32_t ray_groups_x = MAX((probe_w * ray_stride + 7u) / 8u, 1u);
+		const uint32_t ray_groups_y = MAX((probe_h * ray_stride + 7u) / 8u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
+		if (!bound_swrt) {
+			rd->compute_list_bind_compute_pipeline(list, _pipeline(11));
+			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+			rd->compute_list_dispatch(list, groups_x, groups_y, 1);
+			rd->compute_list_add_barrier(list);
+		}
 		if (ran_gi_hit_lighting) {
 			rd->compute_list_bind_compute_pipeline(list, _pipeline(7));
 			rd->compute_list_bind_uniform_set(list, gather_hl_uniform_set, 0);
@@ -1358,6 +1374,11 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 			rd->compute_list_bind_compute_pipeline(list, _pipeline(hit_radiance_reference ? 4 : 0));
 			rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		}
+		_bind_trace_set(list);
+		rd->compute_list_dispatch(list, ray_groups_x, ray_groups_y, 1);
+		rd->compute_list_add_barrier(list);
+		rd->compute_list_bind_compute_pipeline(list, _pipeline(10));
+		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
@@ -1734,7 +1755,8 @@ void NextGIGather::_stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers
 // GodotNext: nextgi_view_math
 NextGIGather::ViewMatrices NextGIGather::view_matrices(const RenderSceneDataRD &p_scene_data) {
 	ViewMatrices matrices;
-	matrices.inv_view_proj = NextGIView::inv_view_projection(p_scene_data);
+	matrices.view_proj = NextGIView::view_projection(p_scene_data);
+	matrices.inv_view_proj = matrices.view_proj.inverse();
 	matrices.prev_view_proj = NextGIView::prev_view_projection(p_scene_data);
 	matrices.inv_projection = NextGIView::inv_projection(p_scene_data);
 	matrices.view_to_world = p_scene_data.cam_transform.basis;
