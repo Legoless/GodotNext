@@ -473,11 +473,13 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 		}
 	}
 	if (wrc_hit) {
-		confidence = wrc_confidence;
+		confidence = 1.0;
 		uncovered_count++;
 		return cached;
 	}
-	// A ray that hit solid geometry must never leak open-sky radiance through the hit surface.
+	// A ray that hit solid geometry is occluded from the exterior sky: keep confidence 1.0 so
+	// scene_forward_clustered never blends unoccluded AMBIENT_SOURCE_SKY onto dark interiors.
+	confidence = 1.0;
 	return vec3(0.0);
 }
 #else
@@ -521,11 +523,12 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 		}
 		vec3 cached = nextgi_wrc_sample(world, -ray_dir);
 		if (nextgi_wrc_hit_cache) {
-			confidence = nextgi_wrc_confidence;
+			confidence = 1.0;
 			uncovered_count++;
 			return cached;
 		}
 	}
+	confidence = 1.0;
 	return vec3(0.0);
 #else
 	vec3 radiance;
@@ -541,12 +544,14 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 					dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), missed_pos) + rec.object_to_world[11]);
 			vec3 cached = nextgi_wrc_sample(world, -ray_dir);
 			if (nextgi_wrc_hit_cache) {
-				confidence = nextgi_wrc_confidence;
+				confidence = 1.0;
 				uncovered_count++;
 				return cached;
 			}
 		}
-		// A ray that hit solid geometry must never fall back to open-sky radiance.
+		// A ray that hit solid geometry is occluded from the exterior sky: keep confidence 1.0 so
+		// scene_forward_clustered never blends unoccluded AMBIENT_SOURCE_SKY onto dark interiors.
+		confidence = 1.0;
 		return vec3(0.0);
 	}
 	confidence = 1.0;
@@ -875,7 +880,7 @@ void nextgi_gather_main() {
 			ray_confidence = 1.0;
 			atomicAdd(counters.sky_samples, 1u);
 		} else {
-			ray_confidence = nextgi_wrc_confidence;
+			ray_confidence = 1.0;
 			atomicAdd(counters.wrc_samples, 1u);
 			uncovered_count++;
 		}
@@ -951,6 +956,42 @@ void nextgi_integrate_main() {
 			fallback_accum += irradiance * fw;
 			fallback_conf += probe_confidence * fw;
 			fallback_weight += fw;
+		}
+	}
+	if (weight <= 1e-5 && fallback_weight <= 0.0) {
+		// Thin arch silhouettes or geometry edges straddling sky probes: widen to the 3x3 ring so
+		// occluded interior edges reuse the nearest valid probe instead of leaking unoccluded sky.
+		for (int oy = -1; oy <= 2; oy++) {
+			for (int ox = -1; ox <= 2; ox++) {
+				if (ox >= 0 && ox <= 1 && oy >= 0 && oy <= 1) {
+					continue;
+				}
+				ivec2 id = base + ivec2(ox, oy);
+				if (id.x < 0 || id.y < 0 || id.x >= int(params.probes_x) || id.y >= int(params.probes_y)) {
+					continue;
+				}
+				vec4 probe = imageLoad(probe_image, id * int(params.ray_stride));
+				if (probe.a <= 0.0) {
+					continue;
+				}
+				ivec2 p_anchor = clamp(id * 16 + ivec2(8), ivec2(0), screen_i - ivec2(1));
+				float p_depth = texelFetch(depth_tex, p_anchor, 0).r;
+				if (p_depth <= 0.0) {
+					continue;
+				}
+				vec3 p_world = nextgi_unproject(vec2(p_anchor), p_depth);
+				float plane_dist = abs(dot(p_world - world, normal));
+				float depth_weight = 1.0 / (1.0 + (plane_dist / (0.05 * view_dist)) + abs(view_dist - probe.a) * 0.5);
+				vec3 irradiance = vec3(0.0);
+				for (uint i = 0u; i < params.ray_stride * params.ray_stride; i++) {
+					irradiance += imageLoad(probe_image, id * int(params.ray_stride) + ivec2(i % params.ray_stride, i / params.ray_stride)).rgb;
+				}
+				irradiance /= float(params.ray_stride * params.ray_stride);
+				float probe_confidence = confidence_data.data[uint(id.y) * params.probes_x + uint(id.x)];
+				fallback_accum += irradiance * depth_weight;
+				fallback_conf += probe_confidence * depth_weight;
+				fallback_weight += depth_weight;
+			}
 		}
 	}
 	vec3 out_irr = weight > 1e-5 ? (accum / weight) : (fallback_weight > 0.0 ? (fallback_accum / fallback_weight) : vec3(0.0));
@@ -1232,9 +1273,8 @@ void nextgi_reflect_main() {
 				radiance = nextgi_wrc_sample(trace_origin + direction * trace_tmax, direction);
 				if (!nextgi_wrc_hit_cache) {
 					radiance = nextgi_miss_radiance(direction);
-				} else {
-					confidence = nextgi_wrc_confidence;
 				}
+				confidence = 1.0;
 #endif
 				atomicAdd(reflect_counters.misses, 1u);
 			}
@@ -1252,7 +1292,10 @@ void nextgi_reflect_main() {
 	} else {
 		vec3 direction = reflect(-view_dir, normal);
 		radiance = nextgi_wrc_sample(origin, direction);
-		confidence = nextgi_wrc_confidence;
+		if (!nextgi_wrc_hit_cache) {
+			radiance = nextgi_miss_radiance(direction);
+		}
+		confidence = 1.0;
 	}
 	imageStore(reflection_image, pixel, vec4(radiance, clamp(confidence, 0.0, 1.0)));
 	imageStore(specular_hit_image, pixel, vec4(hit_distance));

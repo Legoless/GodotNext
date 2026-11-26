@@ -78,6 +78,16 @@ vec2 hl_blue_noise(ivec2 p_pixel, uint p_frame) {
 	return texelFetch(hit_light_blue_noise, coord, 0).rg;
 }
 
+float hl_light_rand(ivec2 p_pixel, uint p_frame, uint p_bounce, uint p_index) {
+	uint h = uint(p_pixel.x) * 374761393u ^ uint(p_pixel.y) * 668265263u ^ (p_frame + 1u) * 2147483647u ^ (p_bounce + 1u) * 1274126177u ^ (p_index + 1u) * 2246822519u;
+	h ^= h >> 15u;
+	h *= 2246822519u;
+	h ^= h >> 13u;
+	h *= 3266489917u;
+	h ^= h >> 16u;
+	return float(h & 0x00FFFFFFu) * (1.0 / 16777216.0);
+}
+
 vec2 hl_wrc_oct_uv(vec3 p_dir) {
 	vec3 d = normalize(p_dir);
 	float sum = abs(d.x) + abs(d.y) + abs(d.z);
@@ -319,6 +329,18 @@ vec3 hl_shade_surface(
 		uint unshadowed_extra = 0u;
 		uint traced_shadows = 0u;
 		vec3 shadow_origin = p_hit_pos + p_normal * max(p_hit_eps, 0.01);
+		// Reserve the final shadow-ray slot for luminance-weighted reservoir importance sampling (RIS)
+		// over any remaining facing shadowed lights so shadowed lights beyond p_max_shadowed_lights
+		// (e.g. downstairs point lights when GI budget is 1 ray) never leak unshadowed through solid walls.
+		uint direct_shadow_budget = p_max_shadowed_lights > 1u ? (p_max_shadowed_lights - 1u) : 0u;
+		uint ris_light_idx = 0xFFFFFFFFu;
+		float ris_w_sum = 0.0;
+		float ris_picked_w = 0.0;
+		vec3 ris_to_light = vec3(0.0, 1.0, 0.0);
+		float ris_dist = 0.0;
+		float ris_atten = 0.0;
+		float ris_ndotl = 0.0;
+		bool ris_is_dir = false;
 
 		for (uint i = 0u; i < cell_count; i++) {
 			uint packed = hit_light_grid.data[cell_base + 1u + (i >> 1u)];
@@ -354,23 +376,52 @@ vec3 hl_shade_surface(
 				continue;
 			}
 
-			float vis = 1.0;
 			if ((light.shadow_flags.x & NEXTGI_HL_LIGHT_FLAG_SHADOW) != 0u) {
-				if (shadowed_used < p_max_shadowed_lights) {
+				if (shadowed_used < direct_shadow_budget) {
 					vec2 bn = hl_blue_noise(p_pixel, hit_light_params.counts0.w + shadowed_used * 17u + p_bounce * 53u);
 					vec3 shadow_dir;
 					float shadow_tmax;
 					nextgi_hl_area_shadow_ray(to_light, max(dist - max(p_hit_eps, 0.01), 0.0), light.spot_atten_radius.w, is_dir, bn, shadow_dir, shadow_tmax);
-					vis = trace_shadow(shadow_origin, shadow_dir, shadow_tmax, light.shadow_flags.y, light.shadow_flags.z);
+					float vis = trace_shadow(shadow_origin, shadow_dir, shadow_tmax, light.shadow_flags.y, light.shadow_flags.z);
 					shadowed_used++;
 					traced_shadows++;
+					if (vis > 0.0) {
+						vec3 brdf = nextgi_hl_eval_brdf(p_albedo, p_metallic, eval_roughness, p_normal, p_view_dir, to_light);
+						direct += brdf * (light.color_energy.rgb * light.color_energy.a * atten * n_dot_l * vis);
+					}
 				} else {
-					unshadowed_extra++;
+					float w = max(dot(light.color_energy.rgb * light.color_energy.a * atten * n_dot_l, vec3(0.2126, 0.7152, 0.0722)), 1e-6);
+					ris_w_sum += w;
+					float u = hl_light_rand(p_pixel, hit_light_params.counts0.w, p_bounce, i);
+					if (ris_light_idx == 0xFFFFFFFFu || u * ris_w_sum < w) {
+						ris_light_idx = light_idx;
+						ris_picked_w = w;
+						ris_to_light = to_light;
+						ris_dist = dist;
+						ris_atten = atten;
+						ris_ndotl = n_dot_l;
+						ris_is_dir = is_dir;
+					}
 				}
-			}
-			if (vis > 0.0) {
+			} else {
 				vec3 brdf = nextgi_hl_eval_brdf(p_albedo, p_metallic, eval_roughness, p_normal, p_view_dir, to_light);
-				direct += brdf * (light.color_energy.rgb * light.color_energy.a * atten * n_dot_l * vis);
+				direct += brdf * (light.color_energy.rgb * light.color_energy.a * atten * n_dot_l);
+			}
+		}
+
+		if (ris_light_idx != 0xFFFFFFFFu && ris_w_sum > 0.0) {
+			NextGIHitLightGPU light = hit_light_lights.data[ris_light_idx];
+			vec2 bn = hl_blue_noise(p_pixel, hit_light_params.counts0.w + shadowed_used * 17u + p_bounce * 53u);
+			vec3 shadow_dir;
+			float shadow_tmax;
+			nextgi_hl_area_shadow_ray(ris_to_light, max(ris_dist - max(p_hit_eps, 0.01), 0.0), light.spot_atten_radius.w, ris_is_dir, bn, shadow_dir, shadow_tmax);
+			float vis = trace_shadow(shadow_origin, shadow_dir, shadow_tmax, light.shadow_flags.y, light.shadow_flags.z);
+			shadowed_used++;
+			traced_shadows++;
+			if (vis > 0.0) {
+				vec3 brdf = nextgi_hl_eval_brdf(p_albedo, p_metallic, eval_roughness, p_normal, p_view_dir, ris_to_light);
+				float ris_scale = ris_w_sum / max(ris_picked_w, 1e-6);
+				direct += brdf * (light.color_energy.rgb * light.color_energy.a * ris_atten * ris_ndotl * vis * ris_scale);
 			}
 		}
 
@@ -659,7 +710,9 @@ void main() {
 		final_radiance = vec3(0.0);
 	}
 	final_radiance = clamp(final_radiance, vec3(0.0), vec3(64.0));
-	float confidence = got_any_hit ? 1.0 : 0.0;
+	// NextGI resolved this reflection ray (surface hit, WRC, or traced sky miss); keep confidence 1.0 so
+	// specular upsampling never dilutes alpha and leaks unoccluded REFLECTION_SOURCE_SKY into dark interiors.
+	float confidence = 1.0;
 	imageStore(hit_light_reflection_out, pixel, vec4(final_radiance, confidence));
 	imageStore(hit_light_hit_distance_out, pixel, vec4(first_hit_distance));
 	if ((hit_light_params.counts1.w & NEXTGI_HL_PARAM_FLAG_REFLECT_DEBUG) != 0u) {

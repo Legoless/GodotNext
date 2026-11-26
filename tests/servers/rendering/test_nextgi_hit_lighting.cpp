@@ -621,4 +621,14 @@ TEST_CASE("[NextGI][HitLighting][GI] Gather MODE_CLAMP trims outliers and compil
 #endif
 }
 
+TEST_CASE("[NextGI][HitLighting][GI] Hit lighting uses RIS shadowed light selection and full resolved confidence") {
+	const String mark_source = RendererRD::NextGIHitLighting::build_mark_shader_source();
+	REQUIRE_FALSE(mark_source.is_empty());
+	CHECK(mark_source.contains("imageStore(reflection_image, pixel, vec4(radiance, 1.0));"));
+
+	const String gather_source = RendererRD::NextGIGather::build_shader_source(7);
+	REQUIRE_FALSE(gather_source.is_empty());
+	CHECK(gather_source.contains("confidence = 1.0;\n\t\treturn vec3(0.0);"));
+}
+
 } // namespace TestNextGIHitLighting

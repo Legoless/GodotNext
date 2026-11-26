@@ -200,11 +200,11 @@ void main() {
 	if (roughness > max_trace_roughness) {
 		vec3 dir = reflect(-view_dir, normal);
 		vec3 radiance = nextgi_wrc_sample(origin, dir);
-		float confidence = nextgi_wrc_confidence;
 		if (!nextgi_wrc_hit_cache) {
 			radiance = mark_miss_radiance(dir);
 		}
-		imageStore(reflection_image, pixel, vec4(radiance, clamp(confidence, 0.0, 1.0)));
+		// Resolved by NextGI (WRC or sky): publish 1.0 confidence so dark interiors never leak unoccluded sky cubemap.
+		imageStore(reflection_image, pixel, vec4(radiance, 1.0));
 		imageStore(specular_hit_image, pixel, vec4(65504.0));
 		mark_write_debug(pixel, 65504.0);
 		return;
@@ -282,12 +282,12 @@ void main() {
 
 	if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
 		vec3 radiance = nextgi_wrc_sample(trace_origin + direction * trace_tmax, direction);
-		float confidence = nextgi_wrc_confidence;
 		if (!nextgi_wrc_hit_cache) {
 			radiance = mark_miss_radiance(direction);
-			confidence = 0.0;
 		}
-		imageStore(reflection_image, pixel, vec4(radiance, clamp(confidence, 0.0, 1.0)));
+		// Traced miss resolved by WRC or sky: publish 1.0 confidence so 3x3 specular upsampling never leaks
+		// unoccluded REFLECTION_SOURCE_SKY onto adjacent occluded interior pixels.
+		imageStore(reflection_image, pixel, vec4(radiance, 1.0));
 		imageStore(specular_hit_image, pixel, vec4(65504.0));
 		mark_write_debug(pixel, 65504.0);
 		uint miss_prev = atomicAdd(reflect_counters.misses, 1u);
