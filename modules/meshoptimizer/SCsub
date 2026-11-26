@@ -20,6 +20,8 @@ thirdparty_sources = [
     # GodotNext: nextgeo_meshlet_sources
     "meshletcodec.cpp",
     "meshletutils.cpp",
+    # GodotNext: p6f_nv_rt (#90)
+    "opacitymap.cpp",
     "overdrawoptimizer.cpp",
     "partition.cpp",
     "quantization.cpp",

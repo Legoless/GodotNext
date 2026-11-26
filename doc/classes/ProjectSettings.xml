@@ -3293,6 +3293,15 @@
 		<member name="rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow" type="bool" setter="" getter="" default="true">
 			Allows NextGI to create front-layer reflection shaders and render targets when [member Environment.nextgi_translucency_front_layer_reflections] is enabled. If [code]false[/code], no front-layer shader variant or target is created and the existing translucent reflection path is unchanged.
 		</member>
+		<member name="rendering/global_illumination/nextgi/vendor/nv_cluster_rt" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], enables the post-v1 vendor-optional NVIDIA cluster acceleration structure and partitioned TLAS path when [constant RenderingDevice.SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE] and [constant RenderingDevice.SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE] are reported on the hardware ray tracing tier. Defaults to [code]false[/code] (standard v1 fixed proxy and TLAS behavior).
+		</member>
+		<member name="rendering/global_illumination/nextgi/vendor/nv_cluster_rt_budget_mib" type="int" setter="" getter="" default="128">
+			Separate Q15 memory budget in MiB for cluster acceleration structures when [member rendering/global_illumination/nextgi/vendor/nv_cluster_rt] is enabled. Meshes that would exceed this budget remain on the fixed RT proxy without triggering the tier-level [code]AS_MEMORY[/code] fallback.
+		</member>
+		<member name="rendering/global_illumination/nextgi/vendor/nv_opacity_micromap" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], enables the post-v1 vendor-optional 2-state opacity micromap path when [constant RenderingDevice.SUPPORTS_OPACITY_MICROMAP] is reported on the hardware ray tracing tier, admitting alpha-tested surfaces into the ray tracing scene with opaque 2-state micromaps instead of excluding them with [code]ALPHA_TESTED_RT_EXCLUDED[/code]. Defaults to [code]false[/code].
+		</member>
 		<member name="rendering/global_illumination/nextgi/world_cache" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI uses a runtime sparse world-space lighting cache (World Cache) instead of the Surface Radiance Cache (SRC) on the hardware ray tracing (HWRT) tier under Vulkan and Direct3D 12 when [member rendering/global_illumination/nextgi/hardware_ray_tracing_mode] is [code]Full[/code] or [code]Simplified Material[/code] and the hit-material pipeline is available. When active, the Surface Cache is neither captured, lit, nor allocated. On unsupported configurations (software ray tracing tier, [code]Inline[/code] HWRT mode, or Metal/macOS), NextGI logs the fallback reason once per session and keeps the Surface Cache.
 			[b]Note:[/b] This property is only read when the project starts. Changing it requires restarting the project.

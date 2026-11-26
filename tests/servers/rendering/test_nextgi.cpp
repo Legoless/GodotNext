@@ -5433,3 +5433,122 @@ TEST_CASE("[NextGI] Relight radiometric light energy, shadow reuse eligibility a
 	CHECK(sample_point.is_equal_approx(Vector3(-18.0f, 0.0f, 0.0f)));
 	CHECK_GT(nextgi_omni_attenuation(sample_point.distance_to(light_pos), 1.0f / 6.0f, 1.0f), 0.0f);
 }
+
+TEST_CASE("[NextGI] P6f vendor-optional CLAS, PTLAS and OMM capability mocks and policy") {
+	using namespace RendererRD;
+
+	// Step 1: capability flags are appended at the end of RenderingDeviceCommons::Features.
+	CHECK_EQ(int(RenderingDevice::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), int(RenderingDevice::SUPPORTS_MESH_SHADER_INDIRECT) + 1);
+	CHECK_EQ(int(RenderingDevice::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE), int(RenderingDevice::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE) + 1);
+	CHECK_EQ(int(RenderingDevice::SUPPORTS_OPACITY_MICROMAP), int(RenderingDevice::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE) + 1);
+
+	// Mocked device capabilities lacking the three extensions (Metal, D3D12, lavapipe, non-RTX).
+	RenderingDevice mock_rd;
+	const uint64_t ray_query_only = (uint64_t(1) << RenderingDevice::SUPPORTS_RAY_QUERY) |
+			(uint64_t(1) << RenderingDevice::SUPPORTS_RAY_QUERY_HARDWARE) |
+			(uint64_t(1) << RenderingDevice::SUPPORTS_BUFFER_DEVICE_ADDRESS);
+	mock_rd.set_feature_mock(true, ray_query_only);
+	CHECK(mock_rd.has_feature(RenderingDevice::SUPPORTS_RAY_QUERY));
+	CHECK_FALSE(mock_rd.has_feature(RenderingDevice::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE));
+	CHECK_FALSE(mock_rd.has_feature(RenderingDevice::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE));
+	CHECK_FALSE(mock_rd.has_feature(RenderingDevice::SUPPORTS_OPACITY_MICROMAP));
+
+	// Vendor-neutral RD calls validate against their capability flags and fail cleanly without them.
+	{
+		ERR_PRINT_OFF;
+		RenderingDevice::ClusterASBuildParams clas_params;
+		clas_params.max_count = 1;
+		clas_params.max_triangles_per_cluster = 128;
+		CHECK_EQ(mock_rd.clas_get_build_sizes(clas_params).data_bytes, 0u);
+		CHECK_EQ(mock_rd.clas_build_from_buffer(clas_params), ERR_UNAVAILABLE);
+
+		RenderingDevice::ClusterBLASBuildParams cblas_params;
+		cblas_params.max_blas_count = 1;
+		cblas_params.max_total_clusters = 1;
+		cblas_params.max_clusters_per_blas = 1;
+		CHECK_EQ(mock_rd.cluster_blas_get_build_sizes(cblas_params).data_bytes, 0u);
+		CHECK_EQ(mock_rd.cluster_blas_build_from_buffer(cblas_params), ERR_UNAVAILABLE);
+
+		CHECK_FALSE(mock_rd.ptlas_create(16, 4).is_valid());
+		RenderingDevice::MicromapUsage usage;
+		usage.count = 1;
+		usage.subdivision_level = 1;
+		usage.format = 1;
+		CHECK_FALSE(mock_rd.micromap_create(Span<RenderingDevice::MicromapUsage>(&usage, 1)).is_valid());
+		ERR_PRINT_ON;
+	}
+
+	// Mocked device with all three vendor extensions enabled reports true.
+	const uint64_t with_p6f = ray_query_only |
+			(uint64_t(1) << RenderingDevice::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE) |
+			(uint64_t(1) << RenderingDevice::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE) |
+			(uint64_t(1) << RenderingDevice::SUPPORTS_OPACITY_MICROMAP);
+	mock_rd.set_feature_mock(true, with_p6f);
+	CHECK(mock_rd.has_feature(RenderingDevice::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE));
+	CHECK(mock_rd.has_feature(RenderingDevice::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE));
+	CHECK(mock_rd.has_feature(RenderingDevice::SUPPORTS_OPACITY_MICROMAP));
+	// Validation still enforces max_triangles_per_cluster <= 256 even when mocked supported.
+	{
+		ERR_PRINT_OFF;
+		RenderingDevice::ClusterASBuildParams bad_params;
+		bad_params.max_count = 1;
+		bad_params.max_triangles_per_cluster = 257;
+		CHECK_EQ(mock_rd.clas_get_build_sizes(bad_params).data_bytes, 0u);
+		ERR_PRINT_ON;
+	}
+	mock_rd.set_feature_mock(false, 0);
+
+	// Vendor tier resolution policy.
+	CHECK_FALSE(nextgi_resolve_vendor_tier(false, true, true).active);
+	CHECK_EQ(nextgi_resolve_vendor_tier(false, true, true).reason, NEXTGI_VENDOR_OFF);
+	CHECK_FALSE(nextgi_resolve_vendor_tier(true, false, true).active);
+	CHECK_EQ(nextgi_resolve_vendor_tier(true, false, true).reason, NEXTGI_VENDOR_TIER_NOT_HWRT);
+	CHECK_FALSE(nextgi_resolve_vendor_tier(true, true, false).active);
+	CHECK_EQ(nextgi_resolve_vendor_tier(true, true, false).reason, NEXTGI_VENDOR_UNSUPPORTED);
+	CHECK_FALSE(nextgi_resolve_vendor_tier(true, true, true, false).active);
+	CHECK_EQ(nextgi_resolve_vendor_tier(true, true, true, false).reason, NEXTGI_VENDOR_BUDGET_FALLBACK);
+	CHECK(nextgi_resolve_vendor_tier(true, true, true, true).active);
+	CHECK_EQ(nextgi_resolve_vendor_tier(true, true, true, true).reason, NEXTGI_VENDOR_ACTIVE);
+	CHECK_EQ(String(nextgi_vendor_tier_reason_name(NEXTGI_VENDOR_ACTIVE)), String("ACTIVE"));
+	CHECK_EQ(String(nextgi_vendor_tier_reason_name(NEXTGI_VENDOR_BUDGET_FALLBACK)), String("BUDGET_FALLBACK"));
+
+	// PTLAS spatial partition mapping anchored on main viewport camera.
+	const uint32_t center_cell = nextgi_ptlas_partition_for_position(Vector3(1.0f, 1.0f, 1.0f), Vector3(0.0f, 0.0f, 0.0f), 32.0f, 4);
+	CHECK_LT(center_cell, 64u);
+	const uint32_t shifted_cell = nextgi_ptlas_partition_for_position(Vector3(40.0f, 1.0f, 1.0f), Vector3(0.0f, 0.0f, 0.0f), 32.0f, 4);
+	CHECK_LT(shifted_cell, 64u);
+	CHECK_NE(center_cell, shifted_cell);
+	CHECK_EQ(nextgi_ptlas_partition_for_position(Vector3(500.0f, 0.0f, 0.0f), Vector3(0.0f, 0.0f, 0.0f), 32.0f, 4), UINT32_MAX);
+
+	// Separate CLAS Q15 budget check (overflow returns false -> fixed proxy fallback).
+	CHECK(nextgi_clas_budget_can_admit(64 * 1024 * 1024, 64 * 1024 * 1024, 128 * 1024 * 1024));
+	CHECK_FALSE(nextgi_clas_budget_can_admit(100 * 1024 * 1024, 32 * 1024 * 1024, 128 * 1024 * 1024));
+	CHECK_FALSE(nextgi_clas_budget_can_admit(0, 1, 0));
+
+	// Step 5: 2-state opacity micromap generation and compaction via meshoptimizer (opacitymap.cpp).
+	const uint32_t indices[9] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+	// Tri 0: all opaque half of texture; Tri 1: all transparent; Tri 2: straddles alpha edge.
+	const float uvs[18] = {
+		0.05f, 0.05f, 0.40f, 0.05f, 0.05f, 0.40f,
+		0.60f, 0.60f, 0.95f, 0.60f, 0.60f, 0.95f,
+		0.05f, 0.05f, 0.95f, 0.05f, 0.05f, 0.95f,
+	};
+	Vector<uint8_t> alpha_tex;
+	alpha_tex.resize(8 * 8);
+	for (uint32_t y = 0; y < 8; y++) {
+		for (uint32_t x = 0; x < 8; x++) {
+			alpha_tex.write[y * 8 + x] = (x < 4 && y < 4) ? 255 : 0;
+		}
+	}
+	NextGIOpacityMicromapData omm;
+	CHECK(nextgi_build_2state_omm(indices, 9, uvs, 9, alpha_tex.ptr(), 1, 8, 8, 8, 2, 0.0f, omm));
+	CHECK_EQ(omm.omm_indices.size(), 3);
+	CHECK_EQ(omm.special_opaque_triangles, 1u);
+	CHECK_EQ(omm.special_transparent_triangles, 1u);
+	CHECK_EQ(omm.unique_entries, 1u);
+	CHECK_EQ(omm.triangles.size(), 8);
+	CHECK_GT(omm.data.size(), 0);
+	CHECK_EQ(omm.usages.size(), 1);
+	CHECK_EQ(omm.usages[0].count, 1u);
+	CHECK_EQ(omm.usages[0].format, 1u);
+}

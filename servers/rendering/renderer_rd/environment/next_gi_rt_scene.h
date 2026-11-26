@@ -458,6 +458,59 @@ bool nextgi_rt_evict_as_memory(const NextGIASMesh *p_meshes, uint32_t p_count, u
 // Patches the CPU-decoded position copy. A range past the positions is ignored.
 void nextgi_rt_patch_positions(Vector<float> &r_positions, uint32_t p_byte_offset, const uint8_t *p_data, uint32_t p_size);
 
+// GodotNext: p6f_nv_rt (#90). Pure-CPU policy and 2-state opacity micromap builders for post-v1
+// vendor-optional NVIDIA cluster AS + partitioned TLAS and opacity micromap tiers.
+enum NextGIVendorTierReason {
+	NEXTGI_VENDOR_OFF = 0,
+	NEXTGI_VENDOR_ACTIVE,
+	NEXTGI_VENDOR_UNSUPPORTED,
+	NEXTGI_VENDOR_TIER_NOT_HWRT,
+	NEXTGI_VENDOR_BUDGET_FALLBACK,
+};
+
+const char *nextgi_vendor_tier_reason_name(NextGIVendorTierReason p_reason);
+
+struct NextGIVendorTierDecision {
+	bool active = false;
+	NextGIVendorTierReason reason = NEXTGI_VENDOR_OFF;
+};
+
+NextGIVendorTierDecision nextgi_resolve_vendor_tier(bool p_setting_enabled, bool p_hwrt_active, bool p_device_supported, bool p_budget_ok = true);
+
+// Maps an instance position relative to the main viewport camera to a PTLAS spatial partition
+// index in [0, p_grid_dim^3 - 1], or UINT32_MAX (global partition) outside the camera grid.
+uint32_t nextgi_ptlas_partition_for_position(const Vector3 &p_world_pos, const Vector3 &p_camera_pos, float p_cell_size, uint32_t p_grid_dim);
+
+// Separate Q15 budget check for CLAS bytes: overflow falls back to the fixed proxy without altering AS_MEMORY.
+_FORCE_INLINE_ bool nextgi_clas_budget_can_admit(uint64_t p_used_bytes, uint64_t p_add_bytes, uint64_t p_budget_bytes) {
+	return p_budget_bytes > 0 && p_add_bytes <= p_budget_bytes && p_used_bytes <= p_budget_bytes - p_add_bytes;
+}
+
+struct NextGIOpacityMicromapData {
+	Vector<uint8_t> data;
+	Vector<uint8_t> triangles; // Packed 8-byte VkMicromapTriangleEXT records.
+	Vector<int32_t> omm_indices; // Per-triangle OMM index or special index (-1 transparent, -2 opaque).
+	Vector<RD::MicromapUsage> usages;
+	uint32_t unique_entries = 0;
+	uint32_t special_opaque_triangles = 0;
+	uint32_t special_transparent_triangles = 0;
+};
+
+// Generates a compacted 2-state opacity micromap (D5 single opaque proceed) via meshoptimizer.
+bool nextgi_build_2state_omm(
+		const uint32_t *p_indices,
+		uint32_t p_index_count,
+		const float *p_uvs,
+		uint32_t p_vertex_count,
+		const uint8_t *p_alpha_tex,
+		uint32_t p_tex_stride,
+		uint32_t p_tex_pitch,
+		uint32_t p_tex_width,
+		uint32_t p_tex_height,
+		int p_max_level,
+		float p_target_edge,
+		NextGIOpacityMicromapData &r_out);
+
 // One published list per frame. Two views read it; the next swap drops it.
 template <typename T>
 class NextGIRTEventBuffer {
@@ -547,6 +600,21 @@ public:
 		uint32_t shadow_opaque_alpha_entries = 0;
 		// TLAS instances the GPU wrote (dynamic MultiMesh and particle elements, #57), GI and shadow-only.
 		uint32_t gpu_written_instances = 0;
+		// GodotNext: p6f_nv_rt (#90). Vendor-optional NVIDIA cluster AS + PTLAS and 2-state OMM telemetry.
+		bool nv_cluster_rt_active = false;
+		uint32_t nv_cluster_rt_reason = NEXTGI_VENDOR_OFF;
+		uint64_t clas_memory_bytes = 0;
+		uint64_t clas_budget_bytes = 0;
+		uint32_t clas_cluster_count = 0;
+		uint32_t clas_blas_count = 0;
+		uint32_t clas_fallback_instances = 0;
+		uint32_t ptlas_partition_count = 0;
+		uint32_t ptlas_updated_partitions = 0;
+		bool nv_opacity_micromap_active = false;
+		uint32_t nv_opacity_micromap_reason = NEXTGI_VENDOR_OFF;
+		uint32_t omm_count = 0;
+		uint32_t omm_admitted_surfaces = 0;
+		uint64_t omm_memory_bytes = 0;
 	};
 
 	// GodotNext: nextgi_shadow_policy (#145). One TLAS instance GM-4's check builds its rays from: its triangles
@@ -648,6 +716,11 @@ private:
 	// GodotNext: nextgeo_rt_native (#156). Exists only in native mode (EXPERIMENTAL); the fallback
 	// mode, the default, never creates it.
 	NextGIRTNative *native = nullptr;
+	// GodotNext: p6f_nv_rt (#90). Exists only when nv_cluster_rt is enabled on a supporting device.
+	struct NVClusterRTState;
+	NVClusterRTState *nv_cluster_rt = nullptr;
+	void _free_nv_cluster_rt();
+	void _update_nv_cluster_rt(const ::RenderDataRD *p_render_data, const Vector3 &p_camera_pos, const LocalVector<RD::AccelerationStructureInstance> &p_tlas_instances);
 	// GodotNext: nextgi_shadow_policy (#145). The caster-mask allocation, and per TLAS custom index the shadow
 	// instance word (x, y) that nextgi_shadow_ray_inc.glsl reads, with the alpha table of the non-opaque
 	// instances' geometries.

@@ -1567,6 +1567,23 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				const RecordedAccelerationStructureCopyCommand *copy_command = reinterpret_cast<const RecordedAccelerationStructureCopyCommand *>(command);
 				driver->command_copy_acceleration_structure_compact(r_command_buffer, copy_command->source, copy_command->destination);
 			} break;
+			// GodotNext: p6f_nv_rt (#90)
+			case RecordedCommand::TYPE_CLAS_BUILD: {
+				const RecordedCLASBuildCommand *clas_command = reinterpret_cast<const RecordedCLASBuildCommand *>(command);
+				driver->command_build_clas_from_buffer(r_command_buffer, clas_command->params);
+			} break;
+			case RecordedCommand::TYPE_CLUSTER_BLAS_BUILD: {
+				const RecordedClusterBLASBuildCommand *cblas_command = reinterpret_cast<const RecordedClusterBLASBuildCommand *>(command);
+				driver->command_build_cluster_blas_from_buffer(r_command_buffer, cblas_command->params);
+			} break;
+			case RecordedCommand::TYPE_PTLAS_UPDATE: {
+				const RecordedPTLASUpdateCommand *ptlas_command = reinterpret_cast<const RecordedPTLASUpdateCommand *>(command);
+				driver->command_update_ptlas_from_buffer(r_command_buffer, ptlas_command->params);
+			} break;
+			case RecordedCommand::TYPE_MICROMAP_BUILD: {
+				const RecordedMicromapBuildCommand *mm_command = reinterpret_cast<const RecordedMicromapBuildCommand *>(command);
+				driver->command_build_micromap(r_command_buffer, mm_command->params);
+			} break;
 			default: {
 				DEV_ASSERT(false && "Unknown recorded command type.");
 				return;
@@ -1642,7 +1659,12 @@ void RenderingDeviceGraph::_run_label_command_change(RDD::CommandBufferID p_comm
 					} break;
 					// GodotNext: blas_compact
 					case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE:
-					case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY: {
+					case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY:
+					// GodotNext: p6f_nv_rt (#90)
+					case RecordedCommand::TYPE_CLAS_BUILD:
+					case RecordedCommand::TYPE_CLUSTER_BLAS_BUILD:
+					case RecordedCommand::TYPE_PTLAS_UPDATE:
+					case RecordedCommand::TYPE_MICROMAP_BUILD: {
 						custom_commands = true;
 					} break;
 					default: {
@@ -2019,6 +2041,23 @@ void RenderingDeviceGraph::_print_render_commands(const RecordedCommandSort *p_s
 			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY: {
 				const RecordedAccelerationStructureCopyCommand *copy_command = reinterpret_cast<const RecordedAccelerationStructureCopyCommand *>(command);
 				print_line(command_index, "LEVEL", command_level, "ACCELERATION STRUCTURE COPY COMPACT SOURCE", itos(copy_command->source.id), "DESTINATION", itos(copy_command->destination.id));
+			} break;
+			// GodotNext: p6f_nv_rt (#90)
+			case RecordedCommand::TYPE_CLAS_BUILD: {
+				const RecordedCLASBuildCommand *clas_command = reinterpret_cast<const RecordedCLASBuildCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "CLAS BUILD MAX COUNT", clas_command->params.max_count);
+			} break;
+			case RecordedCommand::TYPE_CLUSTER_BLAS_BUILD: {
+				const RecordedClusterBLASBuildCommand *cblas_command = reinterpret_cast<const RecordedClusterBLASBuildCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "CLUSTER BLAS BUILD MAX COUNT", cblas_command->params.max_blas_count);
+			} break;
+			case RecordedCommand::TYPE_PTLAS_UPDATE: {
+				const RecordedPTLASUpdateCommand *ptlas_command = reinterpret_cast<const RecordedPTLASUpdateCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "PTLAS UPDATE", itos(ptlas_command->params.ptlas.id));
+			} break;
+			case RecordedCommand::TYPE_MICROMAP_BUILD: {
+				const RecordedMicromapBuildCommand *mm_command = reinterpret_cast<const RecordedMicromapBuildCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "MICROMAP BUILD", itos(mm_command->params.micromap.id));
 			} break;
 			default:
 				DEV_ASSERT(false && "Unknown recorded command type.");
@@ -2442,6 +2481,113 @@ void RenderingDeviceGraph::add_acceleration_structure_copy(RDD::AccelerationStru
 	ResourceTracker *trackers[2] = { p_source_tracker, p_destination_tracker };
 	ResourceUsage usages[2] = { RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ, RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE };
 	_add_command_to_graph(trackers, usages, 2, command_index, command);
+}
+
+// GodotNext: p6f_nv_rt (#90)
+void RenderingDeviceGraph::add_clas_build(const RDD::ClusterASBuildParams &p_params, VectorView<ResourceTracker *> p_read_trackers, VectorView<ResourceTracker *> p_write_trackers) {
+	int32_t command_index;
+	RecordedCLASBuildCommand *command = static_cast<RecordedCLASBuildCommand *>(_allocate_command(sizeof(RecordedCLASBuildCommand), command_index));
+	command->type = RecordedCommand::TYPE_CLAS_BUILD;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->params = p_params;
+
+	thread_local LocalVector<ResourceTracker *> trackers;
+	thread_local LocalVector<ResourceUsage> usages;
+	trackers.clear();
+	usages.clear();
+	for (uint32_t i = 0; i < p_write_trackers.size(); ++i) {
+		ResourceTracker *t = p_write_trackers[i];
+		if (t != nullptr && !trackers.has(t)) {
+			trackers.push_back(t);
+			usages.push_back(RESOURCE_USAGE_GENERAL);
+		}
+	}
+	for (uint32_t i = 0; i < p_read_trackers.size(); ++i) {
+		ResourceTracker *t = p_read_trackers[i];
+		if (t != nullptr && !trackers.has(t)) {
+			trackers.push_back(t);
+			usages.push_back(RESOURCE_USAGE_STORAGE_BUFFER_READ);
+		}
+	}
+	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
+}
+
+void RenderingDeviceGraph::add_cluster_blas_build(const RDD::ClusterBLASBuildParams &p_params, VectorView<ResourceTracker *> p_read_trackers, VectorView<ResourceTracker *> p_write_trackers) {
+	int32_t command_index;
+	RecordedClusterBLASBuildCommand *command = static_cast<RecordedClusterBLASBuildCommand *>(_allocate_command(sizeof(RecordedClusterBLASBuildCommand), command_index));
+	command->type = RecordedCommand::TYPE_CLUSTER_BLAS_BUILD;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->params = p_params;
+
+	thread_local LocalVector<ResourceTracker *> trackers;
+	thread_local LocalVector<ResourceUsage> usages;
+	trackers.clear();
+	usages.clear();
+	for (uint32_t i = 0; i < p_write_trackers.size(); ++i) {
+		ResourceTracker *t = p_write_trackers[i];
+		if (t != nullptr && !trackers.has(t)) {
+			trackers.push_back(t);
+			usages.push_back(RESOURCE_USAGE_GENERAL);
+		}
+	}
+	for (uint32_t i = 0; i < p_read_trackers.size(); ++i) {
+		ResourceTracker *t = p_read_trackers[i];
+		if (t != nullptr && !trackers.has(t)) {
+			trackers.push_back(t);
+			usages.push_back(RESOURCE_USAGE_STORAGE_BUFFER_READ);
+		}
+	}
+	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
+}
+
+void RenderingDeviceGraph::add_ptlas_update(const RDD::PartitionedTLASUpdateParams &p_params, ResourceTracker *p_ptlas_tracker, VectorView<ResourceTracker *> p_read_trackers) {
+	DEV_ASSERT(p_ptlas_tracker != nullptr);
+
+	int32_t command_index;
+	RecordedPTLASUpdateCommand *command = static_cast<RecordedPTLASUpdateCommand *>(_allocate_command(sizeof(RecordedPTLASUpdateCommand), command_index));
+	command->type = RecordedCommand::TYPE_PTLAS_UPDATE;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->params = p_params;
+
+	thread_local LocalVector<ResourceTracker *> trackers;
+	thread_local LocalVector<ResourceUsage> usages;
+	trackers.clear();
+	usages.clear();
+	trackers.push_back(p_ptlas_tracker);
+	usages.push_back(RESOURCE_USAGE_GENERAL);
+	for (uint32_t i = 0; i < p_read_trackers.size(); ++i) {
+		ResourceTracker *t = p_read_trackers[i];
+		if (t != nullptr && !trackers.has(t)) {
+			trackers.push_back(t);
+			usages.push_back(RESOURCE_USAGE_STORAGE_BUFFER_READ);
+		}
+	}
+	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
+}
+
+void RenderingDeviceGraph::add_micromap_build(const RDD::MicromapBuildParams &p_params, ResourceTracker *p_micromap_tracker, VectorView<ResourceTracker *> p_read_trackers) {
+	DEV_ASSERT(p_micromap_tracker != nullptr);
+
+	int32_t command_index;
+	RecordedMicromapBuildCommand *command = static_cast<RecordedMicromapBuildCommand *>(_allocate_command(sizeof(RecordedMicromapBuildCommand), command_index));
+	command->type = RecordedCommand::TYPE_MICROMAP_BUILD;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->params = p_params;
+
+	thread_local LocalVector<ResourceTracker *> trackers;
+	thread_local LocalVector<ResourceUsage> usages;
+	trackers.clear();
+	usages.clear();
+	trackers.push_back(p_micromap_tracker);
+	usages.push_back(RESOURCE_USAGE_GENERAL);
+	for (uint32_t i = 0; i < p_read_trackers.size(); ++i) {
+		ResourceTracker *t = p_read_trackers[i];
+		if (t != nullptr && !trackers.has(t)) {
+			trackers.push_back(t);
+			usages.push_back(RESOURCE_USAGE_STORAGE_BUFFER_READ);
+		}
+	}
+	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
 }
 
 void RenderingDeviceGraph::add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size) {
@@ -3449,6 +3595,11 @@ void RenderingDeviceGraph::_compute_command_levels(LocalVector<RecordedCommandSo
 		// GodotNext: blas_compact
 		6, // TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE
 		6, // TYPE_ACCELERATION_STRUCTURE_COPY
+		// GodotNext: p6f_nv_rt (#90)
+		6, // TYPE_CLAS_BUILD
+		6, // TYPE_CLUSTER_BLAS_BUILD
+		6, // TYPE_PTLAS_UPDATE
+		6, // TYPE_MICROMAP_BUILD
 	};
 	static_assert(std_size(PriorityTable) == RecordedCommand::TYPE_MAX, "PriorityTable must have one entry per RecordedCommand::Type");
 

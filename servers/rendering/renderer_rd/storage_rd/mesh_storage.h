@@ -93,6 +93,10 @@ public:
 		uint32_t surface_count = 0;
 		uint32_t triangle_count = 0;
 		LocalVector<NextGIRTPartGeometry> geometries;
+		// GodotNext: p6f_nv_rt (#90). Optional 2-state opacity micromaps and backing index buffers owned by this BLAS part.
+		LocalVector<RID> opacity_micromaps;
+		LocalVector<RID> opacity_micromap_buffers;
+		uint64_t omm_bytes = 0;
 	};
 
 	// GodotNext: nextgeo_rt_native (#156). See mesh_nextgi_set_virtual_geometry_changed_callback().

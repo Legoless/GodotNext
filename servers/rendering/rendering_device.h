@@ -1526,7 +1526,33 @@ private:
 
 	RID_Owner<AccelerationStructure, true> acceleration_structure_owner;
 
+	// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional partitioned TLAS and opacity micromap owners.
+	struct PartitionedTLAS {
+		RDD::PartitionedTLASID driver_id;
+		uint64_t size_bytes = 0;
+		uint32_t max_instances = 0;
+		uint32_t partition_count = 0;
+		BitField<AccelerationStructureFlagBits> flags = {};
+		RDG::ResourceTracker *draw_tracker = nullptr;
+		bool built = false;
+	};
+
+	struct Micromap {
+		RDD::MicromapID driver_id;
+		uint64_t size_bytes = 0;
+		BitField<AccelerationStructureFlagBits> flags = {};
+		RDG::ResourceTracker *draw_tracker = nullptr;
+		bool built = false;
+	};
+
+	RID_Owner<PartitionedTLAS, true> ptlas_owner;
+	RID_Owner<Micromap, true> micromap_owner;
+
 public:
+	// GodotNext: p6f_nv_rt (#90)
+	using MicromapUsage = RDD::MicromapUsage;
+	using ClusterASBuildSizes = RDD::ClusterASBuildSizes;
+
 	struct AccelerationStructureGeometry {
 		BitField<AccelerationStructureGeometryFlagBits> flags = {};
 		RID vertex_buffer;
@@ -1540,6 +1566,54 @@ public:
 		// GodotNext: rd_ray_query_api
 		// Format of a storage-buffer index source. An index buffer uses its own format.
 		IndexBufferFormat index_format = INDEX_BUFFER_FORMAT_UINT32;
+		// GodotNext: p6f_nv_rt (#90). Optional 2-state opacity micromap attached to this triangle geometry.
+		RID opacity_micromap;
+		RID opacity_micromap_index_buffer;
+		uint64_t opacity_micromap_index_offset = 0;
+		uint32_t opacity_micromap_index_stride = 0;
+		IndexBufferFormat opacity_micromap_index_format = INDEX_BUFFER_FORMAT_UINT32;
+		uint32_t opacity_micromap_base_triangle = 0;
+		Vector<MicromapUsage> opacity_micromap_usages;
+	};
+
+	// GodotNext: p6f_nv_rt (#90). Vendor-neutral opaque entry points for CLAS, Cluster BLAS, PTLAS, and OMM.
+	struct ClusterASBuildParams {
+		RID args_buffer;
+		uint64_t args_offset = 0;
+		uint32_t args_stride = 0;
+		RID count_buffer;
+		uint64_t count_offset = 0;
+		RID dst_data_buffer;
+		uint64_t dst_data_offset = 0;
+		RID dst_addresses_buffer;
+		uint64_t dst_addresses_offset = 0;
+		RID dst_sizes_buffer;
+		uint64_t dst_sizes_offset = 0;
+		uint32_t max_count = 0;
+		uint32_t max_triangles_per_cluster = 128;
+		uint32_t max_vertices_per_cluster = 128;
+		uint32_t max_total_triangles = 0;
+		uint32_t max_total_vertices = 0;
+		uint32_t max_geometry_index = 0;
+		BitField<AccelerationStructureFlagBits> flags = {};
+	};
+
+	struct ClusterBLASBuildParams {
+		RID args_buffer;
+		uint64_t args_offset = 0;
+		uint32_t args_stride = 0;
+		RID count_buffer;
+		uint64_t count_offset = 0;
+		RID dst_data_buffer;
+		uint64_t dst_data_offset = 0;
+		RID dst_addresses_buffer;
+		uint64_t dst_addresses_offset = 0;
+		RID dst_sizes_buffer;
+		uint64_t dst_sizes_offset = 0;
+		uint32_t max_blas_count = 0;
+		uint32_t max_total_clusters = 0;
+		uint32_t max_clusters_per_blas = 0;
+		BitField<AccelerationStructureFlagBits> flags = {};
 	};
 
 	RID blas_create(Span<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags);
@@ -1570,6 +1644,19 @@ public:
 	uint32_t acceleration_structure_get_instance_size();
 	uint64_t acceleration_structure_get_instance_reference(RID p_blas);
 	Error acceleration_structure_instance_encode(const AccelerationStructureInstance &p_instance, uint8_t *r_dst);
+
+	// GodotNext: p6f_nv_rt (#90). Vendor-neutral CLAS, Cluster BLAS, Partitioned TLAS, and 2-state OMM API.
+	ClusterASBuildSizes clas_get_build_sizes(const ClusterASBuildParams &p_params);
+	Error clas_build_from_buffer(const ClusterASBuildParams &p_params);
+	ClusterASBuildSizes cluster_blas_get_build_sizes(const ClusterBLASBuildParams &p_params);
+	Error cluster_blas_build_from_buffer(const ClusterBLASBuildParams &p_params);
+	RID ptlas_create(uint32_t p_max_instances, uint32_t p_partition_count, uint32_t p_max_instances_per_partition = 0, uint32_t p_max_global_instances = 0, BitField<AccelerationStructureFlagBits> p_flags = ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+	Error ptlas_update_from_buffer(RID p_ptlas, RID p_infos_buffer, uint64_t p_infos_offset, RID p_count_buffer, uint64_t p_count_offset, bool p_update = false);
+	uint64_t ptlas_get_size_bytes(RID p_ptlas);
+	uint64_t ptlas_get_device_address(RID p_ptlas);
+	RID micromap_create(Span<MicromapUsage> p_usages, BitField<AccelerationStructureFlagBits> p_flags = ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+	Error micromap_build(RID p_micromap, RID p_data_buffer, uint64_t p_data_offset, RID p_triangle_buffer, uint64_t p_triangle_offset, uint32_t p_triangle_stride = 8);
+	uint64_t micromap_get_size_bytes(RID p_micromap);
 
 	// GodotNext: tlas_from_buffer
 	// A GPU instance-record build reads p_count records of the API instance size at a 16-byte aligned offset.
@@ -2092,6 +2179,9 @@ private:
 		List<RenderPipeline> render_pipelines_to_dispose_of;
 		List<ComputePipeline> compute_pipelines_to_dispose_of;
 		List<AccelerationStructure> acceleration_structures_to_dispose_of;
+		// GodotNext: p6f_nv_rt (#90)
+		List<PartitionedTLAS> ptlas_to_dispose_of;
+		List<Micromap> micromaps_to_dispose_of;
 		// GodotNext: blas_compact
 		// The pre-compaction object stays alive until the copy's submission has retired.
 		// It is not a normal AccelerationStructure disposal: that path also updates the dependencies.

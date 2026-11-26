@@ -138,6 +138,11 @@ public:
 			// GodotNext: blas_compact
 			TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE,
 			TYPE_ACCELERATION_STRUCTURE_COPY,
+			// GodotNext: p6f_nv_rt (#90)
+			TYPE_CLAS_BUILD,
+			TYPE_CLUSTER_BLAS_BUILD,
+			TYPE_PTLAS_UPDATE,
+			TYPE_MICROMAP_BUILD,
 			TYPE_MAX
 		};
 
@@ -669,6 +674,23 @@ private:
 	struct RecordedAccelerationStructureCopyCommand : RecordedCommand {
 		RDD::AccelerationStructureID source;
 		RDD::AccelerationStructureID destination;
+	};
+
+	// GodotNext: p6f_nv_rt (#90)
+	struct RecordedCLASBuildCommand : RecordedCommand {
+		RDD::ClusterASBuildParams params;
+	};
+
+	struct RecordedClusterBLASBuildCommand : RecordedCommand {
+		RDD::ClusterBLASBuildParams params;
+	};
+
+	struct RecordedPTLASUpdateCommand : RecordedCommand {
+		RDD::PartitionedTLASUpdateParams params;
+	};
+
+	struct RecordedMicromapBuildCommand : RecordedCommand {
+		RDD::MicromapBuildParams params;
 	};
 
 	struct RecordedRaytracingListCommand : RecordedCommand {
@@ -1289,6 +1311,11 @@ public:
 	// GodotNext: blas_compact
 	void add_acceleration_structure_query_size(RDD::AccelerationStructureID p_acceleration_structure, RDD::QueryPoolID p_pool, uint32_t p_index, ResourceTracker *p_tracker);
 	void add_acceleration_structure_copy(RDD::AccelerationStructureID p_source, ResourceTracker *p_source_tracker, RDD::AccelerationStructureID p_destination, ResourceTracker *p_destination_tracker);
+	// GodotNext: p6f_nv_rt (#90)
+	void add_clas_build(const RDD::ClusterASBuildParams &p_params, VectorView<ResourceTracker *> p_read_trackers, VectorView<ResourceTracker *> p_write_trackers);
+	void add_cluster_blas_build(const RDD::ClusterBLASBuildParams &p_params, VectorView<ResourceTracker *> p_read_trackers, VectorView<ResourceTracker *> p_write_trackers);
+	void add_ptlas_update(const RDD::PartitionedTLASUpdateParams &p_params, ResourceTracker *p_ptlas_tracker, VectorView<ResourceTracker *> p_read_trackers);
+	void add_micromap_build(const RDD::MicromapBuildParams &p_params, ResourceTracker *p_micromap_tracker, VectorView<ResourceTracker *> p_read_trackers);
 	void add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size);
 	void add_buffer_copy(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, RDD::BufferCopyRegion p_region);
 	void add_buffer_get_data(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, RDD::BufferCopyRegion p_region);

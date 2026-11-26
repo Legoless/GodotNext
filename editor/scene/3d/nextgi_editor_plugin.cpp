@@ -232,6 +232,26 @@ static String _nextgi_overlay_suffix(const Dictionary &p_info) {
 	if (bool(p_info.get("experimental_toggle", false))) {
 		suffix += " toggle=EXPERIMENTAL";
 	}
+	// GodotNext: p6f_nv_rt (#90). Active vendor tiers and counters (omitted when all vendor flags are off).
+	const bool nv_clas = bool(p_info.get("nv_cluster_rt_active", false));
+	const bool nv_omm = bool(p_info.get("nv_opacity_micromap_active", false));
+	if (nv_clas || nv_omm) {
+		suffix += " vendor=[";
+		if (nv_clas) {
+			const int64_t clas_clusters = int64_t(p_info.get("clas_cluster_count", 0));
+			const double clas_mib = double(int64_t(p_info.get("clas_memory_bytes", 0))) / (1024.0 * 1024.0);
+			suffix += vformat("CLAS+PTLAS clusters=%d %.1fMiB", clas_clusters, clas_mib);
+		}
+		if (nv_clas && nv_omm) {
+			suffix += ", ";
+		}
+		if (nv_omm) {
+			const int64_t omm_count = int64_t(p_info.get("omm_count", 0));
+			const double omm_mib = double(int64_t(p_info.get("omm_memory_bytes", 0))) / (1024.0 * 1024.0);
+			suffix += vformat("OMM=%d %.1fMiB", omm_count, omm_mib);
+		}
+		suffix += "]";
+	}
 	return suffix;
 }
 

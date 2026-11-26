@@ -48,6 +48,16 @@ void initialize_meshoptimizer_module(ModuleInitializationLevel p_level) {
 	SurfaceTool::remap_vertex_func = meshopt_remapVertexBuffer;
 	SurfaceTool::remap_index_func = meshopt_remapIndexBuffer;
 	SurfaceTool::generate_tangents_func = meshopt_generateTangents;
+
+	// GodotNext: p6f_nv_rt (#90). Reference opacitymap.cpp symbols so static linkers pull opacitymap.o
+	// from libmodule_meshoptimizer before libservers resolves nextgi_build_2state_omm().
+	static const void *volatile omm_keep[4] = {
+		reinterpret_cast<const void *>(&meshopt_opacityMapMeasure),
+		reinterpret_cast<const void *>(&meshopt_opacityMapRasterize),
+		reinterpret_cast<const void *>(&meshopt_opacityMapEntrySize),
+		reinterpret_cast<const void *>(&meshopt_opacityMapCompact),
+	};
+	(void)omm_keep[0];
 }
 
 void uninitialize_meshoptimizer_module(ModuleInitializationLevel p_level) {

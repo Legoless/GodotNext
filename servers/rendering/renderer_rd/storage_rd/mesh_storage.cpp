@@ -1099,6 +1099,20 @@ void MeshStorage::_mesh_nextgi_rt_clear_parts(Mesh *p_mesh) {
 				RD::get_singleton()->free_rid(part.blas);
 				part.blas = RID();
 			}
+			// GodotNext: p6f_nv_rt (#90). Free OMM handles and backing buffers after the BLAS that depended on them.
+			for (const RID &mm : part.opacity_micromaps) {
+				if (mm.is_valid()) {
+					RD::get_singleton()->free_rid(mm);
+				}
+			}
+			part.opacity_micromaps.clear();
+			for (const RID &buf : part.opacity_micromap_buffers) {
+				if (buf.is_valid()) {
+					RD::get_singleton()->free_rid(buf);
+				}
+			}
+			part.opacity_micromap_buffers.clear();
+			part.omm_bytes = 0;
 			_mesh_nextgi_free_part_attributes(part);
 			if (part.allocation_size > 0 && part.chunk != UINT32_MAX) {
 				NextGIArenaAllocator::Allocation allocation;

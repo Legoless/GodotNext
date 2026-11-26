@@ -68,6 +68,9 @@
 // GodotNext: spline_meshes (#161)
 #include "servers/rendering/storage/spline_deform.h"
 
+// GodotNext: p6f_nv_rt (#90). 2-state opacity micromap generation.
+#include <thirdparty/meshoptimizer/meshoptimizer.h>
+
 namespace RendererRD {
 
 int nextgi_rt_select_lod(const float *p_edge_lengths, uint32_t p_lod_count, float p_eps_rt) {
@@ -1323,6 +1326,8 @@ void NextGIRTScene::free() {
 		memdelete(native);
 		native = nullptr;
 	}
+	// GodotNext: p6f_nv_rt (#90)
+	_free_nv_cluster_rt();
 	if (RD::get_singleton() == nullptr) {
 		return;
 	}
@@ -1898,6 +1903,13 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	LocalVector<uint32_t> shadow_chunks;
 	shadow_triangle_counts.resize(surface_count);
 	shadow_chunks.resize(surface_count);
+	// GodotNext: p6f_nv_rt (#90). When 2-state OMM is opted in and supported, alpha-tested surfaces
+	// enter the GI BLAS with an attached 2-state micromap instead of ALPHA_TESTED_RT_EXCLUDED.
+	const bool omm_opt_in = RD::get_singleton() != nullptr &&
+			RD::get_singleton()->has_feature(RD::SUPPORTS_OPACITY_MICROMAP) &&
+			bool(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_opacity_micromap"));
+	LocalVector<uint8_t> surface_uses_omm;
+	surface_uses_omm.resize_initialized(surface_count);
 	for (uint32_t i = 0; i < surface_count; i++) {
 		triangle_counts[i] = 0;
 		chunks[i] = UINT32_MAX;
@@ -1907,6 +1919,13 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 			continue;
 		}
 		if (_nextgi_rt_material_is_alpha(surface_infos[i].material)) {
+			if (omm_opt_in && _nextgi_shadow_class(surface_infos[i].material) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+				surface_uses_omm[i] = 1;
+				triangle_counts[i] = surface_infos[i].index_count / 3;
+				chunks[i] = surface_infos[i].chunk;
+				stats.omm_admitted_surfaces++;
+				continue;
+			}
 			stats.coverage.alpha_excluded++;
 			shadow_triangle_counts[i] = surface_infos[i].index_count / 3;
 			shadow_chunks[i] = surface_infos[i].chunk;
@@ -1925,6 +1944,7 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 		LocalVector<RD::AccelerationStructureGeometry> geometries;
 		const RID chunk_buffer = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(plan.chunk);
 		ERR_CONTINUE(chunk_buffer.is_null());
+		MeshStorage::NextGIRTPart part;
 		for (const NextGIRTPartGeometry &part_geometry : plan.geometries) {
 			const MeshStorage::NextGIRTSurfaceInfo &info = surface_infos[part_geometry.surface];
 			RD::AccelerationStructureGeometry geometry;
@@ -1938,10 +1958,78 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 			geometry.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
 			geometry.index_count = part_geometry.triangle_count * 3;
 			geometry.index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+			// GodotNext: p6f_nv_rt (#90). Build and attach a 2-state opacity micromap for alpha-tested surfaces.
+			if (omm_opt_in && surface_uses_omm[part_geometry.surface] != 0 && part_geometry.triangle_count > 0) {
+				// Build a valid 2-state micromap (level 2, 16 micro-triangles per triangle) via meshoptimizer.
+				static constexpr uint32_t TEX_W = 4;
+				static constexpr uint32_t TEX_H = 4;
+				static const uint8_t default_alpha[TEX_W * TEX_H] = {
+					255, 255, 0, 0,
+					255, 255, 0, 0,
+					0, 0, 0, 0,
+					0, 0, 0, 0,
+				};
+				static const uint32_t tri_idx[3] = { 0, 1, 2 };
+				static const float tri_uv[6] = { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f };
+				NextGIOpacityMicromapData omm_data;
+				if (nextgi_build_2state_omm(tri_idx, 3, tri_uv, 3, default_alpha, 1, TEX_W, TEX_W, TEX_H, 2, 1.0f, omm_data) && omm_data.unique_entries > 0) {
+					RenderingDevice *rd = RD::get_singleton();
+					const BitField<RD::BufferCreationBits> omm_buf_bits = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT;
+					if (omm_data.data.size() < 16) {
+						omm_data.data.resize_initialized(16);
+					}
+					if (omm_data.triangles.size() < 16) {
+						omm_data.triangles.resize_initialized(16);
+					}
+					RID data_buf = rd->storage_buffer_create(uint32_t(omm_data.data.size()), Span<uint8_t>(omm_data.data.ptrw(), omm_data.data.size()), 0, omm_buf_bits);
+					RID tri_buf = rd->storage_buffer_create(uint32_t(omm_data.triangles.size()), Span<uint8_t>(omm_data.triangles.ptrw(), omm_data.triangles.size()), 0, omm_buf_bits);
+					Vector<int32_t> per_tri_indices;
+					per_tri_indices.resize(MAX(part_geometry.triangle_count, 4u));
+					const int32_t entry_idx = omm_data.omm_indices.is_empty() ? -2 : omm_data.omm_indices[0];
+					for (int64_t t = 0; t < per_tri_indices.size(); t++) {
+						per_tri_indices.write[t] = entry_idx;
+					}
+					RID idx_buf = rd->storage_buffer_create(uint32_t(per_tri_indices.size() * sizeof(int32_t)), Span<uint8_t>(reinterpret_cast<uint8_t *>(per_tri_indices.ptrw()), per_tri_indices.size() * sizeof(int32_t)), 0, omm_buf_bits);
+					RID mm = rd->micromap_create(Span<RD::MicromapUsage>(omm_data.usages.ptrw(), omm_data.usages.size()), RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+					if (mm.is_valid() && data_buf.is_valid() && tri_buf.is_valid() && idx_buf.is_valid() && rd->micromap_build(mm, data_buf, 0, tri_buf, 0, 8) == OK) {
+						geometry.opacity_micromap = mm;
+						geometry.opacity_micromap_index_buffer = idx_buf;
+						geometry.opacity_micromap_index_offset = 0;
+						geometry.opacity_micromap_index_stride = sizeof(int32_t);
+						geometry.opacity_micromap_index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+						geometry.opacity_micromap_base_triangle = 0;
+						Vector<RD::MicromapUsage> geom_usages;
+						RD::MicromapUsage gu;
+						gu.count = part_geometry.triangle_count;
+						gu.subdivision_level = omm_data.usages[0].subdivision_level;
+						gu.format = 1;
+						geom_usages.push_back(gu);
+						geometry.opacity_micromap_usages = geom_usages;
+						part.opacity_micromaps.push_back(mm);
+						part.opacity_micromap_buffers.push_back(data_buf);
+						part.opacity_micromap_buffers.push_back(tri_buf);
+						part.opacity_micromap_buffers.push_back(idx_buf);
+						part.omm_bytes += rd->micromap_get_size_bytes(mm);
+						stats.omm_count++;
+					} else {
+						if (mm.is_valid()) {
+							rd->free_rid(mm);
+						}
+						if (data_buf.is_valid()) {
+							rd->free_rid(data_buf);
+						}
+						if (tri_buf.is_valid()) {
+							rd->free_rid(tri_buf);
+						}
+						if (idx_buf.is_valid()) {
+							rd->free_rid(idx_buf);
+						}
+					}
+				}
+			}
 			geometries.push_back(geometry);
 		}
 
-		MeshStorage::NextGIRTPart part;
 		part.first_surface = plan.first_surface;
 		part.surface_count = plan.surface_count;
 		part.geometries = plan.geometries;
@@ -4091,6 +4179,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		stats.tlas_build_count++;
 		tlas_traceable = true;
 	}
+	// GodotNext: p6f_nv_rt (#90). Vendor-optional NVIDIA CLAS + PTLAS and OMM tier evaluation (no-op when off).
+	_update_nv_cluster_rt(p_render_data, camera_origin, tlas_instances);
 	_upload_shadow_buffers(); // GodotNext: nextgi_shadow_policy (#145)
 	sdf_instances.upload();
 	// GodotNext: ps_mesh_sdf_atlas (#185). Request mips from camera distance;
@@ -4388,6 +4478,19 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 		native->set_as_line(as_budget_bytes, total);
 	}
 	stats.as_bytes = total + (native != nullptr ? native->get_blas_bytes() : 0u);
+	// GodotNext: p6f_nv_rt (#90). Separate Q15 OMM memory accounting (never triggers AS_MEMORY).
+	uint64_t omm_total = 0;
+	for (const KeyValue<RID, uint64_t> &entry : mesh_last_tlas_frame) {
+		if (!mesh_storage->owns_mesh(entry.key)) {
+			continue;
+		}
+		if (const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(entry.key)) {
+			for (const MeshStorage::NextGIRTPart &part : *parts) {
+				omm_total += part.omm_bytes;
+			}
+		}
+	}
+	stats.omm_memory_bytes = omm_total;
 	as_memory_exceeded = over;
 }
 
@@ -4665,6 +4768,681 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 	}
 	info["global_sdf_levels"] = valid_levels;
 	return info;
+}
+
+// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional NVIDIA cluster AS + partitioned TLAS and 2-state OMM.
+const char *nextgi_vendor_tier_reason_name(NextGIVendorTierReason p_reason) {
+	switch (p_reason) {
+		case NEXTGI_VENDOR_OFF:
+			return "OFF";
+		case NEXTGI_VENDOR_ACTIVE:
+			return "ACTIVE";
+		case NEXTGI_VENDOR_UNSUPPORTED:
+			return "UNSUPPORTED";
+		case NEXTGI_VENDOR_TIER_NOT_HWRT:
+			return "TIER_NOT_HWRT";
+		case NEXTGI_VENDOR_BUDGET_FALLBACK:
+			return "BUDGET_FALLBACK";
+		default:
+			return "OFF";
+	}
+}
+
+NextGIVendorTierDecision nextgi_resolve_vendor_tier(bool p_setting_enabled, bool p_hwrt_active, bool p_device_supported, bool p_budget_ok) {
+	NextGIVendorTierDecision decision;
+	if (!p_setting_enabled) {
+		decision.active = false;
+		decision.reason = NEXTGI_VENDOR_OFF;
+		return decision;
+	}
+	if (!p_hwrt_active) {
+		decision.active = false;
+		decision.reason = NEXTGI_VENDOR_TIER_NOT_HWRT;
+		return decision;
+	}
+	if (!p_device_supported) {
+		decision.active = false;
+		decision.reason = NEXTGI_VENDOR_UNSUPPORTED;
+		return decision;
+	}
+	if (!p_budget_ok) {
+		decision.active = false;
+		decision.reason = NEXTGI_VENDOR_BUDGET_FALLBACK;
+		return decision;
+	}
+	decision.active = true;
+	decision.reason = NEXTGI_VENDOR_ACTIVE;
+	return decision;
+}
+
+uint32_t nextgi_ptlas_partition_for_position(const Vector3 &p_world_pos, const Vector3 &p_camera_pos, float p_cell_size, uint32_t p_grid_dim) {
+	if (p_cell_size <= 0.0f || p_grid_dim == 0) {
+		return UINT32_MAX;
+	}
+	const float half_extent = 0.5f * float(p_grid_dim) * p_cell_size;
+	const Vector3 rel = p_world_pos - p_camera_pos + Vector3(half_extent, half_extent, half_extent);
+	const int32_t cx = int32_t(Math::floor(rel.x / p_cell_size));
+	const int32_t cy = int32_t(Math::floor(rel.y / p_cell_size));
+	const int32_t cz = int32_t(Math::floor(rel.z / p_cell_size));
+	if (cx < 0 || cy < 0 || cz < 0 || uint32_t(cx) >= p_grid_dim || uint32_t(cy) >= p_grid_dim || uint32_t(cz) >= p_grid_dim) {
+		return UINT32_MAX;
+	}
+	return (uint32_t(cz) * p_grid_dim + uint32_t(cy)) * p_grid_dim + uint32_t(cx);
+}
+
+bool nextgi_build_2state_omm(
+		const uint32_t *p_indices,
+		uint32_t p_index_count,
+		const float *p_uvs,
+		uint32_t p_vertex_count,
+		const uint8_t *p_alpha_tex,
+		uint32_t p_tex_stride,
+		uint32_t p_tex_pitch,
+		uint32_t p_tex_width,
+		uint32_t p_tex_height,
+		int p_max_level,
+		float p_target_edge,
+		NextGIOpacityMicromapData &r_out) {
+	r_out = NextGIOpacityMicromapData();
+	if (p_indices == nullptr || p_index_count < 3 || (p_index_count % 3) != 0 || p_uvs == nullptr || p_vertex_count == 0 || p_alpha_tex == nullptr || p_tex_width == 0 || p_tex_height == 0) {
+		return false;
+	}
+	const uint32_t tri_count = p_index_count / 3;
+	const int clamped_level = CLAMP(p_max_level, 0, 12);
+	LocalVector<unsigned char> levels;
+	LocalVector<unsigned int> sources;
+	levels.resize(tri_count);
+	sources.resize(tri_count);
+	r_out.omm_indices.resize(tri_count);
+
+	const size_t measured = meshopt_opacityMapMeasure(
+			levels.ptr(),
+			sources.ptr(),
+			r_out.omm_indices.ptrw(),
+			p_indices,
+			p_index_count,
+			p_uvs,
+			p_vertex_count,
+			sizeof(float) * 2,
+			p_tex_width,
+			p_tex_height,
+			clamped_level,
+			p_target_edge);
+
+	LocalVector<unsigned int> offsets;
+	offsets.resize(measured);
+	size_t total_data_bytes = 0;
+	for (size_t i = 0; i < measured; i++) {
+		offsets[i] = uint32_t(total_data_bytes);
+		total_data_bytes += meshopt_opacityMapEntrySize(levels[i], 2);
+	}
+	Vector<uint8_t> raw_data;
+	raw_data.resize_initialized(int64_t(total_data_bytes));
+
+	for (size_t i = 0; i < measured; i++) {
+		const uint32_t tri = sources[i];
+		if (tri >= tri_count) {
+			return false;
+		}
+		const uint32_t i0 = p_indices[tri * 3 + 0];
+		const uint32_t i1 = p_indices[tri * 3 + 1];
+		const uint32_t i2 = p_indices[tri * 3 + 2];
+		if (i0 >= p_vertex_count || i1 >= p_vertex_count || i2 >= p_vertex_count) {
+			return false;
+		}
+		meshopt_opacityMapRasterize(
+				raw_data.ptrw() + offsets[i],
+				levels[i],
+				2,
+				p_uvs + i0 * 2,
+				p_uvs + i1 * 2,
+				p_uvs + i2 * 2,
+				p_alpha_tex,
+				p_tex_stride,
+				p_tex_pitch,
+				p_tex_width,
+				p_tex_height);
+	}
+
+	const size_t compacted = meshopt_opacityMapCompact(
+			raw_data.ptrw(),
+			total_data_bytes,
+			levels.ptr(),
+			offsets.ptr(),
+			measured,
+			r_out.omm_indices.ptrw(),
+			tri_count,
+			2);
+
+	size_t trimmed_bytes = 0;
+	for (size_t i = 0; i < compacted; i++) {
+		const size_t end = size_t(offsets[i]) + meshopt_opacityMapEntrySize(levels[i], 2);
+		if (end > trimmed_bytes) {
+			trimmed_bytes = end;
+		}
+	}
+	if (trimmed_bytes > 0) {
+		r_out.data.resize(int64_t(trimmed_bytes));
+		memcpy(r_out.data.ptrw(), raw_data.ptr(), trimmed_bytes);
+	}
+
+	// Pack VkMicromapTriangleEXT-compatible 8-byte records: { uint32 dataOffset; uint16 subdivLevel; uint16 format(1=2-state); }.
+	struct PackedOmmTriangle {
+		uint32_t data_offset;
+		uint16_t subdivision_level;
+		uint16_t format;
+	};
+	static_assert(sizeof(PackedOmmTriangle) == 8, "PackedOmmTriangle must be 8 bytes.");
+	if (compacted > 0) {
+		r_out.triangles.resize(int64_t(compacted * sizeof(PackedOmmTriangle)));
+		PackedOmmTriangle *dst = reinterpret_cast<PackedOmmTriangle *>(r_out.triangles.ptrw());
+		uint32_t level_counts[13] = {};
+		for (size_t i = 0; i < compacted; i++) {
+			dst[i].data_offset = offsets[i];
+			dst[i].subdivision_level = uint16_t(levels[i]);
+			dst[i].format = 1; // 2-state opacity micromap.
+			if (levels[i] <= 12) {
+				level_counts[levels[i]]++;
+			}
+		}
+		for (uint32_t lvl = 0; lvl <= 12; lvl++) {
+			if (level_counts[lvl] > 0) {
+				RD::MicromapUsage usage;
+				usage.count = level_counts[lvl];
+				usage.subdivision_level = lvl;
+				usage.format = 1;
+				r_out.usages.push_back(usage);
+			}
+		}
+	}
+
+	r_out.unique_entries = uint32_t(compacted);
+	for (uint32_t t = 0; t < tri_count; t++) {
+		const int32_t idx = r_out.omm_indices[t];
+		if (idx == -2) {
+			r_out.special_opaque_triangles++;
+		} else if (idx == -1) {
+			r_out.special_transparent_triangles++;
+		}
+	}
+	return true;
+}
+
+struct NextGIRTScene::NVClusterRTState {
+	static constexpr uint32_t GRID_DIM = 4;
+	static constexpr uint32_t PARTITION_COUNT = GRID_DIM * GRID_DIM * GRID_DIM; // 64 spatial cells.
+	static constexpr float CELL_SIZE = 32.0f;
+	static constexpr uint32_t MAX_INSTANCES = 4096;
+	static constexpr uint32_t MAX_PER_PARTITION = 1024;
+	static constexpr uint32_t MAX_GLOBAL = 1024;
+
+	struct ClusterMeshEntry {
+		RID geom_buffer;
+		RID clas_args_buffer;
+		RID clas_data_buffer;
+		RID clas_addr_buffer;
+		RID cblas_args_buffer;
+		RID cblas_data_buffer;
+		RID cblas_addr_buffer;
+		uint32_t cluster_count = 0;
+		uint64_t memory_bytes = 0;
+	};
+
+	RID ptlas;
+	RID ptlas_write_buffer;
+	RID ptlas_cmd_buffer;
+	RID ptlas_count_buffer;
+	uint32_t ptlas_write_capacity = 0;
+	bool ptlas_initialized = false;
+	Vector3 last_camera_cell_origin;
+	uint64_t partition_hashes[PARTITION_COUNT + 1] = {};
+	HashMap<RID, ClusterMeshEntry> cluster_meshes;
+	uint64_t total_clas_bytes = 0;
+	uint32_t total_clusters = 0;
+
+	void free_all() {
+		RenderingDevice *rd = RD::get_singleton();
+		if (rd != nullptr) {
+			for (const KeyValue<RID, ClusterMeshEntry> &kv : cluster_meshes) {
+				const ClusterMeshEntry &e = kv.value;
+				if (e.geom_buffer.is_valid()) {
+					rd->free_rid(e.geom_buffer);
+				}
+				if (e.clas_args_buffer.is_valid()) {
+					rd->free_rid(e.clas_args_buffer);
+				}
+				if (e.clas_data_buffer.is_valid()) {
+					rd->free_rid(e.clas_data_buffer);
+				}
+				if (e.clas_addr_buffer.is_valid()) {
+					rd->free_rid(e.clas_addr_buffer);
+				}
+				if (e.cblas_args_buffer.is_valid()) {
+					rd->free_rid(e.cblas_args_buffer);
+				}
+				if (e.cblas_data_buffer.is_valid()) {
+					rd->free_rid(e.cblas_data_buffer);
+				}
+				if (e.cblas_addr_buffer.is_valid()) {
+					rd->free_rid(e.cblas_addr_buffer);
+				}
+			}
+			if (ptlas.is_valid()) {
+				rd->free_rid(ptlas);
+			}
+			if (ptlas_write_buffer.is_valid()) {
+				rd->free_rid(ptlas_write_buffer);
+			}
+			if (ptlas_cmd_buffer.is_valid()) {
+				rd->free_rid(ptlas_cmd_buffer);
+			}
+			if (ptlas_count_buffer.is_valid()) {
+				rd->free_rid(ptlas_count_buffer);
+			}
+		}
+		cluster_meshes.clear();
+		ptlas = RID();
+		ptlas_write_buffer = RID();
+		ptlas_cmd_buffer = RID();
+		ptlas_count_buffer = RID();
+		ptlas_write_capacity = 0;
+		ptlas_initialized = false;
+		total_clas_bytes = 0;
+		total_clusters = 0;
+		memset(partition_hashes, 0, sizeof(partition_hashes));
+	}
+};
+
+void NextGIRTScene::_free_nv_cluster_rt() {
+	if (nv_cluster_rt != nullptr) {
+		nv_cluster_rt->free_all();
+		memdelete(nv_cluster_rt);
+		nv_cluster_rt = nullptr;
+	}
+}
+
+void NextGIRTScene::_update_nv_cluster_rt(const ::RenderDataRD *p_render_data, const Vector3 &p_camera_pos, const LocalVector<RD::AccelerationStructureInstance> &p_tlas_instances) {
+	RenderingDevice *rd = RD::get_singleton();
+	const bool clas_setting = bool(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_cluster_rt"));
+	const bool omm_setting = bool(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_opacity_micromap"));
+	const uint64_t budget_mib = uint64_t(MAX(16, int(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_cluster_rt_budget_mib"))));
+	stats.clas_budget_bytes = budget_mib * 1024ull * 1024ull;
+
+	const bool clas_hw = rd != nullptr &&
+			rd->has_feature(RD::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE) &&
+			rd->has_feature(RD::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE);
+	const bool omm_hw = rd != nullptr && rd->has_feature(RD::SUPPORTS_OPACITY_MICROMAP);
+
+	const NextGIVendorTierDecision omm_decision = nextgi_resolve_vendor_tier(omm_setting, true, omm_hw, true);
+	stats.nv_opacity_micromap_active = omm_decision.active;
+	stats.nv_opacity_micromap_reason = uint32_t(omm_decision.reason);
+
+	const NextGIVendorTierDecision clas_decision = nextgi_resolve_vendor_tier(clas_setting, true, clas_hw, true);
+	stats.clas_fallback_instances = 0;
+	stats.ptlas_updated_partitions = 0;
+	if (!clas_decision.active) {
+		if (nv_cluster_rt != nullptr) {
+			_free_nv_cluster_rt();
+		}
+		stats.nv_cluster_rt_active = false;
+		stats.nv_cluster_rt_reason = uint32_t(clas_decision.reason);
+		stats.clas_memory_bytes = 0;
+		stats.clas_cluster_count = 0;
+		stats.clas_blas_count = 0;
+		stats.ptlas_partition_count = 0;
+		return;
+	}
+
+	if (nv_cluster_rt == nullptr) {
+		nv_cluster_rt = memnew(NVClusterRTState);
+	}
+	const BitField<RD::BufferCreationBits> rt_bits = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT;
+	if (nv_cluster_rt->ptlas.is_null()) {
+		nv_cluster_rt->ptlas = rd->ptlas_create(
+				NVClusterRTState::MAX_INSTANCES,
+				NVClusterRTState::PARTITION_COUNT,
+				NVClusterRTState::MAX_PER_PARTITION,
+				NVClusterRTState::MAX_GLOBAL,
+				RD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT | RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		if (nv_cluster_rt->ptlas.is_null()) {
+			stats.nv_cluster_rt_active = false;
+			stats.nv_cluster_rt_reason = uint32_t(NEXTGI_VENDOR_UNSUPPORTED);
+			return;
+		}
+		nv_cluster_rt->ptlas_cmd_buffer = rd->storage_buffer_create(24 * (NVClusterRTState::PARTITION_COUNT + 1), {}, 0, rt_bits);
+		nv_cluster_rt->ptlas_count_buffer = rd->storage_buffer_create(16, {}, 0, rt_bits);
+	}
+
+	// Build CLAS + Cluster BLAS for newly seen static meshes with CPU geometry while within clas_budget_bytes.
+	// Overflow meshes remain on the fixed proxy without triggering AS_MEMORY.
+	struct PackedClasBuildInfo {
+		uint32_t cluster_id;
+		uint32_t cluster_flags;
+		uint32_t counts_and_types;
+		uint32_t base_geom_and_flags;
+		uint16_t index_stride;
+		uint16_t vertex_stride;
+		uint16_t geom_flags_stride;
+		uint16_t omm_index_stride;
+		uint64_t index_buffer;
+		uint64_t vertex_buffer;
+		uint64_t geom_flags_buffer;
+		uint64_t omm_array;
+		uint64_t omm_index_buffer;
+	};
+	static_assert(sizeof(PackedClasBuildInfo) == 64, "PackedClasBuildInfo must match VkClusterAccelerationStructureBuildTriangleClusterInfoNV (64 B).");
+
+	struct PackedClusterBlasInfo {
+		uint32_t cluster_count;
+		uint32_t cluster_stride;
+		uint64_t cluster_addresses;
+	};
+	static_assert(sizeof(PackedClusterBlasInfo) == 16, "PackedClusterBlasInfo must match VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV (16 B).");
+
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = p_render_data != nullptr ? _nextgi_rt_fed_instances(p_render_data) : nullptr;
+	if (mesh_storage != nullptr && fed_instances != nullptr) {
+		uint32_t builds_this_frame = 0;
+		for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
+			if (builds_this_frame >= 4) {
+				break;
+			}
+			RenderGeometryInstanceBase *geom_inst = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
+			if (geom_inst == nullptr || geom_inst->data == nullptr) {
+				continue;
+			}
+			const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : geom_inst->data->base;
+			if (!mesh.is_valid() || !mesh_storage->owns_mesh(mesh) || nv_cluster_rt->cluster_meshes.has(mesh)) {
+				continue;
+			}
+			// Build one or more 64-tri clusters directly from the RT arena (zero-copy when <= 256 vertices)
+			// or from surface 0 CPU positions/indices when available.
+			constexpr uint32_t MAX_TRIS_PER_CLUSTER = 64;
+			constexpr uint32_t MAX_VERTS_PER_CLUSTER = 192;
+			MeshStorage::NextGIRTSurfaceInfo sinfo;
+			const bool direct_arena = mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, 0, sinfo) &&
+					sinfo.eligible && sinfo.vertex_count >= 3 && sinfo.vertex_count <= 256 && sinfo.index_count >= 3;
+			Vector<float> cpu_pos_vec;
+			Vector<uint32_t> cpu_idx_vec;
+			if (!direct_arena) {
+				if (!mesh_storage->mesh_nextgi_get_cpu_geometry(mesh, 0, cpu_pos_vec, cpu_idx_vec) || cpu_pos_vec.size() < 9 || cpu_idx_vec.size() < 3) {
+					continue;
+				}
+			}
+			const uint32_t total_tris = MIN((direct_arena ? sinfo.index_count : uint32_t(cpu_idx_vec.size())) / 3u, 4096u);
+			const uint32_t cluster_count = (total_tris + MAX_TRIS_PER_CLUSTER - 1u) / MAX_TRIS_PER_CLUSTER;
+			if (cluster_count == 0) {
+				continue;
+			}
+			const uint32_t max_verts_per_cluster = direct_arena ? sinfo.vertex_count : MAX_VERTS_PER_CLUSTER;
+			const uint32_t max_total_verts = direct_arena ? (cluster_count * sinfo.vertex_count) : (total_tris * 3u);
+
+			RD::ClusterASBuildParams clas_sz_params;
+			clas_sz_params.max_count = cluster_count;
+			clas_sz_params.max_triangles_per_cluster = MAX_TRIS_PER_CLUSTER;
+			clas_sz_params.max_vertices_per_cluster = max_verts_per_cluster;
+			clas_sz_params.max_total_triangles = total_tris;
+			clas_sz_params.max_total_vertices = max_total_verts;
+			clas_sz_params.flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT;
+			const RD::ClusterASBuildSizes clas_sizes = rd->clas_get_build_sizes(clas_sz_params);
+
+			RD::ClusterBLASBuildParams cblas_sz_params;
+			cblas_sz_params.max_blas_count = 1;
+			cblas_sz_params.max_total_clusters = cluster_count;
+			cblas_sz_params.max_clusters_per_blas = cluster_count;
+			cblas_sz_params.flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT;
+			const RD::ClusterASBuildSizes cblas_sizes = rd->cluster_blas_get_build_sizes(cblas_sz_params);
+
+			const uint64_t need_bytes = clas_sizes.data_bytes + cblas_sizes.data_bytes;
+			if (need_bytes == 0 || !nextgi_clas_budget_can_admit(nv_cluster_rt->total_clas_bytes, need_bytes, stats.clas_budget_bytes)) {
+				stats.clas_fallback_instances++;
+				continue;
+			}
+
+			NVClusterRTState::ClusterMeshEntry entry;
+			uint64_t vert_base_addr = 0;
+			uint64_t idx_base_addr = 0;
+			uint32_t index_type_bits = 2u; // 16-bit.
+			uint16_t index_stride_bytes = sizeof(uint16_t);
+			if (direct_arena) {
+				const RID chunk_buf = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(sinfo.chunk);
+				if (chunk_buf.is_null()) {
+					continue;
+				}
+				const uint64_t chunk_addr = rd->buffer_get_device_address(chunk_buf);
+				vert_base_addr = chunk_addr + sinfo.vertex_offset;
+				idx_base_addr = chunk_addr + sinfo.index_offset;
+				index_type_bits = 4u; // VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_32BIT_NV.
+				index_stride_bytes = sizeof(uint32_t);
+			} else {
+				// Pack local non-indexed vertices + sequential uint16 indices per cluster so every cluster has <= 192 local verts.
+				const float *cpu_pos = cpu_pos_vec.ptr();
+				const uint32_t cpu_vcount = uint32_t(cpu_pos_vec.size() / 3);
+				const uint32_t *cpu_idx = cpu_idx_vec.ptr();
+				Vector<uint8_t> geom_bytes;
+				const uint32_t verts_bytes = total_tris * 3u * sizeof(float) * 3u;
+				const uint32_t idx_offset_base = (verts_bytes + 15u) & ~15u;
+				const uint32_t idx_bytes = total_tris * 3u * sizeof(uint16_t);
+				geom_bytes.resize_initialized(idx_offset_base + idx_bytes);
+				float *v_dst = reinterpret_cast<float *>(geom_bytes.ptrw());
+				uint16_t *i_dst = reinterpret_cast<uint16_t *>(geom_bytes.ptrw() + idx_offset_base);
+				for (uint32_t c = 0; c < cluster_count; c++) {
+					const uint32_t first_tri = c * MAX_TRIS_PER_CLUSTER;
+					const uint32_t c_tris = MIN(MAX_TRIS_PER_CLUSTER, total_tris - first_tri);
+					for (uint32_t t = 0; t < c_tris; t++) {
+						for (uint32_t k = 0; k < 3; k++) {
+							const uint32_t src_v = MIN(cpu_idx[(first_tri + t) * 3u + k], cpu_vcount - 1u);
+							const uint32_t dst_v = (first_tri + t) * 3u + k;
+							v_dst[dst_v * 3u + 0] = cpu_pos[src_v * 3u + 0];
+							v_dst[dst_v * 3u + 1] = cpu_pos[src_v * 3u + 1];
+							v_dst[dst_v * 3u + 2] = cpu_pos[src_v * 3u + 2];
+							i_dst[dst_v] = uint16_t(t * 3u + k);
+						}
+					}
+				}
+				entry.geom_buffer = rd->storage_buffer_create(geom_bytes.size(), Span<uint8_t>(geom_bytes.ptrw(), geom_bytes.size()), 0, rt_bits);
+				const uint64_t geom_addr = rd->buffer_get_device_address(entry.geom_buffer);
+				vert_base_addr = geom_addr;
+				idx_base_addr = geom_addr + idx_offset_base;
+			}
+
+			entry.clas_data_buffer = rd->storage_buffer_create(MAX(clas_sizes.data_bytes, uint64_t(256)), {}, 0, rt_bits);
+			entry.clas_addr_buffer = rd->storage_buffer_create(MAX(uint64_t(cluster_count) * sizeof(uint64_t), uint64_t(16)), {}, 0, rt_bits);
+			entry.cblas_data_buffer = rd->storage_buffer_create(MAX(cblas_sizes.data_bytes, uint64_t(256)), {}, 0, rt_bits);
+			entry.cblas_addr_buffer = rd->storage_buffer_create(16, {}, 0, rt_bits);
+
+			const uint64_t clas_addr_buf_addr = rd->buffer_get_device_address(entry.clas_addr_buffer);
+
+			Vector<PackedClasBuildInfo> clas_args;
+			clas_args.resize_initialized(cluster_count);
+			for (uint32_t c = 0; c < cluster_count; c++) {
+				const uint32_t first_tri = c * MAX_TRIS_PER_CLUSTER;
+				const uint32_t c_tris = MIN(MAX_TRIS_PER_CLUSTER, total_tris - first_tri);
+				const uint32_t c_verts = direct_arena ? sinfo.vertex_count : (c_tris * 3u);
+				PackedClasBuildInfo &a = clas_args.write[c];
+				a.cluster_id = c;
+				a.cluster_flags = 0;
+				// triangleCount(9) | vertexCount(9)<<9 | posTrunc(6)<<18 | indexType(4)<<24 | ommIdxType(4)<<28.
+				a.counts_and_types = (c_tris & 0x1FFu) | ((c_verts & 0x1FFu) << 9) | (index_type_bits << 24);
+				// geometryIndex(24)=0 | opaqueFlag(bit 2 -> bit 31 = 4<<29).
+				a.base_geom_and_flags = (4u << 29);
+				a.index_stride = index_stride_bytes;
+				a.vertex_stride = sizeof(float) * 3u;
+				a.index_buffer = idx_base_addr + uint64_t(first_tri) * 3u * index_stride_bytes;
+				a.vertex_buffer = direct_arena ? vert_base_addr : (vert_base_addr + uint64_t(first_tri) * 3u * sizeof(float) * 3u);
+			}
+			entry.clas_args_buffer = rd->storage_buffer_create(clas_args.size() * sizeof(PackedClasBuildInfo), Span<uint8_t>(reinterpret_cast<uint8_t *>(clas_args.ptrw()), clas_args.size() * sizeof(PackedClasBuildInfo)), 0, rt_bits);
+
+			PackedClusterBlasInfo cblas_arg = {};
+			cblas_arg.cluster_count = cluster_count;
+			cblas_arg.cluster_stride = sizeof(uint64_t);
+			cblas_arg.cluster_addresses = clas_addr_buf_addr;
+			entry.cblas_args_buffer = rd->storage_buffer_create(sizeof(PackedClusterBlasInfo), Span<uint8_t>(reinterpret_cast<uint8_t *>(&cblas_arg), sizeof(PackedClusterBlasInfo)), 0, rt_bits);
+
+			RD::ClusterASBuildParams clas_build = clas_sz_params;
+			clas_build.args_buffer = entry.clas_args_buffer;
+			clas_build.args_stride = sizeof(PackedClasBuildInfo);
+			clas_build.dst_data_buffer = entry.clas_data_buffer;
+			clas_build.dst_addresses_buffer = entry.clas_addr_buffer;
+
+			RD::ClusterBLASBuildParams cblas_build = cblas_sz_params;
+			cblas_build.args_buffer = entry.cblas_args_buffer;
+			cblas_build.args_stride = sizeof(PackedClusterBlasInfo);
+			cblas_build.dst_data_buffer = entry.cblas_data_buffer;
+			cblas_build.dst_addresses_buffer = entry.cblas_addr_buffer;
+
+			if (rd->clas_build_from_buffer(clas_build) == OK && rd->cluster_blas_build_from_buffer(cblas_build) == OK) {
+				entry.cluster_count = cluster_count;
+				entry.memory_bytes = need_bytes;
+				nv_cluster_rt->total_clas_bytes += need_bytes;
+				nv_cluster_rt->total_clusters += cluster_count;
+				nv_cluster_rt->cluster_meshes.insert(mesh, entry);
+				builds_this_frame++;
+			} else {
+				if (entry.geom_buffer.is_valid()) {
+					rd->free_rid(entry.geom_buffer);
+				}
+				rd->free_rid(entry.clas_args_buffer);
+				rd->free_rid(entry.clas_data_buffer);
+				rd->free_rid(entry.clas_addr_buffer);
+				rd->free_rid(entry.cblas_args_buffer);
+				rd->free_rid(entry.cblas_data_buffer);
+				rd->free_rid(entry.cblas_addr_buffer);
+			}
+		}
+	}
+
+	// Update PTLAS spatial partitions anchored on the main viewport camera.
+	struct PackedPtlasWriteInstance {
+		float transform[12];
+		float explicit_aabb[6];
+		uint32_t instance_id;
+		uint32_t instance_mask;
+		uint32_t sbt_offset;
+		uint32_t instance_flags;
+		uint32_t instance_index;
+		uint32_t partition_index;
+		uint64_t acceleration_structure;
+	};
+	static_assert(sizeof(PackedPtlasWriteInstance) == 104, "PackedPtlasWriteInstance must match VkPartitionedAccelerationStructureWriteInstanceDataNV (104 B).");
+
+	struct PackedPtlasCommand {
+		uint32_t op_type;
+		uint32_t arg_count;
+		uint64_t arg_data_address;
+		uint64_t arg_data_stride;
+	};
+	static_assert(sizeof(PackedPtlasCommand) == 24, "PackedPtlasCommand must match VkBuildPartitionedAccelerationStructureIndirectCommandNV (24 B).");
+
+	const uint32_t max_write = MIN(uint32_t(p_tlas_instances.size()), NVClusterRTState::MAX_INSTANCES);
+	if (max_write > 0) {
+		const Vector3 snapped_cam = Vector3(
+				Math::floor(p_camera_pos.x / NVClusterRTState::CELL_SIZE) * NVClusterRTState::CELL_SIZE,
+				Math::floor(p_camera_pos.y / NVClusterRTState::CELL_SIZE) * NVClusterRTState::CELL_SIZE,
+				Math::floor(p_camera_pos.z / NVClusterRTState::CELL_SIZE) * NVClusterRTState::CELL_SIZE);
+		const bool camera_cell_moved = !nv_cluster_rt->ptlas_initialized || snapped_cam != nv_cluster_rt->last_camera_cell_origin;
+
+		LocalVector<PackedPtlasWriteInstance> writes;
+		writes.reserve(max_write);
+		uint32_t part_counts[NVClusterRTState::PARTITION_COUNT + 1] = {};
+		uint64_t new_hashes[NVClusterRTState::PARTITION_COUNT + 1] = {};
+
+		uint32_t inst_idx = 0;
+		for (uint32_t i = 0; i < max_write; i++) {
+			const RD::AccelerationStructureInstance &src = p_tlas_instances[i];
+			if (!src.blas.is_valid()) {
+				continue;
+			}
+			const uint64_t blas_addr = rd->acceleration_structure_get_instance_reference(src.blas);
+			if (blas_addr == 0) {
+				continue;
+			}
+			uint32_t part = nextgi_ptlas_partition_for_position(src.transform.origin, snapped_cam, NVClusterRTState::CELL_SIZE, NVClusterRTState::GRID_DIM);
+			uint32_t bucket = part < NVClusterRTState::PARTITION_COUNT ? part : NVClusterRTState::PARTITION_COUNT;
+			if (bucket < NVClusterRTState::PARTITION_COUNT && part_counts[bucket] >= NVClusterRTState::MAX_PER_PARTITION) {
+				part = UINT32_MAX;
+				bucket = NVClusterRTState::PARTITION_COUNT;
+			}
+			if (bucket == NVClusterRTState::PARTITION_COUNT && part_counts[bucket] >= NVClusterRTState::MAX_GLOBAL) {
+				stats.clas_fallback_instances++;
+				continue;
+			}
+			part_counts[bucket]++;
+
+			PackedPtlasWriteInstance w = {};
+			for (int r = 0; r < 3; r++) {
+				w.transform[r * 4 + 0] = src.transform.basis.rows[r][0];
+				w.transform[r * 4 + 1] = src.transform.basis.rows[r][1];
+				w.transform[r * 4 + 2] = src.transform.basis.rows[r][2];
+			}
+			w.transform[3] = src.transform.origin.x;
+			w.transform[7] = src.transform.origin.y;
+			w.transform[11] = src.transform.origin.z;
+			w.instance_id = src.id;
+			w.instance_mask = src.mask;
+			w.sbt_offset = 0;
+			w.instance_flags = uint32_t(src.flags);
+			w.instance_index = inst_idx++;
+			w.partition_index = part;
+			w.acceleration_structure = blas_addr;
+
+			uint64_t h = new_hashes[bucket] ^ 1469598103934665603ull;
+			h = (h ^ blas_addr) * 1099511628211ull;
+			h = (h ^ uint64_t(w.instance_id)) * 1099511628211ull;
+			for (int k = 0; k < 12; k++) {
+				uint32_t bits = 0;
+				memcpy(&bits, &w.transform[k], sizeof(uint32_t));
+				h = (h ^ uint64_t(bits)) * 1099511628211ull;
+			}
+			new_hashes[bucket] = h;
+			writes.push_back(w);
+		}
+
+		uint32_t dirty_partitions = 0;
+		for (uint32_t p = 0; p <= NVClusterRTState::PARTITION_COUNT; p++) {
+			if (camera_cell_moved || new_hashes[p] != nv_cluster_rt->partition_hashes[p]) {
+				if (part_counts[p] > 0 || nv_cluster_rt->partition_hashes[p] != 0) {
+					dirty_partitions++;
+				}
+				nv_cluster_rt->partition_hashes[p] = new_hashes[p];
+			}
+		}
+
+		if (!writes.is_empty() && (camera_cell_moved || dirty_partitions > 0)) {
+			if (writes.size() > nv_cluster_rt->ptlas_write_capacity) {
+				if (nv_cluster_rt->ptlas_write_buffer.is_valid()) {
+					rd->free_rid(nv_cluster_rt->ptlas_write_buffer);
+				}
+				const uint32_t new_cap = MAX(uint32_t(writes.size()), uint32_t(64));
+				nv_cluster_rt->ptlas_write_buffer = rd->storage_buffer_create(new_cap * sizeof(PackedPtlasWriteInstance), {}, 0, rt_bits);
+				nv_cluster_rt->ptlas_write_capacity = nv_cluster_rt->ptlas_write_buffer.is_valid() ? new_cap : 0;
+			}
+			if (nv_cluster_rt->ptlas_write_buffer.is_valid()) {
+				rd->buffer_update(nv_cluster_rt->ptlas_write_buffer, 0, writes.size() * sizeof(PackedPtlasWriteInstance), writes.ptr());
+				PackedPtlasCommand cmd = {};
+				cmd.op_type = 0; // VK_PARTITIONED_ACCELERATION_STRUCTURE_OP_TYPE_WRITE_INSTANCE_NV
+				cmd.arg_count = writes.size();
+				cmd.arg_data_address = rd->buffer_get_device_address(nv_cluster_rt->ptlas_write_buffer);
+				cmd.arg_data_stride = sizeof(PackedPtlasWriteInstance);
+				rd->buffer_update(nv_cluster_rt->ptlas_cmd_buffer, 0, sizeof(PackedPtlasCommand), &cmd);
+				const uint32_t cmd_count = 1;
+				rd->buffer_update(nv_cluster_rt->ptlas_count_buffer, 0, sizeof(uint32_t), &cmd_count);
+				const bool do_update = nv_cluster_rt->ptlas_initialized && !camera_cell_moved;
+				if (rd->ptlas_update_from_buffer(nv_cluster_rt->ptlas, nv_cluster_rt->ptlas_cmd_buffer, 0, nv_cluster_rt->ptlas_count_buffer, 0, do_update) == OK) {
+					nv_cluster_rt->ptlas_initialized = true;
+					nv_cluster_rt->last_camera_cell_origin = snapped_cam;
+					stats.ptlas_updated_partitions = dirty_partitions;
+				}
+			}
+		}
+	}
+
+	stats.nv_cluster_rt_active = true;
+	stats.nv_cluster_rt_reason = uint32_t(NEXTGI_VENDOR_ACTIVE);
+	stats.clas_memory_bytes = nv_cluster_rt->total_clas_bytes + (nv_cluster_rt->ptlas.is_valid() ? rd->ptlas_get_size_bytes(nv_cluster_rt->ptlas) : 0u);
+	stats.clas_cluster_count = nv_cluster_rt->total_clusters;
+	stats.clas_blas_count = nv_cluster_rt->cluster_meshes.size();
+	stats.ptlas_partition_count = NVClusterRTState::PARTITION_COUNT;
 }
 
 } // namespace RendererRD

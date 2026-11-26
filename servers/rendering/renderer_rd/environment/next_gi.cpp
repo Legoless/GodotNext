@@ -1573,6 +1573,54 @@ Dictionary NextGI::get_tier_info() const {
 			}
 		}
 	}
+	// GodotNext: p6f_nv_rt (#90). Vendor-optional NVIDIA cluster AS + partitioned TLAS and 2-state OMM state.
+	{
+		const bool clas_setting = bool(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_cluster_rt"));
+		const bool omm_setting = bool(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_opacity_micromap"));
+		const uint64_t clas_budget = uint64_t(MAX(16, int(GLOBAL_GET("rendering/global_illumination/nextgi/vendor/nv_cluster_rt_budget_mib")))) * 1024ull * 1024ull;
+		const bool has_clas = RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE);
+		const bool has_ptlas = RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE);
+		const bool has_omm = RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_OPACITY_MICROMAP);
+		info["nv_cluster_rt"] = clas_setting;
+		info["nv_opacity_micromap"] = omm_setting;
+		info["supports_cluster_as"] = has_clas;
+		info["supports_partitioned_as"] = has_ptlas;
+		info["supports_opacity_micromap"] = has_omm;
+		if (rt_scene != nullptr) {
+			const NextGIRTScene::Stats &rt_stats = rt_scene->get_stats();
+			info["nv_cluster_rt_active"] = rt_stats.nv_cluster_rt_active;
+			info["nv_cluster_rt_reason"] = String(nextgi_vendor_tier_reason_name(NextGIVendorTierReason(rt_stats.nv_cluster_rt_reason)));
+			info["clas_memory_bytes"] = int64_t(rt_stats.clas_memory_bytes);
+			info["clas_budget_bytes"] = int64_t(rt_stats.clas_budget_bytes);
+			info["clas_cluster_count"] = int64_t(rt_stats.clas_cluster_count);
+			info["clas_blas_count"] = int64_t(rt_stats.clas_blas_count);
+			info["clas_fallback_instances"] = int64_t(rt_stats.clas_fallback_instances);
+			info["ptlas_partition_count"] = int64_t(rt_stats.ptlas_partition_count);
+			info["ptlas_updated_partitions"] = int64_t(rt_stats.ptlas_updated_partitions);
+			info["nv_opacity_micromap_active"] = rt_stats.nv_opacity_micromap_active;
+			info["nv_opacity_micromap_reason"] = String(nextgi_vendor_tier_reason_name(NextGIVendorTierReason(rt_stats.nv_opacity_micromap_reason)));
+			info["omm_count"] = int64_t(rt_stats.omm_count);
+			info["omm_admitted_surfaces"] = int64_t(rt_stats.omm_admitted_surfaces);
+			info["omm_memory_bytes"] = int64_t(rt_stats.omm_memory_bytes);
+		} else {
+			const NextGIVendorTierDecision clas_dec = nextgi_resolve_vendor_tier(clas_setting, false, has_clas && has_ptlas, true);
+			const NextGIVendorTierDecision omm_dec = nextgi_resolve_vendor_tier(omm_setting, false, has_omm, true);
+			info["nv_cluster_rt_active"] = false;
+			info["nv_cluster_rt_reason"] = String(nextgi_vendor_tier_reason_name(clas_dec.reason));
+			info["clas_memory_bytes"] = int64_t(0);
+			info["clas_budget_bytes"] = int64_t(clas_budget);
+			info["clas_cluster_count"] = int64_t(0);
+			info["clas_blas_count"] = int64_t(0);
+			info["clas_fallback_instances"] = int64_t(0);
+			info["ptlas_partition_count"] = int64_t(0);
+			info["ptlas_updated_partitions"] = int64_t(0);
+			info["nv_opacity_micromap_active"] = false;
+			info["nv_opacity_micromap_reason"] = String(nextgi_vendor_tier_reason_name(omm_dec.reason));
+			info["omm_count"] = int64_t(0);
+			info["omm_admitted_surfaces"] = int64_t(0);
+			info["omm_memory_bytes"] = int64_t(0);
+		}
+	}
 	if (MeshStorage::get_singleton() != nullptr) {
 		const MeshStorage::NextGIRTStats ms_stats = MeshStorage::get_singleton()->mesh_nextgi_get_rt_stats();
 		info["blas_bytes_compacted"] = int64_t(ms_stats.blas_bytes_compacted);

@@ -1142,6 +1142,11 @@ public:
 		// draw_list_draw_mesh_tasks_indirect(); draw_list_draw_mesh_tasks_indirect_count() also needs
 		// SUPPORTS_DRAW_INDIRECT_COUNT. Drivers set it only together with SUPPORTS_MESH_SHADER.
 		SUPPORTS_MESH_SHADER_INDIRECT,
+		// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional NVIDIA ray-tracing tiers (PX).
+		// Always appended at the end of Features so script-bound enum values never shift.
+		SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE,
+		SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE,
+		SUPPORTS_OPACITY_MICROMAP,
 	};
 
 	// GodotNext: metal_ray_query (#48, #171)

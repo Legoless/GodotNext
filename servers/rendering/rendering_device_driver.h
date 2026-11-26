@@ -144,6 +144,9 @@ public:
 	DEFINE_ID(RaytracingPipeline);
 	// GodotNext: rd_bindless (#176)
 	DEFINE_ID(BindlessTable);
+	// GodotNext: p6f_nv_rt (#90)
+	DEFINE_ID(PartitionedTLAS);
+	DEFINE_ID(Micromap);
 
 public:
 	/*****************/
@@ -179,6 +182,9 @@ public:
 		BUFFER_USAGE_DEVICE_ADDRESS_BIT = (1 << 17),
 		BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT = (1 << 19),
 		BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT = (1 << 20),
+		// GodotNext: p6f_nv_rt (#90). Matches VK_BUFFER_USAGE_MICROMAP_*_BIT_EXT.
+		BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT = (1 << 23),
+		BUFFER_USAGE_MICROMAP_STORAGE_BIT = (1 << 24),
 		// There are no Vulkan-equivalent. Try to use unused/unclaimed bits.
 		BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT = (1 << 31),
 	};
@@ -805,6 +811,13 @@ public:
 
 	// ----- ACCELERATION STRUCTURE -----
 
+	// GodotNext: p6f_nv_rt (#90). Usage counts for 2-state opacity micromap creation and BLAS attachment.
+	struct MicromapUsage {
+		uint32_t count = 0;
+		uint32_t subdivision_level = 0;
+		uint32_t format = 1; // 1 = 2-state opacity micromap.
+	};
+
 	struct AccelerationStructureGeometry {
 		BitField<AccelerationStructureGeometryFlagBits> flags = {};
 		BufferID vertex_buffer;
@@ -816,6 +829,14 @@ public:
 		uint32_t index_offset = 0;
 		uint32_t index_count = 0;
 		IndexBufferFormat index_format = {};
+		// GodotNext: p6f_nv_rt (#90). Optional 2-state opacity micromap attached to this triangle geometry.
+		MicromapID opacity_micromap;
+		BufferID opacity_micromap_index_buffer;
+		uint64_t opacity_micromap_index_offset = 0;
+		uint32_t opacity_micromap_index_stride = 0;
+		IndexBufferFormat opacity_micromap_index_format = INDEX_BUFFER_FORMAT_UINT32;
+		uint32_t opacity_micromap_base_triangle = 0;
+		Vector<MicromapUsage> opacity_micromap_usages;
 	};
 
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) = 0;
@@ -868,6 +889,111 @@ public:
 	}
 	virtual void command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) {
 		ERR_FAIL_MSG("Acceleration structure compaction is not implemented by this driver.");
+	}
+
+	// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional Cluster AS, Partitioned TLAS, and 2-state Opacity Micromaps.
+	// Opaque, vendor-neutral entry points so DXR clustered geometry can map onto them later.
+	struct ClusterASBuildSizes {
+		uint64_t data_bytes = 0;
+		uint64_t scratch_bytes = 0;
+		uint32_t alignment = 256;
+	};
+
+	struct ClusterASBuildParams {
+		BufferID args_buffer;
+		uint64_t args_offset = 0;
+		uint32_t args_stride = 0;
+		BufferID count_buffer;
+		uint64_t count_offset = 0;
+		BufferID dst_data_buffer;
+		uint64_t dst_data_offset = 0;
+		BufferID dst_addresses_buffer;
+		uint64_t dst_addresses_offset = 0;
+		BufferID dst_sizes_buffer;
+		uint64_t dst_sizes_offset = 0;
+		BufferID scratch_buffer;
+		uint64_t scratch_offset = 0;
+		uint32_t max_count = 0;
+		uint32_t max_triangles_per_cluster = 128;
+		uint32_t max_vertices_per_cluster = 128;
+		uint32_t max_total_triangles = 0;
+		uint32_t max_total_vertices = 0;
+		uint32_t max_geometry_index = 0;
+		BitField<AccelerationStructureFlagBits> flags = {};
+	};
+
+	struct ClusterBLASBuildParams {
+		BufferID args_buffer;
+		uint64_t args_offset = 0;
+		uint32_t args_stride = 0;
+		BufferID count_buffer;
+		uint64_t count_offset = 0;
+		BufferID dst_data_buffer;
+		uint64_t dst_data_offset = 0;
+		BufferID dst_addresses_buffer;
+		uint64_t dst_addresses_offset = 0;
+		BufferID dst_sizes_buffer;
+		uint64_t dst_sizes_offset = 0;
+		BufferID scratch_buffer;
+		uint64_t scratch_offset = 0;
+		uint32_t max_blas_count = 0;
+		uint32_t max_total_clusters = 0;
+		uint32_t max_clusters_per_blas = 0;
+		BitField<AccelerationStructureFlagBits> flags = {};
+	};
+
+	struct PartitionedTLASUpdateParams {
+		PartitionedTLASID ptlas;
+		BufferID infos_buffer;
+		uint64_t infos_offset = 0;
+		BufferID count_buffer;
+		uint64_t count_offset = 0;
+		BufferID scratch_buffer;
+		uint64_t scratch_offset = 0;
+		bool update = false;
+	};
+
+	struct MicromapBuildParams {
+		MicromapID micromap;
+		BufferID data_buffer;
+		uint64_t data_offset = 0;
+		BufferID triangle_buffer;
+		uint64_t triangle_offset = 0;
+		uint32_t triangle_stride = 8;
+		BufferID scratch_buffer;
+		uint64_t scratch_offset = 0;
+	};
+
+	virtual ClusterASBuildSizes clas_get_build_sizes(const ClusterASBuildParams &p_params) { return ClusterASBuildSizes(); }
+	virtual ClusterASBuildSizes cluster_blas_get_build_sizes(const ClusterBLASBuildParams &p_params) { return ClusterASBuildSizes(); }
+	virtual void command_build_clas_from_buffer(CommandBufferID p_cmd_buffer, const ClusterASBuildParams &p_params) {
+		ERR_FAIL_MSG("Cluster acceleration structures are not implemented by this driver.");
+	}
+	virtual void command_build_cluster_blas_from_buffer(CommandBufferID p_cmd_buffer, const ClusterBLASBuildParams &p_params) {
+		ERR_FAIL_MSG("Cluster bottom-level acceleration structures are not implemented by this driver.");
+	}
+	virtual PartitionedTLASID ptlas_create(uint32_t p_max_instances, uint32_t p_partition_count, uint32_t p_max_instances_per_partition, uint32_t p_max_global_instances, BitField<AccelerationStructureFlagBits> p_flags) {
+		ERR_FAIL_V_MSG(PartitionedTLASID(), "Partitioned acceleration structures are not implemented by this driver.");
+	}
+	virtual void ptlas_free(PartitionedTLASID p_ptlas) {
+		ERR_FAIL_MSG("Partitioned acceleration structures are not implemented by this driver.");
+	}
+	virtual uint64_t ptlas_get_size_bytes(PartitionedTLASID p_ptlas) { return 0; }
+	virtual uint64_t ptlas_get_scratch_size_bytes(PartitionedTLASID p_ptlas, bool p_update) { return 0; }
+	virtual uint64_t ptlas_get_device_address(PartitionedTLASID p_ptlas) { return 0; }
+	virtual void command_update_ptlas_from_buffer(CommandBufferID p_cmd_buffer, const PartitionedTLASUpdateParams &p_params) {
+		ERR_FAIL_MSG("Partitioned acceleration structures are not implemented by this driver.");
+	}
+	virtual MicromapID micromap_create(VectorView<MicromapUsage> p_usages, BitField<AccelerationStructureFlagBits> p_flags) {
+		ERR_FAIL_V_MSG(MicromapID(), "Opacity micromaps are not implemented by this driver.");
+	}
+	virtual void micromap_free(MicromapID p_micromap) {
+		ERR_FAIL_MSG("Opacity micromaps are not implemented by this driver.");
+	}
+	virtual uint64_t micromap_get_size_bytes(MicromapID p_micromap) { return 0; }
+	virtual uint64_t micromap_get_scratch_size_bytes(MicromapID p_micromap) { return 0; }
+	virtual void command_build_micromap(CommandBufferID p_cmd_buffer, const MicromapBuildParams &p_params) {
+		ERR_FAIL_MSG("Opacity micromaps are not implemented by this driver.");
 	}
 
 	// ----- PIPELINE -----

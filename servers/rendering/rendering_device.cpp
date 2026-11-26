@@ -572,6 +572,36 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 
 			_check_transfer_worker_buffer(index_buffer);
 		}
+
+		// GodotNext: p6f_nv_rt (#90). Optional 2-state opacity micromap attached to this triangle geometry.
+		if (rd_geometry.opacity_micromap.is_valid()) {
+			ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_OPACITY_MICROMAP), RID(), "The current rendering device does not support opacity micromaps.");
+			Micromap *micromap = micromap_owner.get_or_null(rd_geometry.opacity_micromap);
+			ERR_FAIL_NULL_V_MSG(micromap, RID(), "The opacity micromap of geometry " + itos(i) + " is not valid.");
+			rdd_geometry.opacity_micromap = micromap->driver_id;
+			rdd_geometry.opacity_micromap_base_triangle = rd_geometry.opacity_micromap_base_triangle;
+			rdd_geometry.opacity_micromap_usages = rd_geometry.opacity_micromap_usages;
+			if (micromap->draw_tracker != nullptr && !draw_trackers.has(micromap->draw_tracker)) {
+				draw_trackers.push_back(micromap->draw_tracker);
+			}
+			if (rd_geometry.opacity_micromap_index_buffer.is_valid()) {
+				Buffer *omm_idx_buffer = storage_buffer_owner.get_or_null(rd_geometry.opacity_micromap_index_buffer);
+				ERR_FAIL_NULL_V_MSG(omm_idx_buffer, RID(), "The opacity micromap index buffer of geometry " + itos(i) + " must be a storage buffer.");
+				ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(omm_idx_buffer->usage), RID(), "The opacity micromap index buffer must be created with device-address and build-input usage.");
+				rdd_geometry.opacity_micromap_index_buffer = omm_idx_buffer->driver_id;
+				rdd_geometry.opacity_micromap_index_offset = rd_geometry.opacity_micromap_index_offset;
+				rdd_geometry.opacity_micromap_index_stride = rd_geometry.opacity_micromap_index_stride;
+				rdd_geometry.opacity_micromap_index_format = rd_geometry.opacity_micromap_index_format;
+				if (omm_idx_buffer->draw_tracker != nullptr) {
+					if (!draw_trackers.has(omm_idx_buffer->draw_tracker)) {
+						draw_trackers.push_back(omm_idx_buffer->draw_tracker);
+					}
+				} else {
+					untracked_buffers.insert(rd_geometry.opacity_micromap_index_buffer);
+				}
+				_check_transfer_worker_buffer(omm_idx_buffer);
+			}
+		}
 	}
 
 	AccelerationStructure acceleration_structure;
@@ -606,6 +636,12 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 
 		if (geometry.index_buffer.is_valid()) {
 			_add_dependency(id, geometry.index_buffer);
+		}
+		if (geometry.opacity_micromap.is_valid()) {
+			_add_dependency(id, geometry.opacity_micromap);
+		}
+		if (geometry.opacity_micromap_index_buffer.is_valid()) {
+			_add_dependency(id, geometry.opacity_micromap_index_buffer);
 		}
 	}
 
@@ -1156,6 +1192,383 @@ Error RenderingDevice::acceleration_structure_instance_encode(const Acceleration
 
 	driver->acceleration_structure_instance_write(r_dst, rdd_instance);
 	return OK;
+}
+
+// GodotNext: p6f_nv_rt (#90). Vendor-neutral CLAS, Cluster BLAS, Partitioned TLAS, and 2-state OMM API.
+RenderingDevice::ClusterASBuildSizes RenderingDevice::clas_get_build_sizes(const ClusterASBuildParams &p_params) {
+	ClusterASBuildSizes empty;
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), empty, "Cluster acceleration structures are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, empty);
+	ERR_FAIL_COND_V_MSG(p_params.max_count == 0, empty, "CLAS max_count must be > 0.");
+	ERR_FAIL_COND_V_MSG(p_params.max_triangles_per_cluster == 0 || p_params.max_triangles_per_cluster > 256, empty, "CLAS max_triangles_per_cluster must be in [1, 256].");
+	ERR_FAIL_COND_V_MSG(p_params.max_vertices_per_cluster == 0 || p_params.max_vertices_per_cluster > 256, empty, "CLAS max_vertices_per_cluster must be in [1, 256].");
+
+	RDD::ClusterASBuildParams rdd;
+	rdd.max_count = p_params.max_count;
+	rdd.max_triangles_per_cluster = p_params.max_triangles_per_cluster;
+	rdd.max_vertices_per_cluster = p_params.max_vertices_per_cluster;
+	rdd.max_total_triangles = p_params.max_total_triangles;
+	rdd.max_total_vertices = p_params.max_total_vertices;
+	rdd.max_geometry_index = p_params.max_geometry_index;
+	rdd.flags = p_params.flags;
+	return driver->clas_get_build_sizes(rdd);
+}
+
+Error RenderingDevice::clas_build_from_buffer(const ClusterASBuildParams &p_params) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), ERR_UNAVAILABLE, "Cluster acceleration structures are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(draw_list.active || compute_list.active || raytracing_list.active, ERR_INVALID_PARAMETER, "Building CLAS is forbidden inside an open command list.");
+	ERR_FAIL_COND_V_MSG(p_params.max_count == 0, ERR_INVALID_PARAMETER, "CLAS max_count must be > 0.");
+	ERR_FAIL_COND_V_MSG(p_params.max_triangles_per_cluster == 0 || p_params.max_triangles_per_cluster > 256, ERR_INVALID_PARAMETER, "CLAS max_triangles_per_cluster must be in [1, 256].");
+	ERR_FAIL_COND_V_MSG(p_params.max_vertices_per_cluster == 0 || p_params.max_vertices_per_cluster > 256, ERR_INVALID_PARAMETER, "CLAS max_vertices_per_cluster must be in [1, 256].");
+
+	Buffer *args_buf = storage_buffer_owner.get_or_null(p_params.args_buffer);
+	Buffer *dst_data_buf = storage_buffer_owner.get_or_null(p_params.dst_data_buffer);
+	Buffer *dst_addr_buf = storage_buffer_owner.get_or_null(p_params.dst_addresses_buffer);
+	ERR_FAIL_NULL_V_MSG(args_buf, ERR_INVALID_PARAMETER, "CLAS args_buffer must be a storage buffer.");
+	ERR_FAIL_NULL_V_MSG(dst_data_buf, ERR_INVALID_PARAMETER, "CLAS dst_data_buffer must be a storage buffer.");
+	ERR_FAIL_NULL_V_MSG(dst_addr_buf, ERR_INVALID_PARAMETER, "CLAS dst_addresses_buffer must be a storage buffer.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(args_buf->usage), ERR_INVALID_PARAMETER, "CLAS args_buffer needs device-address and build-input usage.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(dst_data_buf->usage), ERR_INVALID_PARAMETER, "CLAS dst_data_buffer needs device-address and build-input usage.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(dst_addr_buf->usage), ERR_INVALID_PARAMETER, "CLAS dst_addresses_buffer needs device-address and build-input usage.");
+
+	Buffer *count_buf = p_params.count_buffer.is_valid() ? storage_buffer_owner.get_or_null(p_params.count_buffer) : nullptr;
+	if (p_params.count_buffer.is_valid()) {
+		ERR_FAIL_NULL_V_MSG(count_buf, ERR_INVALID_PARAMETER, "CLAS count_buffer must be a storage buffer.");
+		ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(count_buf->usage), ERR_INVALID_PARAMETER, "CLAS count_buffer needs device-address and build-input usage.");
+	}
+	Buffer *dst_sizes_buf = p_params.dst_sizes_buffer.is_valid() ? storage_buffer_owner.get_or_null(p_params.dst_sizes_buffer) : nullptr;
+	if (p_params.dst_sizes_buffer.is_valid()) {
+		ERR_FAIL_NULL_V_MSG(dst_sizes_buf, ERR_INVALID_PARAMETER, "CLAS dst_sizes_buffer must be a storage buffer.");
+		ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(dst_sizes_buf->usage), ERR_INVALID_PARAMETER, "CLAS dst_sizes_buffer needs device-address and build-input usage.");
+	}
+
+	RDD::ClusterASBuildParams rdd;
+	rdd.args_buffer = args_buf->driver_id;
+	rdd.args_offset = p_params.args_offset;
+	rdd.args_stride = p_params.args_stride;
+	rdd.count_buffer = count_buf != nullptr ? count_buf->driver_id : RDD::BufferID();
+	rdd.count_offset = p_params.count_offset;
+	rdd.dst_data_buffer = dst_data_buf->driver_id;
+	rdd.dst_data_offset = p_params.dst_data_offset;
+	rdd.dst_addresses_buffer = dst_addr_buf->driver_id;
+	rdd.dst_addresses_offset = p_params.dst_addresses_offset;
+	rdd.dst_sizes_buffer = dst_sizes_buf != nullptr ? dst_sizes_buf->driver_id : RDD::BufferID();
+	rdd.dst_sizes_offset = p_params.dst_sizes_offset;
+	rdd.max_count = p_params.max_count;
+	rdd.max_triangles_per_cluster = p_params.max_triangles_per_cluster;
+	rdd.max_vertices_per_cluster = p_params.max_vertices_per_cluster;
+	rdd.max_total_triangles = p_params.max_total_triangles;
+	rdd.max_total_vertices = p_params.max_total_vertices;
+	rdd.max_geometry_index = p_params.max_geometry_index;
+	rdd.flags = p_params.flags;
+
+	const ClusterASBuildSizes sizes = driver->clas_get_build_sizes(rdd);
+	ERR_FAIL_COND_V(sizes.data_bytes == 0 || p_params.dst_data_offset + sizes.data_bytes > dst_data_buf->size, ERR_INVALID_PARAMETER);
+
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	Error err = _scratch_ring_allocate(MAX(sizes.scratch_bytes, uint64_t(256)), scratch_buffer, scratch_offset);
+	ERR_FAIL_COND_V(err != OK, err);
+	rdd.scratch_buffer = scratch_buffer;
+	rdd.scratch_offset = scratch_offset;
+
+	_check_transfer_worker_buffer(args_buf);
+	_check_transfer_worker_buffer(dst_data_buf);
+	_check_transfer_worker_buffer(dst_addr_buf);
+	if (count_buf != nullptr) {
+		_check_transfer_worker_buffer(count_buf);
+	}
+	if (dst_sizes_buf != nullptr) {
+		_check_transfer_worker_buffer(dst_sizes_buf);
+	}
+
+	LocalVector<RDG::ResourceTracker *> read_trackers;
+	LocalVector<RDG::ResourceTracker *> write_trackers;
+	if (args_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(args_buf->draw_tracker);
+	}
+	if (count_buf != nullptr && count_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(count_buf->draw_tracker);
+	}
+	if (dst_data_buf->draw_tracker != nullptr) {
+		write_trackers.push_back(dst_data_buf->draw_tracker);
+	}
+	if (dst_addr_buf->draw_tracker != nullptr) {
+		write_trackers.push_back(dst_addr_buf->draw_tracker);
+	}
+	if (dst_sizes_buf != nullptr && dst_sizes_buf->draw_tracker != nullptr) {
+		write_trackers.push_back(dst_sizes_buf->draw_tracker);
+	}
+
+	draw_graph.add_clas_build(rdd, read_trackers, write_trackers);
+	return OK;
+}
+
+RenderingDevice::ClusterASBuildSizes RenderingDevice::cluster_blas_get_build_sizes(const ClusterBLASBuildParams &p_params) {
+	ClusterASBuildSizes empty;
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), empty, "Cluster acceleration structures are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, empty);
+	ERR_FAIL_COND_V_MSG(p_params.max_blas_count == 0 || p_params.max_total_clusters == 0 || p_params.max_clusters_per_blas == 0, empty, "Cluster BLAS counts must be > 0.");
+
+	RDD::ClusterBLASBuildParams rdd;
+	rdd.max_blas_count = p_params.max_blas_count;
+	rdd.max_total_clusters = p_params.max_total_clusters;
+	rdd.max_clusters_per_blas = p_params.max_clusters_per_blas;
+	rdd.flags = p_params.flags;
+	return driver->cluster_blas_get_build_sizes(rdd);
+}
+
+Error RenderingDevice::cluster_blas_build_from_buffer(const ClusterBLASBuildParams &p_params) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), ERR_UNAVAILABLE, "Cluster acceleration structures are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(draw_list.active || compute_list.active || raytracing_list.active, ERR_INVALID_PARAMETER, "Building Cluster BLAS is forbidden inside an open command list.");
+	ERR_FAIL_COND_V_MSG(p_params.max_blas_count == 0 || p_params.max_total_clusters == 0 || p_params.max_clusters_per_blas == 0, ERR_INVALID_PARAMETER, "Cluster BLAS counts must be > 0.");
+
+	Buffer *args_buf = storage_buffer_owner.get_or_null(p_params.args_buffer);
+	Buffer *dst_data_buf = storage_buffer_owner.get_or_null(p_params.dst_data_buffer);
+	Buffer *dst_addr_buf = storage_buffer_owner.get_or_null(p_params.dst_addresses_buffer);
+	ERR_FAIL_NULL_V_MSG(args_buf, ERR_INVALID_PARAMETER, "Cluster BLAS args_buffer must be a storage buffer.");
+	ERR_FAIL_NULL_V_MSG(dst_data_buf, ERR_INVALID_PARAMETER, "Cluster BLAS dst_data_buffer must be a storage buffer.");
+	ERR_FAIL_NULL_V_MSG(dst_addr_buf, ERR_INVALID_PARAMETER, "Cluster BLAS dst_addresses_buffer must be a storage buffer.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(args_buf->usage), ERR_INVALID_PARAMETER, "Cluster BLAS args_buffer needs device-address and build-input usage.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(dst_data_buf->usage), ERR_INVALID_PARAMETER, "Cluster BLAS dst_data_buffer needs device-address and build-input usage.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(dst_addr_buf->usage), ERR_INVALID_PARAMETER, "Cluster BLAS dst_addresses_buffer needs device-address and build-input usage.");
+
+	Buffer *count_buf = p_params.count_buffer.is_valid() ? storage_buffer_owner.get_or_null(p_params.count_buffer) : nullptr;
+	if (p_params.count_buffer.is_valid()) {
+		ERR_FAIL_NULL_V_MSG(count_buf, ERR_INVALID_PARAMETER, "Cluster BLAS count_buffer must be a storage buffer.");
+		ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(count_buf->usage), ERR_INVALID_PARAMETER, "Cluster BLAS count_buffer needs device-address and build-input usage.");
+	}
+	Buffer *dst_sizes_buf = p_params.dst_sizes_buffer.is_valid() ? storage_buffer_owner.get_or_null(p_params.dst_sizes_buffer) : nullptr;
+	if (p_params.dst_sizes_buffer.is_valid()) {
+		ERR_FAIL_NULL_V_MSG(dst_sizes_buf, ERR_INVALID_PARAMETER, "Cluster BLAS dst_sizes_buffer must be a storage buffer.");
+		ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(dst_sizes_buf->usage), ERR_INVALID_PARAMETER, "Cluster BLAS dst_sizes_buffer needs device-address and build-input usage.");
+	}
+
+	RDD::ClusterBLASBuildParams rdd;
+	rdd.args_buffer = args_buf->driver_id;
+	rdd.args_offset = p_params.args_offset;
+	rdd.args_stride = p_params.args_stride;
+	rdd.count_buffer = count_buf != nullptr ? count_buf->driver_id : RDD::BufferID();
+	rdd.count_offset = p_params.count_offset;
+	rdd.dst_data_buffer = dst_data_buf->driver_id;
+	rdd.dst_data_offset = p_params.dst_data_offset;
+	rdd.dst_addresses_buffer = dst_addr_buf->driver_id;
+	rdd.dst_addresses_offset = p_params.dst_addresses_offset;
+	rdd.dst_sizes_buffer = dst_sizes_buf != nullptr ? dst_sizes_buf->driver_id : RDD::BufferID();
+	rdd.dst_sizes_offset = p_params.dst_sizes_offset;
+	rdd.max_blas_count = p_params.max_blas_count;
+	rdd.max_total_clusters = p_params.max_total_clusters;
+	rdd.max_clusters_per_blas = p_params.max_clusters_per_blas;
+	rdd.flags = p_params.flags;
+
+	const ClusterASBuildSizes sizes = driver->cluster_blas_get_build_sizes(rdd);
+	ERR_FAIL_COND_V(sizes.data_bytes == 0 || p_params.dst_data_offset + sizes.data_bytes > dst_data_buf->size, ERR_INVALID_PARAMETER);
+
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	Error err = _scratch_ring_allocate(MAX(sizes.scratch_bytes, uint64_t(256)), scratch_buffer, scratch_offset);
+	ERR_FAIL_COND_V(err != OK, err);
+	rdd.scratch_buffer = scratch_buffer;
+	rdd.scratch_offset = scratch_offset;
+
+	_check_transfer_worker_buffer(args_buf);
+	_check_transfer_worker_buffer(dst_data_buf);
+	_check_transfer_worker_buffer(dst_addr_buf);
+	if (count_buf != nullptr) {
+		_check_transfer_worker_buffer(count_buf);
+	}
+	if (dst_sizes_buf != nullptr) {
+		_check_transfer_worker_buffer(dst_sizes_buf);
+	}
+
+	LocalVector<RDG::ResourceTracker *> read_trackers;
+	LocalVector<RDG::ResourceTracker *> write_trackers;
+	if (args_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(args_buf->draw_tracker);
+	}
+	if (count_buf != nullptr && count_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(count_buf->draw_tracker);
+	}
+	if (dst_data_buf->draw_tracker != nullptr) {
+		write_trackers.push_back(dst_data_buf->draw_tracker);
+	}
+	if (dst_addr_buf->draw_tracker != nullptr) {
+		write_trackers.push_back(dst_addr_buf->draw_tracker);
+	}
+	if (dst_sizes_buf != nullptr && dst_sizes_buf->draw_tracker != nullptr) {
+		write_trackers.push_back(dst_sizes_buf->draw_tracker);
+	}
+
+	draw_graph.add_cluster_blas_build(rdd, read_trackers, write_trackers);
+	return OK;
+}
+
+RID RenderingDevice::ptlas_create(uint32_t p_max_instances, uint32_t p_partition_count, uint32_t p_max_instances_per_partition, uint32_t p_max_global_instances, BitField<AccelerationStructureFlagBits> p_flags) {
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE), RID(), "Partitioned acceleration structures are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, RID());
+	ERR_FAIL_COND_V_MSG(p_max_instances == 0 || p_partition_count == 0, RID(), "PTLAS max_instances and partition_count must be > 0.");
+
+	PartitionedTLAS ptlas;
+	ptlas.driver_id = driver->ptlas_create(p_max_instances, p_partition_count, p_max_instances_per_partition, p_max_global_instances, p_flags);
+	ERR_FAIL_COND_V_MSG(!ptlas.driver_id, RID(), "Failed to create Partitioned TLAS.");
+	ptlas.size_bytes = driver->ptlas_get_size_bytes(ptlas.driver_id);
+	ptlas.max_instances = p_max_instances;
+	ptlas.partition_count = p_partition_count;
+	ptlas.flags = p_flags;
+	ptlas.draw_tracker = RDG::resource_tracker_create();
+	ptlas.draw_tracker->usage = RDG::RESOURCE_USAGE_GENERAL;
+
+	buffer_memory.add(ptlas.size_bytes);
+	acceleration_structure_memory.add(ptlas.size_bytes);
+
+	RID id = ptlas_owner.make_rid(ptlas);
+#ifdef DEV_ENABLED
+	set_resource_name(id, "PTLAS:" + itos(id.get_id()));
+#endif
+	return id;
+}
+
+Error RenderingDevice::ptlas_update_from_buffer(RID p_ptlas, RID p_infos_buffer, uint64_t p_infos_offset, RID p_count_buffer, uint64_t p_count_offset, bool p_update) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE), ERR_UNAVAILABLE, "Partitioned acceleration structures are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(draw_list.active || compute_list.active || raytracing_list.active, ERR_INVALID_PARAMETER, "Updating PTLAS is forbidden inside an open command list.");
+
+	PartitionedTLAS *ptlas = ptlas_owner.get_or_null(p_ptlas);
+	ERR_FAIL_NULL_V_MSG(ptlas, ERR_INVALID_PARAMETER, "PTLAS argument is not valid.");
+	if (p_update) {
+		ERR_FAIL_COND_V_MSG(!ptlas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), ERR_INVALID_PARAMETER, "PTLAS was not created with ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.");
+		ERR_FAIL_COND_V_MSG(!ptlas->built, ERR_INVALID_PARAMETER, "PTLAS must be built once before an incremental update.");
+	}
+
+	Buffer *infos_buf = storage_buffer_owner.get_or_null(p_infos_buffer);
+	Buffer *count_buf = storage_buffer_owner.get_or_null(p_count_buffer);
+	ERR_FAIL_NULL_V_MSG(infos_buf, ERR_INVALID_PARAMETER, "PTLAS infos_buffer must be a storage buffer.");
+	ERR_FAIL_NULL_V_MSG(count_buf, ERR_INVALID_PARAMETER, "PTLAS count_buffer must be a storage buffer.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(infos_buf->usage), ERR_INVALID_PARAMETER, "PTLAS infos_buffer needs device-address and build-input usage.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(count_buf->usage), ERR_INVALID_PARAMETER, "PTLAS count_buffer needs device-address and build-input usage.");
+
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	const uint64_t scratch_bytes = driver->ptlas_get_scratch_size_bytes(ptlas->driver_id, p_update);
+	Error err = _scratch_ring_allocate(MAX(scratch_bytes, uint64_t(256)), scratch_buffer, scratch_offset);
+	ERR_FAIL_COND_V(err != OK, err);
+
+	_check_transfer_worker_buffer(infos_buf);
+	_check_transfer_worker_buffer(count_buf);
+
+	RDD::PartitionedTLASUpdateParams rdd;
+	rdd.ptlas = ptlas->driver_id;
+	rdd.infos_buffer = infos_buf->driver_id;
+	rdd.infos_offset = p_infos_offset;
+	rdd.count_buffer = count_buf->driver_id;
+	rdd.count_offset = p_count_offset;
+	rdd.scratch_buffer = scratch_buffer;
+	rdd.scratch_offset = scratch_offset;
+	rdd.update = p_update;
+
+	LocalVector<RDG::ResourceTracker *> read_trackers;
+	if (infos_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(infos_buf->draw_tracker);
+	}
+	if (count_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(count_buf->draw_tracker);
+	}
+	draw_graph.add_ptlas_update(rdd, ptlas->draw_tracker, read_trackers);
+	ptlas->built = true;
+	return OK;
+}
+
+uint64_t RenderingDevice::ptlas_get_size_bytes(RID p_ptlas) {
+	const PartitionedTLAS *ptlas = ptlas_owner.get_or_null(p_ptlas);
+	ERR_FAIL_NULL_V(ptlas, 0);
+	return ptlas->size_bytes;
+}
+
+uint64_t RenderingDevice::ptlas_get_device_address(RID p_ptlas) {
+	const PartitionedTLAS *ptlas = ptlas_owner.get_or_null(p_ptlas);
+	ERR_FAIL_NULL_V(ptlas, 0);
+	ERR_FAIL_NULL_V(driver, 0);
+	return driver->ptlas_get_device_address(ptlas->driver_id);
+}
+
+RID RenderingDevice::micromap_create(Span<MicromapUsage> p_usages, BitField<AccelerationStructureFlagBits> p_flags) {
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_OPACITY_MICROMAP), RID(), "Opacity micromaps are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, RID());
+	ERR_FAIL_COND_V_MSG(p_usages.is_empty(), RID(), "Opacity micromap requires at least one usage entry.");
+
+	Micromap mm;
+	mm.driver_id = driver->micromap_create(VectorView<RDD::MicromapUsage>(p_usages.ptr(), p_usages.size()), p_flags);
+	ERR_FAIL_COND_V_MSG(!mm.driver_id, RID(), "Failed to create opacity micromap.");
+	mm.size_bytes = driver->micromap_get_size_bytes(mm.driver_id);
+	mm.flags = p_flags;
+	mm.draw_tracker = RDG::resource_tracker_create();
+	mm.draw_tracker->usage = RDG::RESOURCE_USAGE_GENERAL;
+
+	buffer_memory.add(mm.size_bytes);
+	acceleration_structure_memory.add(mm.size_bytes);
+
+	RID id = micromap_owner.make_rid(mm);
+#ifdef DEV_ENABLED
+	set_resource_name(id, "Micromap:" + itos(id.get_id()));
+#endif
+	return id;
+}
+
+Error RenderingDevice::micromap_build(RID p_micromap, RID p_data_buffer, uint64_t p_data_offset, RID p_triangle_buffer, uint64_t p_triangle_offset, uint32_t p_triangle_stride) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_OPACITY_MICROMAP), ERR_UNAVAILABLE, "Opacity micromaps are not supported by the current rendering device.");
+	ERR_FAIL_NULL_V(driver, ERR_UNAVAILABLE);
+	ERR_FAIL_COND_V_MSG(draw_list.active || compute_list.active || raytracing_list.active, ERR_INVALID_PARAMETER, "Building an opacity micromap is forbidden inside an open command list.");
+
+	Micromap *mm = micromap_owner.get_or_null(p_micromap);
+	ERR_FAIL_NULL_V_MSG(mm, ERR_INVALID_PARAMETER, "Micromap argument is not valid.");
+	Buffer *data_buf = storage_buffer_owner.get_or_null(p_data_buffer);
+	Buffer *tri_buf = storage_buffer_owner.get_or_null(p_triangle_buffer);
+	ERR_FAIL_NULL_V_MSG(data_buf, ERR_INVALID_PARAMETER, "Micromap data_buffer must be a storage buffer.");
+	ERR_FAIL_NULL_V_MSG(tri_buf, ERR_INVALID_PARAMETER, "Micromap triangle_buffer must be a storage buffer.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(data_buf->usage), ERR_INVALID_PARAMETER, "Micromap data_buffer needs device-address and build-input usage.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(tri_buf->usage), ERR_INVALID_PARAMETER, "Micromap triangle_buffer needs device-address and build-input usage.");
+
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	const uint64_t scratch_bytes = driver->micromap_get_scratch_size_bytes(mm->driver_id);
+	Error err = _scratch_ring_allocate(MAX(scratch_bytes, uint64_t(256)), scratch_buffer, scratch_offset);
+	ERR_FAIL_COND_V(err != OK, err);
+
+	_check_transfer_worker_buffer(data_buf);
+	_check_transfer_worker_buffer(tri_buf);
+
+	RDD::MicromapBuildParams rdd;
+	rdd.micromap = mm->driver_id;
+	rdd.data_buffer = data_buf->driver_id;
+	rdd.data_offset = p_data_offset;
+	rdd.triangle_buffer = tri_buf->driver_id;
+	rdd.triangle_offset = p_triangle_offset;
+	rdd.triangle_stride = p_triangle_stride;
+	rdd.scratch_buffer = scratch_buffer;
+	rdd.scratch_offset = scratch_offset;
+
+	LocalVector<RDG::ResourceTracker *> read_trackers;
+	if (data_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(data_buf->draw_tracker);
+	}
+	if (tri_buf->draw_tracker != nullptr) {
+		read_trackers.push_back(tri_buf->draw_tracker);
+	}
+	draw_graph.add_micromap_build(rdd, mm->draw_tracker, read_trackers);
+	mm->built = true;
+	return OK;
+}
+
+uint64_t RenderingDevice::micromap_get_size_bytes(RID p_micromap) {
+	const Micromap *mm = micromap_owner.get_or_null(p_micromap);
+	ERR_FAIL_NULL_V(mm, 0);
+	return mm->size_bytes;
 }
 
 /**********************************/
@@ -9377,6 +9790,18 @@ void RenderingDevice::_free_internal(RID p_id) {
 		RDG::resource_tracker_free(acceleration_structure->draw_tracker);
 		frames[frame].acceleration_structures_to_dispose_of.push_back(*acceleration_structure);
 		acceleration_structure_owner.free(p_id);
+	} else if (ptlas_owner.owns(p_id)) {
+		// GodotNext: p6f_nv_rt (#90)
+		PartitionedTLAS *ptlas = ptlas_owner.get_or_null(p_id);
+		RDG::resource_tracker_free(ptlas->draw_tracker);
+		frames[frame].ptlas_to_dispose_of.push_back(*ptlas);
+		ptlas_owner.free(p_id);
+	} else if (micromap_owner.owns(p_id)) {
+		// GodotNext: p6f_nv_rt (#90)
+		Micromap *mm = micromap_owner.get_or_null(p_id);
+		RDG::resource_tracker_free(mm->draw_tracker);
+		frames[frame].micromaps_to_dispose_of.push_back(*mm);
+		micromap_owner.free(p_id);
 	} else if (bindless_table_owner.owns(p_id)) {
 		// GodotNext: rd_bindless (#176). The uniform sets that bound the table were freed as its
 		// dependencies. Releasing its slots completes the frees they deferred.
@@ -9584,6 +10009,8 @@ void RenderingDevice::set_resource_name(RID p_id, const String &p_name) {
 	} else if (bindless_table_owner.owns(p_id)) {
 		// GodotNext: rd_bindless (#176). The table's driver objects have no name of their own; the name is
 		// kept for the leak report.
+	} else if (ptlas_owner.owns(p_id) || micromap_owner.owns(p_id)) {
+		// GodotNext: p6f_nv_rt (#90). Kept for the leak report.
 	} else {
 		ERR_PRINT("Attempted to name invalid ID: " + itos(p_id.get_id()));
 		return;
@@ -9785,6 +10212,22 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 		}
 
 		frames[p_frame].acceleration_structures_to_dispose_of.pop_front();
+	}
+
+	// GodotNext: p6f_nv_rt (#90). Partitioned TLAS and opacity micromaps.
+	while (frames[p_frame].ptlas_to_dispose_of.front()) {
+		PartitionedTLAS &ptlas = frames[p_frame].ptlas_to_dispose_of.front()->get();
+		driver->ptlas_free(ptlas.driver_id);
+		buffer_memory.sub(ptlas.size_bytes);
+		acceleration_structure_memory.sub(ptlas.size_bytes);
+		frames[p_frame].ptlas_to_dispose_of.pop_front();
+	}
+	while (frames[p_frame].micromaps_to_dispose_of.front()) {
+		Micromap &mm = frames[p_frame].micromaps_to_dispose_of.front()->get();
+		driver->micromap_free(mm.driver_id);
+		buffer_memory.sub(mm.size_bytes);
+		acceleration_structure_memory.sub(mm.size_bytes);
+		frames[p_frame].micromaps_to_dispose_of.pop_front();
 	}
 
 	// Uniform sets.
@@ -10845,6 +11288,9 @@ void RenderingDevice::finalize() {
 	_free_rids(compute_pipeline_owner, "Compute");
 	_free_rids(raytracing_pipeline_owner, "RaytracingPipeline");
 	_free_rids(acceleration_structure_owner, "AccelerationStructure");
+	// GodotNext: p6f_nv_rt (#90)
+	_free_rids(ptlas_owner, "PartitionedTLAS");
+	_free_rids(micromap_owner, "Micromap");
 	_free_rids(hit_sbt_owner, "HitShaderBindingTable");
 	_free_rids(uniform_set_owner, "UniformSet");
 	// GodotNext: rd_bindless (#176). Before the resources their slots hold, so deferred frees complete.
@@ -11926,6 +12372,10 @@ void RenderingDevice::_bind_methods() {
 	// GodotNext: rd_mesh_shaders (#178)
 	BIND_ENUM_CONSTANT(SUPPORTS_MESH_SHADER);
 	BIND_ENUM_CONSTANT(SUPPORTS_MESH_SHADER_INDIRECT);
+	// GodotNext: p6f_nv_rt (#90)
+	BIND_ENUM_CONSTANT(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE);
+	BIND_ENUM_CONSTANT(SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE);
+	BIND_ENUM_CONSTANT(SUPPORTS_OPACITY_MICROMAP);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);

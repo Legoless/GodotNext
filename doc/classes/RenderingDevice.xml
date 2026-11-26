@@ -3112,6 +3112,15 @@
 			The device supports [method draw_list_draw_mesh_tasks_indirect], and with [constant SUPPORTS_DRAW_INDIRECT_COUNT] also [method draw_list_draw_mesh_tasks_indirect_count]. It is only reported together with [constant SUPPORTS_MESH_SHADER].
 			[b]Note:[/b] The Vulkan and Direct3D 12 drivers set it together with [constant SUPPORTS_MESH_SHADER] (Direct3D 12 uses [code]ExecuteIndirect[/code] with [code]D3D12_DISPATCH_MESH_ARGUMENTS[/code] records and an optional count buffer; there, task and mesh shaders drawn this way must not read [code]gl_NumWorkGroups[/code], whose value only direct draws set). The Metal driver sets it on Apple9 and later GPUs; Apple7 and Apple8 GPUs draw mesh shaders with direct draws only. On Metal, the indirect count draws clamp their records with a compute pass before the render pass, as [constant SUPPORTS_DRAW_INDIRECT_COUNT] describes.
 		</constant>
+		<constant name="SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE" value="29" enum="Features">
+			The device supports cluster acceleration structures and cluster bottom-level acceleration structures (Vulkan [code]VK_NV_cluster_acceleration_structure[/code]) together with [constant SUPPORTS_RAY_QUERY]. Reports [code]false[/code] on Metal, Direct3D 12, and Vulkan devices without the extension.
+		</constant>
+		<constant name="SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE" value="30" enum="Features">
+			The device supports spatially partitioned top-level acceleration structures (Vulkan [code]VK_NV_partitioned_acceleration_structure[/code]) together with [constant SUPPORTS_RAY_QUERY]. Reports [code]false[/code] on Metal, Direct3D 12, and Vulkan devices without the extension.
+		</constant>
+		<constant name="SUPPORTS_OPACITY_MICROMAP" value="31" enum="Features">
+			The device supports 2-state opacity micromaps attached to bottom-level acceleration structure triangle geometries (Vulkan [code]VK_EXT_opacity_micromap[/code]) together with [constant SUPPORTS_RAY_QUERY]. Reports [code]false[/code] on Metal, Direct3D 12, and Vulkan devices without the extension.
+		</constant>
 		<constant name="COMPUTE_QUEUE_MAIN" value="0" enum="ComputeQueue">
 			Records the compute list on the main queue.
 		</constant>

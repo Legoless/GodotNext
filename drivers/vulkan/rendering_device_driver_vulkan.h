@@ -157,6 +157,27 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		bool reorder_nv = false; // VK_NV_ray_tracing_invocation_reorder's rayTracingInvocationReorder.
 	};
 
+	// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional NVIDIA cluster AS, partitioned TLAS, and opacity micromaps.
+	struct ClusterASCapabilities {
+		bool supported = false;
+		uint32_t max_vertices_per_cluster = 0;
+		uint32_t max_triangles_per_cluster = 0;
+		uint32_t scratch_alignment = 256;
+		uint32_t cluster_byte_alignment = 128;
+		uint32_t cluster_blas_byte_alignment = 256;
+		uint32_t max_geometry_index = 0;
+	};
+
+	struct PartitionedASCapabilities {
+		bool supported = false;
+		uint32_t max_partition_count = 0;
+	};
+
+	struct OpacityMicromapCapabilities {
+		bool supported = false;
+		uint32_t max_opacity_2state_subdivision_level = 0;
+	};
+
 	struct DeviceFunctions {
 		PFN_vkCreateSwapchainKHR CreateSwapchainKHR = nullptr;
 		PFN_vkDestroySwapchainKHR DestroySwapchainKHR = nullptr;
@@ -198,6 +219,17 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		PFN_vkCmdDrawMeshTasksEXT CmdDrawMeshTasksEXT = nullptr;
 		PFN_vkCmdDrawMeshTasksIndirectEXT CmdDrawMeshTasksIndirectEXT = nullptr;
 		PFN_vkCmdDrawMeshTasksIndirectCountEXT CmdDrawMeshTasksIndirectCountEXT = nullptr;
+
+		// GodotNext: p6f_nv_rt (#90). Synchronization2 + NVIDIA CLAS / PTLAS + EXT Opacity Micromaps.
+		PFN_vkCmdPipelineBarrier2 CmdPipelineBarrier2 = nullptr;
+		PFN_vkGetClusterAccelerationStructureBuildSizesNV GetClusterAccelerationStructureBuildSizesNV = nullptr;
+		PFN_vkCmdBuildClusterAccelerationStructureIndirectNV CmdBuildClusterAccelerationStructureIndirectNV = nullptr;
+		PFN_vkGetPartitionedAccelerationStructuresBuildSizesNV GetPartitionedAccelerationStructuresBuildSizesNV = nullptr;
+		PFN_vkCmdBuildPartitionedAccelerationStructuresNV CmdBuildPartitionedAccelerationStructuresNV = nullptr;
+		PFN_vkCreateMicromapEXT CreateMicromapEXT = nullptr;
+		PFN_vkDestroyMicromapEXT DestroyMicromapEXT = nullptr;
+		PFN_vkGetMicromapBuildSizesEXT GetMicromapBuildSizesEXT = nullptr;
+		PFN_vkCmdBuildMicromapsEXT CmdBuildMicromapsEXT = nullptr;
 	};
 	// Debug marker extensions.
 	VkDebugReportObjectTypeEXT _convert_to_debug_report_objectType(VkObjectType p_object_type);
@@ -237,6 +269,11 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	VulkanRayQueryCaps ray_query_caps;
 	AccelerationStructureLimits acceleration_structure_limits;
 	RaytracingCapabilities raytracing_capabilities;
+	// GodotNext: p6f_nv_rt (#90)
+	bool synchronization2_support = false;
+	ClusterASCapabilities cluster_as_capabilities;
+	PartitionedASCapabilities partitioned_as_capabilities;
+	OpacityMicromapCapabilities opacity_micromap_capabilities;
 	Int64AtomicsCapabilities int64_atomics_capabilities; // GodotNext: rd_atomics64 (#175).
 	BindlessCapabilities bindless_capabilities; // GodotNext: rd_bindless (#176).
 	// GodotNext: rd_bindless (#176). Found, not enabled: the table memory line reads its descriptor sizes.
@@ -892,6 +929,30 @@ public:
 		TightLocalVector<VkAccelerationStructureGeometryKHR> geometries;
 		VkAccelerationStructureBuildGeometryInfoKHR build_info;
 		TightLocalVector<VkAccelerationStructureBuildRangeInfoKHR> range_infos;
+		// GodotNext: p6f_nv_rt (#90). Storage for chained OMM descriptors per geometry.
+		TightLocalVector<VkAccelerationStructureTrianglesOpacityMicromapEXT> opacity_micromaps;
+		TightLocalVector<TightLocalVector<VkMicromapUsageEXT>> opacity_micromap_usages;
+	};
+
+	// GodotNext: p6f_nv_rt (#90)
+	struct PartitionedTLASInfo {
+		RDD::BufferID buffer;
+		VkDeviceAddress device_address = 0;
+		uint64_t size_bytes = 0;
+		uint64_t build_scratch_size = 0;
+		uint64_t update_scratch_size = 0;
+		uint32_t scratch_alignment = 256;
+		VkPartitionedAccelerationStructureInstancesInputNV input = {};
+	};
+
+	struct MicromapInfo {
+		VkMicromapEXT vk_micromap = VK_NULL_HANDLE;
+		RDD::BufferID buffer;
+		uint64_t size_bytes = 0;
+		uint64_t scratch_size = 0;
+		uint32_t scratch_alignment = 256;
+		VkBuildMicromapFlagsEXT flags = 0;
+		TightLocalVector<VkMicromapUsageEXT> usages;
 	};
 
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) override final;
@@ -911,6 +972,22 @@ public:
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) override final;
 	// GodotNext: as_build_modes
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) override final;
+	// GodotNext: p6f_nv_rt (#90)
+	virtual ClusterASBuildSizes clas_get_build_sizes(const ClusterASBuildParams &p_params) override final;
+	virtual ClusterASBuildSizes cluster_blas_get_build_sizes(const ClusterBLASBuildParams &p_params) override final;
+	virtual void command_build_clas_from_buffer(CommandBufferID p_cmd_buffer, const ClusterASBuildParams &p_params) override final;
+	virtual void command_build_cluster_blas_from_buffer(CommandBufferID p_cmd_buffer, const ClusterBLASBuildParams &p_params) override final;
+	virtual PartitionedTLASID ptlas_create(uint32_t p_max_instances, uint32_t p_partition_count, uint32_t p_max_instances_per_partition, uint32_t p_max_global_instances, BitField<AccelerationStructureFlagBits> p_flags) override final;
+	virtual void ptlas_free(PartitionedTLASID p_ptlas) override final;
+	virtual uint64_t ptlas_get_size_bytes(PartitionedTLASID p_ptlas) override final;
+	virtual uint64_t ptlas_get_scratch_size_bytes(PartitionedTLASID p_ptlas, bool p_update) override final;
+	virtual uint64_t ptlas_get_device_address(PartitionedTLASID p_ptlas) override final;
+	virtual void command_update_ptlas_from_buffer(CommandBufferID p_cmd_buffer, const PartitionedTLASUpdateParams &p_params) override final;
+	virtual MicromapID micromap_create(VectorView<MicromapUsage> p_usages, BitField<AccelerationStructureFlagBits> p_flags) override final;
+	virtual void micromap_free(MicromapID p_micromap) override final;
+	virtual uint64_t micromap_get_size_bytes(MicromapID p_micromap) override final;
+	virtual uint64_t micromap_get_scratch_size_bytes(MicromapID p_micromap) override final;
+	virtual void command_build_micromap(CommandBufferID p_cmd_buffer, const MicromapBuildParams &p_params) override final;
 
 private:
 	void _acceleration_structure_create(VkAccelerationStructureTypeKHR p_type, VkAccelerationStructureBuildSizesInfoKHR p_size_info, AccelerationStructureInfo *r_accel_info);

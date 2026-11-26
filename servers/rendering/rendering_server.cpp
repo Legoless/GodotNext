@@ -4672,6 +4672,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/path_tracing_denoiser", PROPERTY_HINT_ENUM, "Off,Builtin,OIDN"), RSE::VIEWPORT_PATH_TRACING_DENOISER_BUILTIN);
 	// GodotNext: path_tracer_lights_camera (#169). Camera shutter fraction for per-instance motion blur in the path tracer (0 disables).
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/path_tracing_motion_blur_shutter", PROPERTY_HINT_RANGE, "0.0,1.0,0.01"), 1.0f);
+	// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional NVIDIA cluster AS + partitioned TLAS and 2-state opacity micromaps (all default off).
+	GLOBAL_DEF("rendering/global_illumination/nextgi/vendor/nv_cluster_rt", false);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/vendor/nv_opacity_micromap", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/vendor/nv_cluster_rt_budget_mib", PROPERTY_HINT_RANGE, "16,2048,1,or_greater,suffix:MiB"), 128);
 
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);

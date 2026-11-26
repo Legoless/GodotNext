@@ -630,6 +630,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false);
+	// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional NVIDIA cluster AS, partitioned TLAS, and opacity micromaps.
+	_register_requested_device_extension(VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_NV_PARTITIONED_ACCELERATION_STRUCTURE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_SPIRV_1_4_EXTENSION_NAME, false);
 	// GodotNext: rd_atomics64 (#175)
 	_register_requested_device_extension(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME, false);
@@ -1051,6 +1055,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			mesh_shader_features.pNext = next_features;
 			next_features = &mesh_shader_features;
 		}
+		// GodotNext: p6f_nv_rt (#90)
+		VkPhysicalDeviceClusterAccelerationStructureFeaturesNV cluster_as_features = {};
+		VkPhysicalDevicePartitionedAccelerationStructureFeaturesNV partitioned_as_features = {};
+		VkPhysicalDeviceOpacityMicromapFeaturesEXT opacity_micromap_features = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -1160,7 +1168,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			next_features = &raytracing_validation_features;
 		}
 
-		if (enabled_device_extension_names.has(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+		if (physical_device_properties.apiVersion >= VK_API_VERSION_1_3 || enabled_device_extension_names.has(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
 			sync_2_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
 			sync_2_features.pNext = next_features;
 			next_features = &sync_2_features;
@@ -1170,6 +1178,23 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 			ray_query_features.pNext = next_features;
 			next_features = &ray_query_features;
+		}
+
+		// GodotNext: p6f_nv_rt (#90)
+		if (enabled_device_extension_names.has(VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+			cluster_as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_FEATURES_NV;
+			cluster_as_features.pNext = next_features;
+			next_features = &cluster_as_features;
+		}
+		if (enabled_device_extension_names.has(VK_NV_PARTITIONED_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+			partitioned_as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_FEATURES_NV;
+			partitioned_as_features.pNext = next_features;
+			next_features = &partitioned_as_features;
+		}
+		if (enabled_device_extension_names.has(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME)) {
+			opacity_micromap_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
+			opacity_micromap_features.pNext = next_features;
+			next_features = &opacity_micromap_features;
 		}
 
 		// GodotNext: rd_rt_pipelines (#179)
@@ -1329,6 +1354,18 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
 			ray_query_support = ray_query_features.rayQuery;
 		}
+
+		// GodotNext: p6f_nv_rt (#90)
+		synchronization2_support = sync_2_features.synchronization2;
+		if (enabled_device_extension_names.has(VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+			cluster_as_capabilities.supported = cluster_as_features.clusterAccelerationStructure && acceleration_structure_capabilities.acceleration_structure_support && buffer_device_address_support;
+		}
+		if (enabled_device_extension_names.has(VK_NV_PARTITIONED_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+			partitioned_as_capabilities.supported = partitioned_as_features.partitionedAccelerationStructure && acceleration_structure_capabilities.acceleration_structure_support && buffer_device_address_support;
+		}
+		if (enabled_device_extension_names.has(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME)) {
+			opacity_micromap_capabilities.supported = opacity_micromap_features.micromap && synchronization2_support && acceleration_structure_capabilities.acceleration_structure_support && buffer_device_address_support;
+		}
 	}
 
 	if (functions.GetPhysicalDeviceProperties2 != nullptr) {
@@ -1345,6 +1382,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceDescriptorIndexingPropertiesEXT descriptor_indexing_properties = {};
 		VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer_properties = {};
 		VkPhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties = {}; // GodotNext: rd_mesh_shaders (#178)
+		// GodotNext: p6f_nv_rt (#90)
+		VkPhysicalDeviceClusterAccelerationStructurePropertiesNV cluster_as_properties = {};
+		VkPhysicalDevicePartitionedAccelerationStructurePropertiesNV partitioned_as_properties = {};
+		VkPhysicalDeviceOpacityMicromapPropertiesEXT opacity_micromap_properties = {};
 		VkPhysicalDeviceProperties2 physical_device_properties_2 = {};
 
 		const bool use_1_1_properties = physical_device_properties.apiVersion >= VK_API_VERSION_1_1;
@@ -1414,6 +1455,22 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			mesh_shader_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
 			mesh_shader_properties.pNext = next_properties;
 			next_properties = &mesh_shader_properties;
+		}
+		// GodotNext: p6f_nv_rt (#90)
+		if (cluster_as_capabilities.supported) {
+			cluster_as_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_PROPERTIES_NV;
+			cluster_as_properties.pNext = next_properties;
+			next_properties = &cluster_as_properties;
+		}
+		if (partitioned_as_capabilities.supported) {
+			partitioned_as_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_PROPERTIES_NV;
+			partitioned_as_properties.pNext = next_properties;
+			next_properties = &partitioned_as_properties;
+		}
+		if (opacity_micromap_capabilities.supported) {
+			opacity_micromap_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_PROPERTIES_EXT;
+			opacity_micromap_properties.pNext = next_properties;
+			next_properties = &opacity_micromap_properties;
 		}
 
 		physical_device_properties_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -1598,6 +1655,25 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			print_verbose(vformat("  pipeline libraries: %s, indirect trace: %s, invocation reorder: EXT %s, NV %s", raytracing_capabilities.library_support ? "yes" : "no", raytracing_capabilities.trace_rays_indirect_support ? "yes" : "no", raytracing_capabilities.reorder_ext ? "yes" : "no", raytracing_capabilities.reorder_nv ? "yes" : "no"));
 		} else {
 			print_verbose("- Vulkan Raytracing not supported");
+		}
+
+		// GodotNext: p6f_nv_rt (#90)
+		if (cluster_as_capabilities.supported) {
+			cluster_as_capabilities.max_vertices_per_cluster = cluster_as_properties.maxVerticesPerCluster;
+			cluster_as_capabilities.max_triangles_per_cluster = cluster_as_properties.maxTrianglesPerCluster;
+			cluster_as_capabilities.scratch_alignment = MAX(cluster_as_properties.clusterScratchByteAlignment, 256u);
+			cluster_as_capabilities.cluster_byte_alignment = MAX(cluster_as_properties.clusterByteAlignment, 128u);
+			cluster_as_capabilities.cluster_blas_byte_alignment = MAX(cluster_as_properties.clusterBottomLevelByteAlignment, 256u);
+			cluster_as_capabilities.max_geometry_index = cluster_as_properties.maxClusterGeometryIndex;
+			print_verbose(vformat("- Vulkan Cluster AS supported (max_tris=%d, max_verts=%d, scratch_align=%d)", cluster_as_capabilities.max_triangles_per_cluster, cluster_as_capabilities.max_vertices_per_cluster, cluster_as_capabilities.scratch_alignment));
+		}
+		if (partitioned_as_capabilities.supported) {
+			partitioned_as_capabilities.max_partition_count = partitioned_as_properties.maxPartitionCount;
+			print_verbose(vformat("- Vulkan Partitioned AS supported (max_partitions=%d)", partitioned_as_capabilities.max_partition_count));
+		}
+		if (opacity_micromap_capabilities.supported) {
+			opacity_micromap_capabilities.max_opacity_2state_subdivision_level = opacity_micromap_properties.maxOpacity2StateSubdivisionLevel;
+			print_verbose(vformat("- Vulkan Opacity Micromap supported (max_2state_subdiv=%d)", opacity_micromap_capabilities.max_opacity_2state_subdivision_level));
 		}
 	}
 
@@ -1788,6 +1864,36 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		create_info_next = &ray_query_features;
 	}
 
+	// GodotNext: p6f_nv_rt (#90)
+	VkPhysicalDeviceSynchronization2Features sync_2_features = {};
+	if (synchronization2_support) {
+		sync_2_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+		sync_2_features.pNext = create_info_next;
+		sync_2_features.synchronization2 = VK_TRUE;
+		create_info_next = &sync_2_features;
+	}
+	VkPhysicalDeviceClusterAccelerationStructureFeaturesNV cluster_as_features = {};
+	if (cluster_as_capabilities.supported) {
+		cluster_as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_FEATURES_NV;
+		cluster_as_features.pNext = create_info_next;
+		cluster_as_features.clusterAccelerationStructure = VK_TRUE;
+		create_info_next = &cluster_as_features;
+	}
+	VkPhysicalDevicePartitionedAccelerationStructureFeaturesNV partitioned_as_features = {};
+	if (partitioned_as_capabilities.supported) {
+		partitioned_as_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_FEATURES_NV;
+		partitioned_as_features.pNext = create_info_next;
+		partitioned_as_features.partitionedAccelerationStructure = VK_TRUE;
+		create_info_next = &partitioned_as_features;
+	}
+	VkPhysicalDeviceOpacityMicromapFeaturesEXT opacity_micromap_features = {};
+	if (opacity_micromap_capabilities.supported) {
+		opacity_micromap_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
+		opacity_micromap_features.pNext = create_info_next;
+		opacity_micromap_features.micromap = VK_TRUE;
+		create_info_next = &opacity_micromap_features;
+	}
+
 	VkPhysicalDeviceVulkan11Features vulkan_1_1_features = {};
 	VkPhysicalDevice16BitStorageFeaturesKHR storage_features = {};
 	VkPhysicalDeviceMultiviewFeatures multiview_features = {};
@@ -1971,6 +2077,28 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			device_functions.CmdTraceRaysKHR = PFN_vkCmdTraceRaysKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdTraceRaysKHR"));
 			// GodotNext: rd_rt_pipelines (#179)
 			device_functions.CmdTraceRaysIndirectKHR = PFN_vkCmdTraceRaysIndirectKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdTraceRaysIndirectKHR"));
+		}
+
+		// GodotNext: p6f_nv_rt (#90)
+		if (synchronization2_support) {
+			device_functions.CmdPipelineBarrier2 = PFN_vkCmdPipelineBarrier2(functions.GetDeviceProcAddr(vk_device, "vkCmdPipelineBarrier2"));
+			if (device_functions.CmdPipelineBarrier2 == nullptr) {
+				device_functions.CmdPipelineBarrier2 = PFN_vkCmdPipelineBarrier2(functions.GetDeviceProcAddr(vk_device, "vkCmdPipelineBarrier2KHR"));
+			}
+		}
+		if (cluster_as_capabilities.supported) {
+			device_functions.GetClusterAccelerationStructureBuildSizesNV = PFN_vkGetClusterAccelerationStructureBuildSizesNV(functions.GetDeviceProcAddr(vk_device, "vkGetClusterAccelerationStructureBuildSizesNV"));
+			device_functions.CmdBuildClusterAccelerationStructureIndirectNV = PFN_vkCmdBuildClusterAccelerationStructureIndirectNV(functions.GetDeviceProcAddr(vk_device, "vkCmdBuildClusterAccelerationStructureIndirectNV"));
+		}
+		if (partitioned_as_capabilities.supported) {
+			device_functions.GetPartitionedAccelerationStructuresBuildSizesNV = PFN_vkGetPartitionedAccelerationStructuresBuildSizesNV(functions.GetDeviceProcAddr(vk_device, "vkGetPartitionedAccelerationStructuresBuildSizesNV"));
+			device_functions.CmdBuildPartitionedAccelerationStructuresNV = PFN_vkCmdBuildPartitionedAccelerationStructuresNV(functions.GetDeviceProcAddr(vk_device, "vkCmdBuildPartitionedAccelerationStructuresNV"));
+		}
+		if (opacity_micromap_capabilities.supported) {
+			device_functions.CreateMicromapEXT = PFN_vkCreateMicromapEXT(functions.GetDeviceProcAddr(vk_device, "vkCreateMicromapEXT"));
+			device_functions.DestroyMicromapEXT = PFN_vkDestroyMicromapEXT(functions.GetDeviceProcAddr(vk_device, "vkDestroyMicromapEXT"));
+			device_functions.GetMicromapBuildSizesEXT = PFN_vkGetMicromapBuildSizesEXT(functions.GetDeviceProcAddr(vk_device, "vkGetMicromapBuildSizesEXT"));
+			device_functions.CmdBuildMicromapsEXT = PFN_vkCmdBuildMicromapsEXT(functions.GetDeviceProcAddr(vk_device, "vkCmdBuildMicromapsEXT"));
 		}
 	}
 
@@ -2425,6 +2553,9 @@ static_assert(ENUM_MEMBERS_EQUAL(RDD::BUFFER_USAGE_SHADER_BINDING_TABLE_BIT, VK_
 static_assert(ENUM_MEMBERS_EQUAL(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR));
+// GodotNext: p6f_nv_rt (#90)
+static_assert(ENUM_MEMBERS_EQUAL(RDD::BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT, VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::BUFFER_USAGE_MICROMAP_STORAGE_BIT, VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT));
 
 RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) {
 	uint32_t alignment = 16u; // 16 bytes is reasonable.
@@ -2448,6 +2579,21 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	create_info.size = p_size;
 	create_info.usage = p_usage & ~BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT;
+	// GodotNext: p6f_nv_rt (#90). Allow RT build-input buffers to also feed micromap builds and CLAS
+	// storage when supported, and strip micromap usage flags on devices without VK_EXT_opacity_micromap.
+	if (opacity_micromap_capabilities.supported) {
+		if (p_usage.has_flag(BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)) {
+			create_info.usage |= VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT;
+		}
+	} else {
+		create_info.usage &= ~(VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT | VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT);
+	}
+	if (cluster_as_capabilities.supported &&
+			p_usage.has_flag(BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT) &&
+			p_usage.has_flag(BUFFER_USAGE_STORAGE_BIT) &&
+			p_usage.has_flag(BUFFER_USAGE_DEVICE_ADDRESS_BIT)) {
+		create_info.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+	}
 	create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	// GodotNext: async_compute (#174).
 	if (!resource_sharing_queue_families.is_empty()) {
@@ -7295,6 +7441,18 @@ RDD::AccelerationStructureID RenderingDeviceDriverVulkan::blas_create(VectorView
 
 	accel_info->geometries.resize(p_geometries.size());
 	accel_info->range_infos.resize(p_geometries.size());
+	// GodotNext: p6f_nv_rt (#90). Pre-size OMM descriptor storage before taking pNext pointers.
+	bool has_any_omm = false;
+	for (uint32_t i = 0; i < p_geometries.size(); i++) {
+		if (p_geometries[i].opacity_micromap) {
+			has_any_omm = true;
+			break;
+		}
+	}
+	if (has_any_omm) {
+		accel_info->opacity_micromaps.resize_initialized(p_geometries.size());
+		accel_info->opacity_micromap_usages.resize(p_geometries.size());
+	}
 
 	thread_local LocalVector<uint32_t> max_primitive_counts;
 	max_primitive_counts.resize(p_geometries.size());
@@ -7314,6 +7472,41 @@ RDD::AccelerationStructureID RenderingDeviceDriverVulkan::blas_create(VectorView
 		vk_geometry.geometry.triangles.vertexStride = geometry.vertex_stride;
 		// Number of vertices in vertexData minus one, aka max vertex index.
 		vk_geometry.geometry.triangles.maxVertex = (geometry.vertex_count ? (geometry.vertex_count - 1) : 0);
+
+		// GodotNext: p6f_nv_rt (#90). Chain 2-state opacity micromap when attached.
+		if (has_any_omm && geometry.opacity_micromap && opacity_micromap_capabilities.supported) {
+			const MicromapInfo *mm_info = (const MicromapInfo *)geometry.opacity_micromap.id;
+			if (mm_info != nullptr && mm_info->vk_micromap != VK_NULL_HANDLE) {
+				VkAccelerationStructureTrianglesOpacityMicromapEXT &vk_omm = accel_info->opacity_micromaps[i];
+				vk_omm = {};
+				vk_omm.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT;
+				vk_omm.micromap = mm_info->vk_micromap;
+				vk_omm.baseTriangle = geometry.opacity_micromap_base_triangle;
+				if (geometry.opacity_micromap_index_buffer != BufferID()) {
+					vk_omm.indexType = (geometry.opacity_micromap_index_format == INDEX_BUFFER_FORMAT_UINT16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+					vk_omm.indexBuffer.deviceAddress = buffer_get_device_address(geometry.opacity_micromap_index_buffer) + geometry.opacity_micromap_index_offset;
+					vk_omm.indexStride = geometry.opacity_micromap_index_stride ? geometry.opacity_micromap_index_stride : (geometry.opacity_micromap_index_format == INDEX_BUFFER_FORMAT_UINT16 ? 2u : 4u);
+				} else {
+					vk_omm.indexType = VK_INDEX_TYPE_NONE_KHR;
+				}
+				TightLocalVector<VkMicromapUsageEXT> &vk_usages = accel_info->opacity_micromap_usages[i];
+				if (!geometry.opacity_micromap_usages.is_empty()) {
+					vk_usages.resize(geometry.opacity_micromap_usages.size());
+					for (int u = 0; u < geometry.opacity_micromap_usages.size(); u++) {
+						vk_usages[u].count = geometry.opacity_micromap_usages[u].count;
+						vk_usages[u].subdivisionLevel = geometry.opacity_micromap_usages[u].subdivision_level;
+						vk_usages[u].format = geometry.opacity_micromap_usages[u].format;
+					}
+					vk_omm.usageCountsCount = vk_usages.size();
+					vk_omm.pUsageCounts = vk_usages.ptr();
+				} else if (!mm_info->usages.is_empty()) {
+					vk_usages = mm_info->usages;
+					vk_omm.usageCountsCount = vk_usages.size();
+					vk_omm.pUsageCounts = vk_usages.ptr();
+				}
+				vk_geometry.geometry.triangles.pNext = &vk_omm;
+			}
+		}
 
 		// Info for building BLAS.
 		uint32_t primitive_count;
@@ -7510,6 +7703,17 @@ RDD::AccelerationStructureID RenderingDeviceDriverVulkan::acceleration_structure
 	info->build_info = src->build_info;
 	info->range_infos = src->range_infos;
 	info->build_info.pGeometries = info->geometries.ptr();
+	// GodotNext: p6f_nv_rt (#90). Keep OMM descriptor pointers bound to this copy's storage.
+	if (!src->opacity_micromaps.is_empty()) {
+		info->opacity_micromaps = src->opacity_micromaps;
+		info->opacity_micromap_usages = src->opacity_micromap_usages;
+		for (uint32_t i = 0; i < info->geometries.size() && i < info->opacity_micromaps.size(); i++) {
+			if (info->opacity_micromaps[i].sType == VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT) {
+				info->opacity_micromaps[i].pUsageCounts = info->opacity_micromap_usages[i].is_empty() ? nullptr : info->opacity_micromap_usages[i].ptr();
+				info->geometries[i].geometry.triangles.pNext = &info->opacity_micromaps[i];
+			}
+		}
+	}
 
 	RDD::BufferID buffer = buffer_create(p_size, RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT | RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, UINT64_MAX);
 	if (!buffer) {
@@ -7668,6 +7872,408 @@ void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffe
 	const VkAccelerationStructureBuildRangeInfoKHR *range_infos = accel_info->range_infos.ptr();
 
 	device_functions.CmdBuildAccelerationStructuresKHR(command_buffer->vk_command_buffer, 1, build_info, &range_infos);
+#endif
+}
+
+// GodotNext: p6f_nv_rt (#90). NVIDIA Cluster AS, Partitioned TLAS, and 2-state Opacity Micromaps.
+#if VULKAN_RAYTRACING_ENABLED
+static VkBuildMicromapFlagsEXT _rd_to_vk_micromap_flags(BitField<RDD::AccelerationStructureFlagBits> p_flags) {
+	VkBuildMicromapFlagsEXT flags = 0;
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT)) {
+		flags |= VK_BUILD_MICROMAP_PREFER_FAST_TRACE_BIT_EXT;
+	}
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT)) {
+		flags |= VK_BUILD_MICROMAP_PREFER_FAST_BUILD_BIT_EXT;
+	}
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT)) {
+		flags |= VK_BUILD_MICROMAP_ALLOW_COMPACTION_BIT_EXT;
+	}
+	return flags;
+}
+#endif
+
+RDD::ClusterASBuildSizes RenderingDeviceDriverVulkan::clas_get_build_sizes(const ClusterASBuildParams &p_params) {
+	ClusterASBuildSizes out;
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), out);
+	ERR_FAIL_COND_V(p_params.max_count == 0 || p_params.max_triangles_per_cluster == 0 || p_params.max_vertices_per_cluster == 0, out);
+
+	VkClusterAccelerationStructureTriangleClusterInputNV tri_input = {};
+	tri_input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV;
+	tri_input.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	tri_input.maxGeometryIndexValue = p_params.max_geometry_index;
+	tri_input.maxClusterUniqueGeometryCount = MAX(1u, MIN(p_params.max_geometry_index + 1u, p_params.max_triangles_per_cluster));
+	tri_input.maxClusterTriangleCount = p_params.max_triangles_per_cluster;
+	tri_input.maxClusterVertexCount = p_params.max_vertices_per_cluster;
+	tri_input.maxTotalTriangleCount = p_params.max_total_triangles ? p_params.max_total_triangles : (p_params.max_count * p_params.max_triangles_per_cluster);
+	tri_input.maxTotalVertexCount = p_params.max_total_vertices ? p_params.max_total_vertices : (p_params.max_count * p_params.max_vertices_per_cluster);
+	tri_input.minPositionTruncateBitCount = 0;
+
+	VkClusterAccelerationStructureInputInfoNV input = {};
+	input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV;
+	input.maxAccelerationStructureCount = p_params.max_count;
+	input.flags = p_params.flags;
+	input.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_TRIANGLE_CLUSTER_NV;
+	input.opMode = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
+	input.opInput.pTriangleClusters = &tri_input;
+
+	VkAccelerationStructureBuildSizesInfoKHR size_info = {};
+	size_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	device_functions.GetClusterAccelerationStructureBuildSizesNV(vk_device, &input, &size_info);
+
+	out.alignment = cluster_as_capabilities.cluster_byte_alignment;
+	out.data_bytes = size_info.accelerationStructureSize + out.alignment;
+	out.scratch_bytes = size_info.buildScratchSize + cluster_as_capabilities.scratch_alignment;
+#endif
+	return out;
+}
+
+RDD::ClusterASBuildSizes RenderingDeviceDriverVulkan::cluster_blas_get_build_sizes(const ClusterBLASBuildParams &p_params) {
+	ClusterASBuildSizes out;
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE), out);
+	ERR_FAIL_COND_V(p_params.max_blas_count == 0 || p_params.max_total_clusters == 0 || p_params.max_clusters_per_blas == 0, out);
+
+	VkClusterAccelerationStructureClustersBottomLevelInputNV blas_input = {};
+	blas_input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV;
+	blas_input.maxTotalClusterCount = p_params.max_total_clusters;
+	blas_input.maxClusterCountPerAccelerationStructure = p_params.max_clusters_per_blas;
+
+	VkClusterAccelerationStructureInputInfoNV input = {};
+	input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV;
+	input.maxAccelerationStructureCount = p_params.max_blas_count;
+	input.flags = p_params.flags;
+	input.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
+	input.opMode = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
+	input.opInput.pClustersBottomLevel = &blas_input;
+
+	VkAccelerationStructureBuildSizesInfoKHR size_info = {};
+	size_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	device_functions.GetClusterAccelerationStructureBuildSizesNV(vk_device, &input, &size_info);
+
+	out.alignment = cluster_as_capabilities.cluster_blas_byte_alignment;
+	out.data_bytes = size_info.accelerationStructureSize + out.alignment;
+	out.scratch_bytes = size_info.buildScratchSize + cluster_as_capabilities.scratch_alignment;
+#endif
+	return out;
+}
+
+void RenderingDeviceDriverVulkan::command_build_clas_from_buffer(CommandBufferID p_cmd_buffer, const ClusterASBuildParams &p_params) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE));
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+
+	VkClusterAccelerationStructureTriangleClusterInputNV tri_input = {};
+	tri_input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV;
+	tri_input.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	tri_input.maxGeometryIndexValue = p_params.max_geometry_index;
+	tri_input.maxClusterUniqueGeometryCount = MAX(1u, MIN(p_params.max_geometry_index + 1u, p_params.max_triangles_per_cluster));
+	tri_input.maxClusterTriangleCount = p_params.max_triangles_per_cluster;
+	tri_input.maxClusterVertexCount = p_params.max_vertices_per_cluster;
+	tri_input.maxTotalTriangleCount = p_params.max_total_triangles ? p_params.max_total_triangles : (p_params.max_count * p_params.max_triangles_per_cluster);
+	tri_input.maxTotalVertexCount = p_params.max_total_vertices ? p_params.max_total_vertices : (p_params.max_count * p_params.max_vertices_per_cluster);
+	tri_input.minPositionTruncateBitCount = 0;
+
+	const uint32_t stride = p_params.args_stride ? p_params.args_stride : uint32_t(sizeof(VkClusterAccelerationStructureBuildTriangleClusterInfoNV));
+
+	VkClusterAccelerationStructureCommandsInfoNV cmd_info = {};
+	cmd_info.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV;
+	cmd_info.input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV;
+	cmd_info.input.maxAccelerationStructureCount = p_params.max_count;
+	cmd_info.input.flags = p_params.flags;
+	cmd_info.input.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_TRIANGLE_CLUSTER_NV;
+	cmd_info.input.opMode = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
+	cmd_info.input.opInput.pTriangleClusters = &tri_input;
+	cmd_info.dstImplicitData = _align_up_address(buffer_get_device_address(p_params.dst_data_buffer) + p_params.dst_data_offset, cluster_as_capabilities.cluster_byte_alignment);
+	cmd_info.scratchData = _align_up_address(buffer_get_device_address(p_params.scratch_buffer) + p_params.scratch_offset, cluster_as_capabilities.scratch_alignment);
+	cmd_info.dstAddressesArray.deviceAddress = buffer_get_device_address(p_params.dst_addresses_buffer) + p_params.dst_addresses_offset;
+	cmd_info.dstAddressesArray.stride = sizeof(uint64_t);
+	cmd_info.dstAddressesArray.size = uint64_t(p_params.max_count) * sizeof(uint64_t);
+	if (p_params.dst_sizes_buffer) {
+		cmd_info.dstSizesArray.deviceAddress = buffer_get_device_address(p_params.dst_sizes_buffer) + p_params.dst_sizes_offset;
+		cmd_info.dstSizesArray.stride = sizeof(uint32_t);
+		cmd_info.dstSizesArray.size = uint64_t(p_params.max_count) * sizeof(uint32_t);
+	}
+	cmd_info.srcInfosArray.deviceAddress = buffer_get_device_address(p_params.args_buffer) + p_params.args_offset;
+	cmd_info.srcInfosArray.stride = stride;
+	cmd_info.srcInfosArray.size = uint64_t(p_params.max_count) * stride;
+	if (p_params.count_buffer) {
+		cmd_info.srcInfosCount = buffer_get_device_address(p_params.count_buffer) + p_params.count_offset;
+	}
+	cmd_info.addressResolutionFlags = VK_CLUSTER_ACCELERATION_STRUCTURE_ADDRESS_RESOLUTION_NONE_NV;
+
+	device_functions.CmdBuildClusterAccelerationStructureIndirectNV(command_buffer->vk_command_buffer, &cmd_info);
+#endif
+}
+
+void RenderingDeviceDriverVulkan::command_build_cluster_blas_from_buffer(CommandBufferID p_cmd_buffer, const ClusterBLASBuildParams &p_params) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND(!has_feature(SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE));
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+
+	VkClusterAccelerationStructureClustersBottomLevelInputNV blas_input = {};
+	blas_input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV;
+	blas_input.maxTotalClusterCount = p_params.max_total_clusters;
+	blas_input.maxClusterCountPerAccelerationStructure = p_params.max_clusters_per_blas;
+
+	const uint32_t stride = p_params.args_stride ? p_params.args_stride : uint32_t(sizeof(VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV));
+
+	VkClusterAccelerationStructureCommandsInfoNV cmd_info = {};
+	cmd_info.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV;
+	cmd_info.input.sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV;
+	cmd_info.input.maxAccelerationStructureCount = p_params.max_blas_count;
+	cmd_info.input.flags = p_params.flags;
+	cmd_info.input.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
+	cmd_info.input.opMode = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
+	cmd_info.input.opInput.pClustersBottomLevel = &blas_input;
+	cmd_info.dstImplicitData = _align_up_address(buffer_get_device_address(p_params.dst_data_buffer) + p_params.dst_data_offset, cluster_as_capabilities.cluster_blas_byte_alignment);
+	cmd_info.scratchData = _align_up_address(buffer_get_device_address(p_params.scratch_buffer) + p_params.scratch_offset, cluster_as_capabilities.scratch_alignment);
+	cmd_info.dstAddressesArray.deviceAddress = buffer_get_device_address(p_params.dst_addresses_buffer) + p_params.dst_addresses_offset;
+	cmd_info.dstAddressesArray.stride = sizeof(uint64_t);
+	cmd_info.dstAddressesArray.size = uint64_t(p_params.max_blas_count) * sizeof(uint64_t);
+	if (p_params.dst_sizes_buffer) {
+		cmd_info.dstSizesArray.deviceAddress = buffer_get_device_address(p_params.dst_sizes_buffer) + p_params.dst_sizes_offset;
+		cmd_info.dstSizesArray.stride = sizeof(uint32_t);
+		cmd_info.dstSizesArray.size = uint64_t(p_params.max_blas_count) * sizeof(uint32_t);
+	}
+	cmd_info.srcInfosArray.deviceAddress = buffer_get_device_address(p_params.args_buffer) + p_params.args_offset;
+	cmd_info.srcInfosArray.stride = stride;
+	cmd_info.srcInfosArray.size = uint64_t(p_params.max_blas_count) * stride;
+	if (p_params.count_buffer) {
+		cmd_info.srcInfosCount = buffer_get_device_address(p_params.count_buffer) + p_params.count_offset;
+	}
+	cmd_info.addressResolutionFlags = VK_CLUSTER_ACCELERATION_STRUCTURE_ADDRESS_RESOLUTION_NONE_NV;
+
+	// Ensure preceding CLAS builds in the same command buffer are visible before building Cluster BLAS.
+	VkMemoryBarrier barrier = {};
+	barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(command_buffer->vk_command_buffer, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+	device_functions.CmdBuildClusterAccelerationStructureIndirectNV(command_buffer->vk_command_buffer, &cmd_info);
+#endif
+}
+
+RDD::PartitionedTLASID RenderingDeviceDriverVulkan::ptlas_create(uint32_t p_max_instances, uint32_t p_partition_count, uint32_t p_max_instances_per_partition, uint32_t p_max_global_instances, BitField<AccelerationStructureFlagBits> p_flags) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE), PartitionedTLASID());
+	ERR_FAIL_COND_V(p_max_instances == 0 || p_partition_count == 0, PartitionedTLASID());
+	if (partitioned_as_capabilities.max_partition_count > 0) {
+		ERR_FAIL_COND_V_MSG(p_partition_count > partitioned_as_capabilities.max_partition_count, PartitionedTLASID(), vformat("Requested %d PTLAS partitions exceeds device limit %d.", p_partition_count, partitioned_as_capabilities.max_partition_count));
+	}
+
+	PartitionedTLASInfo *info = VersatileResource::allocate<PartitionedTLASInfo>(resources_allocator);
+	info->input = {};
+	info->input.sType = VK_STRUCTURE_TYPE_PARTITIONED_ACCELERATION_STRUCTURE_INSTANCES_INPUT_NV;
+	info->input.flags = p_flags;
+	info->input.instanceCount = p_max_instances;
+	info->input.maxInstancePerPartitionCount = p_max_instances_per_partition ? p_max_instances_per_partition : p_max_instances;
+	info->input.partitionCount = p_partition_count;
+	info->input.maxInstanceInGlobalPartitionCount = p_max_global_instances;
+
+	VkAccelerationStructureBuildSizesInfoKHR size_info = {};
+	size_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+	device_functions.GetPartitionedAccelerationStructuresBuildSizesNV(vk_device, &info->input, &size_info);
+
+	constexpr uint64_t PTLAS_ALIGN = 256;
+	const uint64_t alloc_bytes = MAX(size_info.accelerationStructureSize, PTLAS_ALIGN) + PTLAS_ALIGN;
+	RDD::BufferID buffer = buffer_create(alloc_bytes, RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT | RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, UINT64_MAX);
+	if (!buffer) {
+		VersatileResource::free(resources_allocator, info);
+		ERR_FAIL_V_MSG(PartitionedTLASID(), "Couldn't allocate backing buffer for Vulkan partitioned TLAS.");
+	}
+	info->buffer = buffer;
+	info->device_address = _align_up_address(buffer_get_device_address(buffer), PTLAS_ALIGN);
+	info->size_bytes = size_info.accelerationStructureSize;
+	info->scratch_alignment = MAX(acceleration_structure_capabilities.min_acceleration_structure_scratch_offset_alignment, 256u);
+	info->build_scratch_size = size_info.buildScratchSize + info->scratch_alignment;
+	info->update_scratch_size = size_info.updateScratchSize + info->scratch_alignment;
+	return PartitionedTLASID(info);
+#else
+	return PartitionedTLASID();
+#endif
+}
+
+void RenderingDeviceDriverVulkan::ptlas_free(PartitionedTLASID p_ptlas) {
+#if VULKAN_RAYTRACING_ENABLED
+	PartitionedTLASInfo *info = (PartitionedTLASInfo *)p_ptlas.id;
+	ERR_FAIL_NULL(info);
+	if (info->buffer) {
+		buffer_free(info->buffer);
+	}
+	VersatileResource::free(resources_allocator, info);
+#endif
+}
+
+uint64_t RenderingDeviceDriverVulkan::ptlas_get_size_bytes(PartitionedTLASID p_ptlas) {
+	const PartitionedTLASInfo *info = (const PartitionedTLASInfo *)p_ptlas.id;
+	return info != nullptr ? info->size_bytes : 0;
+}
+
+uint64_t RenderingDeviceDriverVulkan::ptlas_get_scratch_size_bytes(PartitionedTLASID p_ptlas, bool p_update) {
+	const PartitionedTLASInfo *info = (const PartitionedTLASInfo *)p_ptlas.id;
+	if (info == nullptr) {
+		return 0;
+	}
+	return p_update ? info->update_scratch_size : info->build_scratch_size;
+}
+
+uint64_t RenderingDeviceDriverVulkan::ptlas_get_device_address(PartitionedTLASID p_ptlas) {
+	const PartitionedTLASInfo *info = (const PartitionedTLASInfo *)p_ptlas.id;
+	return info != nullptr ? uint64_t(info->device_address) : 0;
+}
+
+void RenderingDeviceDriverVulkan::command_update_ptlas_from_buffer(CommandBufferID p_cmd_buffer, const PartitionedTLASUpdateParams &p_params) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND(!has_feature(SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE));
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const PartitionedTLASInfo *info = (const PartitionedTLASInfo *)p_params.ptlas.id;
+	ERR_FAIL_NULL(info);
+
+	VkBuildPartitionedAccelerationStructureInfoNV build_info = {};
+	build_info.sType = VK_STRUCTURE_TYPE_BUILD_PARTITIONED_ACCELERATION_STRUCTURE_INFO_NV;
+	build_info.input = info->input;
+	build_info.srcAccelerationStructureData = p_params.update ? info->device_address : 0;
+	build_info.dstAccelerationStructureData = info->device_address;
+	build_info.scratchData = _align_up_address(buffer_get_device_address(p_params.scratch_buffer) + p_params.scratch_offset, info->scratch_alignment);
+	build_info.srcInfos = buffer_get_device_address(p_params.infos_buffer) + p_params.infos_offset;
+	build_info.srcInfosCount = buffer_get_device_address(p_params.count_buffer) + p_params.count_offset;
+
+	device_functions.CmdBuildPartitionedAccelerationStructuresNV(command_buffer->vk_command_buffer, &build_info);
+#endif
+}
+
+RDD::MicromapID RenderingDeviceDriverVulkan::micromap_create(VectorView<MicromapUsage> p_usages, BitField<AccelerationStructureFlagBits> p_flags) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_OPACITY_MICROMAP), MicromapID());
+	ERR_FAIL_COND_V(p_usages.size() == 0, MicromapID());
+
+	MicromapInfo *info = VersatileResource::allocate<MicromapInfo>(resources_allocator);
+	info->flags = _rd_to_vk_micromap_flags(p_flags);
+	info->usages.resize(p_usages.size());
+	for (uint32_t i = 0; i < p_usages.size(); i++) {
+		info->usages[i].count = p_usages[i].count;
+		info->usages[i].subdivisionLevel = p_usages[i].subdivision_level;
+		info->usages[i].format = p_usages[i].format;
+	}
+
+	VkMicromapBuildInfoEXT build_info = {};
+	build_info.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT;
+	build_info.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
+	build_info.flags = info->flags;
+	build_info.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
+	build_info.usageCountsCount = info->usages.size();
+	build_info.pUsageCounts = info->usages.ptr();
+
+	VkMicromapBuildSizesInfoEXT size_info = {};
+	size_info.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT;
+	device_functions.GetMicromapBuildSizesEXT(vk_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build_info, &size_info);
+
+	RDD::BufferID buffer = buffer_create(MAX(size_info.micromapSize, uint64_t(256)), RDD::BUFFER_USAGE_MICROMAP_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, UINT64_MAX);
+	if (!buffer) {
+		VersatileResource::free(resources_allocator, info);
+		ERR_FAIL_V_MSG(MicromapID(), "Couldn't allocate backing buffer for Vulkan opacity micromap.");
+	}
+	info->buffer = buffer;
+
+	VkMicromapCreateInfoEXT create_info = {};
+	create_info.sType = VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT;
+	create_info.buffer = ((const BufferInfo *)buffer.id)->vk_buffer;
+	create_info.offset = 0;
+	create_info.size = size_info.micromapSize;
+	create_info.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
+
+	VkResult err = device_functions.CreateMicromapEXT(vk_device, &create_info, nullptr, &info->vk_micromap);
+	if (err != VK_SUCCESS) {
+		buffer_free(buffer);
+		VersatileResource::free(resources_allocator, info);
+		ERR_FAIL_V_MSG(MicromapID(), vformat("Couldn't create Vulkan opacity micromap (VkResult error %d).", err));
+	}
+	_track_handle(info->vk_micromap);
+	info->size_bytes = size_info.micromapSize;
+	info->scratch_alignment = MAX(acceleration_structure_capabilities.min_acceleration_structure_scratch_offset_alignment, 256u);
+	info->scratch_size = size_info.buildScratchSize + info->scratch_alignment;
+	return MicromapID(info);
+#else
+	return MicromapID();
+#endif
+}
+
+void RenderingDeviceDriverVulkan::micromap_free(MicromapID p_micromap) {
+#if VULKAN_RAYTRACING_ENABLED
+	MicromapInfo *info = (MicromapInfo *)p_micromap.id;
+	ERR_FAIL_NULL(info);
+	if (info->vk_micromap != VK_NULL_HANDLE && device_functions.DestroyMicromapEXT != nullptr) {
+		device_functions.DestroyMicromapEXT(vk_device, info->vk_micromap, nullptr);
+		_untrack_handle(info->vk_micromap);
+	}
+	if (info->buffer) {
+		buffer_free(info->buffer);
+	}
+	VersatileResource::free(resources_allocator, info);
+#endif
+}
+
+uint64_t RenderingDeviceDriverVulkan::micromap_get_size_bytes(MicromapID p_micromap) {
+	const MicromapInfo *info = (const MicromapInfo *)p_micromap.id;
+	return info != nullptr ? info->size_bytes : 0;
+}
+
+uint64_t RenderingDeviceDriverVulkan::micromap_get_scratch_size_bytes(MicromapID p_micromap) {
+	const MicromapInfo *info = (const MicromapInfo *)p_micromap.id;
+	return info != nullptr ? info->scratch_size : 0;
+}
+
+void RenderingDeviceDriverVulkan::command_build_micromap(CommandBufferID p_cmd_buffer, const MicromapBuildParams &p_params) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND(!has_feature(SUPPORTS_OPACITY_MICROMAP));
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const MicromapInfo *info = (const MicromapInfo *)p_params.micromap.id;
+	ERR_FAIL_NULL(info);
+
+	if (device_functions.CmdPipelineBarrier2 != nullptr) {
+		VkMemoryBarrier2 pre = {};
+		pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+		pre.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+		pre.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+		pre.dstStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
+		pre.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
+		VkDependencyInfo dep = {};
+		dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		dep.memoryBarrierCount = 1;
+		dep.pMemoryBarriers = &pre;
+		device_functions.CmdPipelineBarrier2(command_buffer->vk_command_buffer, &dep);
+	}
+
+	VkMicromapBuildInfoEXT build_info = {};
+	build_info.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT;
+	build_info.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
+	build_info.flags = info->flags;
+	build_info.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
+	build_info.dstMicromap = info->vk_micromap;
+	build_info.usageCountsCount = info->usages.size();
+	build_info.pUsageCounts = info->usages.ptr();
+	build_info.data.deviceAddress = buffer_get_device_address(p_params.data_buffer) + p_params.data_offset;
+	build_info.scratchData.deviceAddress = _align_up_address(buffer_get_device_address(p_params.scratch_buffer) + p_params.scratch_offset, info->scratch_alignment);
+	build_info.triangleArray.deviceAddress = buffer_get_device_address(p_params.triangle_buffer) + p_params.triangle_offset;
+	build_info.triangleArrayStride = p_params.triangle_stride ? p_params.triangle_stride : uint32_t(sizeof(VkMicromapTriangleEXT));
+
+	device_functions.CmdBuildMicromapsEXT(command_buffer->vk_command_buffer, 1, &build_info);
+
+	if (device_functions.CmdPipelineBarrier2 != nullptr) {
+		VkMemoryBarrier2 post = {};
+		post.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+		post.srcStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
+		post.srcAccessMask = VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
+		post.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+		post.dstAccessMask = VK_ACCESS_2_MICROMAP_READ_BIT_EXT | VK_ACCESS_2_MEMORY_READ_BIT;
+		VkDependencyInfo dep = {};
+		dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		dep.memoryBarrierCount = 1;
+		dep.pMemoryBarriers = &post;
+		device_functions.CmdPipelineBarrier2(command_buffer->vk_command_buffer, &dep);
+	}
 #endif
 }
 
@@ -8793,6 +9399,21 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 		case SUPPORTS_MESH_SHADER:
 		case SUPPORTS_MESH_SHADER_INDIRECT:
 			return device_functions.CmdDrawMeshTasksEXT != nullptr && device_functions.CmdDrawMeshTasksIndirectEXT != nullptr && device_functions.CmdDrawMeshTasksIndirectCountEXT != nullptr;
+		// GodotNext: p6f_nv_rt (#90). Post-v1 vendor-optional NVIDIA cluster AS, partitioned TLAS, and opacity micromaps.
+		case SUPPORTS_CLUSTER_ACCELERATION_STRUCTURE:
+			return has_feature(SUPPORTS_RAY_QUERY) && cluster_as_capabilities.supported &&
+					device_functions.GetClusterAccelerationStructureBuildSizesNV != nullptr &&
+					device_functions.CmdBuildClusterAccelerationStructureIndirectNV != nullptr;
+		case SUPPORTS_PARTITIONED_ACCELERATION_STRUCTURE:
+			return has_feature(SUPPORTS_RAY_QUERY) && partitioned_as_capabilities.supported &&
+					device_functions.GetPartitionedAccelerationStructuresBuildSizesNV != nullptr &&
+					device_functions.CmdBuildPartitionedAccelerationStructuresNV != nullptr;
+		case SUPPORTS_OPACITY_MICROMAP:
+			return has_feature(SUPPORTS_RAY_QUERY) && opacity_micromap_capabilities.supported &&
+					device_functions.CreateMicromapEXT != nullptr &&
+					device_functions.DestroyMicromapEXT != nullptr &&
+					device_functions.GetMicromapBuildSizesEXT != nullptr &&
+					device_functions.CmdBuildMicromapsEXT != nullptr;
 		default:
 			return false;
 	}
