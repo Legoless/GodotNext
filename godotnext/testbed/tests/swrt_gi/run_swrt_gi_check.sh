@@ -123,6 +123,7 @@ run_pass() {
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt
 global_illumination/nextgi/quality=$quality
 global_illumination/nextgi/debug/deny_ray_query=$pass_deny
 global_illumination/nextgi/software_ray_tracing_mode=$swrt_mode

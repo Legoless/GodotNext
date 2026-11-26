@@ -255,6 +255,10 @@ void RenderingDeviceDriverMetal::acceleration_structure_free(AccelerationStructu
 
 	info->as.reset();
 	info->last_instance_buffer.reset();
+	if (info->last_instance_staging.buffer) {
+		allocator->free_buffer(info->last_instance_staging);
+		info->last_instance_staging = {};
+	}
 	info->last_instance_offset = 0;
 	MetalAccelerationStructure resource;
 	resource.allocation = info->allocation;
@@ -323,6 +327,11 @@ void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer
 	NS::UInteger count_offset = 0;
 	ERR_FAIL_COND_MSG(!cb->write_instance_count(p_instance_count, count_buffer, count_offset), "Failed to allocate the acceleration structure instance count.");
 
+	if (info->last_instance_staging.buffer) {
+		cb->defer_acceleration_structure_resource(info->last_instance_staging);
+		info->last_instance_staging = {};
+	}
+
 	MTL::Buffer *instance_buffer = instances->buffer.get();
 	NS::UInteger instance_offset = p_instance_offset;
 	// instanceDescriptorBufferOffset must be a multiple of 64. The 72-byte instance
@@ -336,7 +345,9 @@ void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer
 		memcpy(staging.buffer->contents(), (const uint8_t *)instance_buffer->contents() + p_instance_offset, (size_t)instance_bytes);
 		instance_buffer = staging.buffer.get();
 		instance_offset = 0;
-		cb->defer_acceleration_structure_resource(staging);
+		// Keep staging alive on the TLAS until replaced or freed so subsequent RT traces
+		// reading last_instance_buffer never dereference a recycled heap allocation.
+		info->last_instance_staging = staging;
 	}
 
 	auto *stored = static_cast<MTL::IndirectInstanceAccelerationStructureDescriptor *>(info->descriptor.get());

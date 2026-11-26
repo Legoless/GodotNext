@@ -116,7 +116,6 @@ uint32_t VulkanExtensionProviders::get_provider_count() {
 	return providers.size();
 }
 
-#ifdef DEBUG_ENABLED
 LocalVector<VulkanExtensionProvider *> VulkanExtensionProviders::detach_all_for_tests() {
 	MutexLock lock(mutex);
 	LocalVector<VulkanExtensionProvider *> saved(providers);
@@ -128,7 +127,6 @@ void VulkanExtensionProviders::restore_for_tests(const LocalVector<VulkanExtensi
 	MutexLock lock(mutex);
 	providers = p_saved;
 }
-#endif
 
 // Providers are called on a copy of the list, outside the lock: a provider's own threads can raise
 // validation messages, and those take the lock.

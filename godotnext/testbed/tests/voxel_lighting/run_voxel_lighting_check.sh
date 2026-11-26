@@ -104,6 +104,7 @@ for run in "${runs[@]}"; do
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt
 global_illumination/nextgi/quality=$quality
 global_illumination/nextgi/debug/deny_ray_query=$deny
 CFG

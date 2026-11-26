@@ -72,6 +72,8 @@ grep -qx 'global_illumination/nextgi/enabled=true' "$case_dir/override.cfg"
 check $? "--hwrt=off enables NextGI in override.cfg"
 grep -qx 'global_illumination/nextgi/hardware_ray_tracing=1' "$case_dir/override.cfg"
 check $? "--hwrt=off writes hardware_ray_tracing=1"
+grep -qx 'global_illumination/nextgi/hardware_ray_tracing.macos=1' "$case_dir/override.cfg"
+check $? "--hwrt=off writes hardware_ray_tracing.macos=1"
 [[ ! -e "$root_override" ]]
 check $? "--hwrt=off leaves no override.cfg behind"
 

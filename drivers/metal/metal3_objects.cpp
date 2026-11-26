@@ -362,12 +362,18 @@ QueryPool *QueryPool::create(MTL::Device *p_device, uint32_t p_count) {
 		return nullptr;
 	}
 
+	// Metal limits a single MTLCounterSampleBuffer to 32768 bytes (4096 8-byte timestamp samples).
+	// Clamp requested counts so projects configured with larger Vulkan/D3D12 pools (such as
+	// max_timestamp_query_elements=65535) keep GPU timestamps active on Metal.
+	constexpr uint32_t MAX_METAL_TIMESTAMP_SAMPLES = 32768u / uint32_t(sizeof(MTL::CounterResultTimestamp));
+	const uint32_t sample_count = MIN(MAX(p_count, 1u), MAX_METAL_TIMESTAMP_SAMPLES);
+
 	NS::SharedPtr<MTL::CounterSampleBufferDescriptor> desc = NS::TransferPtr(MTL::CounterSampleBufferDescriptor::alloc()->init());
 	desc->setCounterSet(counter_set);
 	// Shared storage makes the samples resolvable on the CPU, so no blit pass is
 	// needed to convert them.
 	desc->setStorageMode(MTL::StorageModeShared);
-	desc->setSampleCount(p_count);
+	desc->setSampleCount(sample_count);
 
 	NS::Error *error = nullptr;
 	NS::SharedPtr<MTL::CounterSampleBuffer> sample_buffer = NS::TransferPtr(p_device->newCounterSampleBuffer(desc.get(), &error));
@@ -378,7 +384,7 @@ QueryPool *QueryPool::create(MTL::Device *p_device, uint32_t p_count) {
 	pool->dummy_buffer = NS::TransferPtr(p_device->newBuffer(1, MTL::ResourceStorageModePrivate | MTL::ResourceHazardTrackingModeUntracked));
 	pool->device = p_device;
 	p_device->sampleTimestamps(&pool->cpu_base, &pool->gpu_base);
-	pool->count = p_count;
+	pool->count = sample_count;
 	return pool;
 }
 
@@ -404,19 +410,26 @@ void QueryPool::get_results(uint32_t p_count, uint64_t *r_results) {
 		return;
 	}
 
-	NS::Data *data = sample_buffer->resolveCounterRange(NS::Range::Make(0, p_count));
+	const uint32_t resolve_count = MIN(p_count, count);
+	NS::Data *data = sample_buffer->resolveCounterRange(NS::Range::Make(0, resolve_count));
 	ERR_FAIL_NULL(data);
 	const MTL::CounterResultTimestamp *src = (const MTL::CounterResultTimestamp *)data->bytes();
 	uint64_t last = 0;
-	for (uint32_t i = 0; i < p_count; i++) {
+	for (uint32_t i = 0; i < resolve_count; i++) {
 		// A slot the GPU never wrote resolves to the error value; hold the previous
 		// reading so the profiler reports a zero length span rather than garbage.
 		last = src[i].timestamp == COUNTER_ERROR_VALUE ? last : uint64_t((double)src[i].timestamp * to_nano);
 		r_results[i] = last;
 	}
+	for (uint32_t i = resolve_count; i < p_count; i++) {
+		r_results[i] = last;
+	}
 }
 
 void MDCommandBuffer::timestamp_write(QueryPool *p_pool, uint32_t p_index) {
+	if (p_index >= p_pool->get_count()) {
+		return;
+	}
 	end();
 
 	NS::SharedPtr<MTL::BlitPassDescriptor> desc = NS::TransferPtr(MTL::BlitPassDescriptor::alloc()->init());
