@@ -269,7 +269,7 @@ private:
 	void _set_card_rects(InstancePages &r_pages, const LocalVector<Rect2i> &p_rects);
 	void _free_set_blocks(NextGIBuddyAllocator &r_buddy, const InstancePages &p_pages) const;
 	void _build_eviction_order();
-	bool _place_cards(const LocalVector<uint32_t> &p_sides, float p_solid_angle, uint64_t p_self_key, LocalVector<Rect2i> &r_rects, bool *r_outranked = nullptr);
+	bool _place_cards(const LocalVector<uint32_t> &p_sides, float p_solid_angle, uint64_t p_self_key, LocalVector<Rect2i> &r_rects, bool *r_outranked = nullptr, bool *r_fragmented = nullptr);
 	bool _recut(uint64_t p_key, uint32_t p_level);
 
 public:
@@ -319,6 +319,8 @@ public:
 	};
 	PageSetInfo get_page_set_info(uint32_t p_set) const;
 	uint32_t get_page_set_count() const { return instances.size(); }
+	// Cards whose pages have not completed their initial relight yet (card.relit == false).
+	uint32_t get_unrelit_page_count() const;
 	// GodotNext: nextgi_src_page_levels (#247)
 	uint32_t get_page_table_count() const { return page_table_count; }
 	Size2i get_mask_extent() const { return mask_extent; }

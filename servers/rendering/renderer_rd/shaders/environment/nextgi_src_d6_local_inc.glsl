@@ -57,6 +57,9 @@ bool resample_src(vec3 position, vec3 normal, uint page_table, uint card_set_ind
 			continue;
 		}
 		uvec2 page = NEXTGI_D6_PAGE_RECTS.data[page_index];
+		if (page.y == 0u) {
+			continue;
+		}
 		uvec2 page_origin = uvec2(page.x & 0xffffu, page.x >> 16u);
 		uvec2 page_size = max(uvec2(page.y & 0xffffu, page.y >> 16u), uvec2(1u));
 		ivec2 radiance_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - vec2(1.0)));

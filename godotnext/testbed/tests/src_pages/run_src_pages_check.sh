@@ -77,6 +77,7 @@ run_scene() {
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/hardware_ray_tracing.macos=$hwrt_value
 global_illumination/nextgi/quality=1
 global_illumination/nextgi/medium_gather=0
 CFG

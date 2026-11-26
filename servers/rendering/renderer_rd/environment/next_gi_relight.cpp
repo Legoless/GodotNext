@@ -853,10 +853,15 @@ static bool _nextgi_allocate_sides(NextGIBuddyAllocator &r_buddy, const LocalVec
 // eviction order, then evicted, until the blocks fit. The plan is committed only when they fit, so
 // a set that cannot fit changes nothing. p_self_key (a set being re-cut) has its own blocks freed
 // in the plan; 0 for a new set.
-// r_outranked: set when the blocks did not fit and no set was eligible to make room.
-bool NextGIRelight::_place_cards(const LocalVector<uint32_t> &p_sides, float p_solid_angle, uint64_t p_self_key, LocalVector<Rect2i> &r_rects, bool *r_outranked) {
+// r_outranked: set when the blocks did not fit even after freeing every lower-priority candidate.
+// r_fragmented: set when total free + lower-priority texels were sufficient, so only buddy-block
+// alignment against higher-priority sibling sets prevented placement at this level.
+bool NextGIRelight::_place_cards(const LocalVector<uint32_t> &p_sides, float p_solid_angle, uint64_t p_self_key, LocalVector<Rect2i> &r_rects, bool *r_outranked, bool *r_fragmented) {
 	if (r_outranked != nullptr) {
 		*r_outranked = false;
+	}
+	if (r_fragmented != nullptr) {
+		*r_fragmented = false;
 	}
 	const uint32_t *self_index = p_self_key != 0 ? instance_index.getptr(p_self_key) : nullptr;
 	if (self_index == nullptr) {
@@ -984,6 +989,14 @@ bool NextGIRelight::_place_cards(const LocalVector<uint32_t> &p_sides, float p_s
 		}
 	}
 	if (!fitted) {
+		// Every lower-priority candidate was evicted in the plan and the blocks still did not fit:
+		// higher-priority sets occupy the buddy siblings needed for this alignment.
+		if (r_outranked != nullptr) {
+			*r_outranked = true;
+		}
+		if (r_fragmented != nullptr) {
+			*r_fragmented = true;
+		}
 		return false;
 	}
 	// Commit: the plan is the allocator; the steps carry its blocks into the page sets.
@@ -1281,16 +1294,23 @@ uint32_t NextGIRelight::assign_card_pages(RenderGeometryInstance *p_instance, Ne
 	}
 	LocalVector<Rect2i> rects;
 	bool outranked = false;
-	if (!_place_cards(sides, p_solid_angle, 0, rects, &outranked)) {
-		// No room at its level, even by priority: a coarser level in the space that is free, so a
-		// far set holds a small page rather than none. It is promoted once room appears.
+	bool fragmented = false;
+	if (!_place_cards(sides, p_solid_angle, 0, rects, &outranked, &fragmented)) {
+		// No room at its level, even by priority: try a coarser level. When buddy fragmentation
+		// against higher-priority sibling blocks prevented placement despite sufficient area,
+		// allow coarser priority placement so a near set is not dropped while far sets stay resident.
 		bool placed = false;
 		for (uint32_t level = pages.level + 1; level <= uint32_t(NEXTGI_SRC_PAGE_LEVEL_MAX) && !placed; level++) {
 			LocalVector<uint32_t> coarser;
 			for (const CardPage &page : pages.cards) {
 				coarser.push_back(MAX(page.full_side >> level, uint32_t(NEXTGI_SRC_PAGE_MIN)));
 			}
-			if (_nextgi_allocate_sides(radiance_buddy, coarser, rects)) {
+			if (fragmented) {
+				if (_place_cards(coarser, p_solid_angle, 0, rects, &outranked)) {
+					pages.level = level;
+					placed = true;
+				}
+			} else if (_nextgi_allocate_sides(radiance_buddy, coarser, rects)) {
 				pages.level = level;
 				placed = true;
 			} else {
@@ -2348,6 +2368,18 @@ float NextGIRelight::get_card_ray_fraction(RenderGeometryInstance *p_instance, u
 		return -1.0f;
 	}
 	return instances[*index].cards[p_card].ray_fraction;
+}
+
+uint32_t NextGIRelight::get_unrelit_page_count() const {
+	uint32_t count = 0;
+	for (const InstancePages &instance_pages : instances) {
+		for (const CardPage &card : instance_pages.cards) {
+			if (!card.relit) {
+				count++;
+			}
+		}
+	}
+	return count;
 }
 
 void NextGIRelight::build_page_rect_words(LocalVector<uint32_t> &r_words, bool p_relit_only) const {

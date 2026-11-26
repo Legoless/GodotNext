@@ -888,11 +888,14 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.probe_count = trace_probes;
 	// GodotNext: nextgi_wrc_shift (#254)
 	nextgi_wrc_mark_fresh(nextgi_wrc_shifted_levels(previous_origin, origin, has_previous_origin), fresh_frames);
-	// When SRC newly captures cards (e.g. initial frames while material cards stream in), refresh
-	// WRC probes without stale pre-capture history over 3 sweeps so multi-bounce SRC<->WRC converges
-	// cleanly before steady-state temporal blending (blend=0.1) resumes.
+	// When SRC newly captures cards or HWRT still has newly placed/re-cut pages awaiting their
+	// initial relight, keep WRC probes fresh so multi-bounce SRC<->WRC converges cleanly before
+	// steady-state temporal blending (blend=0.1) resumes.
 	NextGISRC *src_check = NextGISRC::get_singleton();
-	if (src_check != nullptr && src_check->get_stats().capture_texels > 0) {
+	NextGIRelight *relight_check = NextGIRelight::get_singleton();
+	const bool src_streaming = (src_check != nullptr && src_check->get_stats().capture_texels > 0) ||
+			(!swrt && relight_check != nullptr && relight_check->get_unrelit_page_count() > 0);
+	if (src_streaming) {
 		nextgi_wrc_mark_fresh(0xFu, fresh_frames);
 		settle_sweeps_remaining = 2u;
 	} else if (fresh_frames[0] == 0u && settle_sweeps_remaining > 0u) {

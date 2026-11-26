@@ -202,6 +202,9 @@ bool hl_src_indirect_lookup(uint p_custom_index, vec3 p_world_pos, vec3 p_world_
 			continue;
 		}
 		uvec2 page = hit_light_page_rects.data[page_index];
+		if (page.y == 0u) {
+			continue;
+		}
 		uvec2 page_origin = uvec2(page.x & 0xFFFFu, page.x >> 16u);
 		uvec2 page_size = max(uvec2(page.y & 0xFFFFu, page.y >> 16u), uvec2(1u));
 		ivec2 rad_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - 1.0));

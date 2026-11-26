@@ -2292,6 +2292,44 @@ TEST_CASE("[NextGI] SRC cards: an occluded hollow room splits interior depth lay
 	CHECK(has_floor);
 }
 
+TEST_CASE("[NextGI] SRC cards: a curved single-layer dome does not false-split its +Y card") {
+	// Shallow smooth parabolic dome on top of a box (normals stay near +Y, heightfield single-valued):
+	// the 32x32 exact depth rasterizer must see zero front-layer occlusion and keep <= 6 cards.
+	SRCTestMesh mesh;
+	const int grid_n = 8;
+	LocalVector<uint32_t> top;
+	top.resize((grid_n + 1) * (grid_n + 1));
+	for (int iz = 0; iz <= grid_n; iz++) {
+		const float z = (float(iz) / float(grid_n) - 0.5f) * 4.0f;
+		for (int ix = 0; ix <= grid_n; ix++) {
+			const float x = (float(ix) / float(grid_n) - 0.5f) * 4.0f;
+			const float r2 = (x * x + z * z) / 8.0f;
+			const float y = 1.0f + 0.6f * (1.0f - r2);
+			top[iz * (grid_n + 1) + ix] = mesh.add_vertex(Vector3(x, y, z));
+		}
+	}
+	for (int iz = 0; iz < grid_n; iz++) {
+		for (int ix = 0; ix < grid_n; ix++) {
+			const uint32_t a = top[iz * (grid_n + 1) + ix];
+			const uint32_t b = top[iz * (grid_n + 1) + (ix + 1)];
+			const uint32_t c = top[(iz + 1) * (grid_n + 1) + (ix + 1)];
+			const uint32_t d = top[(iz + 1) * (grid_n + 1) + ix];
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(b);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(a);
+			mesh.indices.push_back(c);
+			mesh.indices.push_back(d);
+		}
+	}
+	// Flat bottom cap at y = 0 facing -Y.
+	mesh.add_quad(Vector3(-2.0f, 0.0f, -2.0f), Vector3(-2.0f, 0.0f, 2.0f), Vector3(2.0f, 0.0f, 2.0f), Vector3(2.0f, 0.0f, -2.0f));
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	CHECK_LE(result.cards.size(), 6u);
+}
+
 TEST_CASE("[NextGI] SRC cards: inner depth split clips narrow foreground columns ahead of a dominant inner wall") {
 	// Hollow room with two narrow columns sitting 2 m in front of the inner +X wall (x = -4).
 	SRCTestMesh mesh;
@@ -4952,6 +4990,41 @@ TEST_CASE("[NextGI][Lite] SRC placement demotes before it evicts, and a set that
 	CHECK_EQ(relight.get_page_set_count(), 129u);
 }
 
+TEST_CASE("[NextGI][Lite] Buddy-fragmented high-priority set falls back to coarser priority placement with zero alloc failures") {
+	using namespace RendererRD;
+	const float pi = float(Math::PI);
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true)); // 4096x2048 = 512 x 128x128 blocks.
+	relight.begin_record_pass();
+	// Occupy one 64x64 quadrant of every 128x128 tile (512 high-priority sets) and fill the
+	// remaining three 64x64 quadrants of each tile with lower-priority level-1 sets.
+	const NextGICard one64[1] = { lite_test_card(64) };
+	const NextGICard three64[3] = { lite_test_card(64), lite_test_card(64), lite_test_card(64) };
+	for (uint32_t i = 0; i < 512; i++) {
+		NextGIInstanceRecord hi;
+		hi.card_set = i;
+		hi.tlas_index = i;
+		REQUIRE((relight.assign_card_pages(lite_test_instance(i), hi, UINT32_MAX, i, one64, 1, pi) & 0x80000000u) == 0);
+		NextGIInstanceRecord lo;
+		lo.card_set = 1000 + i;
+		lo.tlas_index = 1000 + i;
+		REQUIRE((relight.assign_card_pages(lite_test_instance(1000 + i), lo, UINT32_MAX, 1000 + i * 3, three64, 3, pi * 0.1f) & 0x80000000u) == 0);
+	}
+	// A mid-priority level-0 set needs 128x128 blocks: raw lower-priority area is huge (3/4 of
+	// the atlas), yet no 128x128 buddy tile is free because high-priority sets hold one 64x64
+	// sibling in every tile. Priority fallback places it cleanly at level 1 (64x64) with zero
+	// allocation failures.
+	const NextGICard mid128[4] = { lite_test_card(128), lite_test_card(128), lite_test_card(128), lite_test_card(128) };
+	NextGIInstanceRecord mid;
+	mid.card_set = 3000;
+	mid.tlas_index = 3000;
+	CHECK((relight.assign_card_pages(lite_test_instance(3000), mid, UINT32_MAX, 4000, mid128, 4, pi * 0.5f) & 0x80000000u) == 0);
+	Dictionary info;
+	relight.fill_info(info);
+	CHECK_EQ(int64_t(info["src_page_alloc_failures"]), 0);
+	CHECK_EQ(int64_t(info["src_page_failures_radiance"]), 0);
+}
+
 TEST_CASE("[NextGI][Lite] SRC page rects never overlap through random placements and level changes") {
 	using namespace RendererRD;
 	NextGIRelight relight;
@@ -5683,6 +5756,9 @@ TEST_CASE("[NextGI] Gather and WRC shader contracts: probe normal weights, solid
 	// Coarse SRC cards (> 8 cm world texel extent) must guard against wall-straddling radiance leaks in both Gather and WRC.
 	CHECK(gather_src.contains("nextgi_src_resolve_coarse_radiance"));
 	CHECK(wrc_src.contains("nextgi_wrc_resolve_coarse_radiance"));
+	// Unrelit/unpaged page_rects entries (page.y == 0u from p_relit_only) must be skipped instead of sampling atlas (0, 0).
+	CHECK(gather_src.contains("if (page.y == 0u)"));
+	CHECK(wrc_src.contains("if (page.y == 0u)"));
 }
 
 TEST_CASE("[NextGI] SRC card atlas budgeting and directional-light alignment on tilted cards") {
