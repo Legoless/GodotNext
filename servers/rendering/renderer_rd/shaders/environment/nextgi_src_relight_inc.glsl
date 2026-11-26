@@ -347,6 +347,67 @@ void main() {
 		}
 		imageStore(mask_image, mask_coord, uvec4(mask, 0u, 0u, 0u));
 	}
+#ifndef NEXTGI_TRACE_SDF
+	// Half-resolution shadow masks share one bit across 2x2 radiance texels. On coarse cards
+	// (e.g. large single-mesh halls), a 2x2 block can straddle a thin interior partition wall and
+	// leak direct light into the dark side. When a non-owner texel inherits any lit bit from a
+	// separated owner texel, verify wall visibility between them and re-trace only if separated.
+	if (!owner && page.shadowed_count > 0u && mask != 0u) {
+		uvec2 owner_texel = min(mask_texel * 2u, size - 1u);
+		ivec2 owner_mat_local = ivec2(clamp(((vec2(owner_texel) + 0.5) / vec2(size)) * card_size, vec2(0.0), card_size - 1.0));
+		ivec2 owner_mat = ivec2(card.atlas_rect.xy) + owner_mat_local;
+		float owner_depth = texelFetch(depth_tex, owner_mat, 0).r;
+		bool mask_separated = owner_depth <= 0.0;
+		if (!mask_separated) {
+			float oxu = ((float(owner_mat_local.x) + 0.5) / card_size.x * 2.0 - 1.0) * card.axis_u.w;
+			float oyv = ((float(owner_mat_local.y) + 0.5) / card_size.y * 2.0 - 1.0) * card.axis_v.w;
+			vec3 owner_world = nextgi_xform(rec, card.origin.xyz + card.axis_u.xyz * oxu + card.axis_v.xyz * oyv + card.axis_n.xyz * (-owner_depth * card_set.capture_scale));
+			vec3 delta_own = owner_world - world;
+			float dist_own = length(delta_own);
+			if (dist_own > 0.04) {
+				float vis_off = max(rec.origin_offset, 0.02);
+				NextGIHit sep_hit = nextgi_trace_opaque(world + normal * vis_off, 0.01, delta_own / dist_own, dist_own - 0.01, NEXTGI_RT_MASK_GI);
+				mask_separated = sep_hit.hit;
+			}
+		}
+		if (mask_separated) {
+			uint local_mask = 0u;
+			vec3 origin = world + normal * rec.origin_offset;
+			for (uint s = 0u; s < page.shadowed_count; s++) {
+				if ((mask & (1u << s)) == 0u) {
+					continue;
+				}
+				uint light_index = page_lights.data[page.light_offset + s];
+				NextGILight light = lights.data[light_index];
+				uint reuse = light.flags >> 8u;
+				int reused = reuse != 0xFFFFFFu ? nextgi_reuse_state(reuse, world) : -1;
+				bool lit = true;
+				if (reused >= 0) {
+					lit = reused == 1;
+				} else {
+					vec3 to_light;
+					float tmax;
+					uint light_type = uint(light.direction_type.w + 0.5);
+					if (light_type == 0u) {
+						to_light = -light.direction_type.xyz;
+						tmax = params.rt_radius;
+					} else {
+						to_light = light.position_inv_range.xyz - origin;
+						tmax = length(to_light);
+						if (tmax > 0.0) {
+							to_light /= tmax;
+						}
+					}
+					lit = !nextgi_shadow_ray(origin, to_light, tmax, light_index);
+				}
+				if (lit) {
+					local_mask |= 1u << s;
+				}
+			}
+			mask = local_mask;
+		}
+	}
+#endif
 
 	vec3 albedo = min(texelFetch(albedo_tex, material, 0).rgb, vec3(0.95));
 	vec3 emission = texelFetch(emission_tex, material, 0).rgb;
@@ -448,6 +509,29 @@ void main() {
 		direct += light_contrib;
 	}
 	vec3 indirect = texelFetch(src_indirect_tex, radiance_coord / 8, 0).rgb;
+#ifndef NEXTGI_TRACE_SDF
+	// Feedback indirect is sampled once per 8x8 radiance block. Reject it across a solid wall so
+	// coarse cards on multi-room meshes never bleed multi-bounce radiance into an adjacent dark room.
+	if (dot(indirect, indirect) > 0.0) {
+		uvec2 blocks = max((size + 7u) / 8u, uvec2(1u));
+		uvec2 bcoord = min(uvec2(radiance_coord / 8) - (radiance_origin / 8u), blocks - 1u);
+		vec2 block_uv = (vec2(bcoord) + 0.5) / vec2(blocks);
+		ivec2 bmat = ivec2(card.atlas_rect.xy) + ivec2(clamp(block_uv * card_size, vec2(0.0), card_size - 1.0));
+		float bdepth = texelFetch(depth_tex, bmat, 0).r;
+		float bxu = (block_uv.x * 2.0 - 1.0) * card.axis_u.w;
+		float byv = (block_uv.y * 2.0 - 1.0) * card.axis_v.w;
+		vec3 block_world = nextgi_xform(rec, card.origin.xyz + card.axis_u.xyz * bxu + card.axis_v.xyz * byv - card.axis_n.xyz * (bdepth > 0.0 ? bdepth * card_set.capture_scale : 0.0));
+		vec3 delta_blk = block_world - world;
+		float dist_blk = length(delta_blk);
+		if (dist_blk > 0.04) {
+			float vis_off = max(rec.origin_offset, 0.02);
+			NextGIHit blk_hit = nextgi_trace_opaque(world + normal * vis_off, 0.01, delta_blk / dist_blk, dist_blk - 0.01, NEXTGI_RT_MASK_GI);
+			if (blk_hit.hit) {
+				indirect = vec3(0.0);
+			}
+		}
+	}
+#endif
 	vec3 radiance = emission + (albedo / PI) * (direct + indirect);
 	imageStore(radiance_image, radiance_coord, vec4(radiance, 1.0));
 

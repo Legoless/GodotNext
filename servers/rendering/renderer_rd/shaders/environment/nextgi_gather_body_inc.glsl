@@ -173,7 +173,7 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		}
 		return false;
 	}
-	float best_align = -2.0;
+	float best_align = 0.0;
 	float fallback_align = -2.0;
 	vec3 best = vec3(0.0);
 	vec3 fallback = vec3(0.0);
@@ -598,18 +598,21 @@ void nextgi_gather_main() {
 #ifdef MODE_HIT_LIGHTING_GI
 	float probe_depth = length(world - params.camera_pos.xyz);
 #endif
-	float angle = float(params.frame) * 2.3999632;
+	// Stratum-bounded jitter keeps each ray texel (ix, iy) inside its own solid-angle stratum across
+	// neighboring probes and consecutive frames so probe-space spatial/temporal filtering mixes coherent
+	// directions while covering the full [0, 1) elevation range including zenith and grazing angles.
+	vec2 stratum_jitter = fract(float(params.frame) * vec2(0.75487766, 0.56984029));
 	if (params.sampling_mode == 0u) {
-		angle = nextgi_blue_noise_sample(ivec2(probe), params.frame).x * 6.2831853;
+		stratum_jitter = nextgi_blue_noise_sample(ivec2(probe), params.frame);
 	}
 	uint uncovered_count = 0u;
 	uint ix = local.x;
 	uint iy = local.y;
 	// Exact stratified polar cosine-weighted hemisphere (Malley's method):
 	// E[r^2] = 0.5 exactly for every ray_stride, so mean(L_i) estimates E / PI directly.
-	float r2 = (float(iy) + 0.5) / float(rstride);
+	float r2 = (float(iy) + stratum_jitter.y) / float(rstride);
 	float disk_r = sqrt(r2);
-	float disk_phi = ((float(ix) + 0.5) / float(rstride)) * (2.0 * PI) + angle;
+	float disk_phi = ((float(ix) + stratum_jitter.x) / float(rstride)) * (2.0 * PI);
 	vec3 local_dir = vec3(disk_r * cos(disk_phi), disk_r * sin(disk_phi), sqrt(max(1.0 - r2, 0.0)));
 	vec3 dir = nextgi_orient(normal, local_dir);
 	NextGIHit hit;
@@ -618,7 +621,10 @@ void nextgi_gather_main() {
 	bool queued_hl = false;
 	atomicAdd(counters.rays, 1u);
 	float handoff = nextgi_wrc_handoff(origin);
-#ifdef MODE_HIT_LIGHTING_GI
+#ifdef MODE_HIT_RADIANCE_REFERENCE
+	// Reference hit-radiance diagnostic isolates gather+denoise from both SRC and WRC handoff.
+	float tmax = params.rt_radius;
+#elif defined(MODE_HIT_LIGHTING_GI)
 	float gi_hl_cutoff = handoff > 0.0 ? min(1.5 * handoff, params.rt_radius) : params.rt_radius;
 	float tmax = gi_hl_cutoff;
 #else
@@ -840,7 +846,7 @@ void nextgi_feedback_main() {
 	uint traced = 0u;
 	uint escaped = 0u;
 	for (uint i = 0u; i < 16u; i++) {
-		vec2 uv = vec2(float(i) / 16.0, nextgi_radical_inverse(i + params.frame));
+		vec2 uv = vec2((float(i) + 0.5) / 16.0, nextgi_radical_inverse(i + params.frame));
 		float radius = sqrt(uv.x);
 		float phi = uv.y * 2.0 * PI + float(params.frame) * 0.1;
 		vec3 local_dir = vec3(radius * cos(phi), radius * sin(phi), sqrt(max(1.0 - uv.x, 0.0)));

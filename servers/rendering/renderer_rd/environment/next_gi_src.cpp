@@ -249,28 +249,227 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 		alive_count--;
 	}
 
-	// One card per remaining cluster, in seed order.
-	for (uint32_t c = 0; c < cluster_count; c++) {
-		if (!alive[c]) {
-			continue;
-		}
-		NextGICardDesc card;
-		const Vector3 n = centers[c];
-		// Gram-Schmidt against the world axis least aligned with n; u x v = n.
+	// Split normal clusters that contain (u, v)-occluded interior depth layers (e.g., concave
+	// courtyards or single-mesh multi-room shells) up to NEXTGI_SRC_MAX_CARDS_PER_MESH. Convex
+	// boxes and non-overlapping step/L meshes have zero (u, v) front-layer occlusion and stay
+	// unchanged.
+	struct DepthSplitCandidate {
+		uint32_t cluster = UINT32_MAX;
+		uint32_t depth = UINT32_MAX;
+		real_t split_pn = 0.0;
+		real_t outer_n_min = 0.0;
+		float occluded_area = 0.0f;
+	};
+	auto cluster_basis = [](const Vector3 &p_n, Vector3 &r_u, Vector3 &r_v) {
 		int reference_axis = 0;
 		for (int axis = 1; axis < 3; axis++) {
-			if (Math::abs(n[axis]) < Math::abs(n[reference_axis])) {
+			if (Math::abs(p_n[axis]) < Math::abs(p_n[reference_axis])) {
 				reference_axis = axis;
 			}
 		}
 		Vector3 reference;
 		reference[reference_axis] = 1.0;
-		const Vector3 u = (reference - n * n.dot(reference)).normalized();
-		const Vector3 v = n.cross(u);
+		r_u = (reference - p_n * p_n.dot(reference)).normalized();
+		r_v = p_n.cross(r_u);
+	};
+
+	LocalVector<bool> is_inner_split;
+	LocalVector<real_t> split_outer_n_min;
+	LocalVector<uint32_t> split_depth;
+	is_inner_split.resize(centers.size());
+	split_outer_n_min.resize(centers.size());
+	split_depth.resize(centers.size());
+	for (uint32_t c = 0; c < centers.size(); c++) {
+		is_inner_split[c] = false;
+		split_outer_n_min[c] = Math::INF;
+		split_depth[c] = 0;
+	}
+
+	const real_t min_depth_gap = real_t(texel_size) * 4.0;
+	while (alive_count < NEXTGI_SRC_MAX_CARDS_PER_MESH) {
+		DepthSplitCandidate best_split;
+		for (uint32_t c = 0; c < centers.size(); c++) {
+			if (!alive[c]) {
+				continue;
+			}
+			const Vector3 n = centers[c];
+			Vector3 u, v;
+			cluster_basis(n, u, v);
+			real_t pn_min = Math::INF, pn_max = -Math::INF;
+			real_t u_min = Math::INF, u_max = -Math::INF;
+			real_t v_min = Math::INF, v_max = -Math::INF;
+			for (uint32_t t = 0; t < triangles.size(); t++) {
+				if (assignment[t] != c) {
+					continue;
+				}
+				const Vector3 p0 = position(triangles[t].index[0]);
+				const Vector3 p1 = position(triangles[t].index[1]);
+				const Vector3 p2 = position(triangles[t].index[2]);
+				const real_t pn = ((p0 + p1 + p2) * (real_t(1.0) / real_t(3.0))).dot(n);
+				pn_min = MIN(pn_min, pn);
+				pn_max = MAX(pn_max, pn);
+				for (const Vector3 &p : { p0, p1, p2 }) {
+					const real_t pu = p.dot(u);
+					const real_t pv = p.dot(v);
+					u_min = MIN(u_min, pu);
+					u_max = MAX(u_max, pu);
+					v_min = MIN(v_min, pv);
+					v_max = MAX(v_max, pv);
+				}
+			}
+			if (pn_max - pn_min < min_depth_gap) {
+				continue;
+			}
+			const real_t u_span = u_max - u_min;
+			const real_t v_span = v_max - v_min;
+			if (!(u_span > CMP_EPSILON) || !(v_span > CMP_EPSILON)) {
+				continue;
+			}
+			// Area-weighted 1D 2-means along pn initialized at [pn_min, pn_max].
+			real_t c_inner = pn_min;
+			real_t c_outer = pn_max;
+			for (int iter = 0; iter < 6; iter++) {
+				real_t sum_in = 0.0, sum_out = 0.0;
+				real_t area_in = 0.0, area_out = 0.0;
+				const real_t mid = (c_inner + c_outer) * 0.5;
+				for (uint32_t t = 0; t < triangles.size(); t++) {
+					if (assignment[t] != c) {
+						continue;
+					}
+					const Vector3 p0 = position(triangles[t].index[0]);
+					const Vector3 p1 = position(triangles[t].index[1]);
+					const Vector3 p2 = position(triangles[t].index[2]);
+					const real_t pn = ((p0 + p1 + p2) * (real_t(1.0) / real_t(3.0))).dot(n);
+					if (pn > mid) {
+						sum_out += pn * triangles[t].area;
+						area_out += triangles[t].area;
+					} else {
+						sum_in += pn * triangles[t].area;
+						area_in += triangles[t].area;
+					}
+				}
+				if (!(area_in > 0.0) || !(area_out > 0.0)) {
+					break;
+				}
+				c_inner = sum_in / area_in;
+				c_outer = sum_out / area_out;
+			}
+			const real_t split_pn = (c_inner + c_outer) * 0.5;
+			float inner_area = 0.0f;
+			float outer_area = 0.0f;
+			real_t inner_n_max = -Math::INF;
+			real_t outer_n_max = -Math::INF;
+			real_t outer_n_min = Math::INF;
+			// 16x16 coarse (u, v) occupancy mask of the outer layer to test true front-layer occlusion.
+			uint16_t outer_occ[16] = {};
+			for (uint32_t t = 0; t < triangles.size(); t++) {
+				if (assignment[t] != c) {
+					continue;
+				}
+				const Vector3 p0 = position(triangles[t].index[0]);
+				const Vector3 p1 = position(triangles[t].index[1]);
+				const Vector3 p2 = position(triangles[t].index[2]);
+				const real_t pn = ((p0 + p1 + p2) * (real_t(1.0) / real_t(3.0))).dot(n);
+				const real_t tri_n_max = MAX(p0.dot(n), MAX(p1.dot(n), p2.dot(n)));
+				const real_t tri_n_min = MIN(p0.dot(n), MIN(p1.dot(n), p2.dot(n)));
+				if (pn > split_pn) {
+					outer_area += triangles[t].area;
+					outer_n_max = MAX(outer_n_max, tri_n_max);
+					outer_n_min = MIN(outer_n_min, tri_n_min);
+					real_t tu0 = Math::INF, tu1 = -Math::INF, tv0 = Math::INF, tv1 = -Math::INF;
+					for (const Vector3 &p : { p0, p1, p2 }) {
+						const real_t pu = p.dot(u);
+						const real_t pv = p.dot(v);
+						tu0 = MIN(tu0, pu);
+						tu1 = MAX(tu1, pu);
+						tv0 = MIN(tv0, pv);
+						tv1 = MAX(tv1, pv);
+					}
+					const int x0 = CLAMP(int(Math::floor(((tu0 - u_min) / u_span) * 16.0)), 0, 15);
+					const int x1 = CLAMP(int(Math::floor(((tu1 - u_min) / u_span) * 16.0 - 1e-4)), 0, 15);
+					const int y0 = CLAMP(int(Math::floor(((tv0 - v_min) / v_span) * 16.0)), 0, 15);
+					const int y1 = CLAMP(int(Math::floor(((tv1 - v_min) / v_span) * 16.0 - 1e-4)), 0, 15);
+					for (int gy = y0; gy <= y1; gy++) {
+						for (int gx = x0; gx <= x1; gx++) {
+							outer_occ[gy] |= uint16_t(1u << gx);
+						}
+					}
+				} else {
+					inner_area += triangles[t].area;
+					inner_n_max = MAX(inner_n_max, tri_n_max);
+				}
+			}
+			if (inner_area < merge_area || outer_area < merge_area || (outer_n_max - inner_n_max) < min_depth_gap) {
+				continue;
+			}
+			float occluded_area = 0.0f;
+			for (uint32_t t = 0; t < triangles.size(); t++) {
+				if (assignment[t] != c) {
+					continue;
+				}
+				const Vector3 p0 = position(triangles[t].index[0]);
+				const Vector3 p1 = position(triangles[t].index[1]);
+				const Vector3 p2 = position(triangles[t].index[2]);
+				const Vector3 centroid = (p0 + p1 + p2) * (real_t(1.0) / real_t(3.0));
+				if (centroid.dot(n) > split_pn) {
+					continue;
+				}
+				const int gx = CLAMP(int(Math::floor(((centroid.dot(u) - u_min) / u_span) * 16.0)), 0, 15);
+				const int gy = CLAMP(int(Math::floor(((centroid.dot(v) - v_min) / v_span) * 16.0)), 0, 15);
+				if ((outer_occ[gy] & uint16_t(1u << gx)) != 0u) {
+					occluded_area += triangles[t].area;
+				}
+			}
+			const bool better = best_split.cluster == UINT32_MAX || split_depth[c] < best_split.depth || (split_depth[c] == best_split.depth && occluded_area > best_split.occluded_area);
+			if (occluded_area >= inner_area * 0.25f && occluded_area >= merge_area && better) {
+				best_split.cluster = c;
+				best_split.depth = split_depth[c];
+				best_split.split_pn = split_pn;
+				best_split.outer_n_min = outer_n_min;
+				best_split.occluded_area = occluded_area;
+			}
+		}
+		if (best_split.cluster == UINT32_MAX) {
+			break;
+		}
+		const uint32_t src_c = best_split.cluster;
+		const uint32_t dst_c = centers.size();
+		const Vector3 n = centers[src_c];
+		const uint32_t next_depth = split_depth[src_c] + 1;
+		split_depth[src_c] = next_depth;
+		centers.push_back(n);
+		alive.push_back(true);
+		is_inner_split.push_back(true);
+		split_outer_n_min.push_back(best_split.outer_n_min);
+		split_depth.push_back(next_depth);
+		for (uint32_t t = 0; t < triangles.size(); t++) {
+			if (assignment[t] != src_c) {
+				continue;
+			}
+			const Vector3 p0 = position(triangles[t].index[0]);
+			const Vector3 p1 = position(triangles[t].index[1]);
+			const Vector3 p2 = position(triangles[t].index[2]);
+			const real_t pn = ((p0 + p1 + p2) * (real_t(1.0) / real_t(3.0))).dot(n);
+			if (pn <= best_split.split_pn) {
+				assignment[t] = dst_c;
+			}
+		}
+		alive_count++;
+	}
+
+	// One card per remaining cluster, in seed order.
+	for (uint32_t c = 0; c < centers.size(); c++) {
+		if (!alive[c]) {
+			continue;
+		}
+		NextGICardDesc card;
+		const Vector3 n = centers[c];
+		Vector3 u, v;
+		cluster_basis(n, u, v);
 
 		real_t u_min = Math::INF, u_max = -Math::INF;
 		real_t v_min = Math::INF, v_max = -Math::INF;
-		real_t n_max = -Math::INF;
+		real_t n_min = Math::INF, n_max = -Math::INF;
 		real_t mesh_n_min = Math::INF;
 		for (uint32_t t = 0; t < triangles.size(); t++) {
 			for (uint32_t corner = 0; corner < 3; corner++) {
@@ -286,6 +485,7 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 				u_max = MAX(u_max, pu);
 				v_min = MIN(v_min, pv);
 				v_max = MAX(v_max, pv);
+				n_min = MIN(n_min, pn);
 				n_max = MAX(n_max, pn);
 			}
 			if (assignment[t] == c) {
@@ -295,15 +495,60 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 		}
 
 		// One texel of margin in front of the outermost plane, so geometry on it is not clipped by
-		// the near plane and gets a depth above 0, and one past the mesh's far side.
-		const real_t margin = texel_size;
+		// the near plane and gets a depth above 0, and one past the far side. For an inner depth
+		// split, skip minor foreground slivers (< 10% cluster area, separated by at least
+		// min_depth_gap) such as colonnade columns ahead of a dominant inner wall, and keep the
+		// camera strictly behind the occluding outer/skipped geometry so the near plane clips it.
+		real_t effective_n_max = n_max;
+		real_t clip_front_n_min = split_outer_n_min[c];
+		if (is_inner_split[c] && card.area > 0.0f && (n_max - n_min) >= min_depth_gap) {
+			struct DepthSlice {
+				real_t tri_n_max;
+				real_t tri_n_min;
+				float area;
+			};
+			struct DepthSliceCmp {
+				_FORCE_INLINE_ bool operator()(const DepthSlice &p_a, const DepthSlice &p_b) const {
+					return p_a.tri_n_max > p_b.tri_n_max;
+				}
+			};
+			LocalVector<DepthSlice> slices;
+			for (uint32_t t = 0; t < triangles.size(); t++) {
+				if (assignment[t] != c) {
+					continue;
+				}
+				const real_t d0 = position(triangles[t].index[0]).dot(n);
+				const real_t d1 = position(triangles[t].index[1]).dot(n);
+				const real_t d2 = position(triangles[t].index[2]).dot(n);
+				slices.push_back({ MAX(d0, MAX(d1, d2)), MIN(d0, MIN(d1, d2)), triangles[t].area });
+			}
+			slices.sort_custom<DepthSliceCmp>();
+			real_t skipped_area = 0.0;
+			real_t skipped_n_min = Math::INF;
+			for (uint32_t s = 0; s < slices.size(); s++) {
+				if (s > 0 && (slices[s - 1].tri_n_max - slices[s].tri_n_max) >= min_depth_gap && skipped_area < card.area * 0.10f) {
+					effective_n_max = slices[s].tri_n_max;
+					clip_front_n_min = MIN(clip_front_n_min, skipped_n_min);
+				}
+				skipped_area += slices[s].area;
+				skipped_n_min = MIN(skipped_n_min, slices[s].tri_n_min);
+				if (skipped_area >= card.area * 0.10f) {
+					break;
+				}
+			}
+		}
+		real_t margin = texel_size;
+		if (is_inner_split[c] && clip_front_n_min > effective_n_max) {
+			margin = CLAMP((clip_front_n_min - effective_n_max) * 0.45, real_t(texel_size) * 0.1, real_t(texel_size));
+		}
+		const real_t far_n = is_inner_split[c] ? n_min : mesh_n_min;
 		card.axis_u = u;
 		card.axis_v = v;
 		card.axis_n = n;
 		card.half_u = MAX(float(u_max - u_min) * 0.5f, texel_size * 0.5f);
 		card.half_v = MAX(float(v_max - v_min) * 0.5f, texel_size * 0.5f);
-		card.origin = u * ((u_min + u_max) * 0.5) + v * ((v_min + v_max) * 0.5) + n * (n_max + margin);
-		card.depth_range = float(n_max - mesh_n_min + margin * 2.0);
+		card.origin = u * ((u_min + u_max) * 0.5) + v * ((v_min + v_max) * 0.5) + n * (effective_n_max + margin);
+		card.depth_range = float(effective_n_max - far_n + margin * 2.0);
 		card.texels_u = _nextgi_src_card_texels(card.half_u * 2.0f, texel_size);
 		card.texels_v = _nextgi_src_card_texels(card.half_v * 2.0f, texel_size);
 		r_result.cards.push_back(card);
@@ -350,27 +595,35 @@ bool NextGIShelfPacker::allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_
 			continue;
 		}
 		r_rect = Rect2i(free.position, Vector2i(int(p_width), int(p_height)));
-		const Rect2i right(free.position.x + int(p_width), free.position.y, free.size.x - int(p_width), free.size.y);
+		// Non-overlapping guillotine split of the remainder.
+		const Rect2i right(free.position.x + int(p_width), free.position.y, free.size.x - int(p_width), int(p_height));
 		const Rect2i bottom(free.position.x, free.position.y + int(p_height), free.size.x, free.size.y - int(p_height));
 		free_rects.remove_at(i);
-		if (right.size.x > 0) {
+		if (right.size.x > 0 && right.size.y > 0) {
 			free_rects.push_back(right);
 		}
-		if (bottom.size.y > 0) {
+		if (bottom.size.x > 0 && bottom.size.y > 0) {
 			free_rects.push_back(bottom);
 		}
 		used_texels += uint64_t(p_width) * p_height;
 		return true;
 	}
-	for (Shelf &shelf : shelves) {
-		// The shelf must be tall enough, and the rect must fit what is left of its width (the
-		// gutter may run past the atlas edge).
-		if (shelf.height >= h && shelf.used_width + p_width <= width) {
-			r_rect = Rect2i(int(shelf.used_width), int(shelf.y), int(p_width), int(p_height));
-			shelf.used_width += w;
-			used_texels += uint64_t(p_width) * p_height;
-			return true;
+	// Best-fit-height shelf selection minimizes vertical fragmentation across varied card sizes.
+	uint32_t best_shelf = UINT32_MAX;
+	uint32_t best_height = UINT32_MAX;
+	for (uint32_t s = 0; s < shelves.size(); s++) {
+		const Shelf &shelf = shelves[s];
+		if (shelf.height >= h && shelf.used_width + p_width <= width && shelf.height < best_height) {
+			best_height = shelf.height;
+			best_shelf = s;
 		}
+	}
+	if (best_shelf != UINT32_MAX) {
+		Shelf &shelf = shelves[best_shelf];
+		r_rect = Rect2i(int(shelf.used_width), int(shelf.y), int(p_width), int(p_height));
+		shelf.used_width += w;
+		used_texels += uint64_t(p_width) * p_height;
+		return true;
 	}
 	if (top + p_height > height) {
 		return false;
@@ -571,6 +824,8 @@ NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite) {
 	budget.radiance_width = 4096;
 	budget.radiance_height = p_epic ? 8192 : 4096;
 	budget.radiance_bytes = uint64_t(budget.radiance_width) * budget.radiance_height * 4;
+	budget.material_width = NEXTGI_SRC_ATLAS_SIZE;
+	budget.material_height = p_epic ? (NEXTGI_SRC_ATLAS_SIZE * 2) : NEXTGI_SRC_ATLAS_SIZE;
 	budget.material_bytes = p_epic ? uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_EPIC) : uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH);
 	return budget;
 }
@@ -995,6 +1250,7 @@ void NextGISRC::free() {
 	mesh_card_sets.clear();
 	key_card_sets.clear();
 	failed_meshes.clear();
+	atlas_full_meshes.clear();
 	emissive_warned_meshes.clear();
 	card_coverage.clear();
 	packer.reset();
@@ -1093,7 +1349,7 @@ void NextGISRC::_check_emissive_contract(RenderGeometryInstance *p_instance, uin
 	}
 }
 
-bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key) {
+bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key, uint64_t p_max_texels) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh) || RSG::virtual_mesh_storage == nullptr) {
 		return false;
@@ -1181,10 +1437,11 @@ bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key) {
 		return false;
 	}
 
-	// Keep any single mesh's Stage-2 card set within 1/256th of the material atlas (min 4096 texels)
-	// and cap tiny sub-centimeter props at the 1 cm authored card-texel floor so large multi-mesh
-	// scenes retain full SRC coverage without starving later meshes.
-	const uint64_t stage2_max_texels_per_mesh = MAX(uint64_t(atlas_width) * uint64_t(atlas_height) / 256u, uint64_t(4096u));
+	// Scale each mesh's Stage-2 card set to the adaptive per-mesh atlas budget and cap tiny
+	// sub-centimeter props at the 1 cm authored card-texel floor so large multi-mesh scenes retain
+	// full SRC coverage without starving later meshes while small scenes keep full detail.
+	const uint64_t atlas_texels = uint64_t(packer.get_width()) * uint64_t(packer.get_height());
+	const uint64_t stage2_max_texels_per_mesh = p_max_texels > 0 ? p_max_texels : MAX<uint64_t>(atlas_texels / 64u, 4096u);
 	nextgi_src_scale_cards_to_budget(built_descs, stage2_max_texels_per_mesh, NEXTGI_SRC_EMISSIVE_MIN_TEXEL_METERS);
 	for (uint32_t i = 0; i < built_descs.size(); i++) {
 		sizes[i] = Vector2i(int(built_descs[i].texels_u), int(built_descs[i].texels_v));
@@ -1570,14 +1827,14 @@ bool NextGISRC::_ensure_stage2_proxy_instances(CardSetState &r_state) {
 	return true;
 }
 
-bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
+bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards, uint64_t p_max_texels) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
 		return false;
 	}
 	const RenderingServerTypes::VirtualGeometryDesc *vgd_desc = RSG::virtual_mesh_storage != nullptr ? RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh) : nullptr;
 	if (!p_axis_cards && vgd_desc != nullptr && !vgd_desc->card_descriptors.is_empty()) {
-		if (_build_stage2_card_set(p_mesh, p_key)) {
+		if (_build_stage2_card_set(p_mesh, p_key, p_max_texels)) {
 			return true;
 		}
 		if (failed_meshes.has(p_mesh)) {
@@ -1723,9 +1980,10 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 		return false;
 	}
 
-	// Apply the same per-mesh atlas budget and 1 cm texel floor to Stage-1 card sets so meshes
-	// falling back from Stage-2 do not exhaust the material atlas before later meshes get cards.
-	const uint64_t stage1_max_texels_per_mesh = MAX(uint64_t(atlas_width) * uint64_t(atlas_height) / 256u, uint64_t(4096u));
+	// Apply the adaptive per-mesh atlas budget and 1 cm texel floor to Stage-1 card sets so large
+	// multi-mesh scenes never exhaust the material atlas while small/medium scenes keep crisp cards.
+	const uint64_t atlas_texels = uint64_t(packer.get_width()) * uint64_t(packer.get_height());
+	const uint64_t stage1_max_texels_per_mesh = p_max_texels > 0 ? p_max_texels : MAX<uint64_t>(atlas_texels / 32u, 4096u);
 	nextgi_src_scale_cards_to_budget(result.cards, stage1_max_texels_per_mesh, NEXTGI_SRC_EMISSIVE_MIN_TEXEL_METERS);
 
 	LocalVector<Vector2i> sizes;
@@ -1753,7 +2011,7 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 	}
 	if (!allocated) {
 		WARN_PRINT_ONCE("The NextGI SRC material atlas is full; meshes without space get no cards (the P1b LRU, #41, evicts).");
-		failed_meshes.insert(p_mesh);
+		atlas_full_meshes.insert(p_mesh);
 		stats.failed_mesh_count++;
 		return false;
 	}
@@ -1864,19 +2122,59 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 	// GodotNext: ps_swrt_trace (#186, #188). The cards come from the CPU copies, which a device
 	// without ray query keeps too.
 	if (update_data != nullptr && update_data->nextgi_rt_instances != nullptr && mesh_storage->mesh_nextgi_cpu_geometry_is_enabled()) {
-		for (const RendererSceneRender::NextGIRTInstance &fed : *update_data->nextgi_rt_instances) {
+		const LocalVector<RendererSceneRender::NextGIRTInstance> &rt_instances = *update_data->nextgi_rt_instances;
+		// Sort instances by descending angular radius so foreground/large meshes claim material
+		// atlas space first, and compute a proportional per-mesh texel budget when many distinct
+		// meshes share the atlas (keeping full resolution on small/medium scenes).
+		LocalVector<uint32_t> order;
+		order.resize(rt_instances.size());
+		HashSet<uint64_t> pending_keys;
+		for (uint32_t i = 0; i < rt_instances.size(); i++) {
+			order[i] = i;
+			RenderGeometryInstanceBase *gi = static_cast<RenderGeometryInstanceBase *>(rt_instances[i].geometry_instance);
+			if (gi != nullptr && gi->data != nullptr) {
+				const RID m = rt_instances[i].mesh_override.is_valid() ? rt_instances[i].mesh_override : gi->data->base;
+				if (mesh_storage->owns_mesh(m) && !failed_meshes.has(m) && !atlas_full_meshes.has(m)) {
+					const uint64_t k = _nextgi_src_instance_key(gi);
+					if (!key_card_sets.has(k)) {
+						pending_keys.insert(k);
+					}
+				}
+			}
+		}
+		for (uint32_t i = 1; i < order.size(); i++) {
+			const uint32_t key_idx = order[i];
+			const float key_ang = rt_instances[key_idx].angular_radius;
+			uint32_t j = i;
+			while (j > 0 && rt_instances[order[j - 1]].angular_radius < key_ang) {
+				order[j] = order[j - 1];
+				j--;
+			}
+			order[j] = key_idx;
+		}
+		const uint64_t atlas_texels = uint64_t(packer.get_width()) * uint64_t(packer.get_height());
+		const uint64_t remaining_texels = atlas_texels > packer.get_used_texels() ? (atlas_texels - packer.get_used_texels()) : 0u;
+		const uint64_t total_sets = uint64_t(card_sets.size()) + uint64_t(pending_keys.size());
+		uint64_t per_mesh_budget = 0;
+		if (total_sets > 48u && pending_keys.size() > 0u) {
+			const uint64_t target_remaining = (remaining_texels * 3u) / 4u;
+			const uint64_t max_cap = MAX<uint64_t>(atlas_texels / 256u, 4096u);
+			per_mesh_budget = CLAMP(target_remaining / uint64_t(pending_keys.size()), uint64_t(2048u), max_cap);
+		}
+		for (uint32_t idx : order) {
+			const RendererSceneRender::NextGIRTInstance &fed = rt_instances[idx];
 			RenderGeometryInstanceBase *geometry_instance = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
 			if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
 				continue;
 			}
 			const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : geometry_instance->data->base;
-			if (!mesh_storage->owns_mesh(mesh) || failed_meshes.has(mesh)) {
+			if (!mesh_storage->owns_mesh(mesh) || failed_meshes.has(mesh) || atlas_full_meshes.has(mesh)) {
 				continue;
 			}
 			const uint64_t key = _nextgi_src_instance_key(geometry_instance);
 			const uint32_t *set_index = key_card_sets.getptr(key);
 			if (set_index == nullptr) {
-				if (!_build_card_set(mesh, key)) {
+				if (!_build_card_set(mesh, key, false, per_mesh_budget)) {
 					continue;
 				}
 				set_index = key_card_sets.getptr(key);
@@ -1922,7 +2220,7 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 		LocalVector<NextGIFarField::CaptureSource> far_sources;
 		next_gi->get_rt_scene()->get_far_field()->capture_sources(far_sources);
 		for (const NextGIFarField::CaptureSource &source : far_sources) {
-			if (source.instance == nullptr || failed_meshes.has(source.mesh)) {
+			if (source.instance == nullptr || failed_meshes.has(source.mesh) || atlas_full_meshes.has(source.mesh)) {
 				continue;
 			}
 			const uint64_t key = _nextgi_src_instance_key(source.instance);

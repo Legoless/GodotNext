@@ -625,6 +625,8 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 // GodotNext: ps_lumen_lite (#183)
 #include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
 
 // The §3.1 tier rule (#15). Device capabilities are mocked: the rule is pure, and the device inputs
 // come from a driverless RenderingDevice through the rd_feature_mock hook (#17).
@@ -2254,6 +2256,67 @@ TEST_CASE("[NextGI] SRC cards: an L-shaped concave mesh gives at most 12 cards")
 	CHECK(has_chamfer);
 }
 
+TEST_CASE("[NextGI] SRC cards: an occluded hollow room splits interior depth layers inside 12 cards (#29)") {
+	// Single-mesh hollow room (outer 10x6x10 shell, inner 8x4x8 cavity) where every axis has
+	// (u, v)-overlapping outer and inner faces separated by > 4 texels.
+	SRCTestMesh mesh;
+	const float wall = 1.0f;
+	// Floor + roof slabs.
+	mesh.add_box(Vector3(0.0f, -0.5f, 0.0f), Vector3(5.0f, 0.5f, 5.0f));
+	mesh.add_box(Vector3(0.0f, 4.5f, 0.0f), Vector3(5.0f, 0.5f, 5.0f));
+	// Four perimeter walls.
+	mesh.add_box(Vector3(-4.5f, 2.0f, 0.0f), Vector3(0.5f, 2.0f, 4.0f));
+	mesh.add_box(Vector3(4.5f, 2.0f, 0.0f), Vector3(0.5f, 2.0f, 4.0f));
+	mesh.add_box(Vector3(0.0f, 2.0f, -4.5f), Vector3(5.0f, 2.0f, 0.5f));
+	mesh.add_box(Vector3(0.0f, 2.0f, 4.5f), Vector3(5.0f, 2.0f, 0.5f));
+	(void)wall;
+
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	CHECK_EQ(result.cards.size(), 12u);
+
+	// Verify both the exterior +Y roof (y = 5) and interior +Y floor (y = 0) get distinct cards.
+	bool has_roof = false;
+	bool has_floor = false;
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		if (src_vectors_equal(card.axis_n, Vector3(0, 1, 0))) {
+			if (card.origin.y > 4.5f) {
+				has_roof = true;
+			} else if (card.origin.y > 0.0f && card.origin.y < 1.0f) {
+				has_floor = true;
+			}
+		}
+	}
+	CHECK(has_roof);
+	CHECK(has_floor);
+}
+
+TEST_CASE("[NextGI] SRC cards: inner depth split clips narrow foreground columns ahead of a dominant inner wall") {
+	// Hollow room with two narrow columns sitting 2 m in front of the inner +X wall (x = -4).
+	SRCTestMesh mesh;
+	mesh.add_box(Vector3(0.0f, -0.5f, 0.0f), Vector3(5.0f, 0.5f, 5.0f));
+	mesh.add_box(Vector3(0.0f, 4.5f, 0.0f), Vector3(5.0f, 0.5f, 5.0f));
+	mesh.add_box(Vector3(-4.5f, 2.0f, 0.0f), Vector3(0.5f, 2.0f, 4.0f));
+	mesh.add_box(Vector3(4.5f, 2.0f, 0.0f), Vector3(0.5f, 2.0f, 4.0f));
+	mesh.add_box(Vector3(0.0f, 2.0f, -4.5f), Vector3(5.0f, 2.0f, 0.5f));
+	mesh.add_box(Vector3(0.0f, 2.0f, 4.5f), Vector3(5.0f, 2.0f, 0.5f));
+	// Two narrow 0.3x3x0.3 columns in front of the x = -4 inner wall.
+	mesh.add_box(Vector3(-2.15f, 1.5f, -1.5f), Vector3(0.15f, 1.5f, 0.15f));
+	mesh.add_box(Vector3(-2.15f, 1.5f, 1.5f), Vector3(0.15f, 1.5f, 0.15f));
+
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	bool has_inner_x_behind_columns = false;
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		if (src_vectors_equal(card.axis_n, Vector3(1, 0, 0)) && card.origin.x < -3.0f && card.origin.x > -4.0f) {
+			has_inner_x_behind_columns = true;
+		}
+	}
+	CHECK(has_inner_x_behind_columns);
+}
+
 TEST_CASE("[NextGI] SRC cards: a sphere clusters into at most 12 cards") {
 	SRCTestMesh mesh;
 	const int rings = 16;
@@ -2389,6 +2452,23 @@ TEST_CASE("[NextGI] SRC cards: the shelf packer fills the atlas and places a car
 	REQUIRE(reused.allocate(64, 32, rect));
 	CHECK_EQ(rect, first);
 	CHECK_EQ(reused.get_used_texels(), 64u * 64u);
+
+	// Non-overlapping free-rect guillotine split and best-fit-height shelf selection.
+	RendererRD::NextGIShelfPacker non_overlap(128, 128);
+	Rect2i a, b, c;
+	REQUIRE(non_overlap.allocate(64, 64, a));
+	non_overlap.free(a);
+	REQUIRE(non_overlap.allocate(32, 32, b));
+	REQUIRE(non_overlap.allocate(32, 32, c));
+	CHECK_FALSE(b.intersects(c));
+
+	RendererRD::NextGIShelfPacker best_fit(256, 256);
+	Rect2i tall, short_first, short_second;
+	REQUIRE(best_fit.allocate(64, 128, tall));
+	REQUIRE(best_fit.allocate(200, 16, short_first));
+	REQUIRE(best_fit.allocate(32, 16, short_second));
+	// short_second picks the 17-px shelf rather than wasting space on the 129-px shelf.
+	CHECK_EQ(short_second.position.y, short_first.position.y);
 }
 
 TEST_CASE("[NextGI] SRC cards: atlas memory is under the 128 MiB High budget") {
@@ -2814,6 +2894,9 @@ TEST_CASE("[NextGI] SRC production: atlas budget, material sharing, capture cap,
 	CHECK_EQ(epic.material_bytes, uint64_t(256 * 1024 * 1024));
 	CHECK_EQ(epic.radiance_width, 4096u);
 	CHECK_EQ(epic.radiance_height, 8192u);
+	CHECK_EQ(epic.material_width, uint32_t(RendererRD::NEXTGI_SRC_ATLAS_SIZE));
+	CHECK_EQ(epic.material_height, uint32_t(RendererRD::NEXTGI_SRC_ATLAS_SIZE * 2));
+	CHECK(RendererRD::nextgi_src_atlas_memory_bytes(epic.material_width, epic.material_height, 4) <= epic.material_bytes);
 
 	const uint64_t shared = RendererRD::nextgi_src_material_key(7, 0, nullptr, 0);
 	RendererRD::NextGIMaterialCaptures captures;

@@ -66,7 +66,7 @@ enum NextGeoCutFlags : uint32_t {
 // Orthographic views drop the division by d.
 inline float nextgeo_projected_error(const Vector3 &p_center, float p_radius, const Transform3D &p_transform, const Vector3 &p_camera, float p_lod_bias, float p_internal_height, const Projection &p_projection, bool p_orthographic = false) {
 	const Vector3 center = p_transform.xform(p_center);
-	const Vector3 scale = p_transform.basis.get_scale();
+	const Vector3 scale = p_transform.basis.get_scale_abs();
 	const float s = MAX(scale.x, MAX(scale.y, scale.z));
 	const float z_near = MAX(0.001f, p_projection.get_z_near());
 	const float d = MAX(center.distance_to(p_camera) - p_radius * s, z_near);
@@ -125,7 +125,7 @@ inline float nextgeo_shadow_projected_error(const Vector3 &p_center, float p_sph
 	if (p_error >= 3.4e38f) {
 		return 1e30f;
 	}
-	const Vector3 scale_v = p_transform.basis.get_scale();
+	const Vector3 scale_v = p_transform.basis.get_scale_abs();
 	const float s = MAX(scale_v.x, MAX(scale_v.y, scale_v.z));
 	if ((p_cut_flags & NEXTGEO_CUT_FLAG_ORTHOGRAPHIC) != 0) {
 		return p_error * s * nextgeo_ortho_inv_texel_size(p_tile_size, p_projection) * p_lod_bias;

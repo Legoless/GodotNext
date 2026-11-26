@@ -592,7 +592,8 @@ void RendererVirtualMeshStorage::_write_transform(Record &r_record, const Transf
 		r_record.transform[row][2] = p_transform.basis.rows[row][2];
 		r_record.transform[row][3] = p_transform.origin[row];
 	}
-	const Vector3 scale = p_transform.basis.get_scale();
+	// Use unsigned axis lengths so mirrored transforms (det < 0) stay positive and refine normally.
+	const Vector3 scale = p_transform.basis.get_scale_abs();
 	r_record.world_aabb_min[0] = p_world_aabb.position.x;
 	r_record.world_aabb_min[1] = p_world_aabb.position.y;
 	r_record.world_aabb_min[2] = p_world_aabb.position.z;
@@ -5033,7 +5034,7 @@ void RendererVirtualMeshStorage::build_multimesh_element_record_cpu(const Record
 	write_xform(world_cur, r_out_record.transform);
 	write_xform(world_prev, r_out_record.prev_transform);
 
-	const Vector3 scale = world_cur.basis.get_scale();
+	const Vector3 scale = world_cur.basis.get_scale_abs();
 	const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
 	if (max_scale <= 1e-12f) {
 		r_out_record.flags &= ~RECORD_VISIBLE;
@@ -5228,7 +5229,7 @@ void RendererVirtualMeshStorage::get_effective_records_cpu(LocalVector<Record> &
 					out_rec.prev_transform[r][2] = out_rec.transform[r][2];
 					out_rec.prev_transform[r][3] = out_rec.transform[r][3];
 				}
-				const Vector3 scale = leaf.world_transform.basis.get_scale();
+				const Vector3 scale = leaf.world_transform.basis.get_scale_abs();
 				const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
 				if (basis_has_non_uniform_scale(leaf.world_transform.basis)) {
 					out_rec.flags |= RECORD_NON_UNIFORM_SCALE;

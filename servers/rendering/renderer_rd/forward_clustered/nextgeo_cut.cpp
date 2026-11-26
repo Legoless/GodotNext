@@ -276,7 +276,7 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 			continue;
 		}
 		const uint32_t node_base = 8 + group_count * 60;
-		const float scale = record.world_aabb_min[3];
+		const float scale = Math::abs(record.world_aabb_min[3]);
 		const bool has_spline = (record.flags & RendererVirtualMeshStorage::RECORD_HAS_SPLINE) != 0u;
 		const SplineDeformPose spline_pose = has_spline ? p_storage->get_spline_entry(record.flags >> RendererVirtualMeshStorage::RECORD_SPLINE_INDEX_SHIFT).current : SplineDeformPose();
 		const bool is_skinned = (record.flags & RendererVirtualMeshStorage::RECORD_SKINNED_PALETTE) != 0u;

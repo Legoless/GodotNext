@@ -196,3 +196,43 @@ TEST_CASE("[NextGeo][Cull][Shadow] Shadow projected error across light types at 
 	const float sentinel_err = nextgeo_shadow_projected_error(Vector3(0.0f, 0.0f, -10.0f), 1.0f, 3.4e38f, Transform3D(), Vector3(), 1.0f, Size2i(512, 512), cube_proj, persp_flags, 0.025f);
 	CHECK_FALSE(nextgeo_cut_passes(sentinel_err, 1.0f));
 }
+
+TEST_CASE("[NextGeo][Cull] Mirrored instance transforms keep positive projected error and MultiMesh visibility") {
+	const Projection persp = Projection::create_perspective(90.0f, 1.0f, 0.1f, 100.0f);
+	const Projection ortho = Projection::create_orthogonal(-50.0f, 50.0f, -50.0f, 50.0f, 0.0f, 500.0f);
+	const uint32_t ortho_flags = NEXTGEO_CUT_FLAG_SHADOW_VIEW | NEXTGEO_CUT_FLAG_ORTHOGRAPHIC;
+
+	const Transform3D mirrored_uniform(Basis().scaled(Vector3(-1.0f, 1.0f, 1.0f)), Vector3(0.0f, 0.0f, -10.0f));
+	const Transform3D mirrored_nonuniform(Basis().scaled(Vector3(-1.0f, 4.0f, 1.0f)), Vector3(0.0f, 0.0f, -10.0f));
+	const Transform3D positive_nonuniform(Basis().scaled(Vector3(1.0f, 4.0f, 1.0f)), Vector3(0.0f, 0.0f, -10.0f));
+
+	const float err_m1 = nextgeo_projected_error(Vector3(), 1.0f, mirrored_uniform, Vector3(), 1.0f, 1080.0f, persp);
+	const float err_m4 = nextgeo_projected_error(Vector3(), 1.0f, mirrored_nonuniform, Vector3(), 1.0f, 1080.0f, persp);
+	const float err_p4 = nextgeo_projected_error(Vector3(), 1.0f, positive_nonuniform, Vector3(), 1.0f, 1080.0f, persp);
+	CHECK(err_m1 > 0.0f);
+	CHECK(Math::is_equal_approx(err_m4, err_p4));
+
+	const float sh_m4 = nextgeo_shadow_projected_error(Vector3(), 1.0f, 1.0f, mirrored_nonuniform, Vector3(), 1.0f, Size2i(2048, 2048), ortho, ortho_flags);
+	const float sh_p4 = nextgeo_shadow_projected_error(Vector3(), 1.0f, 1.0f, positive_nonuniform, Vector3(), 1.0f, Size2i(2048, 2048), ortho, ortho_flags);
+	CHECK(sh_m4 > 0.0f);
+	CHECK(Math::is_equal_approx(sh_m4, sh_p4));
+
+	// Mirrored MultiMesh element must keep RECORD_VISIBLE and positive max_scale in world_aabb_min[3].
+	RendererVirtualMeshStorage::Record parent = {};
+	parent.flags = RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE | RendererVirtualMeshStorage::RECORD_MULTIMESH_PARENT;
+	parent.transform[0][0] = 1.0f;
+	parent.transform[1][1] = 1.0f;
+	parent.transform[2][2] = 1.0f;
+	parent.prev_transform[0][0] = 1.0f;
+	parent.prev_transform[1][1] = 1.0f;
+	parent.prev_transform[2][2] = 1.0f;
+	RendererVirtualMeshStorage::InstanceAttributes parent_attr = {};
+	const float elem_cur[12] = { -1.0f, 0.0f, 0.0f, 2.0f, 0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+	RendererVirtualMeshStorage::Record out_rec = {};
+	RendererVirtualMeshStorage::InstanceAttributes out_attr = {};
+	RendererVirtualMeshStorage::build_multimesh_element_record_cpu(
+			parent, parent_attr, 0u, 0u, elem_cur, elem_cur,
+			0u, 0u, false, false, true, AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2)), out_rec, out_attr);
+	CHECK((out_rec.flags & RendererVirtualMeshStorage::RECORD_VISIBLE) != 0u);
+	CHECK(Math::is_equal_approx(out_rec.world_aabb_min[3], 3.0f));
+}

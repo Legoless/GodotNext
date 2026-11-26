@@ -364,6 +364,7 @@ private:
 	HashMap<RID, uint32_t> mesh_card_sets;
 	HashMap<uint64_t, uint32_t> key_card_sets;
 	HashSet<RID> failed_meshes;
+	HashSet<RID> atlas_full_meshes;
 	HashSet<RID> emissive_warned_meshes;
 	Stats stats;
 
@@ -378,8 +379,8 @@ private:
 	LocalVector<float> card_coverage; // Per card, filled by the depth download.
 
 	void _create_atlas();
-	bool _build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards = false);
-	bool _build_stage2_card_set(RID p_mesh, uint64_t p_key);
+	bool _build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards = false, uint64_t p_max_texels = 0);
+	bool _build_stage2_card_set(RID p_mesh, uint64_t p_key, uint64_t p_max_texels = 0);
 	bool _ensure_stage2_proxy_instances(CardSetState &r_state);
 	void _release_stage2_proxy_instances(CardSetState &r_state);
 	void _check_emissive_contract(RenderGeometryInstance *p_instance, uint32_t p_set_index);

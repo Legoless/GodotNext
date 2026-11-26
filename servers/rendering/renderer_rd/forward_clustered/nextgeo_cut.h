@@ -233,7 +233,7 @@ public:
 	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 21;
 	static constexpr uint32_t PHASE2_CLUSTER_BASE = CLUSTER_CAPACITY / 2;
 	static constexpr uint32_t HIZ_MAX_MIPS = 16;
-	static constexpr uint32_t REQUEST_CAPACITY = 4096;
+	static constexpr uint32_t REQUEST_CAPACITY = 16384;
 	static constexpr uint32_t REQUEST_USED_WORDS = 2048;
 	static constexpr uint32_t MAX_SHADOW_VIEWS = 80;
 	static constexpr uint32_t SHADOW_NODES_PER_VIEW = 8192;

@@ -638,20 +638,6 @@ Error NGMFile::open(const String &p_path) {
 		}
 		const uint64_t payload_end = page.offset + page.stored_size;
 		expected = align_up(payload_end, overflow);
-		if (!overflow && expected > payload_end) {
-			Vector<uint8_t> pad;
-			const Error pad_error = pool.read_at(key, open_path, base_offset + payload_end, expected - payload_end, pad);
-			if (pad_error != OK) {
-				pages.clear();
-				return pad_error;
-			}
-			for (int b = 0; b < pad.size(); b++) {
-				if (pad[b] != 0) {
-					pages.clear();
-					return ERR_FILE_CORRUPT;
-				}
-			}
-		}
 	}
 	if (overflow || file_size != expected) {
 		pages.clear();

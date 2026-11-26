@@ -266,27 +266,35 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		radiance = best;
 		return found;
 	}
-	float best_align = -2.0;
-	float fallback_align = -2.0;
+	float best_align = 0.0;
+	float best_depth = 1.0e20;
 	vec3 best = vec3(0.0);
-	vec3 fallback = vec3(0.0);
 	bool found = false;
-	bool found_fallback = false;
 	for (uint i = 0u; i < card_set.card_count; i++) {
 		NextGICard card = cards.data[card_set.first_card + i];
 		vec3 rel = object_pos - card.origin.xyz;
 		float u = dot(rel, card.axis_u.xyz);
 		float v = dot(rel, card.axis_v.xyz);
+		float depth = -dot(rel, card.axis_n.xyz);
 		if (abs(u) > card.axis_u.w + 1e-4 || abs(v) > card.axis_v.w + 1e-4) {
 			continue;
 		}
-		float depth = -dot(rel, card.axis_n.xyz);
+		if (depth < -0.25 * card_set.texel_size || depth > card.axis_n.w + 0.25 * card_set.texel_size) {
+			continue;
+		}
 		float align = dot(face_normal, card.axis_n.xyz);
+		if (align <= 0.0) {
+			continue;
+		}
 		vec2 card_size = max(vec2(card.atlas_rect.zw), vec2(1.0));
 		vec2 texel = vec2((u / card.axis_u.w) * 0.5 + 0.5, (v / card.axis_v.w) * 0.5 + 0.5) * card_size;
 		ivec2 material = ivec2(card.atlas_rect.xy) + ivec2(clamp(texel, vec2(0.0), card_size - 1.0));
 		float card_depth = texelFetch(material_depth_tex, material, 0).r;
 		if (!(card_depth > 0.0)) {
+			continue;
+		}
+		float depth_tol = 2.0 * max(card_set.texel_size, max(2.0 * card.axis_u.w / card_size.x, 2.0 * card.axis_v.w / card_size.y));
+		if (abs(card_depth - depth) > depth_tol) {
 			continue;
 		}
 		uint page_index = rec.page_table + i;
@@ -298,26 +306,15 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		uvec2 page_size = max(uvec2(page.y & 0xFFFFu, page.y >> 16u), uvec2(1u));
 		ivec2 radiance_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - 1.0));
 		vec3 sample_radiance = texelFetch(src_radiance_tex, radiance_coord, 0).rgb;
-		float depth_tol = 2.0 * max(card_set.texel_size, max(2.0 * card.axis_u.w / card_size.x, 2.0 * card.axis_v.w / card_size.y));
-		if (abs(card_depth - depth) <= depth_tol && align > best_align) {
+		if (!found || align > best_align + 0.05 || (abs(align - best_align) <= 0.05 && depth < best_depth)) {
 			best_align = align;
+			best_depth = depth;
 			best = sample_radiance;
 			found = true;
-		} else if (align > fallback_align) {
-			fallback_align = align;
-			fallback = sample_radiance;
-			found_fallback = true;
 		}
 	}
-	if (found) {
-		radiance = best;
-		return true;
-	}
-	if (found_fallback) {
-		radiance = fallback;
-		return true;
-	}
-	return false;
+	radiance = best;
+	return found;
 }
 #endif // !NEXTGI_TRACE_SDF
 
@@ -513,13 +510,21 @@ void nextgi_wrc_trace() {
 			escape_sum += wrc_escape_samples[i];
 		}
 		float fraction = float(wrc_backfaces) / 64.0;
+		vec3 base_pos = level_origin + (vec3(cell.xy, cell.z % 16) - vec3(7.5)) * spacing;
 		vec3 moved = probe_pos;
 		if (fraction > 0.25 && dot(escape_sum, escape_sum) > 0.0) {
 			float travel = min(length(escape_sum), 0.4 * spacing);
 			moved = probe_pos + normalize(escape_sum) * travel;
 		}
+		// Keep cumulative relocation bounded within the probe cell so probes never drift into walls.
+		vec3 total_offset = moved - base_pos;
+		float max_offset = 0.4 * spacing;
+		float offset_len = length(total_offset);
+		if (offset_len > max_offset) {
+			total_offset *= max_offset / offset_len;
+		}
 		// GodotNext: ps_lumen_lite (#183). w > 1.5 marks a probe inside geometry. 1.0 still counts as history.
-		imageStore(offset_image, cell, vec4(moved - level_origin - (vec3(cell.xy, cell.z % 16) - vec3(7.5)) * spacing, fraction > 0.30 ? 2.0 : 1.0));
+		imageStore(offset_image, cell, vec4(total_offset, fraction > 0.30 ? 2.0 : 1.0));
 	}
 }
 

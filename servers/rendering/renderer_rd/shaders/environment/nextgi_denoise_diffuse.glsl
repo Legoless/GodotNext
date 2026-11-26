@@ -101,7 +101,7 @@ void main() {
 	}
 
 	vec4 filtered = weight_sum > 0.0 ? sum / weight_sum : center;
-	imageStore(probe_radiance_out, texel, filtered);
+	imageStore(probe_radiance_out, texel, vec4(filtered.rgb, center.a));
 }
 
 #elif defined(MODE_PROBE_TEMPORAL)
@@ -217,7 +217,8 @@ void main() {
 		history_length = min(imageLoad(history_length_image, prev_probe).r + 1u, params.history_cap);
 	}
 
-	// Clamp the history to the current 3x3 neighbourhood's mean +/- 1.5 sigma.
+	// Clamp the history to the depth- and normal-compatible 3x3 neighbourhood's mean +/- 2.5 sigma
+	// so dark adjacent geometry does not pull down room-interior history or clip bright lobes.
 	vec3 mean = vec3(0.0);
 	vec3 mean_sq = vec3(0.0);
 	float count = 0.0;
@@ -226,6 +227,22 @@ void main() {
 			ivec2 q_probe = probe + ivec2(x, y);
 			if (any(lessThan(q_probe, ivec2(0))) || any(greaterThanEqual(q_probe, probe_count))) {
 				continue;
+			}
+			if (x != 0 || y != 0) {
+				vec2 q_uv = nextgi_denoise_probe_uv(q_probe);
+				float q_depth = textureLod(depth_tex, q_uv, 0.0).r;
+				if (q_depth <= 0.0) {
+					continue;
+				}
+				vec3 q_normal = normalize(textureLod(normal_roughness_tex, q_uv, 0.0).xyz * 2.0 - 1.0);
+				if (dot(normal, q_normal) < params.normal_tolerance) {
+					continue;
+				}
+				vec3 q_world = nextgi_denoise_world_position(q_uv, q_depth);
+				float q_dist = length(q_world - temporal.camera_pos.xyz);
+				if (abs(q_dist - distance_to_camera) > params.depth_tolerance * max(distance_to_camera, 1e-4)) {
+					continue;
+				}
 			}
 			vec3 sample_rgb = textureLod(probe_radiance, (vec2(q_probe * stride + ray) + 0.5) / vec2(params.probe_size), 0.0).rgb;
 			mean += sample_rgb;
@@ -239,7 +256,7 @@ void main() {
 		mean /= count;
 		vec3 variance = max(mean_sq / count - mean * mean, vec3(0.0));
 		debug_sigma = sqrt(variance);
-		vec3 clamped = clamp(history.rgb, mean - 1.5 * debug_sigma, mean + 1.5 * debug_sigma);
+		vec3 clamped = clamp(history.rgb, mean - 2.5 * debug_sigma, mean + 2.5 * debug_sigma);
 		// With a history cap of 0 the pass is a pass-through, for the DLSS-RR bypass hook (#206).
 		float weight = params.history_cap == 0u ? 1.0 : 1.0 / float(history_length + 1u);
 		out_rgb = reset ? current.rgb : mix(clamped, current.rgb, weight);

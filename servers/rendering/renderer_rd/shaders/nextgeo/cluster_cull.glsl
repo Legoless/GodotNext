@@ -1576,7 +1576,7 @@ float projected_error_params_skinned(NextGeoInstanceRecord p_record, vec4 p_lod_
 		spline_deform_bounds_sphere(sp, p_lod_sphere.xyz, p_lod_sphere.w);
 		p_max_parent_error = p_max_parent_error * sp.up_max_stretch.w + spline_deform_curvature_error(sp, raw_radius);
 	}
-	float scale = p_record.world_aabb_min.w;
+	float scale = abs(p_record.world_aabb_min.w);
 	float eff_scale = scale * p_bone_scale;
 	if ((p_flags & 4u) != 0u) {
 		return p_max_parent_error * eff_scale * p_view.x * p_view.w;
@@ -2083,7 +2083,7 @@ void main() {
 							uint missing_page = dag_uint(mesh.group_offset + child_g * 60u + 8u);
 							if (missing_page != last_requested_page) {
 								last_requested_page = missing_page;
-								float scale = record.world_aabb_min.w;
+								float scale = abs(record.world_aabb_min.w);
 								vec4 req_lod = has_skin_bounds ? skin_sphere : own_lod;
 								if ((record.flags & NEXTGEO_RECORD_HAS_SPLINE) != 0u) {
 									spline_deform_bounds_sphere(spline_deforms.data[record.flags >> NEXTGEO_RECORD_SPLINE_INDEX_SHIFT].current, req_lod.xyz, req_lod.w);

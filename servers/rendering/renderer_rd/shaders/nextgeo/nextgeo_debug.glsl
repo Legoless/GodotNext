@@ -289,7 +289,7 @@ float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p
 	if (p_max_parent_error >= 3.4e38) {
 		return dbg.camera.w + 1.0;
 	}
-	float scale = p_record.world_aabb_min.w;
+	float scale = abs(p_record.world_aabb_min.w);
 	if (push_params.is_orthogonal != 0u) {
 		return p_max_parent_error * scale * dbg.view_info.x * dbg.view_info.w;
 	}

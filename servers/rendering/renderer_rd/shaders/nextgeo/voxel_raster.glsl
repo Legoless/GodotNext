@@ -164,7 +164,7 @@ void main() {
 				float depth = clip.z / clip.w;
 				if (depth > 0.0 && depth <= 1.0) {
 					vec2 px_center = nextgeo_sw_clip_to_pixel(clip, params.size).xy;
-					float inst_scale = max(record.world_aabb_min.w, 1e-6);
+					float inst_scale = max(abs(record.world_aabb_min.w), 1e-6);
 					bool is_ortho = abs(raster.proj[2][3]) < 1e-4;
 					float px_scale = 0.5 * float(params.size.y) * abs(raster.proj[1][1]);
 					float diam_px = voxel_size * inst_scale * px_scale / (is_ortho ? 1.0 : max(clip.w, 1e-4));
