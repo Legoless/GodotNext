@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="NextGeoDebug" inherits="Object" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Offline NextGeo DAG inspection and cluster-export helpers for PQ spike measurements.
+	</brief_description>
+	<description>
+		Provides static helpers that run the NextGeo offline cluster DAG builder and finest-level meshlet clusterizer in memory on a [Mesh] without writing [code].ngm[/code] files. Used by multi-material root-cut/depth measurements and draw-identity benchmarks.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="build_stats" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="mesh" type="Mesh" />
+			<description>
+				Runs the NextGeo cluster DAG builder in memory on all triangle surfaces of [param mesh] and returns a [Dictionary] containing [code]source_triangles[/code], [code]root_cut_triangles[/code], [code]dag_depth[/code], [code]cluster_count[/code], [code]group_count[/code], [code]terminal_groups[/code], [code]locked_vertex_fraction[/code], [code]build_ms[/code], and [code]surface_count[/code].
+			</description>
+		</method>
+		<method name="export_clusters" qualifiers="static">
+			<return type="PackedByteArray" />
+			<param index="0" name="mesh" type="Mesh" />
+			<description>
+				Clusterizes all triangle surfaces of [param mesh] at the finest level (at most 128 triangles and 128 vertices per cluster) using meshoptimizer and packs the header, cluster bounding/cone descriptors, vertex positions, and triangle indices into a tightly packed little-endian byte buffer.
+			</description>
+		</method>
+	</methods>
+</class>

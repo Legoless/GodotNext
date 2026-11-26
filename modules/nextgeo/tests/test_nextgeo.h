@@ -1878,4 +1878,87 @@ TEST_CASE("[NextGeo][Voxels] Offline DAG voxelization, .ngm page payload round-t
 	CHECK_EQ(parsed_bricks, dag_vox_a.voxel_bricks.size());
 }
 
+TEST_CASE("[NextGeo][MultiMaterial] 8-surface seam kit meets root-cut and DAG depth targets") {
+	// GodotNext: #71 multi-material kit regression guard (~100k tris across 8 seam-sharing surfaces).
+	// 8 vertical facade strips forming a closed perimeter around a building with coincident seam edges.
+	constexpr uint32_t NUM_SURFACES = 8;
+	constexpr uint32_t SUBDIV_X = 64; // 64 * 100 * 2 = 12,800 tris per surface -> 102,400 tris total.
+	constexpr uint32_t SUBDIV_Y = 100;
+	constexpr float PERIMETER = 80.0f;
+	constexpr float HEIGHT = 42.0f;
+	constexpr float STRIP_W = PERIMETER / float(NUM_SURFACES);
+
+	NextGeoBuildInput input;
+	input.page_size = TEST_PAGE_SIZE;
+	input.use_threads = true;
+
+	for (uint32_t s = 0; s < NUM_SURFACES; s++) {
+		NextGeoSurfaceInput surf;
+		surf.eligible = true;
+		const float u0 = float(s) * STRIP_W;
+		for (uint32_t iy = 0; iy <= SUBDIV_Y; iy++) {
+			const float fy = float(iy) / float(SUBDIV_Y);
+			const float y = fy * HEIGHT;
+			for (uint32_t ix = 0; ix <= SUBDIV_X; ix++) {
+				const float fx = float(ix) / float(SUBDIV_X);
+				const float perim = u0 + fx * STRIP_W;
+				// Wrap around a 24x16 rectangle so adjacent surfaces share exact seam positions.
+				Vector3 p;
+				Vector3 n;
+				if (perim <= 24.0f) {
+					p = Vector3(perim - 12.0f, y, -8.0f);
+					n = Vector3(0, 0, -1);
+				} else if (perim <= 40.0f) {
+					p = Vector3(12.0f, y, (perim - 24.0f) - 8.0f);
+					n = Vector3(1, 0, 0);
+				} else if (perim <= 64.0f) {
+					p = Vector3(12.0f - (perim - 40.0f), y, 8.0f);
+					n = Vector3(0, 0, 1);
+				} else {
+					p = Vector3(-12.0f, y, 8.0f - (perim - 64.0f));
+					n = Vector3(-1, 0, 0);
+				}
+				// Interior displacement only (zero on panel seams ix == 0 or ix == SUBDIV_X).
+				if (ix > 0 && ix < SUBDIV_X && iy > 0 && iy < SUBDIV_Y) {
+					const float disp = 0.08f * std::sin(fx * 12.56637f) * std::sin(fy * 25.13274f);
+					p += n * disp;
+				}
+				surf.positions.push_back(p);
+				surf.normals.push_back(n);
+				surf.uv0.push_back(Vector2(fx, fy));
+			}
+		}
+		for (uint32_t iy = 0; iy < SUBDIV_Y; iy++) {
+			for (uint32_t ix = 0; ix < SUBDIV_X; ix++) {
+				const int32_t v00 = int32_t(iy * (SUBDIV_X + 1) + ix);
+				const int32_t v10 = v00 + 1;
+				const int32_t v01 = v00 + int32_t(SUBDIV_X + 1);
+				const int32_t v11 = v01 + 1;
+				surf.indices.push_back(v00);
+				surf.indices.push_back(v10);
+				surf.indices.push_back(v11);
+				surf.indices.push_back(v00);
+				surf.indices.push_back(v11);
+				surf.indices.push_back(v01);
+			}
+		}
+		input.surfaces.push_back(surf);
+	}
+
+	NextGeoBuildOutput dag;
+	REQUIRE_EQ(nextgeo_build_dag(input, dag), OK);
+	REQUIRE_EQ(dag.source_triangle_count, NUM_SURFACES * SUBDIV_X * SUBDIV_Y * 2u);
+
+	uint64_t root_cut_tris = 0;
+	for (const NextGeoCluster &c : dag.clusters) {
+		if (!std::isfinite(c.parent_error) || c.parent_error >= FLT_MAX * 0.5f) {
+			root_cut_tris += uint64_t(c.triangle_count);
+		}
+	}
+	const uint64_t root_target = MAX(uint64_t(std::ceil(0.02 * double(dag.source_triangle_count))), uint64_t(4096));
+	const uint32_t depth_limit = uint32_t(std::floor(std::log2(double(dag.source_triangle_count) / 128.0))) + 3u;
+	CHECK_LE(root_cut_tris, root_target);
+	CHECK_LE(dag.dag_depth, depth_limit);
+}
+
 } // namespace TestNextGeo

@@ -30,6 +30,7 @@
 
 #include "register_types.h"
 
+#include "nextgeo_debug.h"
 #include "nextgeo_import.h"
 
 #include "core/object/class_db.h"
@@ -46,6 +47,7 @@
 void initialize_nextgeo_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		ImporterMesh::build_virtual_geometry_func = nextgeo_import_build;
+		GDREGISTER_CLASS(NextGeoDebug);
 	}
 
 #ifdef TOOLS_ENABLED
