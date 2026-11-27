@@ -427,5 +427,6 @@ libOpenImageDenoise*.a
 oidnDenoise
 oidnDenoise.exe
 
-# Local working files (pages, exports), never committed.
+# Local working files (pages, exports, sample benches), never committed.
 /local/
+/temp/

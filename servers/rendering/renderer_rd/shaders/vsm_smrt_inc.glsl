@@ -88,6 +88,15 @@ float vsm_smrt_step(uint p_step, uint p_steps, float p_jitter, float p_first, fl
 	if (!(p_last > p_first) || !(p_first > 0.0)) {
 		return p_first;
 	}
+	return p_first * pow(p_last / p_first, t);
+}
+
+// RendererVirtualShadowMapStorage::smrt_step_local().
+float vsm_smrt_step_local(uint p_step, uint p_steps, float p_jitter, float p_first, float p_last) {
+	float t = (float(p_step) + p_jitter) / float(max(p_steps, 1u));
+	if (!(p_last > p_first) || !(p_first > 0.0)) {
+		return p_first;
+	}
 	return p_first + (p_last - p_first) * (t * t);
 }
 
@@ -256,14 +265,19 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 	vec2 t = vec2(vsm_row(level0.row0, receiver), vsm_row(level0.row1, receiver));
 	float depth = vsm_row(level0.row2, receiver);
 	float texels_per_meter = exp2(float(-VSM_CLIPMAP_TEXEL0_EXPONENT));
+	float scale = exp2(float(level + mip));
+	// Receiver tangent-plane depth slope per meter along the clipmap's X and Y axes.
+	vec3 lx = level0.row0.xyz * level0.texel_scale;
+	vec3 ly = level0.row1.xyz * level0.texel_scale;
+	float inv_ndl = n_dot_l > 0.15 ? (1.0 / n_dot_l) : 0.0;
+	vec2 rp_slope = clamp(vec2(dot(p_normal, lx), dot(p_normal, ly)) * inv_ndl, vec2(-2.0), vec2(2.0));
 
 	if (vsm_projection.data.misc.x != 0u && count > VSM_PREFILTERED_DISTANT_LEVELS && level + VSM_PREFILTERED_DISTANT_LEVELS >= count) {
 		return vsm_prefiltered_distant(first, count, t, depth, level, mip);
 	}
 	uint rays = min(vsm_projection.data.counts.z, VSM_SMRT_MAX_RAYS);
 	if (rays == 0u || !(p_tan_half_angle > 0.0)) {
-		// One 2 x 2 filtered tap on the sampled level and mip.
-		float scale = exp2(float(level + mip));
+		// One 2 x 2 filtered tap on the sampled level and mip with uphill receiver-plane depth projection.
 		vec2 grid = t / scale - vec2(0.5);
 		vec2 base = floor(grid);
 		vec2 f = grid - base;
@@ -271,8 +285,13 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 		for (uint corner = 0u; corner < 4u; corner++) {
 			vec2 corner_offset = vec2(float(corner & 1u), float(corner >> 1u));
 			vec2 sample_t = (base + corner_offset + vec2(0.5)) * scale;
+			vec2 delta_tx = (sample_t - t) / scale;
+			float corner_depth = depth + min(dot(rp_slope, delta_tx), 0.0) * texel;
 			float weight = ((corner & 1u) != 0u ? f.x : 1.0 - f.x) * ((corner >> 1u) != 0u ? f.y : 1.0 - f.y);
-			lit += vsm_smrt_clipmap_occluded(first, count, sample_t, depth, level, mip) ? 0.0 : weight;
+			float stored;
+			float sample_texel;
+			bool occluded = vsm_smrt_clipmap_depth(first, count, sample_t, level, mip, stored, sample_texel) && (stored < corner_depth - sample_texel * VSM_SMRT_DEPTH_BIAS_TEXELS);
+			lit += occluded ? 0.0 : weight;
 		}
 		return lit;
 	}
@@ -280,9 +299,27 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 	uint steps = clamp(vsm_projection.data.counts.w, 1u, VSM_SMRT_MAX_STEPS);
 	float first_height = texel * VSM_SMRT_FIRST_STEP_TEXELS;
 	float level_extent = VSM_CLIPMAP_LEVEL0_EXTENT * exp2(float(level));
-	bool init_behind = vsm_pool_depth(probe.texel) < depth - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+	float sub_scale = clamp((n_dot_l - 0.50) * 3.0, 0.0, 1.0);
+	vec2 sub_noise = fract(p_noise + vec2(0.381966, 0.754878));
 	uint lit = 0u;
 	for (uint ray = 0u; ray < rays; ray++) {
+		// Stratified sub-texel origin jitter on the receiver's tangent plane gives stochastic bilinear
+		// anti-aliasing even for near-ground contact shadows whose penumbra is narrower than one texel.
+		// Clamp tangent-plane depth shift to <= 0 (uphill only) so curved or bumpy NextGeo geometry
+		// never projects behind its own depth buffer surface.
+		vec2 sub_tx = vsm_smrt_square(ray, rays, sub_noise) * sub_scale;
+		vec2 ray_t = t + sub_tx * scale;
+		float ray_depth = depth + min(dot(rp_slope, sub_tx), 0.0) * texel;
+		float init_stored;
+		float init_texel;
+		bool prev_behind = false;
+		if (vsm_smrt_clipmap_depth(first, count, ray_t, level, mip, init_stored, init_texel)) {
+			float init_scale = init_texel * texels_per_meter;
+			vec2 init_center = (floor(ray_t / init_scale) + vec2(0.5)) * init_scale;
+			vec2 init_delta_tx = (init_center - ray_t) / init_scale;
+			float init_depth = ray_depth + min(dot(rp_slope, init_delta_tx), 0.0) * init_texel;
+			prev_behind = init_stored < init_depth - init_texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+		}
 		// The ray's slope across the light: a point of the light's disk, in tangent units.
 		vec2 slope = vsm_smrt_disk(ray, rays, p_noise) * p_tan_half_angle;
 		float slope_length = length(slope);
@@ -293,12 +330,11 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 		last_height = max(last_height, first_height);
 		float jitter = vsm_smrt_jitter(ray, p_noise);
 		bool occluded = false;
-		float z_prev = depth;
-		bool prev_behind = init_behind;
+		float z_prev = ray_depth;
 		for (uint step_index = 0u; step_index < steps && !occluded; step_index++) {
 			float height = vsm_smrt_step(step_index, steps, jitter, first_height, last_height);
-			float z_curr = depth - height;
-			vec2 sample_t = t + slope * (height * texels_per_meter);
+			float z_curr = ray_depth - height;
+			vec2 sample_t = ray_t + slope * (height * texels_per_meter);
 			float stored;
 			float sample_texel;
 			if (vsm_smrt_clipmap_depth(first, count, sample_t, level, mip, stored, sample_texel)) {
@@ -401,18 +437,32 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 	if (receiver_map == VSM_MAP_NONE) {
 		return 1.0;
 	}
+	VSMMapData rmd = vsm_maps.data[receiver_map];
+	float inv_cot = 1.0 / max(length(rmd.row0.xyz), 1.0e-20);
+	vec3 fx = rmd.row0.xyz * inv_cot;
+	vec3 fy = rmd.row1.xyz * inv_cot;
+	float f_ndl = dot(p_normal, p_light_position - receiver) / max(rw, 1.0e-20);
+	float inv_f_ndl = f_ndl > 0.15 ? (1.0 / f_ndl) : 0.0;
+	vec2 f_slope = clamp(vec2(dot(p_normal, fx), dot(p_normal, fy)) * inv_f_ndl, vec2(-2.0), vec2(2.0));
 	uint rays = min(vsm_projection.data.counts.y, VSM_SMRT_MAX_RAYS);
 	if (rays == 0u || (!area && !(p_radius > 0.0))) {
-		// One 2 x 2 filtered tap at the receiver's mip.
+		// One 2 x 2 filtered tap at the receiver's mip with uphill receiver-plane depth projection.
 		float mip_size = float(VSM_VIRTUAL_SIZE >> mip);
-		vec2 grid = vec2(x / rw * 0.5 + 0.5, y / rw * 0.5 + 0.5) * mip_size - vec2(0.5);
+		vec2 receiver_tx = vec2(x / rw * 0.5 + 0.5, y / rw * 0.5 + 0.5) * mip_size;
+		vec2 grid = receiver_tx - vec2(0.5);
 		vec2 base = floor(grid);
 		vec2 f = grid - base;
 		float lit = 0.0;
 		for (uint corner = 0u; corner < 4u; corner++) {
-			vec2 uv = (base + vec2(float(corner & 1u), float(corner >> 1u)) + vec2(0.5)) / mip_size;
+			vec2 sample_tx = base + vec2(float(corner & 1u), float(corner >> 1u)) + vec2(0.5);
+			vec2 uv = sample_tx / mip_size;
+			vec2 delta_tx = sample_tx - receiver_tx;
+			float corner_w = max(rw + min(dot(f_slope, delta_tx), 0.0) * texel, rmd.near_w);
 			float weight = ((corner & 1u) != 0u ? f.x : 1.0 - f.x) * ((corner >> 1u) != 0u ? f.y : 1.0 - f.y);
-			lit += vsm_smrt_face_occluded(receiver_map, (uv.x * 2.0 - 1.0) * rw, (uv.y * 2.0 - 1.0) * rw, rw, mip) ? 0.0 : weight;
+			float stored;
+			float sample_texel;
+			bool occluded = vsm_smrt_face_depth(receiver_map, (uv.x * 2.0 - 1.0) * corner_w, (uv.y * 2.0 - 1.0) * corner_w, corner_w, mip, stored, sample_texel) && (stored < corner_w - sample_texel * VSM_SMRT_DEPTH_BIAS_TEXELS);
+			lit += occluded ? 0.0 : weight;
 		}
 		return lit;
 	}
@@ -421,8 +471,17 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 	vec3 up = abs(light_dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
 	vec3 tangent = normalize(cross(light_dir, up));
 	vec3 bitangent = cross(light_dir, tangent);
+	float init_stored;
+	float init_texel;
+	bool init_behind = false;
+	if (vsm_smrt_face_depth(receiver_map, x, y, rw, mip, init_stored, init_texel)) {
+		float init_mip_size = max(rmd.texel_scale * rw * float(VSM_VIRTUAL_SIZE) / max(init_texel, 1.0e-20), 1.0);
+		vec2 ray_tx = vec2(x / rw * 0.5 + 0.5, y / rw * 0.5 + 0.5) * init_mip_size;
+		vec2 delta_tx = (floor(ray_tx) + vec2(0.5)) - ray_tx;
+		float init_w = max(rw + min(dot(f_slope, delta_tx), 0.0) * init_texel, rmd.near_w);
+		init_behind = init_stored < init_w - init_texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+	}
 	uint steps = clamp(vsm_projection.data.counts.w, 1u, VSM_SMRT_MAX_STEPS);
-	bool init_behind = vsm_pool_depth(probe.texel) < w - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
 	uint lit = 0u;
 	for (uint ray = 0u; ray < rays; ray++) {
 		vec3 light_offset;
@@ -456,7 +515,7 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 		float prev_w = rw;
 		bool prev_behind = init_behind;
 		for (uint step_index = 0u; step_index < steps && !occluded; step_index++) {
-			vec3 point = receiver + ray_vector * vsm_smrt_step(step_index, steps, jitter, first, last);
+			vec3 point = receiver + ray_vector * vsm_smrt_step_local(step_index, steps, jitter, first, last);
 			float px;
 			float py;
 			float pw;

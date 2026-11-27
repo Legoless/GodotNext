@@ -37,11 +37,19 @@ bool nextgi_screen_trace_hiz(mat4 view_proj, mat4 inv_view_proj, vec3 camera, ve
 	vec2 uv0 = screen0.xy;
 	vec2 uv1 = screen1.xy;
 	vec2 screen = max(screen_size, vec2(1.0));
-	float mip = clamp(log2(max(length((uv1 - uv0) * screen) / 24.0, 1.0)), 0.0, max_mip);
+	float px_len = length((uv1 - uv0) * screen);
+	if (!(px_len >= 2.0)) {
+		return false;
+	}
+	float mip = clamp(floor(log2(max(px_len / 24.0, 1.0))), 0.0, max_mip);
+	// Start at least 1.5 pixels away from the ray origin so micro-bumps on the receiver surface
+	// cannot falsely self-intersect on the first march sample.
+	float t_start = min(1.5 / px_len, 0.9);
 	bool stopped = false;
+	bool seen_clear = false;
 	vec3 last_clear = origin;
 	for (int step = 0; step < 24; step++) {
-		float t = (float(step) + 0.5) / 24.0;
+		float t = mix(t_start, 1.0, (float(step) + 0.5) / 24.0);
 		vec2 uv = mix(uv0, uv1, t);
 		// GodotNext: ps_swrt_trace (#186 step 4). Even steps on screen are uneven along the ray
 		// under perspective: this is the point of the segment that projects to uv.
@@ -50,15 +58,39 @@ bool nextgi_screen_trace_hiz(mat4 view_proj, mat4 inv_view_proj, vec3 camera, ve
 			stopped = true;
 			break;
 		}
-		float scene_z = textureLod(NEXTGI_SCREEN_HIZ_TEX, uv, mip).r;
-		ivec2 pixel = ivec2(clamp(uv * screen, vec2(0.0), screen - 1.0));
+		// Fast coarse Hi-Z empty-space skip: Hi-Z stores max reverse-Z (nearest surface in the mip cell),
+		// so a sample strictly in front of it cannot hit any mip-0 pixel inside that cell.
+		if (mip > 0.5) {
+			float hiz_z = textureLod(NEXTGI_SCREEN_HIZ_TEX, uv, mip).r;
+			float ray_z = mix(screen0.z, screen1.z, t);
+			if (!(hiz_z > 0.0) || ray_z > hiz_z) {
+				seen_clear = true;
+				last_clear = sample_pos;
+				continue;
+			}
+		}
+		// Exact mip-0 depth confirmation: coarse Hi-Z max(depth) pulls nearer rows of receding floors
+		// and foreground silhouettes into the tile and must never be accepted as a surface hit directly.
+		ivec2 pixel = ivec2(clamp(floor(uv * screen), vec2(0.0), screen - 1.0));
+		float scene_z = texelFetch(NEXTGI_SCREEN_HIZ_TEX, pixel, 0).r;
+		if (!(scene_z > 0.0)) {
+			seen_clear = true;
+			last_clear = sample_pos;
+			continue;
+		}
 		vec3 scene_pos = nextgi_view_reconstruct(inv_view_proj, (vec2(pixel) + 0.5) / screen, scene_z);
 		float scene_dist = max(length(scene_pos - camera), 0.001);
 		float ray_dist = length(sample_pos - camera);
-		if (ray_dist > scene_dist && ray_dist < scene_dist + 0.1 * scene_dist) {
-			color = textureLod(NEXTGI_SCREEN_LAST_FRAME_TEX, uv, 0.0).rgb;
-			march_end = sample_pos;
-			return true;
+		float z_bias = max(0.015, 0.004 * scene_dist);
+		if (ray_dist > scene_dist + z_bias && ray_dist < scene_dist + 0.1 * scene_dist) {
+			if (seen_clear || step >= 1) {
+				color = textureLod(NEXTGI_SCREEN_LAST_FRAME_TEX, uv, 0.0).rgb;
+				march_end = sample_pos;
+				return true;
+			}
+			// First sample is still inside the origin surface's own depth slab: hand off cleanly to
+			// the world trace from the origin rather than returning a false self-hit.
+			return false;
 		}
 		// GodotNext: ps_swrt_trace (#186 step 4). Behind a surface the screen cannot tell what the
 		// ray meets: stop, and the world trace resumes before this sample, pulled back.
@@ -66,6 +98,7 @@ bool nextgi_screen_trace_hiz(mat4 view_proj, mat4 inv_view_proj, vec3 camera, ve
 			stopped = true;
 			break;
 		}
+		seen_clear = true;
 		last_clear = sample_pos;
 	}
 	if (stopped) {

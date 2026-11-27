@@ -1905,6 +1905,8 @@ TEST_CASE("[NextGI][SWRT] Both tiers resume after the screen march with a pull-b
 		REQUIRE_FALSE(gather.is_empty());
 		const String what = software ? "software gather" : "hardware gather";
 		CHECK_MESSAGE(gather.contains("if (ray_dist >= scene_dist + 0.1 * scene_dist) {\n\t\t\tstopped = true;"), (what + ": the screen march stops behind a surface").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("float scene_z = texelFetch(NEXTGI_SCREEN_HIZ_TEX, pixel, 0).r;"), (what + ": coarse Hi-Z hits are confirmed against exact mip-0 depth").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("if (!(hiz_z > 0.0) || ray_z > hiz_z) {"), (what + ": coarse Hi-Z skips empty space conservatively in reverse-Z").utf8().get_data());
 		CHECK_MESSAGE(gather.contains("vec3 sample_pos = mix(origin, far_pos, t * clip0.w / mix(far_w, clip0.w, t));"), (what + ": the sample is the point that projects to the sampled pixel").utf8().get_data());
 		CHECK_MESSAGE(gather.contains("if (stopped) {\n\t\tmarch_end = last_clear;"), (what + ": a stopped miss ends on the last sample in front of the depth buffer").utf8().get_data());
 		CHECK_MESSAGE(gather.contains("float resume = marched - nextgi_screen_pullback(clearance);"), (what + ": the resume pulls back").utf8().get_data());

@@ -3648,6 +3648,211 @@ TEST_CASE("[VSM] SMRT inner penumbra, edge symmetry, resolution independence, th
 	}
 }
 
+TEST_CASE("[VSM] SMRT low contact caster preservation, sub-texel anti-aliasing, and acne-free sloped receivers") {
+	using namespace TestVirtualShadowMapProjection;
+
+	// 1) smrt_step (geometric, directional) vs smrt_step_local (quadratic, bounded local):
+	//    both strictly increase across steps, clamp when last <= first, and geometric concentrates near-ground steps.
+	{
+		float prev_dir = 0.0f;
+		float prev_loc = 0.0f;
+		for (uint32_t s = 0; s < 6; s++) {
+			const float h_dir = VSM::smrt_step(s, 6, 0.5f, 0.004f, 16.0f);
+			const float h_loc = VSM::smrt_step_local(s, 6, 0.5f, 0.004f, 0.95f);
+			CHECK(h_dir > prev_dir);
+			CHECK(h_dir <= 16.0f);
+			CHECK(h_loc > prev_loc);
+			CHECK(h_loc <= 0.95f);
+			prev_dir = h_dir;
+			prev_loc = h_loc;
+		}
+		// Geometric step 0 on a 16 m directional clipmap stays within ~2 cm of the ground (catching low pebbles),
+		// whereas quadratic would jump past 10 cm.
+		CHECK(VSM::smrt_step(0, 6, 0.5f, 0.004f, 16.0f) < 0.02f);
+		CHECK(VSM::smrt_step_local(3, 6, 0.5f, 0.02f, 0.01f) == doctest::Approx(0.02f));
+	}
+
+	// 2) Low 3.5 cm contact caster (pebble height) at level-2 3.9 mm texels: directional SMRT must preserve the shadow
+	//    without bias erosion, and stratified sub-texel origin jitter must produce smooth fractional edge anti-aliasing
+	//    even when the geometric penumbra (~0.37 mm for 1.2 deg sun) is narrower than one 3.9 mm texel.
+	{
+		const uint32_t count = 4;
+		ProjectionScene pebble;
+		pebble.slab_height = 0.035f;
+		pebble.slab_half = 0.08f;
+		pebble.set_maps(sun_levels(count));
+		pebble.allocate(0, 2); // 3.906 mm texels (same texel size as level 2 mip 0).
+		pebble.fill();
+		VSM::ProjectionInput in = pebble.input();
+		in.footprint = std::ldexp(1.0f, -8);
+		in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+		const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(1.2f)));
+
+		// Center under the 3.5 cm caster stays solidly shadowed; well outside stays fully lit.
+		CHECK(ground_shadow_directional(in, count, 0.0f, 0.0f, tan_half) < 0.05f);
+		CHECK(ground_shadow_directional(in, count, 0.25f, 0.0f, tan_half) > 0.95f);
+
+		// Sweep across the shadow edge in 0.5 mm steps: must exhibit intermediate anti-aliased values (not a binary jump).
+		uint32_t partial = 0;
+		for (float x = 0.072f; x <= 0.088f; x += 0.0005f) {
+			const float s = ground_shadow_directional(in, count, x, 0.0f, tan_half);
+			if (s > 0.10f && s < 0.90f) {
+				partial++;
+			}
+		}
+		CHECK(partial >= 2u);
+	}
+
+	// 3) Receiver-plane depth projection: sloped directional receivers (0, 30, 45, 60 deg)
+	//    must stay acne-free (> 0.95 lit) for both 2x2 PCF (rays = 0) and Epic SMRT (rays = 8).
+	{
+		const uint32_t count = 4;
+		const float angles_deg[] = { 0.0f, 30.0f, 45.0f, 60.0f };
+		const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(1.2f)));
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+		for (float deg : angles_deg) {
+			const float slope_k = Math::tan(Math::deg_to_rad(deg));
+			const Vector3 normal = Vector3(-slope_k, 1.0f, 0.0f).normalized();
+			ProjectionScene ramp;
+			ramp.set_maps(sun_levels(count));
+			ramp.allocate(0, 2);
+			const uint32_t rows = (ramp.pages.size() + ProjectionScene::GRID - 1) / ProjectionScene::GRID;
+			ramp.pool_height = rows * VSM::PAGE_SIZE;
+			ramp.pool.resize(uint64_t(ramp.pool_width) * ramp.pool_height * 2);
+			memset(ramp.pool.ptr(), 0, ramp.pool.size() * sizeof(uint32_t));
+			const VSM::MapData &map = ramp.maps[0];
+			const float scale = std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT);
+			const Vector3 axis_x = Vector3(map.rows[0][0], map.rows[0][1], map.rows[0][2]) * scale;
+			const Vector3 axis_y = Vector3(map.rows[1][0], map.rows[1][1], map.rows[1][2]) * scale;
+			for (uint32_t page = 0; page < ramp.pages.size(); page++) {
+				const ProjectionScene::Page &rec = ramp.pages[page];
+				const Vector2i mip_origin = VSM::clipmap_mip_origin(Vector2i(map.origin[0], map.origin[1]), rec.mip);
+				const int32_t side = int32_t(VSM::PAGES_PER_SIDE >> rec.mip);
+				auto unwrap = [side](int32_t p_slot, int32_t p_origin) {
+					int32_t d = (p_slot - p_origin) % side;
+					return p_origin + (d < 0 ? d + side : d);
+				};
+				const int32_t ax = unwrap(int32_t(rec.x), mip_origin.x);
+				const int32_t ay = unwrap(int32_t(rec.y), mip_origin.y);
+				const double span = std::ldexp(1.0, int32_t(rec.mip) + VSM::CLIPMAP_TEXEL0_EXPONENT);
+				for (uint32_t ty = 0; ty < VSM::PAGE_SIZE; ty++) {
+					for (uint32_t tx = 0; tx < VSM::PAGE_SIZE; tx++) {
+						const double cx = (double(ax * int32_t(VSM::PAGE_SIZE) + int32_t(tx)) + 0.5) * span;
+						const double cy = (double(ay * int32_t(VSM::PAGE_SIZE) + int32_t(ty)) + 0.5) * span;
+						const Vector3 col = axis_x * float(cx) + axis_y * float(cy);
+						const float y = slope_k * float(col.x);
+						const uint32_t px = (page % ProjectionScene::GRID) * VSM::PAGE_SIZE + tx;
+						const uint32_t py = (page / ProjectionScene::GRID) * VSM::PAGE_SIZE + ty;
+						ramp.pool[uint64_t(py) * ramp.pool_width + px] = VSM::depth_pack(VSM::row_dot(map.rows[2], Vector3(col.x, y, col.z)));
+					}
+				}
+			}
+			VSM::ProjectionInput in = ramp.input();
+			in.footprint = std::ldexp(1.0f, -8);
+			// Sample across multiple sub-texel offsets on the slope.
+			for (uint32_t i = 0; i < 8; i++) {
+				const float x = -0.3f + float(i) * 0.0813f;
+				const Vector3 pt(x, slope_k * x, 0.05f);
+				in.rays = 0;
+				CHECK(VSM::shadow_directional(in, 0, flags, pt, normal, 0.0f) > 0.95f);
+				in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+				in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+				in.noise = Vector2(float(i) / 8.0f, float((i * 3) % 8) / 8.0f);
+				CHECK(VSM::shadow_directional(in, 0, flags, pt, normal, tan_half) > 0.95f);
+			}
+		}
+	}
+
+	// 4) Local perspective face receiver-plane depth projection: sloped plane near cube-face off-axis corner
+	//    must stay acne-free (> 0.95 lit) under both rays = 0 (2x2 PCF) and Epic SMRT (rays = 8).
+	{
+		const Transform3D spot_xf(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0.0f, 3.0f, 0.0f));
+		const float slope_k = 0.7f; // ~35 deg ramp
+		const Vector3 normal = Vector3(-slope_k, 1.0f, 0.0f).normalized();
+		ProjectionScene ramp;
+		ramp.light_position = spot_xf.origin;
+		LocalVector<VSM::MapData> maps;
+		maps.push_back(VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xf, 12.0f, 50.0f));
+		ramp.set_maps(maps);
+		ramp.allocate(0, 2);
+		const uint32_t rows = (ramp.pages.size() + ProjectionScene::GRID - 1) / ProjectionScene::GRID;
+		ramp.pool_height = rows * VSM::PAGE_SIZE;
+		ramp.pool.resize(uint64_t(ramp.pool_width) * ramp.pool_height * 2);
+		memset(ramp.pool.ptr(), 0, ramp.pool.size() * sizeof(uint32_t));
+		const VSM::MapData &map = ramp.maps[0];
+		Basis face_rows;
+		face_rows.rows[0] = Vector3(map.rows[0][0], map.rows[0][1], map.rows[0][2]);
+		face_rows.rows[1] = Vector3(map.rows[1][0], map.rows[1][1], map.rows[1][2]);
+		face_rows.rows[2] = Vector3(map.rows[3][0], map.rows[3][1], map.rows[3][2]);
+		const Basis inv_rows = face_rows.inverse();
+		for (uint32_t page = 0; page < ramp.pages.size(); page++) {
+			const ProjectionScene::Page &rec = ramp.pages[page];
+			const float span = float(1u << rec.mip) / float(VSM::VIRTUAL_SIZE);
+			for (uint32_t ty = 0; ty < VSM::PAGE_SIZE; ty++) {
+				for (uint32_t tx = 0; tx < VSM::PAGE_SIZE; tx++) {
+					const float u = (float(rec.x * VSM::PAGE_SIZE + tx) + 0.5f) * span;
+					const float v = (float(rec.y * VSM::PAGE_SIZE + ty) + 0.5f) * span;
+					const Vector3 dir = inv_rows.xform(Vector3(u * 2.0f - 1.0f, v * 2.0f - 1.0f, 1.0f));
+					const float denom = float(normal.dot(dir));
+					if (!(denom < -1e-5f)) {
+						continue;
+					}
+					// Plane passes through origin: dot(normal, light_pos + t * dir) = 0 -> t = -dot(normal, light_pos) / denom.
+					const float hit_t = -float(normal.dot(spot_xf.origin)) / denom;
+					if (!(hit_t > 0.0f)) {
+						continue;
+					}
+					const uint32_t px = (page % ProjectionScene::GRID) * VSM::PAGE_SIZE + tx;
+					const uint32_t py = (page / ProjectionScene::GRID) * VSM::PAGE_SIZE + ty;
+					ramp.pool[uint64_t(py) * ramp.pool_width + px] = VSM::depth_pack(VSM::row_dot(map.rows[3], spot_xf.origin + dir * hit_t));
+				}
+			}
+		}
+		VSM::ProjectionInput in = ramp.input();
+		in.footprint = map.texel_scale * 3.0f * 4.5f;
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+		// Test both near axis and well off-axis toward the face corner.
+		const Vector2 test_xz[] = { Vector2(0.0f, 0.0f), Vector2(0.8f, 0.6f), Vector2(-1.0f, -0.8f), Vector2(1.1f, -0.9f) };
+		for (uint32_t i = 0; i < 4; i++) {
+			const Vector3 pt(test_xz[i].x, slope_k * float(test_xz[i].x), test_xz[i].y);
+			in.rays = 0;
+			CHECK(VSM::shadow_local(in, 0, flags, pt, normal, spot_xf.origin, 0.0f) > 0.95f);
+			in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+			in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+			in.noise = Vector2(float(i) * 0.23f + 0.1f, float(i) * 0.19f + 0.2f);
+			CHECK(VSM::shadow_local(in, 0, flags, pt, normal, spot_xf.origin, 0.12f) > 0.95f);
+		}
+	}
+
+	// 5) Bumpy/curved micro-facet regression guard: when a receiver's normal tilts sharply relative to the
+	//    surrounding stored depth (e.g. photogrammetry stone columns where neighboring texels stay near
+	//    the macro surface depth), uphill-only receiver-plane projection must never push init_depth behind
+	//    the stored surface and cause false self-shadow acne.
+	{
+		const uint32_t count = 4;
+		ProjectionScene flat_macro;
+		flat_macro.slab_half = 0.0f; // No occluder — macro flat ground at y = 0.
+		flat_macro.set_maps(sun_levels(count));
+		flat_macro.allocate(0, 2);
+		flat_macro.fill();
+		VSM::ProjectionInput in = flat_macro.input();
+		in.footprint = std::ldexp(1.0f, -8);
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+		const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(1.2f)));
+		const Vector3 tilted_normal = Vector3(0.80f, 0.60f, 0.0f).normalized(); // n_dot_l = 0.60, |rp_slope| = 1.33.
+		for (uint32_t i = 0; i < 16; i++) {
+			const Vector3 pt(-0.1f + float(i) * 0.0013f, 0.0f, 0.02f);
+			in.rays = 0;
+			CHECK(VSM::shadow_directional(in, 0, flags, pt, tilted_normal, 0.0f) == doctest::Approx(1.0f));
+			in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+			in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+			in.noise = Vector2(float(i) / 16.0f, float((i * 5) % 16) / 16.0f);
+			CHECK(VSM::shadow_directional(in, 0, flags, pt, tilted_normal, tan_half) == doctest::Approx(1.0f));
+		}
+	}
+}
+
 // GodotNext: vsm_nanite (#217, plan §21.3 contract S4). CPU reference tests for VSM x Nanite:
 // layout/setting contracts, page-mip projected error matching P5's texel rule, world/local AABB
 // per-page culling, 1-level 8x8 per-page max-depth Hi-Z build & occlusion, SW/HW triangle-size

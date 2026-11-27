@@ -2923,6 +2923,14 @@ float RendererVirtualShadowMapStorage::smrt_step(uint32_t p_step, uint32_t p_ste
 	if (!(p_last > p_first) || !(p_first > 0.0f)) {
 		return p_first;
 	}
+	return p_first * std::pow(p_last / p_first, t);
+}
+
+float RendererVirtualShadowMapStorage::smrt_step_local(uint32_t p_step, uint32_t p_steps, float p_jitter, float p_first, float p_last) {
+	const float t = (float(p_step) + p_jitter) / float(MAX(p_steps, 1u));
+	if (!(p_last > p_first) || !(p_first > 0.0f)) {
+		return p_first;
+	}
 	return p_first + (p_last - p_first) * (t * t);
 }
 
@@ -3026,18 +3034,6 @@ static bool _smrt_clipmap_depth(const RendererVirtualShadowMapStorage::Projectio
 	return true;
 }
 
-// A clipmap sample of SMRT: whether level 0 texel position p_t (floating texels) lies behind the stored
-// depth by more than the bias of the texel it reads. Unmapped (after the coarser mips and levels) is lit.
-static bool _smrt_clipmap_occluded(const RendererVirtualShadowMapStorage::ProjectionInput &p_in, uint32_t p_first, uint32_t p_count, const Vector2 &p_t, float p_depth, uint32_t p_level, uint32_t p_mip) {
-	using VSM = RendererVirtualShadowMapStorage;
-	float stored = 0.0f;
-	float texel = 0.0f;
-	if (!_smrt_clipmap_depth(p_in, p_first, p_count, p_t, p_level, p_mip, stored, texel)) {
-		return false;
-	}
-	return stored < p_depth - texel * VSM::SMRT_DEPTH_BIAS_TEXELS;
-}
-
 float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, float p_tan_half_angle) {
 	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
 	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
@@ -3070,13 +3066,20 @@ float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput 
 	const float depth = row_dot(level0.rows[2], receiver);
 	// Level 0 texels per meter across the light.
 	const float texels_per_meter = std::ldexp(1.0f, -CLIPMAP_TEXEL0_EXPONENT);
+	const float scale = std::ldexp(1.0f, int32_t(level + mip));
+	// Receiver tangent-plane depth slope per meter along the clipmap's X and Y axes.
+	const Vector3 lx(level0.rows[0][0] * level0.texel_scale, level0.rows[0][1] * level0.texel_scale, level0.rows[0][2] * level0.texel_scale);
+	const Vector3 ly(level0.rows[1][0] * level0.texel_scale, level0.rows[1][1] * level0.texel_scale, level0.rows[1][2] * level0.texel_scale);
+	const float inv_ndl = n_dot_l > 0.15f ? (1.0f / n_dot_l) : 0.0f;
+	const Vector2 rp_slope(
+			CLAMP(float(p_normal.dot(lx)) * inv_ndl, -2.0f, 2.0f),
+			CLAMP(float(p_normal.dot(ly)) * inv_ndl, -2.0f, 2.0f));
 
 	if (p_in.prefiltered_distant && prefiltered_distant_level(level, count)) {
 		return prefiltered_distant(p_in, first, count, t, depth, level, mip);
 	}
 	if (p_in.rays == 0 || !(p_tan_half_angle > 0.0f)) {
-		// One 2 x 2 filtered tap on the sampled level and mip.
-		const float scale = std::ldexp(1.0f, int32_t(level + mip));
+		// One 2 x 2 filtered tap on the sampled level and mip with uphill receiver-plane depth projection.
 		const Vector2 grid = t / scale - Vector2(0.5f, 0.5f);
 		const Vector2 base(std::floor(float(grid.x)), std::floor(float(grid.y)));
 		const Vector2 f = grid - base;
@@ -3084,8 +3087,13 @@ float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput 
 		for (uint32_t corner = 0; corner < 4; corner++) {
 			const Vector2 offset_c(float(corner & 1u), float(corner >> 1u));
 			const Vector2 sample_t = (base + offset_c + Vector2(0.5f, 0.5f)) * scale;
+			const Vector2 delta_tx = (sample_t - t) / scale;
+			const float corner_depth = depth + MIN(float(rp_slope.x * delta_tx.x) + float(rp_slope.y * delta_tx.y), 0.0f) * texel;
 			const float weight = ((corner & 1u) != 0u ? float(f.x) : 1.0f - float(f.x)) * ((corner >> 1u) != 0u ? float(f.y) : 1.0f - float(f.y));
-			lit += _smrt_clipmap_occluded(p_in, first, count, sample_t, depth, level, mip) ? 0.0f : weight;
+			float stored = 0.0f;
+			float sample_texel = texel;
+			const bool occluded = _smrt_clipmap_depth(p_in, first, count, sample_t, level, mip, stored, sample_texel) && (stored < corner_depth - sample_texel * SMRT_DEPTH_BIAS_TEXELS);
+			lit += occluded ? 0.0f : weight;
 		}
 		return lit;
 	}
@@ -3094,9 +3102,29 @@ float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput 
 	const uint32_t steps = CLAMP(p_in.steps, 1u, SMRT_MAX_STEPS);
 	const float first_height = texel * SMRT_FIRST_STEP_TEXELS;
 	const float level_extent = CLIPMAP_LEVEL0_EXTENT * std::ldexp(1.0f, int32_t(level));
-	const bool init_behind = pool_depth(p_in, probe.texel_x, probe.texel_y) < depth - texel * SMRT_DEPTH_BIAS_TEXELS;
+	const float sub_scale = CLAMP((n_dot_l - 0.50f) * 3.0f, 0.0f, 1.0f);
+	const Vector2 sub_noise(
+			float(p_in.noise.x) + 0.381966f - std::floor(float(p_in.noise.x) + 0.381966f),
+			float(p_in.noise.y) + 0.754878f - std::floor(float(p_in.noise.y) + 0.754878f));
 	uint32_t lit = 0;
 	for (uint32_t ray = 0; ray < rays; ray++) {
+		// Stratified sub-texel origin jitter on the receiver's tangent plane gives stochastic bilinear
+		// anti-aliasing even for near-ground contact shadows whose penumbra is narrower than one texel.
+		// Clamp tangent-plane depth shift to <= 0 (uphill only) so curved or bumpy NextGeo geometry
+		// never projects behind its own depth buffer surface.
+		const Vector2 sub_tx = smrt_square(ray, rays, sub_noise) * sub_scale;
+		const Vector2 ray_t = t + sub_tx * scale;
+		const float ray_depth = depth + MIN(float(rp_slope.x * sub_tx.x) + float(rp_slope.y * sub_tx.y), 0.0f) * texel;
+		float init_stored = 0.0f;
+		float init_texel = texel;
+		bool prev_behind = false;
+		if (_smrt_clipmap_depth(p_in, first, count, ray_t, level, mip, init_stored, init_texel)) {
+			const float init_scale = init_texel * texels_per_meter;
+			const Vector2 init_center((std::floor(float(ray_t.x) / init_scale) + 0.5f) * init_scale, (std::floor(float(ray_t.y) / init_scale) + 0.5f) * init_scale);
+			const Vector2 init_delta_tx = (init_center - ray_t) / init_scale;
+			const float init_depth = ray_depth + MIN(float(rp_slope.x * init_delta_tx.x) + float(rp_slope.y * init_delta_tx.y), 0.0f) * init_texel;
+			prev_behind = init_stored < init_depth - init_texel * SMRT_DEPTH_BIAS_TEXELS;
+		}
 		// The ray's slope across the light: a point of the light's disk, in tangent units.
 		const Vector2 slope = smrt_disk(ray, rays, p_in.noise) * p_tan_half_angle;
 		const float slope_length = float(slope.length());
@@ -3107,12 +3135,11 @@ float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput 
 		last_height = MAX(last_height, first_height);
 		const float jitter = smrt_jitter(ray, p_in.noise);
 		bool occluded = false;
-		float z_prev = depth;
-		bool prev_behind = init_behind;
+		float z_prev = ray_depth;
 		for (uint32_t step = 0; step < steps && !occluded; step++) {
 			const float height = smrt_step(step, steps, jitter, first_height, last_height);
-			const float z_curr = depth - height;
-			const Vector2 sample_t = t + slope * (height * texels_per_meter);
+			const float z_curr = ray_depth - height;
+			const Vector2 sample_t = ray_t + slope * (height * texels_per_meter);
 			float stored = 0.0f;
 			float sample_texel = texel;
 			if (_smrt_clipmap_depth(p_in, first, count, sample_t, level, mip, stored, sample_texel)) {
@@ -3216,17 +3243,6 @@ static bool _smrt_face_depth(const RendererVirtualShadowMapStorage::ProjectionIn
 	return true;
 }
 
-// A face sample of SMRT: whether p_point (w = its depth) lies behind the stored depth. Unmapped is lit.
-static bool _smrt_face_occluded(const RendererVirtualShadowMapStorage::ProjectionInput &p_in, uint32_t p_map, float p_x, float p_y, float p_w, uint32_t p_mip) {
-	using VSM = RendererVirtualShadowMapStorage;
-	float stored = 0.0f;
-	float texel = 0.0f;
-	if (!_smrt_face_depth(p_in, p_map, p_x, p_y, p_w, p_mip, stored, texel)) {
-		return false;
-	}
-	return stored < p_w - texel * VSM::SMRT_DEPTH_BIAS_TEXELS;
-}
-
 float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, float p_radius, const Vector3 &p_area_a, const Vector3 &p_area_b) {
 	if (p_in.table == nullptr || p_in.maps == nullptr) {
 		return 1.0f;
@@ -3274,17 +3290,33 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 	if (receiver_map == MAP_NONE) {
 		return 1.0f;
 	}
+	const MapData &rmd = p_in.maps[receiver_map];
+	const float inv_cot = 1.0f / MAX(float(Vector3(rmd.rows[0][0], rmd.rows[0][1], rmd.rows[0][2]).length()), 1.0e-20f);
+	const Vector3 fx(rmd.rows[0][0] * inv_cot, rmd.rows[0][1] * inv_cot, rmd.rows[0][2] * inv_cot);
+	const Vector3 fy(rmd.rows[1][0] * inv_cot, rmd.rows[1][1] * inv_cot, rmd.rows[1][2] * inv_cot);
+	const float f_ndl = float(p_normal.dot(p_light_position - receiver)) / MAX(rw, 1.0e-20f);
+	const float inv_f_ndl = f_ndl > 0.15f ? (1.0f / f_ndl) : 0.0f;
+	const Vector2 f_slope(
+			CLAMP(float(p_normal.dot(fx)) * inv_f_ndl, -2.0f, 2.0f),
+			CLAMP(float(p_normal.dot(fy)) * inv_f_ndl, -2.0f, 2.0f));
 	if (p_in.rays == 0 || (!area && !(p_radius > 0.0f))) {
-		// One 2 x 2 filtered tap at the receiver's mip.
+		// One 2 x 2 filtered tap at the receiver's mip with uphill receiver-plane depth projection.
 		const float mip_size = float(VIRTUAL_SIZE >> mip);
-		const Vector2 grid = Vector2(x / rw * 0.5f + 0.5f, y / rw * 0.5f + 0.5f) * mip_size - Vector2(0.5f, 0.5f);
+		const Vector2 receiver_tx = Vector2(x / rw * 0.5f + 0.5f, y / rw * 0.5f + 0.5f) * mip_size;
+		const Vector2 grid = receiver_tx - Vector2(0.5f, 0.5f);
 		const Vector2 base(std::floor(float(grid.x)), std::floor(float(grid.y)));
 		const Vector2 f = grid - base;
 		float lit = 0.0f;
 		for (uint32_t corner = 0; corner < 4; corner++) {
-			const Vector2 uv = (base + Vector2(float(corner & 1u), float(corner >> 1u)) + Vector2(0.5f, 0.5f)) / mip_size;
+			const Vector2 sample_tx = base + Vector2(float(corner & 1u), float(corner >> 1u)) + Vector2(0.5f, 0.5f);
+			const Vector2 uv = sample_tx / mip_size;
+			const Vector2 delta_tx = sample_tx - receiver_tx;
+			const float corner_w = MAX(rw + MIN(float(f_slope.x * delta_tx.x) + float(f_slope.y * delta_tx.y), 0.0f) * texel, rmd.near_w);
 			const float weight = ((corner & 1u) != 0u ? float(f.x) : 1.0f - float(f.x)) * ((corner >> 1u) != 0u ? float(f.y) : 1.0f - float(f.y));
-			lit += _smrt_face_occluded(p_in, receiver_map, (uv.x * 2.0f - 1.0f) * rw, (uv.y * 2.0f - 1.0f) * rw, rw, mip) ? 0.0f : weight;
+			float stored = 0.0f;
+			float sample_texel = texel;
+			const bool occluded = _smrt_face_depth(p_in, receiver_map, (uv.x * 2.0f - 1.0f) * corner_w, (uv.y * 2.0f - 1.0f) * corner_w, corner_w, mip, stored, sample_texel) && (stored < corner_w - sample_texel * SMRT_DEPTH_BIAS_TEXELS);
+			lit += occluded ? 0.0f : weight;
 		}
 		return lit;
 	}
@@ -3293,9 +3325,18 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 	const Vector3 up = std::fabs(float(light_dir.y)) < 0.99f ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
 	const Vector3 tangent = light_dir.cross(up).normalized();
 	const Vector3 bitangent = light_dir.cross(tangent);
+	float init_stored = 0.0f;
+	float init_texel = texel;
+	bool init_behind = false;
+	if (_smrt_face_depth(p_in, receiver_map, x, y, rw, mip, init_stored, init_texel)) {
+		const float init_mip_size = MAX(rmd.texel_scale * rw * float(VIRTUAL_SIZE) / MAX(init_texel, 1.0e-20f), 1.0f);
+		const Vector2 ray_tx = Vector2(x / rw * 0.5f + 0.5f, y / rw * 0.5f + 0.5f) * init_mip_size;
+		const Vector2 delta_tx(std::floor(float(ray_tx.x)) + 0.5f - float(ray_tx.x), std::floor(float(ray_tx.y)) + 0.5f - float(ray_tx.y));
+		const float init_w = MAX(rw + MIN(float(f_slope.x * delta_tx.x) + float(f_slope.y * delta_tx.y), 0.0f) * init_texel, rmd.near_w);
+		init_behind = init_stored < init_w - init_texel * SMRT_DEPTH_BIAS_TEXELS;
+	}
 	const uint32_t rays = MIN(p_in.rays, SMRT_MAX_RAYS);
 	const uint32_t steps = CLAMP(p_in.steps, 1u, SMRT_MAX_STEPS);
-	const bool init_behind = pool_depth(p_in, probe.texel_x, probe.texel_y) < w - texel * SMRT_DEPTH_BIAS_TEXELS;
 	uint32_t lit = 0;
 	for (uint32_t ray = 0; ray < rays; ray++) {
 		Vector3 light_offset;
@@ -3329,7 +3370,7 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 		float prev_w = rw;
 		bool prev_behind = init_behind;
 		for (uint32_t step = 0; step < steps && !occluded; step++) {
-			const Vector3 point = receiver + ray_vector * smrt_step(step, steps, jitter, first, last);
+			const Vector3 point = receiver + ray_vector * smrt_step_local(step, steps, jitter, first, last);
 			float px = 0.0f;
 			float py = 0.0f;
 			float pw = 0.0f;
@@ -3339,11 +3380,11 @@ float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in,
 				float sample_texel = texel;
 				if (_smrt_face_depth(p_in, point_map, px, py, pw, mip, stored, sample_texel)) {
 					const float z_prev = (point_map == prev_map) ? prev_w : row_dot(p_in.maps[point_map].rows[3], prev_point);
-					const float bias = sample_texel * SMRT_DEPTH_BIAS_TEXELS;
+					const float depth_bias = sample_texel * SMRT_DEPTH_BIAS_TEXELS;
 					const float step_dz = MAX(z_prev - pw, 0.0f);
 					const float thickness = MAX(step_dz * 0.5f, sample_texel * 2.0f);
-					const bool behind = stored < pw - bias;
-					occluded = (behind && (pw - stored <= thickness)) || (prev_behind && !behind && (stored < z_prev - bias)) || (step + 1u == steps && behind);
+					const bool behind = stored < pw - depth_bias;
+					occluded = (behind && (pw - stored <= thickness)) || (prev_behind && !behind && (stored < z_prev - depth_bias)) || (step + 1u == steps && behind);
 					prev_behind = behind;
 				} else {
 					prev_behind = false;

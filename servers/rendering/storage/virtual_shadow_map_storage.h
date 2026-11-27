@@ -1005,8 +1005,10 @@ public:
 	static Vector2 smrt_square(uint32_t p_ray, uint32_t p_rays, const Vector2 &p_noise);
 	// The ray's jitter of its step positions, in [0, 1).
 	static float smrt_jitter(uint32_t p_ray, const Vector2 &p_noise);
-	// Step p_step of p_steps: geometric from p_first to p_last, shifted by p_jitter of a step.
+	// Step p_step of p_steps: geometric from p_first to p_last (directional lights spanning mm to tens of meters), shifted by p_jitter of a step.
 	static float smrt_step(uint32_t p_step, uint32_t p_steps, float p_jitter, float p_first, float p_last);
+	// Step p_step of p_steps: quadratic from p_first to p_last (bounded local-light march), shifted by p_jitter of a step.
+	static float smrt_step_local(uint32_t p_step, uint32_t p_steps, float p_jitter, float p_first, float p_last);
 	// tan of half a directional light's angular diameter from DirectionalLightData::size, which is
 	// 1 - cos(angular diameter).
 	static float directional_tan_half_angle(float p_size);
