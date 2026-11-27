@@ -2551,7 +2551,10 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 			}
 		}
 		desc.vertex_layout = virtual_geometry->get_ngm_vertex_layout();
-		if (desc.vertex_layout == 0) {
+		// Only guess vertex_layout from surface formats when no .ngm header or raw pages exist;
+		// the DAG builder can pad missing attributes (e.g. UV0 on UV-less meshes), so guessing
+		// from surface formats can disagree with the .ngm page vertex stride and reject root pages.
+		if (desc.vertex_layout == 0 && desc.ngm_path.is_empty() && desc.root_pages.is_empty()) {
 			for (int index = 0; index < surfaces.size() && index < 32; index++) {
 				if ((desc.eligible_surface_mask & (1u << index)) == 0) {
 					continue;

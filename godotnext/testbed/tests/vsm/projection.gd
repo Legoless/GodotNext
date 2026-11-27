@@ -288,12 +288,21 @@ func _run_case(p_case: Dictionary) -> Dictionary:
 		var image := Image.create_from_data(SIZE, SIZE, false, Image.FORMAT_RF, factor.to_byte_array())
 		image.save_exr(_out.path_join("%s.exr" % p_case.name), true)
 
-	record["width"] = _penumbra_width(p_case, factor)
+	var profile := _penumbra_profile(p_case, factor)
+	record["width"] = profile.width
+	record["inner_width"] = profile.inner_width
+	record["outer_width"] = profile.outer_width
+	record["edge_factor"] = profile.edge_factor
 	if float(p_case.size) == 0.0:
 		_check_mask(p_case, record, factor, reached, reference)
 	else:
 		_check_soft_center(p_case, record, factor)
 		record["geometric_width"] = _geometric_width(p_case)
+		if _mode == "vsm" and not _prefiltered and p_case.name in ["sun_4", "spot_0_08", "omni_0_08", "area_0_3"]:
+			if float(profile.edge_factor) < 0.35 or float(profile.edge_factor) > 0.65:
+				_failures.append("%s: penumbra is asymmetric at the geometric edge (edge_factor=%.3f, want 0.35..0.65)" % [p_case.name, float(profile.edge_factor)])
+			if float(profile.inner_width) <= float(profile.width) * 0.25:
+				_failures.append("%s: inner penumbra is missing or collapsed (inner=%.4f m of %.4f m)" % [p_case.name, float(profile.inner_width), float(profile.width)])
 	return record
 
 
@@ -426,8 +435,9 @@ func _check_soft_center(p_case: Dictionary, r_record: Dictionary, p_factor: Pack
 
 
 # The penumbra across the shadow's far edge (+x), averaged over the rows of the shadow's middle: from
-# the first column above 0.05 to the first above 0.95, in meters. -1 when it never gets there.
-func _penumbra_width(p_case: Dictionary, p_factor: PackedFloat32Array) -> float:
+# the first column above 0.05 to the first above 0.95, in meters, plus its inner/outer split and value at
+# the analytic geometric edge. width is -1 when it never gets there.
+func _penumbra_profile(p_case: Dictionary, p_factor: PackedFloat32Array) -> Dictionary:
 	var edge := SLAB_CENTER.x + SLAB_HALF + SLAB_TOP
 	var rows := 0.3
 	if p_case.light != "sun":
@@ -445,16 +455,34 @@ func _penumbra_width(p_case: Dictionary, p_factor: PackedFloat32Array) -> float:
 			sums[x] += p_factor[y * SIZE + x]
 			counts[x] += 1
 	var low := -1.0
+	var high := -1.0
+	var edge_value := -1.0
+	var best_edge_dist := INF
 	for x in SIZE:
 		var world_x := _world_x[x]
-		if world_x < edge - 0.3 or counts[x] == 0:
+		if counts[x] == 0:
 			continue
 		var value := sums[x] / float(counts[x])
+		var edge_dist := absf(world_x - edge)
+		if edge_dist < best_edge_dist:
+			best_edge_dist = edge_dist
+			edge_value = value
+		if world_x < edge - 0.4:
+			continue
 		if low < 0.0 and value > 0.05:
 			low = world_x
-		if value > 0.95:
-			return 0.0 if low < 0.0 else world_x - low
-	return -1.0
+		if high < 0.0 and value > 0.95:
+			high = world_x
+	if high < 0.0:
+		return {"width": -1.0, "inner_width": -1.0, "outer_width": -1.0, "edge_factor": edge_value}
+	var width := 0.0 if low < 0.0 else high - low
+	var inner_width := 0.0 if low < 0.0 else maxf(edge - low, 0.0)
+	var outer_width := maxf(high - edge, 0.0)
+	return {"width": width, "inner_width": inner_width, "outer_width": outer_width, "edge_factor": edge_value}
+
+
+func _penumbra_width(p_case: Dictionary, p_factor: PackedFloat32Array) -> float:
+	return float(_penumbra_profile(p_case, p_factor).width)
 
 
 # The full width (0 to 100%) of the light's geometric penumbra on the floor across the shadow's far

@@ -88,7 +88,7 @@ float vsm_smrt_step(uint p_step, uint p_steps, float p_jitter, float p_first, fl
 	if (!(p_last > p_first) || !(p_first > 0.0)) {
 		return p_first;
 	}
-	return p_first * pow(p_last / p_first, t);
+	return p_first + (p_last - p_first) * (t * t);
 }
 
 uint vsm_projection_overflow_bias(uint p_map) {
@@ -151,16 +151,26 @@ VSMLookup vsm_clipmap_sample_level(uint p_first, uint p_count, ivec2 p_texel0, u
 	return vsm_lookup_miss();
 }
 
-// _smrt_clipmap_occluded(): whether level 0 texel position p_t lies behind the stored depth.
-bool vsm_smrt_clipmap_occluded(uint p_first, uint p_count, vec2 p_t, float p_depth, uint p_level, uint p_mip) {
+bool vsm_smrt_clipmap_depth(uint p_first, uint p_count, vec2 p_t, uint p_level, uint p_mip, out float r_stored, out float r_texel) {
 	ivec2 texel0 = ivec2(clamp(floor(p_t), vec2(-1073741824.0), vec2(1073741824.0)));
 	uint level;
 	VSMLookup result = vsm_clipmap_sample_level(p_first, p_count, texel0, p_level, p_mip, level);
 	if (!result.valid) {
 		return false;
 	}
-	float texel = exp2(float(int(level + result.mip) + VSM_CLIPMAP_TEXEL0_EXPONENT));
-	return vsm_pool_depth(result.texel) < p_depth - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+	r_texel = exp2(float(int(level + result.mip) + VSM_CLIPMAP_TEXEL0_EXPONENT));
+	r_stored = vsm_pool_depth(result.texel);
+	return true;
+}
+
+// _smrt_clipmap_occluded(): whether level 0 texel position p_t lies behind the stored depth.
+bool vsm_smrt_clipmap_occluded(uint p_first, uint p_count, vec2 p_t, float p_depth, uint p_level, uint p_mip) {
+	float stored;
+	float texel;
+	if (!vsm_smrt_clipmap_depth(p_first, p_count, p_t, p_level, p_mip, stored, texel)) {
+		return false;
+	}
+	return stored < p_depth - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
 }
 
 // Prefiltered Distant (RendererVirtualShadowMapStorage::prefiltered_distant()): a moments filter over the
@@ -270,6 +280,7 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 	uint steps = clamp(vsm_projection.data.counts.w, 1u, VSM_SMRT_MAX_STEPS);
 	float first_height = texel * VSM_SMRT_FIRST_STEP_TEXELS;
 	float level_extent = VSM_CLIPMAP_LEVEL0_EXTENT * exp2(float(level));
+	bool init_behind = vsm_pool_depth(probe.texel) < depth - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
 	uint lit = 0u;
 	for (uint ray = 0u; ray < rays; ray++) {
 		// The ray's slope across the light: a point of the light's disk, in tangent units.
@@ -282,10 +293,27 @@ float vsm_shadow_directional(uint p_map_base, uint p_light_flags, vec3 p_world, 
 		last_height = max(last_height, first_height);
 		float jitter = vsm_smrt_jitter(ray, p_noise);
 		bool occluded = false;
+		float z_prev = depth;
+		bool prev_behind = init_behind;
 		for (uint step_index = 0u; step_index < steps && !occluded; step_index++) {
 			float height = vsm_smrt_step(step_index, steps, jitter, first_height, last_height);
+			float z_curr = depth - height;
 			vec2 sample_t = t + slope * (height * texels_per_meter);
-			occluded = vsm_smrt_clipmap_occluded(first, count, sample_t, depth - height, level, mip);
+			float stored;
+			float sample_texel;
+			if (vsm_smrt_clipmap_depth(first, count, sample_t, level, mip, stored, sample_texel)) {
+				float bias = sample_texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+				float step_dz = max(z_prev - z_curr, 0.0);
+				float thickness = max(step_dz * 0.5, sample_texel * 2.0);
+				bool behind = stored < z_curr - bias;
+				if ((behind && (z_curr - stored <= thickness)) || (prev_behind && !behind && (stored < z_prev - bias)) || (step_index + 1u == steps && behind)) {
+					occluded = true;
+				}
+				prev_behind = behind;
+			} else {
+				prev_behind = false;
+			}
+			z_prev = z_curr;
 		}
 		lit += occluded ? 0u : 1u;
 	}
@@ -304,15 +332,25 @@ uint vsm_smrt_face(uint p_map_base, uint p_light_flags, uint p_map, vec3 p_point
 	return vsm_face_select_hint(vsm_projection.data.counts.x, p_map_base, p_light_flags, p_map, p_point, r_x, r_y, r_w);
 }
 
-// _smrt_face_occluded(): whether a face point (depth w) lies behind the stored depth.
-bool vsm_smrt_face_occluded(uint p_map, float p_x, float p_y, float p_w, uint p_mip) {
+bool vsm_smrt_face_depth(uint p_map, float p_x, float p_y, float p_w, uint p_mip, out float r_stored, out float r_texel) {
 	vec2 uv = vec2(p_x / p_w * 0.5 + 0.5, p_y / p_w * 0.5 + 0.5);
 	VSMLookup result = vsm_lookup(vsm_projection.data.counts.x, p_map, uv, p_mip);
 	if (!result.valid) {
 		return false;
 	}
-	float texel = vsm_maps.data[p_map].texel_scale * p_w * float(1u << result.mip);
-	return vsm_pool_depth(result.texel) < p_w - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+	r_texel = vsm_maps.data[p_map].texel_scale * p_w * float(1u << result.mip);
+	r_stored = vsm_pool_depth(result.texel);
+	return true;
+}
+
+// _smrt_face_occluded(): whether a face point (depth w) lies behind the stored depth.
+bool vsm_smrt_face_occluded(uint p_map, float p_x, float p_y, float p_w, uint p_mip) {
+	float stored;
+	float texel;
+	if (!vsm_smrt_face_depth(p_map, p_x, p_y, p_w, p_mip, stored, texel)) {
+		return false;
+	}
+	return stored < p_w - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
 }
 
 // The shadow of a spot, omni or area light at a receiver (RendererVirtualShadowMapStorage::shadow_local()):
@@ -383,9 +421,8 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 	vec3 up = abs(light_dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
 	vec3 tangent = normalize(cross(light_dir, up));
 	vec3 bitangent = cross(light_dir, tangent);
-	// The angle one texel of the receiver's mip spans, seen from the light.
-	float texel_angle = face.texel_scale * float(1u << mip);
 	uint steps = clamp(vsm_projection.data.counts.w, 1u, VSM_SMRT_MAX_STEPS);
+	bool init_behind = vsm_pool_depth(probe.texel) < w - texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
 	uint lit = 0u;
 	for (uint ray = 0u; ray < rays; ray++) {
 		vec3 light_offset;
@@ -407,13 +444,17 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 		float last = VSM_SMRT_LOCAL_MAX_REACH;
 		if (offset_length > 0.0) {
 			// The angle between the sample and the receiver seen from the light is about
-			// s * offset / ((1 - s) * distance): it reaches VSM_SMRT_MAX_TEXELS texels at s = c / (1 + c).
-			float c = VSM_SMRT_MAX_TEXELS * texel_angle * light_distance / offset_length;
+			// s * offset / ((1 - s) * distance): it reaches VSM_SMRT_LOCAL_MAX_TAN_ANGLE at s = c / (1 + c).
+			float c = VSM_SMRT_LOCAL_MAX_TAN_ANGLE * light_distance / offset_length;
 			last = min(c / (1.0 + c), VSM_SMRT_LOCAL_MAX_REACH);
 		}
 		last = max(last, first);
 		float jitter = vsm_smrt_jitter(ray, p_noise);
 		bool occluded = false;
+		vec3 prev_point = receiver;
+		uint prev_map = receiver_map;
+		float prev_w = rw;
+		bool prev_behind = init_behind;
 		for (uint step_index = 0u; step_index < steps && !occluded; step_index++) {
 			vec3 point = receiver + ray_vector * vsm_smrt_step(step_index, steps, jitter, first, last);
 			float px;
@@ -421,8 +462,25 @@ float vsm_shadow_local(uint p_map_base, uint p_light_flags, vec3 p_world, vec3 p
 			float pw;
 			uint point_map = vsm_smrt_face(p_map_base, p_light_flags, receiver_map, point, px, py, pw);
 			if (point_map != VSM_MAP_NONE) {
-				occluded = vsm_smrt_face_occluded(point_map, px, py, pw, mip);
+				float stored;
+				float sample_texel;
+				if (vsm_smrt_face_depth(point_map, px, py, pw, mip, stored, sample_texel)) {
+					float z_prev = (point_map == prev_map) ? prev_w : vsm_row(vsm_maps.data[point_map].row3, prev_point);
+					float bias = sample_texel * VSM_SMRT_DEPTH_BIAS_TEXELS;
+					float step_dz = max(z_prev - pw, 0.0);
+					float thickness = max(step_dz * 0.5, sample_texel * 2.0);
+					bool behind = stored < pw - bias;
+					occluded = (behind && (pw - stored <= thickness)) || (prev_behind && !behind && (stored < z_prev - bias)) || (step_index + 1u == steps && behind);
+					prev_behind = behind;
+				} else {
+					prev_behind = false;
+				}
+				prev_map = point_map;
+				prev_w = pw;
+			} else {
+				prev_behind = false;
 			}
+			prev_point = point;
 		}
 		lit += occluded ? 0u : 1u;
 	}

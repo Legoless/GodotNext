@@ -692,12 +692,13 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	info.has_voxels = p_desc.voxel_brick_count > 0u;
 	uint32_t ngm_page_count = p_desc.page_count;
 	uint32_t ngm_page_size = p_desc.page_size;
-	if ((ngm_page_count == 0 || info.vertex_layout == 0 || ngm_page_size == 0 || info.skin_influences == 0 || !info.has_voxels) && !p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
+	if (!p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
 		Ref<NGMFile> ngm;
 		ngm.instantiate();
 		if (ngm->open(p_desc.ngm_path) == OK) {
 			const NGMHeader &hdr = ngm->get_header();
-			if (info.vertex_layout == 0) {
+			// The .ngm header is authoritative for the vertex layout stored in its pages.
+			if (hdr.vertex_layout != 0) {
 				info.vertex_layout = hdr.vertex_layout;
 			}
 			if (ngm_page_count == 0) {

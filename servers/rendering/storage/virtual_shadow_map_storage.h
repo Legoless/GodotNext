@@ -971,8 +971,11 @@ public:
 	// of every compare, in texels of the mip a sample reads.
 	static constexpr float SMRT_NORMAL_BIAS_TEXELS = 1.0f;
 	static constexpr float SMRT_DEPTH_BIAS_TEXELS = 1.0f;
-	// Local lights: no step goes further than this share of the way from the receiver to the light.
+	// Local lights: no step goes further than this share of the way from the receiver to the light, and
+	// the march ends once the ray sweeps this tangent angle (tan 5 deg) across the light face so penumbras
+	// stay resolution-independent across mips and cache-coherent for near-light casters.
 	static constexpr float SMRT_LOCAL_MAX_REACH = 0.95f;
+	static constexpr float SMRT_LOCAL_MAX_TAN_ANGLE = 0.0875f;
 	// The value a light loop uses: p_setting when it is 0 or more (clamped to p_max), else p_preset.
 	static constexpr uint32_t smrt_setting(int64_t p_setting, uint32_t p_preset, uint32_t p_max) {
 		return p_setting < 0 ? p_preset : (p_setting > int64_t(p_max) ? p_max : uint32_t(p_setting));

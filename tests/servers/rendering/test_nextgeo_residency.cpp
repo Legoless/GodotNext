@@ -762,6 +762,119 @@ TEST_CASE("[NextGeo][Residency] .ngm streaming and deterministic seeded wall-tim
 		DirAccess::remove_absolute(ngm_path);
 	}
 }
+
+TEST_CASE("[NextGeo][Residency] UV-less mesh uses authoritative .ngm vertex_layout on reload") {
+	using namespace TestNextGeoResidency;
+
+	const String ngm_path = TestUtils::get_temp_path("nextgeo_uvless_layout.ngm");
+
+	// Build a UV-less surface (POSITION + NORMAL + TANGENT only, no TEX_UV), matching procedural/imported meshes without UVs.
+	PackedVector3Array verts;
+	PackedVector3Array norms;
+	PackedFloat32Array tans;
+	PackedInt32Array indices;
+	constexpr int SEGMENTS = 8;
+	for (int i = 0; i < SEGMENTS; i++) {
+		const float a0 = float(i) * (Math::TAU / float(SEGMENTS));
+		const float a1 = float((i + 1) % SEGMENTS) * (Math::TAU / float(SEGMENTS));
+		const Vector3 p0(Math::cos(a0), 0.0f, Math::sin(a0));
+		const Vector3 p1(Math::cos(a1), 0.0f, Math::sin(a1));
+		const Vector3 p2(0.0f, 1.5f, 0.0f);
+		const Vector3 n = (p1 - p0).cross(p2 - p0).normalized();
+		const Vector3 t = (p1 - p0).normalized();
+		const int base = verts.size();
+		verts.push_back(p0);
+		verts.push_back(p1);
+		verts.push_back(p2);
+		for (int k = 0; k < 3; k++) {
+			norms.push_back(n);
+			tans.push_back(t.x);
+			tans.push_back(t.y);
+			tans.push_back(t.z);
+			tans.push_back(1.0f);
+		}
+		indices.push_back(base + 0);
+		indices.push_back(base + 1);
+		indices.push_back(base + 2);
+	}
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	arrays[Mesh::ARRAY_VERTEX] = verts;
+	arrays[Mesh::ARRAY_NORMAL] = norms;
+	arrays[Mesh::ARRAY_TANGENT] = tans;
+	arrays[Mesh::ARRAY_INDEX] = indices;
+
+	Ref<ImporterMesh> imp;
+	imp.instantiate();
+	imp->add_surface(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	REQUIRE_EQ(imp->build_virtual_geometry(ngm_path), OK);
+	Ref<VirtualGeometryData> built_vgd = imp->get_virtual_geometry();
+	REQUIRE(built_vgd.is_valid());
+
+	Ref<NGMFile> ngm;
+	ngm.instantiate();
+	REQUIRE_EQ(ngm->open(ngm_path), OK);
+	const uint32_t hdr_layout = ngm->get_header().vertex_layout;
+	// DAG builder emits POS | NRM | TAN | UV0 (0x0F) even when source lacks TEX_UV.
+	CHECK_EQ(hdr_layout, 0x0Fu);
+
+	// 1) Even if a caller passes a mismatched surface-derived vertex_layout (0x07, missing UV0),
+	// mesh_set_virtual_geometry() must prefer hdr.vertex_layout and pin root pages cleanly.
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	desc.dag_header = built_vgd->get_dag_header();
+	const TypedArray<PackedByteArray> roots = built_vgd->get_root_pages();
+	REQUIRE_GT(roots.size(), 0);
+	for (int i = 0; i < roots.size(); i++) {
+		desc.root_pages.push_back(roots[i]);
+	}
+	desc.ngm_path = ngm_path;
+	desc.eligible_surface_mask = 1u;
+	desc.vertex_layout = 0x07u; // Intentionally wrong (omits UV0).
+	desc.page_size = uint32_t(built_vgd->get_page_size());
+	desc.page_count = ngm->get_page_count();
+
+	MockVirtualMeshStorage storage;
+	const RID mesh_ngm = make_test_rid(9101);
+	storage.mesh_set_virtual_geometry(mesh_ngm, desc);
+	CHECK(storage.mesh_is_page_resident(mesh_ngm, 0u));
+	CHECK_GT(storage.get_mesh_record(mesh_ngm).page_count, 0u);
+
+	// 2) Embedded root_pages with no .ngm file and vertex_layout == 0 infer exact stride from page bytes.
+	RenderingServerTypes::VirtualGeometryDesc embedded_desc = desc;
+	embedded_desc.ngm_path = String();
+	embedded_desc.vertex_layout = 0u;
+	const RID mesh_embedded = make_test_rid(9102);
+	storage.mesh_set_virtual_geometry(mesh_embedded, embedded_desc);
+	CHECK(storage.mesh_is_page_resident(mesh_embedded, 0u));
+	CHECK_GT(storage.get_mesh_record(mesh_embedded).page_count, 0u);
+
+	// 3) Simulate .scn reload on ArrayMesh: transient ngm_vertex_layout is 0 on a fresh VirtualGeometryData,
+	// and ArrayMesh surface lacks ARRAY_FORMAT_TEX_UV. Root page must still pin cleanly in RenderingServer.
+	Ref<VirtualGeometryData> reloaded_vgd;
+	reloaded_vgd.instantiate();
+	reloaded_vgd->set_ngm_path(ngm_path);
+	reloaded_vgd->set_dag_header(built_vgd->get_dag_header());
+	reloaded_vgd->set_root_pages(roots);
+	reloaded_vgd->set_surface_eligibility(built_vgd->get_surface_eligibility());
+	reloaded_vgd->set_page_size(built_vgd->get_page_size());
+	reloaded_vgd->set_source_triangle_count(built_vgd->get_source_triangle_count());
+	CHECK_EQ(reloaded_vgd->get_ngm_vertex_layout(), 0u);
+
+	Ref<ArrayMesh> am;
+	am.instantiate();
+	am->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	CHECK_FALSE((am->surface_get_format(0) & Mesh::ARRAY_FORMAT_TEX_UV) != 0);
+	am->set_virtual_geometry(reloaded_vgd);
+	if (RSG::virtual_mesh_storage != nullptr) {
+		CHECK(RSG::virtual_mesh_storage->mesh_is_page_resident(am->get_rid(), 0u));
+		CHECK_GT(RSG::virtual_mesh_storage->get_mesh_record(am->get_rid()).page_count, 0u);
+	}
+	am.unref();
+
+	if (FileAccess::exists(ngm_path)) {
+		DirAccess::remove_absolute(ngm_path);
+	}
+}
 #endif // MODULE_NEXTGEO_ENABLED
 
 TEST_CASE("[NextGeo][Residency] Q15 memory report and routing counters surface") {

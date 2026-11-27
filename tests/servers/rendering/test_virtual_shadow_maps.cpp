@@ -3469,6 +3469,185 @@ TEST_CASE("[VSM] Omni projection picks the face that holds the point (#222)") {
 	CHECK(VSM::face_projection_select(maps.ptr(), 3, 0, flags, light.origin + directions[5] * 2.0f, w) == VSM::MAP_NONE);
 }
 
+TEST_CASE("[VSM] SMRT inner penumbra, edge symmetry, resolution independence, thin-caster vanishing umbra, and no-leak bounds") {
+	using namespace TestVirtualShadowMapProjection;
+
+	auto omni_shadow_avg = [](const ProjectionScene &p_scene, VSM::ProjectionInput p_in, float p_x, float p_radius) {
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6);
+		float sum = 0.0f;
+		for (uint32_t i = 0; i < 16; i++) {
+			p_in.noise = Vector2((float(i % 4) + 0.5f) / 4.0f, (float(i / 4) + 0.5f) / 4.0f);
+			sum += VSM::shadow_local(p_in, 0, flags, Vector3(p_x, 0.0f, 0.0f), Vector3(0, 1, 0), p_scene.light_position, p_radius);
+		}
+		return sum / 16.0f;
+	};
+
+	auto build_omni_scene = [](ProjectionScene &r_scene, float p_light_y, float p_slab_y, float p_slab_half, uint32_t p_mip = 2u) {
+		const Transform3D light(Basis(), Vector3(0.0f, p_light_y, 0.0f));
+		r_scene.light_position = light.origin;
+		r_scene.slab_height = p_slab_y;
+		r_scene.slab_half = p_slab_half;
+		LocalVector<VSM::MapData> maps;
+		for (uint32_t face = 0; face < 6; face++) {
+			maps.push_back(VSM::map_data_face(VSM::MAP_KIND_OMNI, face, light, 10.0f, 0.0f));
+		}
+		r_scene.set_maps(maps);
+		// Allocate the -Y face (index 3, facing the ground) at p_mip and coarser.
+		r_scene.allocate(3, p_mip);
+		r_scene.fill();
+	};
+
+	// 1) Local omni inner penumbra & edge symmetry (caster 0.7 m from 0.14 m sphere light, wall 1.8 m away).
+	// Geometric shadow edge is at x = 0.35 * 1.8 / 0.7 = 0.90 m; inner and outer penumbras must both soften symmetrically around 0.5.
+	{
+		ProjectionScene scene;
+		build_omni_scene(scene, 1.8f, 1.1f, 0.35f);
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = scene.maps[3].texel_scale * 1.8f * 4.5f;
+		in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+
+		const float umbra = omni_shadow_avg(scene, in, 0.0f, 0.14f);
+		const float inner = omni_shadow_avg(scene, in, 0.80f, 0.14f);
+		const float edge = omni_shadow_avg(scene, in, 0.90f, 0.14f);
+		const float outer = omni_shadow_avg(scene, in, 1.00f, 0.14f);
+		const float far_lit = omni_shadow_avg(scene, in, 1.40f, 0.14f);
+		MESSAGE(vformat("Omni SMRT profile (edge=0.90): umbra=%.3f inner(0.80)=%.3f edge(0.90)=%.3f outer(1.00)=%.3f far=%.3f", umbra, inner, edge, outer, far_lit));
+
+		CHECK(umbra < 0.05f);
+		// Inner penumbra must soften significantly inside the geometric shadow edge (never hard black 0.0).
+		CHECK(inner > 0.12f);
+		CHECK(inner < 0.45f);
+		// Symmetric ~0.5 transition at the exact geometric edge.
+		CHECK(edge > 0.35f);
+		CHECK(edge < 0.65f);
+		// Outer penumbra stays partially shadowed past the edge.
+		CHECK(outer > 0.55f);
+		CHECK(outer < 0.92f);
+		CHECK(far_lit > 0.95f);
+	}
+
+	// 2) Resolution independence: mip 0 (4K footprint) and mip 2 (1080p footprint) must yield matching local
+	// penumbra widths instead of shrinking by 4x at fine mips.
+	{
+		ProjectionScene fine_scene;
+		build_omni_scene(fine_scene, 1.8f, 1.1f, 0.35f, 0u);
+		VSM::ProjectionInput fine_in = fine_scene.input();
+		fine_in.footprint = fine_scene.maps[3].texel_scale * 1.8f * 1.1f; // selects mip 0
+		fine_in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		fine_in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+
+		ProjectionScene coarse_scene;
+		build_omni_scene(coarse_scene, 1.8f, 1.1f, 0.35f, 2u);
+		VSM::ProjectionInput coarse_in = coarse_scene.input();
+		coarse_in.footprint = coarse_scene.maps[3].texel_scale * 1.8f * 4.5f; // selects mip 2
+		coarse_in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		coarse_in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+
+		const float w_fine = penumbra_width([&](float p_x) { return omni_shadow_avg(fine_scene, fine_in, p_x, 0.14f); }, 0.55f, 1.25f, 0.01f);
+		const float w_coarse = penumbra_width([&](float p_x) { return omni_shadow_avg(coarse_scene, coarse_in, p_x, 0.14f); }, 0.55f, 1.25f, 0.01f);
+		MESSAGE(vformat("Omni SMRT penumbra width mip0(4K)=%.3f m vs mip2(1080p)=%.3f m", w_fine, w_coarse));
+		REQUIRE(w_fine > 0.15f);
+		REQUIRE(w_coarse > 0.15f);
+		CHECK(std::fabs(w_fine - w_coarse) < 0.05f);
+	}
+
+	// 3) Thin caster vanishing umbra (0.06 m wide caster 0.80 m from 0.14 m sphere light, wall 2.0 m away).
+	// Angular caster width (0.075 rad) is well below the 2 * SMRT_LOCAL_MAX_TAN_ANGLE (0.175 rad) light cone.
+	{
+		ProjectionScene scene;
+		build_omni_scene(scene, 2.0f, 1.2f, 0.03f);
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = scene.maps[3].texel_scale * 2.0f * 4.5f;
+		// Negative control: hard shadow (radius 0) is solidly occluded at x = 0.
+		in.rays = 0;
+		CHECK(VSM::shadow_local(in, 0, VSM::light_flags(VSM::MAP_KIND_OMNI, 6), Vector3(0.0f, 0.0f, 0.0f), Vector3(0, 1, 0), scene.light_position, 0.0f) == doctest::Approx(0.0f));
+		// Soft shadow (radius 0.14 m, Epic rays/steps): rays pass around the thin caster, lifting the center well above 0.45.
+		in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+		const float thin_center = omni_shadow_avg(scene, in, 0.0f, 0.14f);
+		MESSAGE(vformat("Omni SMRT thin caster center shadow: %.3f", thin_center));
+		CHECK(thin_center > 0.45f);
+	}
+
+	// 4) Near-bulb occluder closer than (1 - SMRT_LOCAL_MAX_REACH) * distance must not light-leak.
+	{
+		ProjectionScene scene;
+		build_omni_scene(scene, 2.0f, 1.92f, 0.06f); // d_occluder = 0.08 m < 0.05 * 2.0 m = 0.10 m.
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = scene.maps[3].texel_scale * 2.0f * 4.5f;
+		in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+		CHECK(omni_shadow_avg(scene, in, 0.0f, 0.02f) < 0.05f);
+	}
+
+	// 5) Contact hardening for local omni: a caster 0.06 m above the ground stays dark and sharp vs elevated caster.
+	{
+		ProjectionScene low_scene;
+		build_omni_scene(low_scene, 1.8f, 0.06f, 0.20f);
+		VSM::ProjectionInput in = low_scene.input();
+		in.footprint = low_scene.maps[3].texel_scale * 1.8f * 4.5f;
+		in.rays = VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC);
+		in.steps = VSM::smrt_preset_steps(VSM::POOL_QUALITY_EPIC);
+		CHECK(omni_shadow_avg(low_scene, in, 0.0f, 0.14f) < 0.05f);
+		const float low_width = penumbra_width([&](float p_x) { return omni_shadow_avg(low_scene, in, p_x, 0.14f); }, 0.05f, 0.45f, 0.005f);
+		REQUIRE(low_width >= 0.0f);
+		CHECK(low_width < 0.10f);
+	}
+
+	// 5) Directional SMRT: inner penumbra, symmetric edge, thin elevated caster vanishing umbra, and tall-cliff no-leak.
+	{
+		const uint32_t count = 4;
+		ProjectionScene scene;
+		scene.slab_height = 1.0f;
+		scene.slab_half = 0.5f;
+		scene.set_maps(sun_levels(count));
+		scene.allocate(0, 2);
+		scene.fill();
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = std::ldexp(1.0f, -8);
+		in.rays = VSM::SMRT_MAX_RAYS;
+		in.steps = VSM::SMRT_MAX_STEPS;
+		const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(4.0f)));
+		const float dir_inner = ground_shadow_directional(in, count, 0.48f, 0.0f, tan_half);
+		const float dir_edge = ground_shadow_directional(in, count, 0.50f, 0.0f, tan_half);
+		const float dir_outer = ground_shadow_directional(in, count, 0.52f, 0.0f, tan_half);
+		MESSAGE(vformat("Directional 4 deg SMRT profile: inner(0.48)=%.3f edge(0.50)=%.3f outer(0.52)=%.3f", dir_inner, dir_edge, dir_outer));
+		CHECK(dir_inner > 0.10f);
+		CHECK(dir_inner < 0.40f);
+		CHECK(dir_edge > 0.35f);
+		CHECK(dir_edge < 0.65f);
+		CHECK(dir_outer > 0.60f);
+		CHECK(dir_outer < 0.93f);
+
+		// Thin 4 cm caster 2 m high under 4 deg sun: projected solar disk (0.14 m) exceeds caster width.
+		ProjectionScene thin_sun;
+		thin_sun.slab_height = 2.0f;
+		thin_sun.slab_half = 0.02f;
+		thin_sun.set_maps(sun_levels(count));
+		thin_sun.allocate(0, 2);
+		thin_sun.fill();
+		VSM::ProjectionInput thin_in = thin_sun.input();
+		thin_in.footprint = std::ldexp(1.0f, -8);
+		thin_in.rays = VSM::SMRT_MAX_RAYS;
+		thin_in.steps = VSM::SMRT_MAX_STEPS;
+		CHECK(ground_shadow_directional(thin_in, count, 0.0f, 0.0f, tan_half) > 0.45f);
+
+		// Tall 20 m cliff above level 0 extent (4 m): must stay solidly occluded with zero light leaks.
+		ProjectionScene tall_sun;
+		tall_sun.slab_height = 20.0f;
+		tall_sun.slab_half = 1.5f;
+		tall_sun.set_maps(sun_levels(count));
+		tall_sun.allocate(0, 2);
+		tall_sun.fill();
+		VSM::ProjectionInput tall_in = tall_sun.input();
+		tall_in.footprint = std::ldexp(1.0f, -8);
+		tall_in.rays = VSM::SMRT_MAX_RAYS;
+		tall_in.steps = VSM::SMRT_MAX_STEPS;
+		CHECK(ground_shadow_directional(tall_in, count, 0.0f, 0.0f, tan_half) < 0.05f);
+	}
+}
+
 // GodotNext: vsm_nanite (#217, plan §21.3 contract S4). CPU reference tests for VSM x Nanite:
 // layout/setting contracts, page-mip projected error matching P5's texel rule, world/local AABB
 // per-page culling, 1-level 8x8 per-page max-depth Hi-Z build & occlusion, SW/HW triangle-size
