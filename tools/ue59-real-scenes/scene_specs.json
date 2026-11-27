@@ -1,0 +1,236 @@
+{
+  "scenes": [
+    {
+      "id": "intel_sponza",
+      "short_title": "Intel Sponza 2022 + Ivy",
+      "title": "Intel Sponza 2022 + Curtains + Geometric Ivy (10.81M Tris)",
+      "description": "4K PBR photogrammetry atrium with draped curtains and 5.07M-triangle geometric ivy, comparing Nanite + Lumen HWRT High vs. NextGeo + NextGI HWRT High.",
+      "source_label": "Intel Graphics Research (glTF 2.0)",
+      "approx_tris": 10809942,
+      "notes": "4K photogrammetry + dense geometric ivy; steep raking sunlight stresses multi-bounce courtyard GI.",
+      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_base_map": "/Game/RealScenes/IntelSponzaV2/IntelSponzaNaniteLumen",
+      "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/IntelSponza",
+      "gn_scenes": [
+        "res://assets/intel_sponza/main/NewSponza_Main_glTF_003.gltf",
+        "res://assets/intel_sponza/curtains/NewSponza_Curtains_glTF.gltf",
+        "res://assets/intel_sponza/ivy/NewSponza_IvyGrowth_glTF.gltf"
+      ],
+      "sun_dir": [0.365, -0.875, -0.318],
+      "sun_color": [1.0, 0.96, 0.90],
+      "gn_sun_energy": 4.2,
+      "gn_sky_energy": 1.6,
+      "gn_exposure": 1.15,
+      "ue_sun_intensity": 10.0,
+      "ue_sky_intensity": 2.4,
+      "ue_exposure_bias": 1.25,
+      "cameras": [
+        {
+          "id": "cam1_courtyard",
+          "label": "A: Atrium Hero",
+          "pos": [-8.5, 2.2, 0.0],
+          "target": [6.0, 3.0, 0.0],
+          "vfov": 46.0
+        },
+        {
+          "id": "cam2_curtains_ivy",
+          "label": "B: Curtains & Arches",
+          "pos": [-3.2, 1.8, 2.4],
+          "target": [7.5, 5.2, -3.0],
+          "vfov": 48.0
+        },
+        {
+          "id": "cam3_arcade_gi",
+          "label": "C: Reverse Courtyard GI",
+          "pos": [4.5, 3.8, 1.2],
+          "target": [-7.5, 3.2, -1.2],
+          "vfov": 50.0
+        }
+      ]
+    },
+    {
+      "id": "bistro",
+      "short_title": "Lumberyard Bistro",
+      "title": "Amazon Lumberyard Bistro (2.8M Tris, Full PBR Street)",
+      "description": "Parisian street exterior & cafe terrace converted from DDS/SpecGloss to full standard glTF 2.0 PBR Metallic-Roughness (254 materials, 469 PNG textures).",
+      "source_label": "Amazon Lumberyard / NVIDIA ORCA (glTF 2.0 PBR)",
+      "approx_tris": 2832120,
+      "notes": "2,909 actors, 551 unique meshes, alpha-masked foliage planters & warm facade GI bounce.",
+      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_base_map": "/Game/RealScenes/BistroPBR/BistroPBR_Base",
+      "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/BistroPBR",
+      "gn_scenes": [
+        "res://assets/bistro_pbr/bistro_pbr.gltf"
+      ],
+      "sun_dir": [0.46, -0.76, -0.46],
+      "sun_color": [1.0, 0.95, 0.87],
+      "gn_sun_energy": 3.8,
+      "gn_sky_energy": 1.5,
+      "gn_exposure": 1.0,
+      "ue_sun_intensity": 10.0,
+      "ue_sky_intensity": 1.8,
+      "ue_exposure_bias": 0.4,
+      "cameras": [
+        {
+          "id": "cam1_street_hero",
+          "label": "A: Street Approach",
+          "pos": [-24.5, 3.0, 10.5],
+          "target": [-4.0, 3.4, 3.5],
+          "vfov": 40.0
+        },
+        {
+          "id": "cam2_archway_alley",
+          "label": "B: Parisian Street Vista",
+          "pos": [-15.0, 2.6, 1.0],
+          "target": [6.0, 3.4, -2.0],
+          "vfov": 46.0
+        },
+        {
+          "id": "cam3_terrace_detail",
+          "label": "C: Cafe Terrace Detail",
+          "pos": [-17.2, 1.9, 2.2],
+          "target": [-9.5, 2.6, 8.2],
+          "vfov": 48.0
+        }
+      ]
+    },
+    {
+      "id": "classic_sponza",
+      "short_title": "ClassicSponza UE5",
+      "title": "ClassicSponzaUnreal (Native UE5 Project Recreated in GodotNext)",
+      "description": "Native Unreal Engine 5 .uproject (80 Nanite meshes, 25 PBR materials / 64 PNG textures) ported faithfully into GodotNext with matched courtyard cameras.",
+      "source_label": "ClassicSponzaUnreal (.uproject -> glTF 2.0 PBR)",
+      "approx_tris": 262267,
+      "notes": "Native UE5 authored materials & HDRP MaskMap textures reconstructed 1:1 for GodotNext.",
+      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ClassicSponzaUE59/ClassicSponzaUnreal.uproject",
+      "ue_base_map": "/Game/ClassicSponza/Maps/SponzaGeometry",
+      "ue_cam_map_prefix": "/Game/ClassicSponza/Maps/CompareCam",
+      "gn_scenes": [
+        "res://assets/classic_sponza_pbr/ClassicSponza.gltf"
+      ],
+      "sun_dir": [-0.36, -0.86, 0.36],
+      "sun_color": [1.0, 0.96, 0.90],
+      "gn_sun_energy": 4.2,
+      "gn_sky_energy": 1.6,
+      "gn_exposure": 1.15,
+      "ue_sun_intensity": 10.0,
+      "ue_sky_intensity": 2.4,
+      "ue_exposure_bias": 1.2,
+      "cameras": [
+        {
+          "id": "cam1_atrium_hero",
+          "label": "A: Courtyard Hero",
+          "pos": [0.0, 2.4, -10.0],
+          "target": [0.0, 4.4, 10.0],
+          "vfov": 50.0
+        },
+        {
+          "id": "cam2_upper_gallery",
+          "label": "B: Upper Gallery",
+          "pos": [-5.4, 6.2, -6.5],
+          "target": [4.5, 2.6, 7.5],
+          "vfov": 48.0
+        },
+        {
+          "id": "cam3_colonnade_lion",
+          "label": "C: Lion Head Alcove",
+          "pos": [1.8, 2.2, 6.2],
+          "target": [0.0, 2.8, -11.5],
+          "vfov": 48.0
+        }
+      ]
+    },
+    {
+      "id": "jungle_ruins",
+      "short_title": "Intel Jungle Ruins",
+      "title": "Intel Jungle Ruins (7.52M Polys — Mayan Pyramid & Banyan Canopy)",
+      "description": "Origin-centered hero export of Intel Jungle Ruins featuring the stepped Mayan pyramid, 3M-poly Banyan canopy, tropical trees, moss, ferns, and terrain.",
+      "source_label": "Intel Graphics Research (Blender 4.2 -> glTF 2.0)",
+      "approx_tris": 7519578,
+      "notes": "Heavy foliage overdraw + alpha cutouts + multi-million-triangle Banyan canopy & stone pyramid.",
+      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_base_map": "/Game/RealScenes/JungleRuins/JungleRuins_Base",
+      "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/JungleRuins",
+      "gn_scenes": [
+        "res://assets/jungle_ruins_hero/jungle_ruins.gltf"
+      ],
+      "sun_dir": [-0.55, -0.72, -0.42],
+      "sun_color": [1.0, 0.96, 0.88],
+      "gn_sun_energy": 4.0,
+      "gn_sky_energy": 1.4,
+      "gn_exposure": 1.0,
+      "ue_sun_intensity": 10.0,
+      "ue_sky_intensity": 1.8,
+      "ue_exposure_bias": 0.4,
+      "cameras": [
+        {
+          "id": "cam1_pyramid_cover",
+          "label": "A: Cover Vista",
+          "pos": [28.8, 3.2, 43.3],
+          "target": [0.0, 6.5, 0.0],
+          "vfov": 42.0
+        },
+        {
+          "id": "cam2_steps_closeup",
+          "label": "B: Temple Stairway",
+          "pos": [12.0, 2.2, 24.5],
+          "target": [-1.5, 9.2, -1.5],
+          "vfov": 48.0
+        },
+        {
+          "id": "cam3_canopy_vista",
+          "label": "C: Elevated Canopy",
+          "pos": [-28.0, 14.5, 32.0],
+          "target": [2.0, 4.5, -2.0],
+          "vfov": 46.0
+        }
+      ]
+    },
+    {
+      "id": "ancient_valley",
+      "short_title": "Ancient Valley (Clean-Room)",
+      "title": "Ancient Valley — Desert Canyon & Monolith Ruins (2.96M Tris)",
+      "description": "Original clean-room desert canyon and monumental ancient gateway inspired by Valley of the Ancient (Epic's Fab project is not on disk), testing stratified cliffs, massive stone shadows, and warm terracotta multi-bounce grotto GI.",
+      "source_label": "Clean-Room Procedural PBR Showcase (glTF 2.0)",
+      "approx_tris": 2957288,
+      "notes": "Original clean-room Valley-of-the-Ancient-style canyon showcase (27 meshes, 125 nodes, 2.96M instanced tris).",
+      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_base_map": "/Game/RealScenes/AncientValley/AncientValley_Base",
+      "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/AncientValley",
+      "gn_scenes": [
+        "res://assets/ancient_valley/ancient_valley.gltf"
+      ],
+      "sun_dir": [0.54, -0.66, -0.52],
+      "sun_color": [1.0, 0.94, 0.85],
+      "gn_sun_energy": 4.2,
+      "gn_sky_energy": 1.45,
+      "gn_exposure": 1.1,
+      "ue_sun_intensity": 10.0,
+      "ue_sky_intensity": 2.2,
+      "ue_exposure_bias": 0.9,
+      "cameras": [
+        {
+          "id": "cam1_canyon_hero",
+          "label": "A: Canyon Approach",
+          "pos": [4.5, 5.2, 36.0],
+          "target": [-4.4, 11.5, -28.0],
+          "vfov": 48.0
+        },
+        {
+          "id": "cam2_portal_sanctum",
+          "label": "B: Monolith Gate Plaza",
+          "pos": [-1.5, 3.6, 6.0],
+          "target": [-4.4, 10.5, -36.0],
+          "vfov": 46.0
+        },
+        {
+          "id": "cam3_grotto_bounce",
+          "label": "C: Canyon Grotto GI",
+          "pos": [-15.5, 4.5, -6.0],
+          "target": [10.0, 10.0, -24.0],
+          "vfov": 50.0
+        }
+      ]
+    }
+  ]
+}
