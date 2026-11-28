@@ -6,7 +6,10 @@ import os
 import urllib.request
 from pathlib import Path
 
-ROOT = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/photogrammetry_sources")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parents[1])
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
+ROOT = TOOLS_DIR / "ue59-real-scenes/photogrammetry_sources"
 HDR = {"User-Agent": "GodotNextCompare/1.0"}
 
 MODELS_4K = [

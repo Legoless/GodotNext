@@ -12,10 +12,11 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path("/home/legoless/Projects/legoless/GodotNext")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parents[1])
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
 GODOT_BIN = REPO_ROOT / "bin/godot.linuxbsd.editor.x86_64"
-UE_EDITOR = Path("/home/legoless/Projects/vendor/UnrealEngine/Engine/Binaries/Linux/UnrealEditor")
-REAL_ROOT = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes")
+REAL_ROOT = TOOLS_DIR / "ue59-real-scenes"
 GODOT_PROJ = REAL_ROOT / "godot_project"
 
 sys.path.insert(0, str(REPO_ROOT / "godotnext/testbed/harness/metrics"))
@@ -132,10 +133,22 @@ def gn_group_p95(cols: dict[str, list[float | None]], select_fn, nframes: int) -
     return val
 
 
+def ue_root() -> Path:
+    """The Unreal Engine 5.9 install (the folder that holds Engine/), from UE_ROOT."""
+    root = os.environ.get("UE_ROOT")
+    if not root:
+        raise SystemExit("UE_ROOT is not set: point it at the Unreal Engine 5.9 install (the folder that holds Engine/).")
+    return Path(root)
+
+
+def ue_editor() -> Path:
+    return Path(os.environ.get("UE_EDITOR") or ue_root() / "Engine/Binaries/Linux/UnrealEditor")
+
+
 def newest_ue_csv(ue_project: Path, since_ts: float) -> Path | None:
     dirs = [
         ue_project.parent / "Saved/Profiling/CSV",
-        Path("/home/legoless/Projects/vendor/UnrealEngine/Engine/Saved/Profiling/CSV"),
+        ue_root() / "Engine/Saved/Profiling/CSV",
     ]
     best = None
     best_m = since_ts
@@ -180,7 +193,7 @@ def run_ue(cfg, out_dir: Path, warmup: int, frames: int, capture_png: bool, toke
     if capture_png:
         exec_cmds.append("HighResShot 1920x1080")
     cmd = [
-        str(UE_EDITOR),
+        str(ue_editor()),
         str(cfg["ue_project"]),
         cfg["ue_map"],
         "-game",
@@ -310,6 +323,7 @@ def main():
     ap.add_argument("--frames", type=int, default=600)
     ap.add_argument("--out", default=str(REAL_ROOT / "results"))
     args = ap.parse_args()
+    ue_root()  # fail before the first run when UE_ROOT is unset
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
     all_res = []

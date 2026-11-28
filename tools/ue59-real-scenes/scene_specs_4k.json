@@ -8,10 +8,10 @@
       "source_label": "Poly Haven Namaqualand 4K Photogrammetry + Blender CC0 Character (glTF 2.0)",
       "approx_tris": 15656524,
       "notes": "15.66M instanced photogrammetry triangles + cantilevered dark cave shadow + warm emissive campfire GI + seated character.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/RedDesertCampfire4K/RedDesertCampfireBase",
       "ue_cam_map_prefix": "/Game/RealScenes/Compare4K/RedDesertCampfire",
-      "ue_sky_hdri": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/photogrammetry_sources/hdris/drakensberg_solitary_mountain_puresky_8k.hdr",
+      "ue_sky_hdri": "ue59-real-scenes/photogrammetry_sources/hdris/drakensberg_solitary_mountain_puresky_8k.hdr",
       "gn_sky_hdri": "res://assets/sky/drakensberg_solitary_mountain_puresky_8k.hdr",
       "gn_scenes": [
         "res://assets/red_desert_campfire_4k/red_desert_campfire.gltf"
@@ -58,10 +58,10 @@
       "source_label": "Poly Haven 4K Photogrammetry Cliffs/Ruins + 8K Sunset HDRI + Blender CC0 Character",
       "approx_tris": 14553249,
       "notes": "14.55M instanced photogrammetry mountain/ruin triangles + over-the-shoulder hero character + 8K golden-pink sunset sky & atmospheric depth.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/AncientCanyonVista4K/AncientCanyonVistaBase",
       "ue_cam_map_prefix": "/Game/RealScenes/Compare4K/AncientCanyonVista",
-      "ue_sky_hdri": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/photogrammetry_sources/hdris/belfast_sunset_puresky_8k.hdr",
+      "ue_sky_hdri": "ue59-real-scenes/photogrammetry_sources/hdris/belfast_sunset_puresky_8k.hdr",
       "gn_sky_hdri": "res://assets/sky/belfast_sunset_puresky_8k.hdr",
       "use_hdri_skydome": true,
       "ue_skydome_brightness": 0.85,
@@ -115,7 +115,7 @@
       "source_label": "Intel Graphics Research (glTF 2.0)",
       "approx_tris": 10809942,
       "notes": "4K photogrammetry + dense geometric ivy + warm colonnade bounce lighting.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/IntelSponzaV2/IntelSponzaNaniteLumen",
       "ue_cam_map_prefix": "/Game/RealScenes/Compare4K/IntelSponza",
       "gn_scenes": [
@@ -175,7 +175,7 @@
       "source_label": "Amazon Lumberyard / NVIDIA ORCA (glTF 2.0 PBR)",
       "approx_tris": 2832120,
       "notes": "2,909 actors, 551 meshes, translucent reflective storefront glass & warm golden-hour streetlamps.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/BistroPBR4K/BistroPBR4K_Base",
       "ue_cam_map_prefix": "/Game/RealScenes/Compare4K/BistroPBR",
       "gn_scenes": [
@@ -237,7 +237,7 @@
       "source_label": "Intel Graphics Research (Blender + USD PointInstancers -> glTF 2.0)",
       "approx_tris": 42000000,
       "notes": "Overgrown Mayan temple + dense alpha-masked canopy framing + lush undergrowth carpet.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/JungleRuins4K/JungleRuins4K_Base",
       "ue_cam_map_prefix": "/Game/RealScenes/Compare4K/JungleRuins",
       "gn_scenes": [
@@ -286,7 +286,7 @@
       "source_label": "ClassicSponzaUnreal (.uproject -> glTF 2.0 PBR)",
       "approx_tris": 262267,
       "notes": "Native UE5 authored materials & HDRP MaskMap textures reconstructed 1:1 for GodotNext.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ClassicSponzaUE59/ClassicSponzaUnreal.uproject",
+      "ue_project": "ue59-real-scenes/ClassicSponzaUE59/ClassicSponzaUnreal.uproject",
       "ue_base_map": "/Game/ClassicSponza/Maps/SponzaGeometry",
       "ue_cam_map_prefix": "/Game/ClassicSponza/Maps/Compare4K",
       "gn_scenes": [

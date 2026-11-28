@@ -11,11 +11,27 @@ import bpy
 import bmesh
 from mathutils import Vector, Euler
 
-SRC = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/photogrammetry_sources")
+
+def _tools_dir() -> Path:
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    if os.environ.get("GODOTNEXT_TOOLS_DIR"):
+        return Path(os.environ["GODOTNEXT_TOOLS_DIR"])
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = Path(__file__).resolve().parents[2]
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return Path(root) / "local/godotnext-tools"
+
+
+TOOLS_DIR = _tools_dir()
+
+SRC = TOOLS_DIR / "ue59-real-scenes/photogrammetry_sources"
 MODELS = SRC / "models"
 TEX = SRC / "textures"
 HERO_GLB = SRC / "hero_character/hero_campfire.glb"
-OUT_DIR = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/red_desert_campfire_4k")
+OUT_DIR = TOOLS_DIR / "ue59-real-scenes/red_desert_campfire_4k"
 TINT_DIR = OUT_DIR / "_tinted_tex"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 TINT_DIR.mkdir(parents=True, exist_ok=True)

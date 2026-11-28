@@ -1,6 +1,23 @@
 import json, os, unreal
 
-out_root = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/exports/classic_sponza_tex"
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
+out_root = os.path.join(TOOLS_DIR, "ue59-real-scenes", "exports", "classic_sponza_tex")
 tex_raw_dir = os.path.join(out_root, "raw_tex")
 os.makedirs(tex_raw_dir, exist_ok=True)
 

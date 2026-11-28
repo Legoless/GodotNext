@@ -8,7 +8,24 @@ import math
 import os
 import unreal
 
-HDRI_PATH = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/intel_jungle_ruins/extracted/JungleRuins/USD/kloppenheim_06_puresky_8k.hdr"
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
+HDRI_PATH = os.path.join(TOOLS_DIR, "ue59-real-scenes/intel_jungle_ruins/extracted/JungleRuins/USD/kloppenheim_06_puresky_8k.hdr")
 
 
 def g2u_pos(p):
@@ -363,7 +380,8 @@ def main():
             print(f"IMPORTED & SAVED {map_path} => {saved}", flush=True)
     elif action == "setup_cam_maps":
         spec = json.loads(open(os.environ["SCENE_SPEC_JSON"]).read())
-        scene_hdri_path = spec.get("ue_sky_hdri", HDRI_PATH)
+        # A relative ue_sky_hdri is relative to TOOLS_DIR; an absolute one is used as it is.
+        scene_hdri_path = os.path.join(TOOLS_DIR, spec.get("ue_sky_hdri", HDRI_PATH))
         scene_hdri_tex = ensure_hdri_cubemap(scene_hdri_path)
         base_map = spec["ue_base_map"]
         for cam in spec["cameras"]:

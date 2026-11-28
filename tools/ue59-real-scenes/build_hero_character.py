@@ -7,6 +7,7 @@ body + garments!) and exported in TWO poses:
   2) hero_campfire.glb  (seated cross-legged/knees-bent beside a campfire)
 """
 import math
+import os
 import random
 from pathlib import Path
 import numpy as np
@@ -14,7 +15,23 @@ import bpy
 import bmesh
 from mathutils import Vector, Euler, Matrix
 
-SRC = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/photogrammetry_sources")
+
+def _tools_dir() -> Path:
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    if os.environ.get("GODOTNEXT_TOOLS_DIR"):
+        return Path(os.environ["GODOTNEXT_TOOLS_DIR"])
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = Path(__file__).resolve().parents[2]
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return Path(root) / "local/godotnext-tools"
+
+
+TOOLS_DIR = _tools_dir()
+
+SRC = TOOLS_DIR / "ue59-real-scenes/photogrammetry_sources"
 BUNDLE = SRC / "human_bundle/human-base-meshes-bundle-v1.4.1/human_base_meshes_bundle.blend"
 TEX_ROOT = SRC / "textures"
 OUT_DIR = SRC / "hero_character"

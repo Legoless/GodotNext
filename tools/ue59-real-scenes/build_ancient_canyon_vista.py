@@ -4,6 +4,7 @@ and export to glTF 2.0 (shared instanced photogrammetry cliff/spire scans + anci
 + standing hero character over-the-shoulder). Matches the iconic Valley of the Ancient Dark World
 sunset vista + Echo overlook composition."""
 import math
+import os
 import random
 from pathlib import Path
 import numpy as np
@@ -11,11 +12,27 @@ import bpy
 import bmesh
 from mathutils import Vector, Euler, Matrix
 
-SRC = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/photogrammetry_sources")
+
+def _tools_dir() -> Path:
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    if os.environ.get("GODOTNEXT_TOOLS_DIR"):
+        return Path(os.environ["GODOTNEXT_TOOLS_DIR"])
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = Path(__file__).resolve().parents[2]
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return Path(root) / "local/godotnext-tools"
+
+
+TOOLS_DIR = _tools_dir()
+
+SRC = TOOLS_DIR / "ue59-real-scenes/photogrammetry_sources"
 MODELS = SRC / "models"
 TEX = SRC / "textures"
 HERO_GLB = SRC / "hero_character/hero_overlook.glb"
-OUT_DIR = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ancient_canyon_vista_4k")
+OUT_DIR = TOOLS_DIR / "ue59-real-scenes/ancient_canyon_vista_4k"
 TINT_DIR = OUT_DIR / "_tinted_tex"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 TINT_DIR.mkdir(parents=True, exist_ok=True)

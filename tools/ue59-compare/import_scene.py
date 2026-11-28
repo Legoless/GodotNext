@@ -4,6 +4,23 @@ import math
 import os
 import unreal
 
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
 # Godot (+X right, +Y up, +Z back, meters) -> UE (+X right, +Y back, +Z up, cm)
 # Calibrated from axes.glb: axis_x=(100,0,0), axis_y=(0,0,100), axis_z=(0,100,0).
 def g2u_pos(x, y, z):
@@ -616,7 +633,7 @@ def import_scene(export_dir, map_name, force_nanite=False, no_lumen=False, enabl
 
 def main():
     spec = os.environ.get("IMPORT_LIST", "")
-    exports_root = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/exports"
+    exports_root = os.path.join(TOOLS_DIR, "ue59-compare", "exports")
     for item in [x.strip() for x in spec.split(",") if x.strip()]:
         parts = item.split(":")
         exp_name, map_name = parts[0], parts[1]

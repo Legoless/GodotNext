@@ -1,12 +1,31 @@
 import unreal, os
 
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
+EXPORTS = os.path.join(TOOLS_DIR, "ue59-compare", "exports")
+
 def run():
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
     # 1. Import axes.glb
     for src, dest in [
-        ('/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/exports/swrt_kitbash/axes.glb', '/Game/Ports/_Calib'),
-        ('/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/exports/character_walk/skinned/s0000.glb', '/Game/Ports/_ProbeSkel'),
-        ('/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/exports/swrt_kitbash/sky.hdr', '/Game/Ports/_ProbeSky'),
+        (os.path.join(EXPORTS, 'swrt_kitbash/axes.glb'), '/Game/Ports/_Calib'),
+        (os.path.join(EXPORTS, 'character_walk/skinned/s0000.glb'), '/Game/Ports/_ProbeSkel'),
+        (os.path.join(EXPORTS, 'swrt_kitbash/sky.hdr'), '/Game/Ports/_ProbeSky'),
     ]:
         task = unreal.AssetImportTask()
         task.filename = src

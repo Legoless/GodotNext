@@ -2,7 +2,7 @@
 """Compute visual diff metrics (FLIP, MAE, luminance) + side-by-side PNG sheets +
 interactive HTML comparison viewer (wipe slider, side-by-side, blink, FLIP heatmap)
 for UE 5.9 (Nanite + Lumen HWRT + VSM) vs. GodotNext (NextGeo + NextGI HWRT + VSM)
-across all 5 scenes x 3 camera angles, and sync cleanly to ~/Drop/godotnext-ue59-comparison/."""
+across all 5 scenes x 3 camera angles, and copy it to $GODOTNEXT_DROP_DIR/godotnext-ue59-comparison-v3/."""
 import csv
 import json
 import math
@@ -16,7 +16,9 @@ for dist_dir in ("/usr/lib/python3/dist-packages", "/usr/local/lib/python3.12/di
     if os.path.isdir(dist_dir) and dist_dir not in sys.path:
         sys.path.append(dist_dir)
 
-REPO_ROOT = Path("/home/legoless/Projects/legoless/GodotNext")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parents[1])
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
 sys.path.insert(0, str(REPO_ROOT / "godotnext/testbed/harness/metrics"))
 
 import numpy as np
@@ -25,9 +27,10 @@ import flip_evaluator
 from godotnext_metrics.ue_bar import run_statistic
 from godotnext_metrics.ue_csv import read_csv_profile, group_ms
 
-REAL_ROOT = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes")
+REAL_ROOT = TOOLS_DIR / "ue59-real-scenes"
 COMP_ROOT = REAL_ROOT / "comparison_v3"
-DROP_DIR = Path("/home/legoless/Drop/godotnext-ue59-comparison")
+# The page folder is replaced on every build, so GODOTNEXT_DROP_DIR names the folder it goes in.
+DROP_DIR = Path(os.environ.get("GODOTNEXT_DROP_DIR") or REPO_ROOT / "local/comparison-page") / "godotnext-ue59-comparison-v3"
 
 UE_GROUPS = {
     "whole_frame_gpu": ["GPUTime"],
@@ -455,8 +458,18 @@ renderAll();
 """
 
 
+def load_specs(name: str) -> dict:
+    """Read a scene spec file kept next to this script. Its paths are relative to TOOLS_DIR; absolute ones are used as they are."""
+    specs = json.loads((SCRIPT_DIR / name).read_text())
+    for sc in specs["scenes"]:
+        for key in ("ue_project", "ue_sky_hdri"):
+            if sc.get(key):
+                sc[key] = str(TOOLS_DIR / sc[key])
+    return specs
+
+
 def main():
-    specs = json.loads((REAL_ROOT / "scene_specs.json").read_text())
+    specs = load_specs("scene_specs.json")
     viewer_dir = COMP_ROOT / "viewer"
     img_dir = viewer_dir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -524,7 +537,7 @@ def main():
     html = HTML_TEMPLATE.replace("__COMPARISON_DATA_JSON__", json.dumps(payload))
     (viewer_dir / "index.html").write_text(html)
 
-    # Sync cleanly to ~/Drop/godotnext-ue59-comparison/
+    # Copy cleanly to $GODOTNEXT_DROP_DIR/godotnext-ue59-comparison-v3/
     if DROP_DIR.exists():
         shutil.rmtree(DROP_DIR)
     shutil.copytree(viewer_dir, DROP_DIR)

@@ -13,9 +13,27 @@ import bmesh
 import mathutils
 from pxr import Usd, UsdGeom
 
-USD_ROOT = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/intel_jungle_ruins/extracted/JungleRuins/USD/elements"
-TEX_TERRAIN = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/intel_jungle_ruins/extracted/JungleRuins/textures/Terrain"
-OUT_DIR = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/jungle_ruins_4k"
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
+JUNGLE_RUINS = os.path.join(TOOLS_DIR, "ue59-real-scenes", "intel_jungle_ruins", "extracted", "JungleRuins")
+USD_ROOT = os.path.join(JUNGLE_RUINS, "USD", "elements")
+TEX_TERRAIN = os.path.join(JUNGLE_RUINS, "textures", "Terrain")
+OUT_DIR = os.path.join(TOOLS_DIR, "ue59-real-scenes", "jungle_ruins_4k")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Pyramid center in Blender meters (matches USD 54370, 80977 cm -> 543.7, 809.8 m)

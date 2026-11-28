@@ -16,7 +16,10 @@ for dist_dir in ("/usr/lib/python3/dist-packages", "/usr/local/lib/python3.12/di
 import numpy as np
 from PIL import Image
 
-OUT_DIR = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ancient_valley")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parents[1])
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
+OUT_DIR = TOOLS_DIR / "ue59-real-scenes/ancient_valley"
 TEX_DIR = OUT_DIR / "textures"
 
 

@@ -8,7 +8,24 @@ import random
 import bpy
 import mathutils
 
-OUT_DIR = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/jungle_ruins_hero"
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
+OUT_DIR = os.path.join(TOOLS_DIR, "ue59-real-scenes", "jungle_ruins_hero")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 ORIGIN = mathutils.Vector((543.7, 809.8, 0.0))

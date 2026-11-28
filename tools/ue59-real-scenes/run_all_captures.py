@@ -14,15 +14,11 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path("/home/legoless/Projects/legoless/GodotNext")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parents[1])
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
 GODOT_BIN = REPO_ROOT / "bin/godot.linuxbsd.editor.x86_64"
-UE_EDITOR = Path("/home/legoless/Projects/vendor/UnrealEngine/Engine/Binaries/Linux/UnrealEditor")
-UE_EDITOR_CMD = Path("/home/legoless/Projects/vendor/UnrealEngine/Engine/Binaries/Linux/UnrealEditor-Cmd")
-UE_SHOT_DIRS = [
-    Path("/data2/Projects/vendor/UnrealEngine/Engine/Saved/Screenshots/LinuxEditor"),
-    Path("/data2/Projects/vendor/UnrealEngine/Engine/Saved/Screenshots/Linux"),
-]
-REAL_ROOT = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes")
+REAL_ROOT = TOOLS_DIR / "ue59-real-scenes"
 GODOT_PROJ = REAL_ROOT / "godot_project"
 COMP_ROOT = REAL_ROOT / "comparison_v3"
 
@@ -49,6 +45,37 @@ UE_EXEC_CMDS = [
 ]
 
 
+def ue_root() -> Path:
+    """The Unreal Engine 5.9 install (the folder that holds Engine/), from UE_ROOT."""
+    root = os.environ.get("UE_ROOT")
+    if not root:
+        raise SystemExit("UE_ROOT is not set: point it at the Unreal Engine 5.9 install (the folder that holds Engine/).")
+    return Path(root)
+
+
+def ue_editor() -> Path:
+    return Path(os.environ.get("UE_EDITOR") or ue_root() / "Engine/Binaries/Linux/UnrealEditor")
+
+
+def ue_editor_cmd() -> Path:
+    return Path(os.environ.get("UE_EDITOR_CMD") or ue_root() / "Engine/Binaries/Linux/UnrealEditor-Cmd")
+
+
+def ue_shot_dirs() -> list[Path]:
+    saved = ue_root() / "Engine/Saved/Screenshots"
+    return [saved / "LinuxEditor", saved / "Linux"]
+
+
+def load_specs(name: str) -> dict:
+    """Read a scene spec file kept next to this script. Its paths are relative to TOOLS_DIR; absolute ones are used as they are."""
+    specs = json.loads((SCRIPT_DIR / name).read_text())
+    for sc in specs["scenes"]:
+        for key in ("ue_project", "ue_sky_hdri"):
+            if sc.get(key):
+                sc[key] = str(TOOLS_DIR / sc[key])
+    return specs
+
+
 def newest_file(dirs: list[Path], pattern: str, since_ts: float) -> Path | None:
     best = None
     best_m = since_ts
@@ -71,11 +98,12 @@ def setup_ue_maps_for_scene(sc: dict):
     env = os.environ.copy()
     env["UE_ACTION"] = "setup_cam_maps"
     env["SCENE_SPEC_JSON"] = str(spec_tmp)
+    env["GODOTNEXT_TOOLS_DIR"] = str(TOOLS_DIR)
     cmd = [
-        str(UE_EDITOR_CMD),
+        str(ue_editor_cmd()),
         sc["ue_project"],
         "-nullrhi", "-unattended", "-nosplash", "-nop4", "-NoSound",
-        f"-ExecutePythonScript={REAL_ROOT / 'setup_ue_comparison.py'}",
+        f"-ExecutePythonScript={SCRIPT_DIR / 'setup_ue_comparison.py'}",
     ]
     log_p = COMP_ROOT / sid / "ue_setup_cams.log"
     print(f"[{sid}] Setting up {len(sc['cameras'])} UE 5.9 camera maps...", flush=True)
@@ -89,13 +117,13 @@ def capture_ue_scene(sc: dict, display: str, only_cams: set[str] | None = None, 
     ue_proj = Path(sc["ue_project"])
     out_dir = COMP_ROOT / sid
     out_dir.mkdir(parents=True, exist_ok=True)
-    shot_dirs = UE_SHOT_DIRS + [
+    shot_dirs = ue_shot_dirs() + [
         ue_proj.parent / "Saved/Screenshots/LinuxEditor",
         ue_proj.parent / "Saved/Screenshots/Linux",
     ]
     csv_dirs = [
         ue_proj.parent / "Saved/Profiling/CSV",
-        Path("/data2/Projects/vendor/UnrealEngine/Engine/Saved/Profiling/CSV"),
+        ue_root() / "Engine/Saved/Profiling/CSV",
     ]
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
@@ -111,7 +139,7 @@ def capture_ue_scene(sc: dict, display: str, only_cams: set[str] | None = None, 
         ]
         log_p = out_dir / f"{cid}_ue.log"
         cmd = [
-            str(UE_EDITOR),
+            str(ue_editor()),
             str(ue_proj),
             cam_map,
             "-game", "-vulkan", "-sm6", "-RenderOffScreen",
@@ -221,12 +249,14 @@ def main():
     ap.add_argument("--gn-frames", type=int, default=45)
     args = ap.parse_args()
 
-    specs = json.loads((REAL_ROOT / "scene_specs.json").read_text())
+    specs = load_specs("scene_specs.json")
     wanted_scenes = None if args.scenes == "all" else set(args.scenes.split(","))
     wanted_cams = None if args.cams == "all" else set(args.cams.split(","))
     selected = [s for s in specs["scenes"] if wanted_scenes is None or s["id"] in wanted_scenes]
 
     # Step 1: UE camera map setup (pure CPU -nullrhi)
+    if not args.skip_ue:
+        ue_root()  # fail before Xvfb starts when UE_ROOT is unset
     if not args.skip_ue_setup and not args.skip_ue:
         for sc in selected:
             setup_ue_maps_for_scene(sc)

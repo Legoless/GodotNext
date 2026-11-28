@@ -10,15 +10,12 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path("/home/legoless/Projects/legoless/GodotNext")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parents[1])
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
 TESTBED_DIR = REPO_ROOT / "godotnext/testbed"
 GODOT_BIN = REPO_ROOT / "bin/godot.linuxbsd.editor.x86_64"
-UE_EDITOR = Path("/home/legoless/Projects/vendor/UnrealEngine/Engine/Binaries/Linux/UnrealEditor")
-UE_PROJECT = Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/GodotNextCompare.uproject")
-UE_CSV_DIRS = [
-    Path("/home/legoless/Projects/vendor/UnrealEngine/Engine/Saved/Profiling/CSV"),
-    Path("/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/Saved/Profiling/CSV"),
-]
+UE_PROJECT = TOOLS_DIR / "ue59-compare/GodotNextCompare.uproject"
 
 sys.path.insert(0, str(TESTBED_DIR / "harness/metrics"))
 from godotnext_metrics.timing_metrics import read_timing_csv
@@ -27,10 +24,29 @@ from godotnext_metrics.ue_compare import load_config, godotnext_args
 from godotnext_metrics.ue_csv import read_csv_profile, group_ms
 
 
+def ue_root() -> Path:
+    """The Unreal Engine 5.9 install (the folder that holds Engine/), from UE_ROOT."""
+    root = os.environ.get("UE_ROOT")
+    if not root:
+        raise SystemExit("UE_ROOT is not set: point it at the Unreal Engine 5.9 install (the folder that holds Engine/).")
+    return Path(root)
+
+
+def ue_editor() -> Path:
+    return Path(os.environ.get("UE_EDITOR") or ue_root() / "Engine/Binaries/Linux/UnrealEditor")
+
+
+def ue_csv_dirs() -> list[Path]:
+    return [
+        ue_root() / "Engine/Saved/Profiling/CSV",
+        UE_PROJECT.parent / "Saved/Profiling/CSV",
+    ]
+
+
 def newest_ue_csv(since_ts: float) -> Path | None:
     best = None
     best_m = since_ts
-    for d in UE_CSV_DIRS:
+    for d in ue_csv_dirs():
         if not d.is_dir():
             continue
         for p in d.glob("*.csv"):
@@ -92,7 +108,7 @@ def run_ue(cfg, run_dir: Path, is_warmup: bool, token: str) -> tuple[int, Path |
     exec_cmds = list(cfg.ue.exec_cmds)
     # Remove Windows-only ProfileGPU if any; keep scalability & Lumen/async settings
     cmd = [
-        str(UE_EDITOR),
+        str(ue_editor()),
         str(UE_PROJECT),
         cfg.ue.map,
         "-game",
@@ -231,10 +247,11 @@ def eval_set(cfg_path: Path, out_root: Path, runs: int, skip_warmup: bool):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("configs", nargs="+")
-    ap.add_argument("--out", default="/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-compare/results")
+    ap.add_argument("--out", default=str(TOOLS_DIR / "ue59-compare/results"))
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--skip-warmup", action="store_true")
     args = ap.parse_args()
+    ue_root()  # fail before the first run when UE_ROOT is unset
     out_root = Path(args.out)
     all_res = []
     for c in args.configs:

@@ -8,7 +8,7 @@
       "source_label": "Intel Graphics Research (glTF 2.0)",
       "approx_tris": 10809942,
       "notes": "4K photogrammetry + dense geometric ivy; steep raking sunlight stresses multi-bounce courtyard GI.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/IntelSponzaV2/IntelSponzaNaniteLumen",
       "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/IntelSponza",
       "gn_scenes": [
@@ -56,7 +56,7 @@
       "source_label": "Amazon Lumberyard / NVIDIA ORCA (glTF 2.0 PBR)",
       "approx_tris": 2832120,
       "notes": "2,909 actors, 551 unique meshes, alpha-masked foliage planters & warm facade GI bounce.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/BistroPBR/BistroPBR_Base",
       "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/BistroPBR",
       "gn_scenes": [
@@ -102,7 +102,7 @@
       "source_label": "ClassicSponzaUnreal (.uproject -> glTF 2.0 PBR)",
       "approx_tris": 262267,
       "notes": "Native UE5 authored materials & HDRP MaskMap textures reconstructed 1:1 for GodotNext.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ClassicSponzaUE59/ClassicSponzaUnreal.uproject",
+      "ue_project": "ue59-real-scenes/ClassicSponzaUE59/ClassicSponzaUnreal.uproject",
       "ue_base_map": "/Game/ClassicSponza/Maps/SponzaGeometry",
       "ue_cam_map_prefix": "/Game/ClassicSponza/Maps/CompareCam",
       "gn_scenes": [
@@ -148,7 +148,7 @@
       "source_label": "Intel Graphics Research (Blender 4.2 -> glTF 2.0)",
       "approx_tris": 7519578,
       "notes": "Heavy foliage overdraw + alpha cutouts + multi-million-triangle Banyan canopy & stone pyramid.",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/JungleRuins/JungleRuins_Base",
       "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/JungleRuins",
       "gn_scenes": [
@@ -194,7 +194,7 @@
       "source_label": "Clean-Room Procedural PBR Showcase (glTF 2.0)",
       "approx_tris": 2957288,
       "notes": "Original clean-room Valley-of-the-Ancient-style canyon showcase (27 meshes, 125 nodes, 2.96M instanced tris).",
-      "ue_project": "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/ue_project/RealScenesUE59.uproject",
+      "ue_project": "ue59-real-scenes/ue_project/RealScenesUE59.uproject",
       "ue_base_map": "/Game/RealScenes/AncientValley/AncientValley_Base",
       "ue_cam_map_prefix": "/Game/RealScenes/CompareCams/AncientValley",
       "gn_scenes": [

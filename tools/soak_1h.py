@@ -22,7 +22,9 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path("/home/legoless/Projects/legoless/GodotNext")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(os.environ.get("GODOTNEXT_ROOT") or SCRIPT_DIR.parent)
+TOOLS_DIR = Path(os.environ.get("GODOTNEXT_TOOLS_DIR") or REPO_ROOT / "local/godotnext-tools")
 TESTBED_DIR = REPO_ROOT / "godotnext/testbed"
 GODOT_BIN = REPO_ROOT / "bin/godot.linuxbsd.editor.x86_64"
 
@@ -174,7 +176,7 @@ def nvidia_vram_mb() -> float | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--duration", type=int, default=3600)
-    ap.add_argument("--out", default="/data2/Projects/legoless/GodotNext/local/godotnext-tools/soak_1h_results")
+    ap.add_argument("--out", default=str(TOOLS_DIR / "soak_1h_results"))
     args = ap.parse_args()
 
     out_dir = Path(args.out)

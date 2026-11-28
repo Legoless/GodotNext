@@ -6,10 +6,29 @@ import os
 import sys
 import unreal
 
+
+def _tools_dir():
+    """The gitignored data dir: GODOTNEXT_TOOLS_DIR, else <repo>/local/godotnext-tools."""
+    tools_dir = os.environ.get("GODOTNEXT_TOOLS_DIR")
+    if tools_dir:
+        return tools_dir
+    root = os.environ.get("GODOTNEXT_ROOT")
+    if not root:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        except NameError:
+            raise RuntimeError("Set GODOTNEXT_TOOLS_DIR or GODOTNEXT_ROOT: this interpreter did not set __file__.")
+    return os.path.join(root, "local", "godotnext-tools")
+
+
+TOOLS_DIR = _tools_dir()
+
+REAL_ROOT = os.path.join(TOOLS_DIR, "ue59-real-scenes")
+
 SCENES = {
     "bistro": {
         "gltfs": [
-            "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/niagara_bistro/bistro.gltf",
+            os.path.join(REAL_ROOT, "niagara_bistro/bistro.gltf"),
         ],
         "dest": "/Game/RealScenes/BistroV2",
         "map": "/Game/RealScenes/BistroV2/BistroNaniteLumen",
@@ -22,9 +41,9 @@ SCENES = {
     },
     "intel_sponza": {
         "gltfs": [
-            "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/intel_sponza/extracted/main_sponza/NewSponza_Main_glTF_003.gltf",
-            "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/intel_sponza/extracted/pkg_a_curtains/NewSponza_Curtains_glTF.gltf",
-            "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/intel_sponza/extracted/pkg_b_ivy/NewSponza_IvyGrowth_glTF.gltf",
+            os.path.join(REAL_ROOT, "intel_sponza/extracted/main_sponza/NewSponza_Main_glTF_003.gltf"),
+            os.path.join(REAL_ROOT, "intel_sponza/extracted/pkg_a_curtains/NewSponza_Curtains_glTF.gltf"),
+            os.path.join(REAL_ROOT, "intel_sponza/extracted/pkg_b_ivy/NewSponza_IvyGrowth_glTF.gltf"),
         ],
         "dest": "/Game/RealScenes/IntelSponzaV2",
         "map": "/Game/RealScenes/IntelSponzaV2/IntelSponzaNaniteLumen",
@@ -202,7 +221,7 @@ def setup_scene(key):
         "cam_loc_cm": [cam_loc.x, cam_loc.y, cam_loc.z],
         "cam_rot_ue": [cam_rot.roll, cam_rot.pitch, cam_rot.yaw],
     }
-    meta_dir = "/data2/Projects/legoless/GodotNext/local/godotnext-tools/ue59-real-scenes/exports"
+    meta_dir = os.path.join(REAL_ROOT, "exports")
     os.makedirs(meta_dir, exist_ok=True)
     with open(os.path.join(meta_dir, f"{key}_ue_meta.json"), "w") as f:
         json.dump(out_meta, f, indent=2)
