@@ -2,7 +2,20 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-27 (NextGI screen-trace self-hits and VSM receiver-plane acne). The change is in the tree and not re-measured in this landing: coarse Hi-Z misses are confirmed against mip-0 depth before a hit is accepted, the screen march starts 1.5 pixels off the receiver, and directional and local SMRT use uphill-only receiver-plane depth so sloped and bumpy receivers do not self-shadow. Doctests in `test_nextgi_swrt_trace.cpp` and `test_virtual_shadow_maps.cpp` cover the new contracts. Comparison scripts now live in `tools/`. Scene files and Unreal projects stay in the gitignored local tools directory. Official Electric Dreams and Valley of the Ancient frames are UE 5.9 black-box shots only. Their GodotNext wipe partners on the comparison page are the existing Jungle Ruins and red-desert campfire frames, not matched cameras.
+**Last updated:** 2026-11-28 (clean-up after the Antigravity and Grok sessions, plan v3.9.25). Master was `5b8b2c29` before today's clean-up commit.
+- **Sessions since the last handoff:** Antigravity (Gemini) ran from 2026-11-23 to 2026-11-27 16:03 and stopped on a quota error without answering the lead's last prompt. A Grok session (2026-11-27, 16:03 to 23:15) upgraded Epic's Electric Dreams and Valley of the Ancient samples to UE 5.9, built them and captured one 4K frame of each. It committed `a096b375` (the entry below) and `5b8b2c29` (the comparison scripts in `tools/`), and moved the UE bench and the comparison data into the git-ignored `local/` folder. `a096b375` was built and passed 690/690 doctests before it was committed, but it was not rebuilt at the commit, and no CI ran. The session's last request, eight more UE views, failed; they were captured on 2026-11-28 (next bullet).
+- **UE 5.9 sample reference views:** all eight extra views were captured on 2026-11-28 at native 3840×2160 on the RTX 5090 (UE 5.9 Cinematic scalability, TSR, Lumen hardware ray tracing with hit lighting, VSM, Nanite), four from Electric Dreams and four from Valley of the Ancient, with no HUD or help overlay. Two Valley views use nearby authored cameras, because the planned ones framed a near-black slot canyon or repeated the campfire frame. The 2026-11-27 failures were `dlopen` errors: after the move into `local/`, the projects' plugin libraries were no longer on the library path. The comparison page's Electric Dreams and Valley of the Ancient tabs are now UE 5.9 reference galleries with five views each and no GodotNext partner, because both samples are Fab "UE-Only" content (plan v3.9.25).
+- **`tools/` is portable:** the scripts hold no machine paths, host names or user names now. "Paths" in `tools/README.md` lists the variables (`GODOTNEXT_ROOT`, `GODOTNEXT_TOOLS_DIR`, `UE_ROOT`, `UE_EDITOR`, `UE_EDITOR_CMD`, `GODOTNEXT_DROP_DIR`). `UE_ROOT` has no default, and every Unreal step stops before it starts without it. The viewers write their pages into `local/comparison-page` unless `GODOTNEXT_DROP_DIR` is set, and the runners use the tracked scripts and scene specs in `tools/`. The fix is forward-only: `5b8b2c29` still has the old paths in history.
+- **Machine clean-up:** a stale UE build process, temporary capture files, a stray bench folder outside the checkout (its crash logs are kept under `local/`) and an old RTX 5090 verification worktree were removed.
+- **Plan v3.9.25:**
+  - UE projects, sample content, scene data and renders are never tracked and live only in `local/`; reusable scripts go in `tools/` with no machine paths (`AGENTS.md` says the same).
+  - Electric Dreams and Valley of the Ancient are Fab "UE-Only" content, used only as UE 5.9 black-box reference captures.
+  - The RTX 5090 runs of 2026-11-25 and 2026-11-26 are pre-PQ evidence only, and spikes #21 and #71 stay closed.
+  - D3D12 builds link the private Mesa NIR library `25.3.1-gn5`, and #273's body now names that label.
+- **Issues and tracker:** new #309 (PD, under #107) covers the DXIL validator's 0x2000 flag mismatch on the path tracer raygen. The checklists in #2, #224 and #225 are ticked for the closed issues. The tracker shows 227 of 240 build tasks done, 0 of 18 gates passed and 50 open issues.
+- **Quality:** the lead's last verdict on the comparison (2026-11-27) was "These are still not good enough". They have not reviewed the later 4K recapture yet, and its timings conflict with the entries below (see "Known issues and risks").
+
+**Earlier 2026-11-27 (NextGI screen-trace self-hits and VSM receiver-plane acne).** The change is in the tree and not re-measured in this landing: coarse Hi-Z misses are confirmed against mip-0 depth before a hit is accepted, the screen march starts 1.5 pixels off the receiver, and directional and local SMRT use uphill-only receiver-plane depth so sloped and bumpy receivers do not self-shadow. Doctests in `test_nextgi_swrt_trace.cpp` and `test_virtual_shadow_maps.cpp` cover the new contracts. Comparison scripts now live in `tools/`. Scene files and Unreal projects stay in the gitignored local tools directory. Official Electric Dreams and Valley of the Ancient frames are UE 5.9 black-box shots only. Their GodotNext wipe partners on the comparison page are the existing Jungle Ruins and red-desert campfire frames, not matched cameras. (Superseded 2026-11-28: those tabs are UE 5.9 reference galleries with no GodotNext partner.)
 
 **Earlier 2026-11-27 (VSM SMRT inner-penumbra / resolution-independent local reach & NextGeo UV-less mesh fixes).** **Two real-world rendering bugs surfaced during native 4K (`3840×2160`) UE 5.9 vs. GodotNext photogrammetry comparisons are fixed and verified on RTX 5090 Linux Vulkan (`330 / 330` VSM + MegaLights + VirtualMesh + NextGeo doctests `3,245,124` assertions `0` failed; live GPU `tests/vsm/projection.tscn` `pass: true` across `--shadows=vsm`, `--shadows=vsm --prefiltered=true`, and `--shadows=atlas`):**
 - **VSM SMRT soft shadows (`virtual_shadow_map_storage.{h,cpp}`, `vsm_smrt_inc.glsl`, `test_virtual_shadow_maps.cpp`, `godotnext/testbed/tests/vsm/projection.gd`):**
@@ -17,7 +30,7 @@ The current state of the build and what to do next. It is written for any agent:
   - Replaced unshadowed overflow local lights (`vis = 1.0` shining through solid stone once `shadowed_used >= max_shadowed`) in `nextgi_hit_lighting.glsl` with luminance-weighted Reservoir Importance Sampling (RIS) inside the existing per-hit shadow-ray budget (`1` GI / `4` reflections), and published `confidence = 1.0` on resolved Hit Lighting reflections.
   - Published `confidence = 1.0` on solid hits without SRC cards, WRC hits, and traced misses in `nextgi_gather_body_inc.glsl` and `nextgi_reflect.glsl`, and added a `3×3` probe ring fallback in `nextgi_integrate_main()` for thin arch rims — stopping unoccluded `AMBIENT_SOURCE_SKY` / `REFLECTION_SOURCE_SKY` leaks into shadowed arches and alcoves (`Intel Sponza cam2` FLIP `0.1918` / `21.34 dB`, `Classic Sponza cam2` FLIP `0.2481` / `20.50 dB`).
   - Added regression coverage in `test_nextgi_hit_lighting.cpp` verifying RIS local-light shadow selection and occlusion confidence contracts.
-- **Next up (waiting on lead):** Official *Valley of the Ancient* 4K comparison scene once the lead supplies the project archive (UE 5.9 black-box capture + local GodotNext comparison outside the repo).
+- **Next up (waiting on lead):** Official *Valley of the Ancient* 4K comparison scene once the lead supplies the project archive (UE 5.9 black-box capture + local GodotNext comparison outside the repo). *2026-11-28: the lead supplied it, and UE 5.9 reference frames exist. Epic's samples are Fab "UE-Only" content, so there is no GodotNext render of them (plan v3.9.25).*
 
 **Earlier 2026-11-26 (`662643dc`) — Native 4K NextGI Hit Lighting, WRC clipmap, firefly-clamping, and NextGeo primary-view capacity fixes (`571+` NextGI + NextGeo doctests `0` failed; all 12 native 4K cameras clean and uncontested at `17.54–36.25 ms` vs. UE 5.9 Cinematic `25.64–103.71 ms`, `1.34×–2.86×` faster):**
 - **NextGI Hit Lighting, WRC & firefly-clamping fixes (`next_gi_gather.{h,cpp}`, `next_gi_hit_lighting.{h,cpp}`, `nextgi_{reflect,wrc_sample_inc,hit_lighting,gather_body_inc,src_relight_inc}.glsl`, `test_nextgi_hit_lighting.cpp`):**
@@ -295,77 +308,85 @@ The current state of the build and what to do next. It is written for any agent:
    - `godotnext-implement-issue` builds an issue and lands it;
    - `godotnext-fleet` covers the machines and how to use them;
    - `godotnext-update-tracker`, `godotnext-plan-revision` and `godotnext-issues` cover the tracker, the plan and the issues.
-2. Read this file, then `local/handoff-private.md`. It points to the private lane queue, the cloud rebuild runbook and the archived history. No GodotNext cloud VMs, disks or template snapshots exist.
+2. Read this file, then `local/handoff-private.md` on the machine you work on. It has that machine's paths and settings.
 3. `git fetch`; master should be at or after this commit. Refresh the tracker with `python3 docs/godotnext/tracker/export.py`.
-4. Lead preference (2026-11-20): keep the orchestrating agent running locally on the Mac while builds, doctests and GPU validation runs execute on cloud Linux L4 and Windows L4 VMs (or the RTX 4080 SUPER machine when reachable). Recreating cloud VMs is spending: get the lead's go-ahead first, then follow the private rebuild runbook.
-5. Stop cloud VMs as soon as they have no work left; delete them when the build is paused.
+4. Use the machines in use now:
+   - **The RTX 5090 machine** (the lead's workstation) runs Linux Vulkan builds, doctests, validation runs and the UE 5.9 sample captures. Its Windows 11 VM takes the RTX 5090 through passthrough for D3D12, DLSS and Windows runs, and hands it back to Linux afterwards (#227). Stay in GodotNext folders, run one GPU job at a time, and make no system changes without the lead's OK.
+   - **The M5 Max** runs Metal builds and runs.
+   - **The RTX 4080 SUPER** (the UE-bar machine) is out of use until the owner restores it.
+   - **No cloud VMs exist.** Recreating any is spending and needs the lead's go-ahead with the exact cost.
+5. The comparison scripts are in `tools/` (see "Paths" in `tools/README.md`). Their data, the UE projects and the renders stay in the git-ignored `local/` folder.
 
-### The lane loop (what Claude's workflows did)
+**How earlier work was done.** Until 2026-11-23, lanes followed the loop in `godotnext-implement-issue`, with builds and GPU runs on cloud L4 VMs and the RTX 4080 SUPER:
+1. Build the issue in its worktree.
+2. Have the diff read independently against the issue, the plan and the clean room (§19).
+3. Fix the real findings.
+4. Run a landing check on current master on a named machine (lead decision 2026-11-16).
+5. Land it, with "Closes #N" only when every build criterion is met.
 
-1. **Build.** Implement or finish the issue in its worktree. Builds and GPU runs go on the cloud VMs or the RTX 4080 SUPER machine, never the Mac. The helpers in `local/gce/` and `local/sal/` build a worktree's diff on a VM, run a scene job and fetch the logs; their header comments explain each one. Prove the issue's criteria: no warnings, full doctests, the issue's GPU checks with 0 validation errors on Vulkan and D3D12, and the phase smoke scene.
-2. **Review.** An independent read of the diff against the issue, the plan and the clean room (§19), looking for concrete defects.
-3. **Fix** the real findings and re-prove from a clean state.
-4. **Landing check** on the cloud test machine (cloud Windows L4 VM with the private Mesa library) or the RTX 4080 SUPER machine. Apply the diff to current master, build, run the issue's landing runs, and name the machine in the issue comment (lead decision 2026-11-16).
-5. **Land** on master. Use "Closes #N" only when every build criterion is met. Metal and macOS builds wait for the lead's Mac runs, so most issues land as progress. Then post the issue comment, refresh the tracker, update this file and delete the WIP branch.
+Since 2026-11-23 the work has run on the RTX 5090 machine and the M5 Max.
 
 The lead does not want questions. Take the recommended option, or follow UE 5.9, record the choice, and report it. Ask only about spending, accounts, the lead's own sign-offs, or publishing anything new.
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.18.
-- Landed on 2026-11-20:
-  - **#298 closed (`96a9a204c5`)**: fixed upstream `EditorHelp` shutdown race (`EditorHelp::doc_cleaned`, thread handoff sync, guarded deferred callbacks, clearing `EditorFileSystem::singleton`), added 4 doctests and a 20-run cross-platform `test_headless_import.py` regression check; verified 20/20 imports + 0 warnings + full doctests + Vulkan VVL 1.4 / D3D12+GBV smoke on the cloud Linux L4 VM and cloud Windows L4 test machine (`25.3.1-gn4`).
-  - **#297 closed (plan v3.9.17)**: counterbalanced 15×15 interleaved AB/BA runs on the cloud Windows L4 test machine (D3D12 + Vulkan, 1920×1080, `--gpu-validation`, NextGI off, VSM off) and a static audit across `b6596def89..953e76ffe0` proved legacy SDFGI's bimodal ±1 binary16 ULP variation is ordinary upstream GPU non-determinism (Fisher `p = 1.0000` D3D12, `p = 0.6999` Vulkan; bit-exact cross-tree EXRs in both clusters; zero engine code changes); recorded baselines and the interleaved AB/BA `max_ulp <= 1` rule in plan §22.2.
-  - **#150 (progress, `7b7d2f5982`)**: added `displacement()` spatial shader function with `DISPLACEMENT` output and `texture()` → `textureGrad()` lowering, `Material.displacement_magnitude`/`displacement_center` (`RenderingServer.material_set_displacement()`), `BaseMaterial3D.heightmap_mode = PARALLAX | DISPLACEMENT`, `RASTER_FEATURE_DISPLACED` + cull bound inflation, `#163` dicing-compute compiler hook, `--doctool` class docs, doctests (Forward+, Forward Mobile, Compatibility, Vulkan/D3D12/Metal containers), and `nextgeo_displacement_check.tscn`. Independently reviewed (5 findings fixed) and verified on the cloud Linux L4 VM (`0` warnings, `2,188/2,188` doctests, Vulkan VVL 1.4) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,212/2,212` doctests, Vulkan + D3D12 + D3D12 GBV, `0/6,220,800` bytes diff at magnitude `0`). Waits only on macOS/Metal build and M5 Max GPU run.
-  - **#217 (progress, `230a613b62`)**: added VSM × Nanite per-page multi-view cluster culling in `cluster_cull.glsl` (`1` directional + `1` local indirect dispatch chain), 1-level 8×8 per-page static Hi-Z, fixed-function HW (`vsm_raster_nextgeo.glsl`, `#177` indirect-count with `firstInstance = 0`) and SW (`vsm_raster_sw.glsl`, 32-bit `imageAtomicMax`) rasterizers, static/dynamic layer routing hook for `#212`, programmable raster-bin VSM Group 2 (`NEXTGEO_RASTER_DEPTH_ONLY`) integrated with `#150` (`RASTER_FEATURE_DISPLACED` + `displacement_bound` cull inflation), live NextGeo VSM projection sampling, `VSM_OVERDRAW` Nanite pairs, `[VSM][NextGeo]` doctests, and `tests/vsm/nanite.tscn`. Independently reviewed (5 findings fixed) and verified on `master` (over `#150`) on the cloud Linux L4 VM (`0` warnings, `2,198/2,198` doctests, Vulkan VVL 1.4) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,222/2,222` doctests, Vulkan + D3D12 + D3D12 GBV). Waits only on macOS/Metal build/run and PQ lines.
-  - **#305 (progress, `95f6bc869b`)**: added `MaterialStorage::TextureCacheIndex` reverse index and `texture_rd_replaced()` so `texture_replace_compatible()` refreshes `MaterialData::texture_cache` in place (bumping `change_serial` for `#167` path tracer history), notified unconditionally with pre-free RD snapshots from `texture_replace()`, `texture_proxy_update()`, `texture_free()`, and `_update_render_target()` (including `0×0` shrink), hardened `MaterialData::get_parameter_uniforms()` across `#155`, `#158`, and `#217` VSM programmable bins, and hardened `NextGIHitMaterials` bindless slot acquisition/tracking. Independently reviewed (4 findings fixed) and verified on `master` (over `#217`) on the cloud Linux L4 VM (`0` warnings, `2,201/2,201` doctests, Vulkan VVL 1.4) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,225/2,225` doctests, Vulkan + D3D12 + D3D12 GBV). Waits only on macOS/Metal build/run.
-  - **#301 (progress, `1c738bdcf7`)**: added `RenderingDevice::DRAW_READ_ONLY_DEPTH`, `ATTACHMENT_STORE_OP_NONE`, `API_TRAIT_SUPPORTS_ATTACHMENT_STORE_OP_NONE`, `RDG::ATTACHMENT_OPERATION_READ_ONLY`, `SharedReadLayoutTransition` (with slice inheritance, bindless dirty-depth `SHADER_READ` merging, cross-frame visibility barriers, and 128-bit `FramebufferStorageKey`), spec-verified Vulkan (`VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL` + `VK_KHR/EXT_load_store_op_none`), D3D12 (`D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ_COMPUTE_QUEUE_ACCESSIBLE` + read-only DSVs), and Metal (`MTL::StoreActionDontCare` without store promotion) support, Forward+ read-only depth for sky, specular merge, AVBOIT composite/remainder, and transparent passes (when no `RENDER_LIST_ALPHA` surface writes depth or stencil), updated `RenderingDevice.xml`/`ProjectSettings.xml`/`rhi-async-compute.md`, and added render-graph/bindless/Forward+ doctests. Independently reviewed (6 findings fixed) and verified on `master` on the cloud Linux L4 VM (`0` warnings, `2,209/2,209` doctests, `--doctool` `0` diff, Vulkan VVL 1.4.363.1 syncval with live cross-queue positive control, `0` hazards, `30/30` level-2 forks) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,233/2,233` doctests, Vulkan VVL 1.4.363.1 syncval + D3D12 debug layer + D3D12 GBV + byte-identity across smoke & legacy scenes). Waits only on macOS/Metal build/run and PQ gate GT-7.
-  - **#212 (progress, `a5b4d5d660` + build fix `7739b79509`)**: added VSM static/dynamic instance routing, swept-bounds and light-map invalidation, the deferred static invalidation budget, the per-instance cache API and documentation, NextGeo dynamic-hook routing and cache telemetry. The follow-up fixes the Linux and Windows compile failure, the NextGeo counter-layout test and the cache-invalidation API docs. Both builds pass; Linux full doctests and doctool pass, Windows targeted VSM tests pass, and repository hooks pass. Behavioral tests, counter checks, Vulkan/D3D12/Metal validation and smoke renders remain open; every acceptance box remains open.
-- Landed on 2026-11-19, all as progress unless noted:
-  - #193 TSR async compute, #218 VSM non-Nanite raster and #167 the path tracer (checked together on the cloud L4 and T4 test machines), with plan v3.9.15.
-  - #299 closed (the D3D12 front-layer depth target).
-  - #158 material shading bins, #295 AVBOIT, #145 RT visibility policy, #221 VSM product surface and #222 VSM projection and SMRT, with plan v3.9.16 (LQ6 decided: translucent casters shadow as opaque, as UE 5.9 does).
-  - Stack 2 review and verification (`02a07e6b4d`): independent code review of #222, merged #221 and #145's #286/#167 port completed; 4 Major and 3 Minor defects fixed (centered depths in `vsm_prefiltered_distant()` + 10 km doctest, Frame-1 positional shadow-atlas slot release via `shadow_atlas_remove_light()`, `vsm_light_skips_atlas()` LRU touch + directional fallback guard, unified VSM projection readiness check, `vsm_sample_view` gating, #145 Simplified Material verdict latch, #145/#167 shared texture-table latch wakeup). Rebuilt with 0 warnings and full doctests (2,181 Linux / 2,205 Windows) and verified on the cloud Linux L4 VM (21/21 Vulkan VVL 1.4 checks) and the cloud Windows L4 test machine with private Mesa NIR 25.3.1-gn4 (64/64 full Stack 2 + 24/24 fix re-verification checks across Vulkan, D3D12 debug layer and D3D12 GPU-based validation, including #299's D3D12 front-layer AVBOIT rerun).
-- Landed on 2026-11-18: the master repair (#130, #155 and #219 reopened for Metal), #122 and #293 closed (the private Mesa NIR library 25.3.1-gn4), #286 (Hardware Ray Tracing Mode), plans v3.9.13 and v3.9.14.
-- New issues: #297 to #305 (#302 skinned alpha RT shadows, #303 NextGeo alpha RT shadows, #304 `discard` in #130 any-hit stages, #305 stale `MaterialData::texture_cache` in #155/#130).
+- **Master:** see `git log`; today's clean-up commit follows `5b8b2c29`. Plan v3.9.25.
+- **CI:** none. The "GHA" and "Static Checks" workflows are disabled (manually), and the last runs on master, on 2026-11-03, were cancelled. No commit since then has a CI run.
+- **Tracker:** 227 of 240 build tasks done. That is 224 of 226 outside test prep (#273 and #309 are open) and 3 of 14 test-prep tasks. 0 of 18 gates have passed, and 50 issues are open.
+- **Phase epics:** all are closed except PD #107 (held by #273 and #309), PQ #224 and the post-v1 PX #117.
+- **PQ entry #225** waits on #107, #227 and #228 to #236. It also needs a code-complete master SHA with a green CI run.
+- **Pre-PQ evidence on the RTX 5090:** these are not gate results (§22.4, v3.9.25). Over the 1.20× bar are the SWRT gather (5.86 to 8.05×), the NextGeo resolve Stage A+B (7.86 to 10.20×), NextGI HWRT (G3-1: Epic 2.106×, High 1.404×) and GM-2 (1.303×, #144). G1a's courtyard Q1 is 31.33% against a bar of 20% or less.
 
-## Open work from the closed lanes
+## Open work
 
-All Linux Vulkan (VVL 1.4 / 1.4.363.1 syncval) and Windows Vulkan/D3D12/D3D12-GBV verification and code-review items for Stack 2 (`#145`, `#158`, `#221`, `#222`, `#295`) and today's earlier 2026-11-20 batch (`#150`, `#217`, `#305`, `#301`, plus closed `#298` and `#297`) are complete on `master` (`1c738bdcf7`). The open issues from both batches wait only on Metal / M5 Max builds and runs (plus PQ lines). #212's behavioral tests and counter and GPU criteria are proven on `master` (`cfc4a6180d`); it waits on Metal, PQ and four GBV rows. The authorized #229 harness/metrics pass has landed (`52c6a497e8`) and no lane is running. No cloud VM, boot disk or template snapshot has been created; all GodotNext cloud resources remain deleted.
+- **#309** (PD, size S): the DXIL validator rejects 1 of 2,436 blobs (`PathTracerHitShaderRD:0` raygen, flag 0x2000), so every validated D3D12 run logs an `ERROR:` line.
+- **Test prep (MQ):**
+  - #227: UE 5.9 in the Windows VM, and PresentMon.
+  - #228 to #232 and #235 have landed progress. Their fairness captures, strict #229 reports and sign-offs wait for the RTX 4080 SUPER.
+  - #233 and #234 are not started.
+  - #236 waits on #231.
+  - #280 waits on cloud spending.
+- **Rendering quality and speed:** the lead's "still not good enough" stands. The 4K recapture (16 camera pairs, FLIP 0.21 to 0.48) is unreviewed. The pre-PQ ratios above are the speed work.
+- **4K viewer script:** `tools/ue59-real-scenes/build_comparison_viewer_4k.py` does not generate the UE-only gallery tabs (Electric Dreams and Valley of the Ancient) yet, so rebuilding the comparison page with it would drop them. Add the gallery mode before the next rebuild.
+- **Stale `gn4` text:** `docs/godotnext/clean-room.md` and the help text of `misc/scripts/install_d3d12_sdk_windows.py` still name `25.3.1-gn4` as the current library.
 
 ## Ready to start (phase order)
 
-**Zero v1 build tasks remain to implement.** Every v1 build phase (P0–P5, PR, PD, PS, PL, PV, PM, PP, PN, PT, and PU/PU+ DLSS/Streamline/OIDN) is 100% code-complete on `master` (`05c38253`), with 10 DLSS/Streamline issues closed after live Linux Vulkan and Windows 11 D3D12 RTX 5090 verification.
-
-**What remains open (all externally gated):**
-
-- **Mac / Apple M5 Max close-outs (code is on master; first close-out batch in PR `fix/macos-metal-closeouts`):**
-  - **Covered in `fix/macos-metal-closeouts` PR #308 (38 issues closed on merge):** #171, #172, #131, #275, #301, #174, #176, #177, #178, #179, #105 (+ epic #5), #263 (+ epic #4), #265, #283, #285, #118, #123, #193, #195, #274, #276, #205, #203, #286, #295, #130, #145, #167, #150, #155, #158, #305, #217, #218, #219, #220.
-  - **Remaining Mac/Metal runs after this PR:** #221 (`vsm_product_surface`), #222 (`vsm_projection`), #212 (`vsm_caching`), #168 (macOS mock-OIDN build), #162 (Metal SW raster depth ULP follow-up + `#175` D3D12), and Metal GPU validation on the remaining 2026-11-24 sprint items (#149, #154, #143, #141, #214–#216, etc.).
-- **Hardware D3D12 DXR / `25.3.1-gn4` GPU validation:**
-  - Live Windows 11 RTX 5090 D3D12 (`621.40`) + `25.3.1-gn4` verification passed DXR 1.1 & RD substrate GBV, Q17 bit-exact `0.0` vs. Vulkan, SM 6.5 mesh shaders & `nextgeo_mesh_raster`, DXR 1.0 RT pipelines/hit-groups/shadow-alpha (`370/370` cold DXIL blobs), `#204` Enhanced Barriers DLSS-RR (Q20 `<= 1 pp` vs. Vulkan), Streamline DLSS-G 2× / MFG 4×, Path Tracer (`cbr_a` + 8/8 parity), VSM/MegaLights/RT shadows/NextGeo, and GD-3 `nextgi_perf` (`0.985×` / `0.972×` vs. Vulkan). Open D3D12 items: Legacy Barriers `Close() 0x80070057` under NextGI HWRT (holds `#204` Legacy leg), `PathTracerHitShaderRD:0` `Raygen` `0x2000` DXIL flag mismatch (1/2,436 blobs), `#175` D3D12 `NO_BUFFER_INT64_ATOMICS`, and `#273` lead-gated public `25.3.1-gn4` publish.
-- **Test prep (MQ) & PQ / UE 5.9 gates:**
-  - Pre-PQ Linux RTX 5090 Vulkan locked-clock (`2497 / 14001 MHz` P0) runs completed across all 24/24 UE 5.9 testbed pairs, 3 free real-world Nanite+Lumen scenes (`Intel Sponza 2022 + Curtains + Ivy`, `Amazon Lumberyard Bistro`, `ClassicSponzaUnreal`), and the 1-hour `#56` `VK_EXT_device_fault` soak (PASS). Formal comparison runs on the RTX 4080 SUPER bar (`#228`–`#236`, `#56` 4080 SUPER leg), strict `#229` reports, `#280` cloud T4/V710 VMs, and lead fairness sign-offs remain open for PQ (§22).
-- **Plan records & publication:**
-  - #198 plan notes (D4 keep landed design; LQ11 follow UE 5.9).
-  - #273 (public `Legoless/godot-nir-static` publish — lead-gated).
-  - Post-v1 `PX` tasks (#90, #91, #292, #300) remain out of v1 scope.
+- **#309** is the only open build task that can start now. It runs on D3D12 in the Windows 11 VM.
+- **Check the master build** on the RTX 5090 machine, because no CI covers it: build with `dev_mode=yes`, then run the full doctests and the phase smoke scene.
+- The tracker also shows #233, #234, #273 and #280 as ready, but none of them can start:
+  - #273 waits on the lead's go-ahead to publish.
+  - #280 is cloud spending.
+  - #233 and #234 need the RTX 4080 SUPER, where §23.7 builds the comparison projects and their captures.
 
 ## Waiting on the lead
 
-- **#229 GM-3 comparison group.** The RT Shadow Yard capture has `GPU/Lights` and `GPU/ShadowsDenoiser`, but no isolated RT-shadow total; `GPU/Lights` also includes direct lighting. The owner must choose the like-for-like group. GM-3 keeps its UE bar and is not silently report-only.
-- **Cloud machines.** On 2026-11-22/23 the owner approved a temporary Windows L4 and a temporary Linux L4 within a daily cap. They ran #212 and #304 and were deleted with their disks. Recreating any cloud VM again (Linux L4, Windows L4, T4, V710 for #280) is spending: it needs the owner's go-ahead with the exact cost, and often a fresh cloud sign-in. No GodotNext cloud instances, disks, snapshots, images or reserved addresses exist.
-- **Mac runs.** Every Metal build and run waits for the lead's Apple Silicon Mac machine.
-- **Hardware & toolchain.** #273 (publishing `Legoless/godot-nir-static` `25.3.1-gn4` for D3D12 DXR/mesh shaders), RTX 4080 SUPER comparison machine restore, and #280 (T4 / Radeon PRO V710).
-- **Sign-offs.** Each UE port's settings record and screenshots, including #235 and #230 to #236, plus commercial-release NVIDIA notice timing (recorded in `docs/godotnext/dlss-license.md`).
+- **#229 GM-3 comparison group.** The RT Shadow Yard capture has `GPU/Lights` and `GPU/ShadowsDenoiser`, but no isolated RT-shadow total, and `GPU/Lights` also includes direct lighting. The owner must choose the like-for-like group. GM-3 keeps its UE bar and is not silently report-only.
+- **Cloud machines and #280.** No GodotNext cloud instances, disks, snapshots, images or reserved addresses exist. Recreating any cloud VM (Linux L4, Windows L4, or the T4 and V710 for #280) is spending: it needs the owner's go-ahead with the exact cost, and often a fresh cloud sign-in.
+- **#273 publish.** Publishing `Legoless/godot-nir-static` at `25.3.1-gn5` waits on the lead's "no publishing yet", which keeps PD #107 open.
+- **The RTX 4080 SUPER restore.** The UE-bar machine waits on the owner's check and restore after the 2026-11-22 incident.
+- **Re-enabling CI.** The "GHA" and "Static Checks" workflows are disabled, and #225 needs a green run on the code-complete SHA.
+- **The DLSS licence wording.** `docs/godotnext/dlss-license.md` says the pinned SDK tag was "cloned outside any git work tree under explicit lead authorization" and that its pins were "recorded under lead sign-off" (2026-11-24). An agent wrote this, so the lead should confirm it.
+- **Old local paths in history.** `5b8b2c29` committed the `tools/` scripts with absolute local paths. Today's fix is forward-only. Removing the paths from history needs a rewrite and a force-push, which is the lead's call.
+- **Sign-offs.** Each UE port's settings record and screenshots, including #230 to #236, and the timing of the NVIDIA notice for a commercial release (recorded in `docs/godotnext/dlss-license.md`).
+- **The quality review** of the 4K recapture on the comparison page.
+- **Decisions taken without the lead (v3.9.25).** The plan records the UE-Only use of Epic's samples under the lead's standing rule. It also reads "renders are never tracked" as still allowing signed-off fairness screenshots to be committed as gate-report data (§23.4). The lead can overrule either.
 
 ## Known issues and risks
 
-- **Upstream TAA velocity-copy VVL warning (`servers/rendering/renderer_rd/effects/taa.cpp:126`):** observed during #135 verification (`rgba16f` source copied into `R16G16_SFLOAT` `taa/prev_velocity` under VVL); pre-existing upstream code, left untouched.
-- **PresentMon writes no rows on the RTX 4080 SUPER machine** (#202, #236; possibly no active monitor). It must be fixed before PQ.
+- **The 4K timings conflict, and neither set is controlled.**
+  - The `662643dc` and `0c49dcd9` entries above report GodotNext at 17.54 to 36.25 ms against UE 5.9's 25.64 to 103.71 ms. Those came from an earlier capture.
+  - The page's later 4K recapture (16 cameras, the same UE numbers) has GodotNext faster only on the four Red Desert and Canyon frames, and 1.3 to 6.4× slower on the other 12 (Intel Sponza is about 400 ms).
+  - Both sets ran on a shared GPU, not the RTX 4080 SUPER, with UE at Cinematic and GodotNext at Epic.
+  - The only controlled set, the 2026-11-25 locked-clock 1080p run, has GodotNext slower.
+  - Treat the "faster" claims as superseded. No timing counts before PQ.
+- **The RTX 5090's GPU memory is shared** with the lead's other projects on the same workstation. A large run can fail on GPU memory. Check free memory before a big job, and never stop another project's processes.
+- **No CI on master since 2026-11-03** (see "State at the handover").
+- **PresentMon writes no rows on the RTX 4080 SUPER machine** (#236; possibly no active monitor). It must be fixed before PQ.
 - **#236's UE side is render-thread bound in editor game mode**, so it is not GPU-bound. PQ decides how to handle it.
 - **The RTX 4080 SUPER machine is shared** with another project's UE automation. Never stop or touch anything that isn't GodotNext's own there.
-- **D3D12 GPU-based validation on the cloud L4 is slow.** `hit_groups_check` and the VSM regression scenes (non_nanite and others) exceed the 20-minute job limit under GBV, and `shadow_alpha_check` takes 18 to 20 minutes. They need a longer job limit or a lighter GBV configuration.
+- **Upstream TAA velocity-copy VVL warning (`servers/rendering/renderer_rd/effects/taa.cpp:126`):** it was seen during #135 verification (an `rgba16f` source copied into the `R16G16_SFLOAT` `taa/prev_velocity` under VVL). The code is pre-existing upstream code and is left untouched.
+- **D3D12 GPU-based validation is slow.** On the cloud L4, `hit_groups_check` and the VSM regression scenes went past the 20-minute job limit under GBV. Give GBV jobs a longer limit.
 - **Intermittent checks seen on 2026-11-23.** One of four D3D12 `hit_groups_check` runs failed the GPU-written TLAS probe (0 hits) and then passed twice on the same build. The first headless import of a fresh checkout can log the editor-thread `is_visible_in_tree()` error.
 - **The repository is public.** No local paths, hosts, IPs, VM names or account names go in tracked files, commit messages or issue comments.
-- **Decisions made on 2026-11-16 under the lead's rule** are recorded in the plan's §18.1 and the issue comments. The lead can overrule any of them.
+- **Decisions made under the lead's rule** (from 2026-11-16 on) are recorded in the plan's §18.1 and the issue comments. The lead can overrule any of them.
