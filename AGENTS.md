@@ -24,7 +24,7 @@ GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.9 ren
 - **The clean room (§19):**
   - Never read Unreal Engine source or shaders, UE plugin source (including NVIDIA's UE DLSS plugin), NvRTX, or the DLSS sample and Donut source.
   - Never commit NVIDIA SDK files.
-  - UE (5.9 for the comparison, §25) runs only as a black-box binary for the performance comparison, and UE projects stay outside this repository.
+  - UE (5.9 for the comparison, §25) runs only as a black-box binary for the performance comparison. UE projects, UE sample content, scene data and renders are never tracked: they live only in the git-ignored `local/` folder, and reusable comparison scripts are tracked in `tools/` with no machine paths.
 - **No upstream merges in v1 (§18.1).** The fork stays on its Godot 4.8-beta snapshot. A needed upstream fix is cherry-picked by hand as a normal commit (see `docs/godotnext/fork-maintenance.md`).
 - **Tests.** Add tests for new code, and never skip, disable or conditionally skip a test.
 - **Landing work.** The lead decided on 2026-11-03: commit finished issue work straight to master with "Closes #N" and push. This deliberately overrides the global "don't commit unless asked" rule, for finished issue work only; when the task is to investigate, review or draft, stop before committing and report. No branches or PRs unless the lead asks. No AI attribution or `Co-Authored-By` lines.
